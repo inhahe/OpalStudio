@@ -1,0 +1,13 @@
+[package]
+name = "opal-core"
+description = "Opal Studio's document model: tiles, layers, history, compositing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+half = { workspace = true }
+bytemuck = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }

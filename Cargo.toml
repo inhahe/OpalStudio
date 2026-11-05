@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/opal-color", "crates/opal-core", "crates/opal-io", "crates/opal-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+rust-version = "1.95"
+
+[workspace.dependencies]
+opal-color = { path = "crates/opal-color" }
+opal-core = { path = "crates/opal-core" }
+opal-io = { path = "crates/opal-io" }
+
+half = { version = "2.7", features = ["bytemuck"] }
+rayon = "1.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+zip = { version = "9.3", default-features = false, features = ["deflate"] }
+bytemuck = { version = "1", features = ["derive"] }
+
+[profile.dev]
+# Pixel loops are unbearably slow unoptimized; keep the app's own code debuggable.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
