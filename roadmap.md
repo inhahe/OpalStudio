@@ -3,11 +3,11 @@
 What each milestone delivers is specified in `design.md`. Status: milestone 0 is done;
 everything after it is planned.
 
-**Order:** photo editing first, with vector shapes taken early (milestone 4), because by then
-the outline tool has built most of the curve editing they need. This order is proposed, not
-settled. Milestones 0–2 are the same in either order; design first would follow them with
-4 (vector shapes), 7 (text), 11 (constraints) and 9 (vectorization), and then the photo
-milestones.
+**Order:** 0, 1, S, 2, A, 3, 4, and so on. Photo editing comes first, with vector shapes
+taken early (milestone 4), because by then the outline tool has built most of the curve
+editing they need. Scripting (S) comes right after milestone 1 so commands take parameters
+before many more of them are written; AI selection and extraction (A) right after the
+selection core it builds on.
 
 ## 0. Foundation (done)
 - Cargo workspace; window with egui and dockable panels.
@@ -45,7 +45,7 @@ milestones.
 - Export PNG and JPEG at a chosen size.
 - Layer thumbnails in the Layers panel; history thumbnails on hover.
 
-## S. Scripting and MCP (proposed: right after milestone 1)
+## S. Scripting and MCP (right after milestone 1)
 - Parameterized commands: every command callable with parameters as well as from the
   interface; Python stubs, API documentation and MCP tools generated from the registry.
 - The JSON-RPC API over a local pipe or socket, with token authentication; document queries;
@@ -68,6 +68,15 @@ milestones.
 - Diagnostics: "why nothing happened", starting with selection, hidden, locked, opacity and
   covered-by-a-layer-above.
 
+## A. AI selection and extraction (right after milestone 2)
+- ONNX Runtime with DirectML; the model manager (download on first use, license shown,
+  delete from Preferences).
+- Select subject (BiRefNet); the AI object and paint-the-area tool (SAM 2.1); matting
+  (ViTMatte) and color decontamination.
+- Copy to new layer, Cut to new layer; Lift out and Remove object, filled by LaMa on a layer
+  of their own.
+- SAM 3 as an optional download.
+
 ## 3. Painting
 - The brush engine that every painting and retouching tool is a preset of: what it paints
   with, how it combines, where it may act, dynamics.
@@ -76,6 +85,8 @@ milestones.
   antialiasing (the Pencil variant) and pixel-perfect lines; build-up; color dynamics in a
   chosen color model; compositing space.
 - Paints with a color, a gradient, or a pattern (patterns from the selection).
+- Flat and elliptical tips at a fixed angle, so the brush can letter calligraphically on
+  pixels before the Calligraphy tool's vector strokes arrive in milestone 4.
 - Pen input on Windows through `WM_POINTER` (pressure, tilt, eraser end); simulated pen
   input for tests.
 - Blend modes, the full set, shared later by layers: one-line descriptions and live preview
@@ -91,6 +102,8 @@ milestones.
 - Fill and stroke; editable brush strokes on vector shapes.
 - SVG import and export.
 - Boolean operations on paths.
+- The Calligraphy tool: broad-edge, pointed and brush variants; strokes as editable vector
+  objects (centerline plus nib); pressure, tilt and rotation; the guide sheet.
 
 ## 5. Adjustments
 - Adjustments: levels, curves, hue/saturation, gradient map, channel matrix (3×3 weights
@@ -121,16 +134,13 @@ milestones.
 - Area text and point text; editable permanently, even inside an existing layer.
 - Shaping, bidirectional text, line breaking, font fallback.
 
-## 8. Smart selection and color matching
+## 8. Edge snapping and color matching
 - Edge snapping in the outline tool (live-wire), with adjustable edge-cost weights.
 - Color-range selection: curves per channel, weights, strictness slider, eyedropper start,
   distance mode.
 - Color match (sampling, extent, matching, protected colors), and the tools that use it:
   magic wand; Replace color (Brush variant); Background and Click erasers, with edge color
   decontamination.
-- ONNX Runtime; model downloads.
-- AI object and paint-the-area: SAM 2.1, then matting and color decontamination.
-- SAM 3 as an optional download.
 
 ## 9. Vectorization
 - Heuristic tracing with the parameters in `design.md`; within the selection.
@@ -143,7 +153,8 @@ milestones.
 - Then the layout solver, and nesting units of either kind.
 
 ## Later
-- Content-aware fill (PatchMatch or LaMa); LaMa as a method for automatic healing.
+- Content-aware fill by PatchMatch (LaMa's arrives with milestone A); LaMa as a method for
+  automatic healing.
 - Auto-stroke brush (like Photoshop's Art History Brush).
 - Perspective, warp and liquify transforms.
 - PSD import; TIFF, WebP and AVIF.

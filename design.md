@@ -189,17 +189,46 @@ anchor.
 ### AI object and paint-the-area selection
 
 One tool; its prompts are include/exclude clicks, a box, a "somewhere in here" brush and a
-"definitely in" brush (everything else counts as out, which forms a trimap). The pipeline:
+"definitely in" brush (everything else counts as out, which forms a trimap), and a **Select
+subject** button that needs no prompt at all. The pipeline:
 
-1. Segmentation: SAM 2.1 (Apache-2.0) bundled; SAM 3 (Meta's own SAM License, adds text
-   prompts) as an optional download, not bundled.
-2. Matting in a band around the edge (for hair), with a ViTMatte-class model.
+1. Segmentation: for Select subject, **BiRefNet** (MIT), which finds the main subject on its
+   own; for prompts, **SAM 2.1** (Apache-2.0), whose image encoder runs once per image and
+   whose prompt decoder then answers each click at interactive speed. SAM 3 (Meta's own
+   SAM License, which adds text prompts such as "the dog") as an optional download.
+2. Matting in a band around the edge (for hair and fur), with **ViTMatte** (MIT).
 3. Color decontamination, which removes background color showing through semi-transparent
    pixels.
 
-Adjustable: the clicks and brushes, mask threshold, edge-band width, decontamination
-strength, and a hard-edge toggle. Model licenses other than SAM's are to be verified before
-bundling.
+Adjustable: the clicks and brushes, the model and its size (SAM 2.1 tiny to large, BiRefNet
+general, portrait or high-resolution), mask threshold, edge-band width, decontamination
+strength, and a hard-edge toggle.
+
+All models run locally through ONNX Runtime (DirectML on Windows, so on the GPU; the CPU as
+fallback). None is bundled: each is downloaded on first use, after saying what it is, how
+large it is and what its license says, and Preferences › AI models lists them with their
+sizes and can delete them. The licenses were checked (November 2026): SAM 2.1 Apache-2.0,
+BiRefNet MIT, ViTMatte MIT, LaMa Apache-2.0; the training data of ViTMatte and LaMa carries
+its own terms, which the model manager shows.
+
+### Extracting objects
+
+Because an AI selection is an ordinary selection (a soft mask), everything works on what it
+selects. The selection panel and the Select tab add the commands extraction needs:
+
+- **Copy to new layer** (Ctrl+J with a selection) and **Cut to new layer**
+  (Ctrl+Shift+J): the object, soft edges included, becomes its own layer, positioned where
+  it was. From there it can be moved, transformed, adjusted, hidden or copied into another
+  image, where it arrives in the paste box.
+- **Lift out:** cut to a new layer *and* fill the hole it leaves, so the object can be moved
+  or resized and the scene behind it still looks whole. The fill is painted by **LaMa**
+  (Apache-2.0) onto a layer of its own between the two, so it can be inspected, touched
+  up or deleted, and the original pixels stay underneath.
+- **Remove object:** the fill alone, for making something disappear.
+
+Adjustable: how far the hole is grown before filling (so no fringe of the object survives
+around it), the fill's working resolution (LaMa sees a 512×512 crop around the hole, scaled),
+and whether the fill goes on its own layer (default) or into the original.
 
 ### Color-range selection
 
@@ -510,6 +539,32 @@ A limit shared by Replace color, the Background and Click erasers, and the magic
 **Auto-stroke brush** (later, low priority): repaints from a source state with automatically
 generated strokes, like Photoshop's Art History Brush; style, area, tolerance and stroke
 length adjustable.
+
+## Calligraphy
+
+A **Calligraphy** tool draws strokes the way a nib does: the stroke's width comes from the
+nib's shape and angle relative to the direction of travel, and from pressure.
+
+- **Each stroke is an editable vector object**: its centerline, plus the nib and its
+  settings. The outline is the area the nib sweeps along the centerline, so the stroke is
+  sharp at any zoom, and afterwards the centerline can be reshaped (as selection outlines
+  are), and the nib, angle or width changed, with the stroke redrawn. On a raster layer it
+  can also be painted into the pixels.
+- **Variants** (the tool's visible variant control):
+  - *Broad-edge*: a flat nib at a fixed angle (italic, blackletter, uncial). The thick and
+    thin strokes come from direction alone, so it works fully with a mouse.
+  - *Pointed*: width from pressure (copperplate, Spencerian), from speed with a mouse.
+  - *Brush*: a round, soft tip that spreads with pressure (brush lettering).
+- **Settings:** nib width; nib angle; *fixation* (how firmly the nib keeps its angle rather
+  than turning with the stroke, from 1, fixed, to 0, always across it); thinning by speed;
+  pressure-to-width curve; mass (inertia that steadies the hand) and smoothing; tremor;
+  stroke ends (square, round, tapered). Advanced: the nib's own shape (flat, elliptical, or
+  an image), its thickness, and the response curves.
+- **Pen input:** tilt and barrel rotation can set the nib angle (pens that report them).
+- **Guide sheet:** a non-printing overlay of the lines calligraphers rule: baseline, x-height,
+  ascender and descender lines and slant lines, sized in nib widths (italic's x-height is
+  about five nib widths), with the nib-width ladder drawn at the margin. The slant angle, the
+  proportions and the spacing are settings, with presets for common hands.
 
 ## Undo history tree
 
