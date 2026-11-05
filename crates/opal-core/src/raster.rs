@@ -19,8 +19,15 @@ pub const MAX_REDUCTION: u32 = 24;
 pub struct RasterImage {
     tiles: HashMap<TileCoord, Arc<Tile>>,
     /// `pyramid[k - 1]` is the image halved `k` times.
-    pyramid: [OnceLock<Box<RasterImage>>; MAX_REDUCTION as usize],
+    pyramid: [OnceLock<Box<Level>>; MAX_REDUCTION as usize],
     bounds: OnceLock<Option<IRect>>,
+}
+
+/// A level of an image's pyramid, and how many tiles it holds (each once, however many
+/// places share it).
+struct Level {
+    image: RasterImage,
+    distinct: usize,
 }
 
 /// A clone has the same pixels and starts with no pyramid: images are cloned (through
@@ -245,25 +252,23 @@ impl RasterImage {
         }
         let k = k.min(MAX_REDUCTION);
         let cell = &self.pyramid[k as usize - 1];
-        if let Some(r) = cell.get() {
-            return r;
+        if let Some(l) = cell.get() {
+            return &l.image;
         }
         let from = (1..k).rev().find(|&j| self.has_reduced(j)).unwrap_or(0);
         let mut level = self.reduced(from).halved();
         for _ in from + 1..k {
-            level = level.halved();
+            level = level.image.halved();
         }
         // Not `get_or_init`, for the reason given in `content_bounds`.
         let _ = cell.set(Box::new(level));
-        cell.get().expect("the level was just stored")
+        &cell.get().expect("the level was just stored").image
     }
 
-    /// The bytes the reduced copies built so far take.
+    /// The bytes the reduced copies built so far take, each tile once however many places
+    /// share it (see `halved`).
     pub fn reduced_bytes(&self) -> u64 {
-        // Each tile once, however many places share it (see `halved`).
-        let tiles: HashSet<*const Tile> =
-            self.pyramid.iter().filter_map(|c| c.get()).flat_map(|r| r.tiles.values().map(Arc::as_ptr)).collect();
-        tiles.len() as u64 * TILE_BYTES
+        self.pyramid.iter().filter_map(|c| c.get()).map(|l| l.distinct as u64).sum::<u64>() * TILE_BYTES
     }
 
     /// Whether level `k` of the pyramid has been built.
@@ -274,7 +279,7 @@ impl RasterImage {
     /// The image at half size, each pixel the average of a 2×2 block. Tiles whose four
     /// children are the same tiles (a uniform area is full of them) are made once, and
     /// shared.
-    fn halved(&self) -> RasterImage {
+    fn halved(&self) -> Level {
         let parents: HashSet<TileCoord> = self.tiles.keys().map(|c| c.parent()).collect();
         // The parents by their children (by address, in the order `children` gives them).
         let mut alike: HashMap<[usize; 4], Vec<TileCoord>> = HashMap::new();
@@ -290,11 +295,12 @@ impl RasterImage {
             })
             .collect();
         let mut out = RasterImage::new();
+        let distinct = made.len();
         for (at, t) in made {
             let t = Arc::new(t);
             out.tiles.extend(at.into_iter().map(|c| (c, t.clone())));
         }
-        out
+        Level { image: out, distinct }
     }
 }
 
