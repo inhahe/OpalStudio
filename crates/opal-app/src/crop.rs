@@ -68,14 +68,16 @@ impl CropBox {
     }
 
     /// The canvas the box makes: its size, rounded, around its center.
+    /// (Sides past the largest canvas allowed are cut to it, still around the center.)
     pub fn canvas(&self) -> Canvas {
-        let w = self.size[0].round().max(1.0);
-        let h = self.size[1].round().max(1.0);
+        let side = f64::from(crate::dialogs::MAX_SIDE);
+        let w = self.size[0].round().clamp(1.0, side);
+        let h = self.size[1].round().clamp(1.0, side);
         Canvas {
             x: (self.center[0] - w * 0.5).round() as i64,
             y: (self.center[1] - h * 0.5).round() as i64,
-            width: w.min(f64::from(crate::dialogs::MAX_SIDE)) as u32,
-            height: h.min(f64::from(crate::dialogs::MAX_SIDE)) as u32,
+            width: w as u32,
+            height: h as u32,
         }
     }
 
@@ -189,7 +191,10 @@ fn cropped(p: &PixelObject, canvas: &IRect) -> PixelObject {
                 tile.set(u, v, t.get(u, v));
             }
         }
-        out.set_tile(c, Some(Arc::new(tile)));
+        // Only tiles with content are kept.
+        if !tile.is_transparent() {
+            out.set_tile(c, Some(Arc::new(tile)));
+        }
     }
     PixelObject { image: Arc::new(out), offset: p.offset }
 }
@@ -359,7 +364,10 @@ pub fn canvas_crop(
     if response.drag_stopped() {
         d.crop_drag = None;
     }
-    let apply = interactive && response.double_clicked();
+    // A double-click inside the box crops (outside it, it does nothing).
+    let apply = interactive
+        && response.double_clicked()
+        && response.interact_pointer_pos().is_some_and(|p| screen.part_at(p) == Part::Move);
 
     // ---- Drawing ----------------------------------------------------------------------
     let b = d.crop.expect("set above");
@@ -550,6 +558,24 @@ mod tests {
         let ObjectKind::Pixels(p) = &o.kind else { panic!("pixels, cropped") };
         let b = p.image.content_bounds().unwrap().translate(p.offset[0], p.offset[1]);
         assert_eq!(b.intersect(&s.doc().canvas.rect()), b, "nothing is left outside the canvas");
+    }
+
+    #[test]
+    fn a_box_larger_than_the_largest_canvas_stays_centered() {
+        let b = CropBox { center: [500.0, 500.0], size: [1e9, 100.0], angle: 0.0 };
+        let c = b.canvas();
+        assert_eq!(c.width, crate::dialogs::MAX_SIDE);
+        assert_eq!(c.x + i64::from(c.width) / 2, 500, "{c:?}");
+    }
+
+    #[test]
+    fn cropping_keeps_no_empty_tiles() {
+        let mut img = opal_core::raster::RasterImage::new();
+        img.set_pixel(0, 0, opal_core::tile::pixel_from_f32([1.0; 4]));
+        let p = PixelObject { image: Arc::new(img), offset: [0, 0] };
+        // The canvas takes part of the tile, but none of its content.
+        let out = cropped(&p, &IRect::new(10, 10, 300, 300));
+        assert!(out.image.is_empty());
     }
 
     #[test]

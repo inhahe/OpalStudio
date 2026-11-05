@@ -130,7 +130,27 @@ pub struct ImageObject {
     pub sampling: Sampling,
 }
 
+/// Coordinates beyond this (2^40 pixels, a thousand times past any canvas) are not used:
+/// they would overflow arithmetic on rectangles.
+pub const MAX_COORD: i64 = 1 << 40;
+
+/// The largest stretch or squash an image object's transform may apply, either way.
+pub const MAX_SCALE: f64 = 1e6;
+
 impl ImageObject {
+    /// Whether `m` can place an image object: finite, invertible, moving it no further than
+    /// `MAX_COORD`, and stretching or squashing it no more than `MAX_SCALE` in any direction.
+    /// The editor keeps every transform it makes within this, and files must too.
+    pub fn transform_ok(m: &Affine) -> bool {
+        let Some(inv) = m.inverse() else { return false };
+        let [su, sv] = m.row_norms();
+        let [qu, qv] = inv.row_norms();
+        m.is_finite()
+            && [m.e, m.f].iter().all(|v| v.abs() <= MAX_COORD as f64)
+            && su.max(sv) <= MAX_SCALE
+            && qu.max(qv) <= MAX_SCALE
+    }
+
     /// The corners of the frame in the document, clockwise from the image's top-left.
     pub fn corners(&self) -> [[f64; 2]; 4] {
         self.frame.to_f().corners().map(|p| self.transform.apply(p))

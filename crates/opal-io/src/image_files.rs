@@ -110,11 +110,11 @@ pub fn flatten_canvas(doc: &Document, size: Option<&ExportSize>) -> (Vec<Pixel>,
     }
     match size {
         Some(s) if (s.width, s.height) != (w, h) => {
-            // Shrinking by a large factor: first average whole k × k blocks, which leaves the
-            // resampler a factor under 2, and so a narrow frame (below) instead of one as
-            // wide as the factor.
-            let k = (w / s.width.max(1)).min(h / s.height.max(1)).max(1);
-            let (flat, w, h) = if k >= 2 { shrink_blocks(&flat, w, h, k) } else { (flat, w, h) };
+            // Shrinking by a large factor: first average whole blocks, kx × ky, which leaves
+            // the resampler a factor under 2 along each axis, and so a narrow frame (below)
+            // instead of one as wide as the factor.
+            let (kx, ky) = ((w / s.width.max(1)).max(1), (h / s.height.max(1)).max(1));
+            let (flat, w, h) = if kx * ky >= 2 { shrink_blocks(&flat, w, h, kx, ky) } else { (flat, w, h) };
             let to_size = Affine::scale(f64::from(s.width) / f64::from(w), f64::from(s.height) / f64::from(h));
             // The canvas is the whole image: what lies past it must not bleed into the
             // edges, and the edges must not fade out either. So the resampler gets the
@@ -132,27 +132,27 @@ pub fn flatten_canvas(doc: &Document, size: Option<&ExportSize>) -> (Vec<Pixel>,
     }
 }
 
-/// `w × h` pixels reduced `k` times each way: each result pixel is the average of the block
-/// of `k × k` it covers (the blocks along the right and bottom edges average the pixels
-/// they hold, when `k` does not divide the size).
-fn shrink_blocks(px: &[Pixel], w: u32, h: u32, k: u32) -> (Vec<Pixel>, u32, u32) {
-    let (w, h, k) = (w as usize, h as usize, k as usize);
-    let (sw, sh) = (w.div_ceil(k), h.div_ceil(k));
+/// `w × h` pixels reduced `kx` times across and `ky` times down: each result pixel is the
+/// average of the `kx × ky` block it covers (the blocks along the right and bottom edges
+/// average the pixels they hold, when the factors do not divide the size).
+fn shrink_blocks(px: &[Pixel], w: u32, h: u32, kx: u32, ky: u32) -> (Vec<Pixel>, u32, u32) {
+    let (w, h, kx, ky) = (w as usize, h as usize, kx as usize, ky as usize);
+    let (sw, sh) = (w.div_ceil(kx), h.div_ceil(ky));
     let rows: Vec<Vec<Pixel>> = (0..sh)
         .into_par_iter()
         .map(|j| {
             (0..sw)
                 .map(|i| {
                     let mut acc = [0.0f32; 4];
-                    let (x1, y1) = (((i + 1) * k).min(w), ((j + 1) * k).min(h));
-                    for y in j * k..y1 {
-                        for p in &px[y * w + i * k..y * w + x1] {
+                    let (x1, y1) = (((i + 1) * kx).min(w), ((j + 1) * ky).min(h));
+                    for y in j * ky..y1 {
+                        for p in &px[y * w + i * kx..y * w + x1] {
                             for c in 0..4 {
                                 acc[c] += p[c].to_f32();
                             }
                         }
                     }
-                    let n = ((x1 - i * k) * (y1 - j * k)) as f32;
+                    let n = ((x1 - i * kx) * (y1 - j * ky)) as f32;
                     acc.map(|v| f16::from_f32(v / n))
                 })
                 .collect()
@@ -326,7 +326,7 @@ mod tests {
         use opal_core::tile::{pixel_from_f32, pixel_to_f32};
         // 3 × 1: two pixels of 0 and one of 1, in blocks of 2: [0, 0] and [1].
         let px: Vec<Pixel> = [0.0, 0.0, 1.0].iter().map(|&v| pixel_from_f32([v, v, v, 1.0])).collect();
-        let (out, w, h) = shrink_blocks(&px, 3, 1, 2);
+        let (out, w, h) = shrink_blocks(&px, 3, 1, 2, 1);
         assert_eq!((w, h), (2, 1));
         assert_eq!(pixel_to_f32(out[0])[0], 0.0);
         assert_eq!(pixel_to_f32(out[1])[0], 1.0);

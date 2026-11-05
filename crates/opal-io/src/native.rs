@@ -101,12 +101,7 @@ impl FileObjectKind {
     }
 }
 
-/// Coordinates beyond this (2^40 pixels, a thousand times past any canvas) mark a damaged
-/// file; they would also overflow arithmetic on rectangles.
-const MAX_COORD: i64 = 1 << 40;
-
-/// The largest stretch or squash a transform may apply, either way.
-const MAX_SCALE: f64 = 1e6;
+use opal_core::document::MAX_COORD;
 
 /// Saves `doc` with the identifier generator's state to `path` (atomically).
 pub fn save(doc: &Document, ids: &IdGen, path: &Path) -> Result<(), IoError> {
@@ -373,22 +368,7 @@ fn check_image(frame: &IRect, m: &Affine, sampling: &Sampling) -> Result<(), Str
     if frame.is_empty() || coords.iter().any(|v| v.abs() > MAX_COORD) {
         return Err(format!("frame {frame:?} is empty or out of range"));
     }
-    let linear = [m.a, m.b, m.c, m.d];
-    let moved = [m.e, m.f];
-    let det = m.determinant().abs();
-    // Neither direction may stretch or squash past MAX_SCALE: the inverse's rows bound the
-    // squash, which the determinant alone does not (a stretch one way can hide a crushing
-    // squash the other).
-    let squash = m.inverse().map_or(f64::INFINITY, |inv| {
-        let [u, v] = inv.row_norms();
-        u.max(v)
-    });
-    let sane = m.is_finite()
-        && linear.iter().all(|v| v.abs() <= MAX_SCALE)
-        && moved.iter().all(|v| v.abs() <= MAX_COORD as f64)
-        && det >= 1.0 / (MAX_SCALE * MAX_SCALE)
-        && squash <= MAX_SCALE;
-    if !sane {
+    if !ImageObject::transform_ok(m) {
         return Err(format!("transform {:?} is not usable", m.to_array()));
     }
     sampling.check()

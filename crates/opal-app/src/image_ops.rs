@@ -8,6 +8,7 @@
 use crate::state::{AppState, MessageKind};
 use opal_core::document::{Canvas, Document, ImageObject, Layer, LayerContent, ObjectKind, PixelObject};
 use opal_core::geom::{Affine, FRect, IRect};
+use opal_core::raster::RasterImage;
 use opal_core::resample::{self, Sampling};
 use std::sync::Arc;
 
@@ -121,7 +122,14 @@ pub fn transform_all(
                 for o in objects {
                     o.kind = match &o.kind {
                         ObjectKind::Image(i) => {
-                            ObjectKind::Image(ImageObject { transform: i.transform.then(*m), ..i.clone() })
+                            let t = i.transform.then(*m);
+                            if ImageObject::transform_ok(&t) {
+                                ObjectKind::Image(ImageObject { transform: t, ..i.clone() })
+                            } else {
+                                // Stretched past what an image object may be (see
+                                // transform_ok), as repeated resizing could do.
+                                drawn(&i.image, &t, &i.sampling, keep, clipped)
+                            }
                         }
                         ObjectKind::Pixels(p) => {
                             let placed = Affine::translate(p.offset[0] as f64, p.offset[1] as f64).then(*m);
@@ -129,17 +137,11 @@ pub fn transform_all(
                                 (Some(g), _) if (g.a, g.b, g.c, g.d) == (1, 0, 0, 1) => {
                                     ObjectKind::Pixels(PixelObject { image: p.image.clone(), offset: [g.e, g.f] })
                                 }
-                                (Some(_), _) => {
-                                    let turned = resample::render_image(&p.image, &placed, &sampling, None);
-                                    ObjectKind::Pixels(PixelObject { image: Arc::new(turned), offset: [0, 0] })
-                                }
-                                (None, Some(s)) => {
-                                    let reach =
-                                        resample::footprint(&p.image, &placed, &s).unwrap_or(IRect::new(0, 0, 0, 0));
-                                    let (area, cut) = crate::layer_ops::drawable(reach, keep);
-                                    *clipped |= cut;
-                                    let drawn = resample::render_image(&p.image, &placed, &s, Some(&area));
-                                    ObjectKind::Pixels(PixelObject { image: Arc::new(drawn), offset: [0, 0] })
+                                // A quarter turn or flip: copied exactly.
+                                (Some(_), _) => drawn(&p.image, &placed, &sampling, keep, clipped),
+                                (None, Some(s)) => drawn(&p.image, &placed, &s, keep, clipped),
+                                (None, None) if !ImageObject::transform_ok(&placed) => {
+                                    drawn(&p.image, &placed, &sampling, keep, clipped)
                                 }
                                 (None, None) => match p.image.content_bounds() {
                                     Some(frame) => ObjectKind::Image(ImageObject {
@@ -166,6 +168,16 @@ pub fn transform_all(
         walk(Arc::make_mut(l), m, resample, sampling, keep, &mut clipped);
     }
     clipped
+}
+
+/// `image` drawn through `t` into a pixel object, keeping only the part within `keep` of
+/// what reaches too far (see `layer_ops::drawable`; `clipped` says if it did).
+fn drawn(image: &RasterImage, t: &Affine, sampling: &Sampling, keep: &IRect, clipped: &mut bool) -> ObjectKind {
+    let reach = resample::footprint(image, t, sampling).unwrap_or(IRect::new(0, 0, 0, 0));
+    let (area, cut) = crate::layer_ops::drawable(reach, keep);
+    *clipped |= cut;
+    let image = resample::render_image(image, t, sampling, Some(&area));
+    ObjectKind::Pixels(PixelObject { image: Arc::new(image), offset: [0, 0] })
 }
 
 /// The bounds of what the visible layers hold, in whole pixels.

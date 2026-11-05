@@ -266,12 +266,19 @@ fn for_each_visible_object(layers: &[Arc<Layer>], f: &mut dyn FnMut(&Object)) {
     }
 }
 
-/// Builds what drawing the visible image objects will need (their pyramids), so tiles
-/// drawn in parallel find it ready instead of each building it.
-fn prepare(layers: &[Arc<Layer>]) {
+/// Builds what drawing the visible image objects that reach into `range` (anywhere, for
+/// `None`) will need (their pyramids), so tiles drawn in parallel find it ready instead of
+/// each building it.
+fn prepare(layers: &[Arc<Layer>], range: Option<&IRect>) {
     for_each_visible_object(layers, &mut |o| {
         if let ObjectKind::Image(i) = &o.kind {
-            resample::prepare(&i.image, &i.transform, &i.sampling);
+            let reaches = match range {
+                None => true,
+                Some(r) => o.extent().is_some_and(|e| !e.intersect(r).is_empty()),
+            };
+            if reaches {
+                resample::prepare(&i.image, &i.transform, &i.sampling);
+            }
         }
     });
 }
@@ -310,7 +317,7 @@ pub fn occupied_tiles(layers: &[Arc<Layer>], range: Option<&IRect>) -> HashSet<T
 /// Composites every tile `layers` occupy within `range` (everywhere when `None`) into one
 /// bitmap, in parallel.
 fn composite_region(layers: &[Arc<Layer>], range: Option<&IRect>) -> RasterImage {
-    prepare(layers);
+    prepare(layers, range);
     let coords: Vec<TileCoord> = occupied_tiles(layers, range).into_iter().collect();
     let tiles: Vec<(TileCoord, Option<Tile>)> = coords.par_iter().map(|&c| (c, composite_tile(layers, c))).collect();
     let mut img = RasterImage::new();
@@ -526,7 +533,7 @@ impl Projection {
             (rect.y1 + span - 1).div_euclid(span) * span,
         );
         let mut coords: HashSet<TileCoord> = occupied_tiles(layers, Some(&outer));
-        prepare(layers);
+        prepare(layers, Some(&outer));
         self.update_base(layers, &coords, &outer);
         for l in 1..=level {
             coords = coords.iter().map(|c| c.parent()).collect();

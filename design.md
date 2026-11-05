@@ -149,8 +149,10 @@ size, and Rasterize Layer, so each gives the same pixels the canvas shows.
 - **Anti-ringing**, on by default: each result is kept within the range of the source
   pixels nearest it, which removes the halos sharp filters draw along hard edges.
 - **Shrinking never aliases.** An image keeps a pyramid of half-size copies, built when
-  first needed; a shrunk image is sampled from the copy just finer than the result, with
-  the filter widened by the remaining factor along each axis.
+  first needed; a shrunk image is sampled from the copy just finer than the result along
+  its less shrunk axis, with the filter widened by the remaining factor along each axis
+  (up to 64 times for a drawing that is not turned, so squashing one axis leaves the
+  other's detail alone; only a squash past that ratio takes a coarser copy).
 - **Exact cases are exact:** moves by whole pixels, quarter turns and flips copy pixels
   without filtering.
 - While a transform is being dragged, Bilinear is used so the drag keeps up (a setting);
@@ -850,7 +852,8 @@ floats byte-shuffled (all low bytes, then all high bytes), which lets deflate co
 photos far better. Numbers are written so they read back exactly. Version 0 (pixel objects
 only, a canvas at the origin) is still read; a newer version is refused with a message
 rather than misread, and so are values out of range (a transform that cannot be inverted,
-say). Later versions add text, selection recipes and optionally the history tree.
+say). The editor never makes a transform a file could not hold: the transform box stops
+at those limits, and a resize that would pass them draws the image into pixels. Later versions add text, selection recipes and optionally the history tree.
 
 Every write, `.opal` and exports alike, goes to a temporary file beside the target that
 replaces it only when complete, so a failed save never damages the existing file.

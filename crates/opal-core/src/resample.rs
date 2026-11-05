@@ -97,8 +97,16 @@ impl Sampling {
 }
 
 /// The most a kernel is widened along one axis before a coarser pyramid level is used
-/// instead. Only a squash much stronger along one axis than the other reaches it.
+/// instead, which also coarsens the other axis. Only a squash much stronger along one
+/// axis than the other reaches it. Axis-aligned drawings filter each axis separately, so
+/// a wide kernel costs them only along its own axis, and they allow far more.
 const MAX_WIDENING: f64 = 4.0;
+const MAX_WIDENING_ALIGNED: f64 = 64.0;
+
+/// The most `inv` (document to image pixels) may widen a kernel at its pyramid level.
+fn widening_cap(inv: &Affine) -> f64 {
+    if inv.b == 0.0 && inv.c == 0.0 { MAX_WIDENING_ALIGNED } else { MAX_WIDENING }
+}
 
 /// Kernel values per unit of distance in the lookup table.
 const PER_UNIT: f64 = 512.0;
@@ -408,10 +416,11 @@ fn render_filtered(
     let src = image.reduced(level);
     let bounds = src.tile_bounds();
     let inv = inv.then(Affine::scale(scale, scale));
-    // A squash so extreme that the coarsest level still leaves the kernel wider than
-    // MAX_WIDENING (one axis shrunk millions of times more than the other) is drawn with the
-    // kernel capped there, aliasing a little, rather than with billions of taps.
-    let (wu, wv) = ((fu * scale).clamp(1.0, MAX_WIDENING), (fv * scale).clamp(1.0, MAX_WIDENING));
+    // A squash so extreme that the coarsest level still leaves the kernel wider than the cap
+    // (one axis shrunk millions of times more than the other) is drawn with the kernel
+    // capped there, aliasing a little, rather than with billions of taps.
+    let cap = widening_cap(&inv);
+    let (wu, wv) = ((fu * scale).clamp(1.0, cap), (fv * scale).clamp(1.0, cap));
     let margin = (kernel.radius * wu.max(wv)).ceil() as i64 + 2;
     let reach = |r: &IRect| IRect::covering(&inv.bounds(&r.to_f())).expand(margin).intersect(&bounds);
     if reach(dest).is_empty() {
@@ -581,12 +590,13 @@ pub fn footprint(image: &RasterImage, transform: &Affine, sampling: &Sampling) -
 
 /// The pyramid level a filtered drawing through `inv` (document to image pixels) reads:
 /// the one just finer than the result along the less shrunk axis, or coarser if the other
-/// axis would need a kernel widened past `MAX_WIDENING`.
+/// axis would need a kernel widened past its cap (`widening_cap`).
 fn pyramid_level(inv: &Affine) -> u32 {
     let [fu, fv] = inv.row_norms();
     let (su, sv) = (fu.max(1.0), fv.max(1.0));
+    let cap = widening_cap(inv);
     let mut level = su.min(sv).log2().floor().max(0.0) as u32;
-    while level < MAX_REDUCTION && su.max(sv) / f64::from(1u32 << level) > MAX_WIDENING {
+    while level < MAX_REDUCTION && su.max(sv) / f64::from(1u32 << level) > cap {
         level += 1;
     }
     level.min(MAX_REDUCTION)
@@ -768,6 +778,21 @@ mod tests {
         let t = std::time::Instant::now();
         render_tile(&img, &squash, &Sampling::default(), TileCoord::new(0, 0));
         assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn squashing_one_axis_keeps_the_other_axis_sharp() {
+        // One-pixel columns, squashed fivefold vertically only: the columns survive.
+        let px: Vec<Pixel> = (0..64 * 64)
+            .map(|i| {
+                let v = ((i % 64) % 2) as f32;
+                pixel_from_f32([v, v, v, 1.0])
+            })
+            .collect();
+        let img = RasterImage::from_pixels(64, 64, &px);
+        let out = render(&img, &Affine::scale(1.0, 0.2), &Sampling::default());
+        let (a, b) = (pixel_to_f32(out.pixel(30, 6))[0], pixel_to_f32(out.pixel(31, 6))[0]);
+        assert!((a - b).abs() > 0.9, "the columns blurred together: {a} {b}");
     }
 
     #[test]

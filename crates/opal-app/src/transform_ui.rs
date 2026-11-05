@@ -384,7 +384,7 @@ pub fn settings(ui: &mut egui::Ui, st: &mut AppState) {
     p.x = x + cx;
     p.y = y + cy;
     if p != before {
-        let m = s.with_params(&p);
+        let m = s.edited(&before, &p);
         d.set_box(m, None);
     }
     ui.add_space(6.0);

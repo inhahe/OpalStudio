@@ -130,6 +130,9 @@ pub struct Session {
     pub guides: Guides,
     /// Whether the objects are drawn with draft sampling now (while a drag lasts).
     pub draft: bool,
+    /// Whether the box's drawing method was changed (so the session changed something even
+    /// if the box never moved).
+    pub sampling_changed: bool,
 }
 
 /// The smallest scale a drag may leave along an axis, so the box never collapses.
@@ -163,14 +166,22 @@ impl Session {
         }
     }
 
-    /// The transform that puts the box where `p` says.
-    pub fn with_params(&self, p: &Params) -> Affine {
-        let sx = (p.width / self.frame.width()).max(MIN_SCALE);
-        let sy = (p.height / self.frame.height()).max(MIN_SCALE) * if p.mirrored { -1.0 } else { 1.0 };
-        Affine::translate(-self.frame.x0, -self.frame.y0)
-            .then(Affine::scale(sx, sy))
-            .then(Affine::rotate(p.angle.to_radians()))
-            .then(Affine::translate(p.x, p.y))
+    /// The box with the numbers changed from `before` (what [`params`](Self::params) said)
+    /// to `after`, as changes to its transform: the size by scaling along the frame's own
+    /// sides, the angle by turning about its top-left corner, then the corner moved to the
+    /// position. So whatever the transform holds besides (a shear, after a resize that
+    /// stretched a turned image) stays.
+    pub fn edited(&self, before: &Params, after: &Params) -> Affine {
+        let corner = [self.frame.x0, self.frame.y0];
+        let ratio = |a: f64, b: f64| if b > 0.0 { (a / b).max(MIN_SCALE) } else { 1.0 };
+        let (kx, ky) = (ratio(after.width, before.width), ratio(after.height, before.height));
+        let mut m = Affine::scale(kx, ky).about(corner[0], corner[1]).then(self.current);
+        if after.angle != before.angle {
+            let [x, y] = m.apply(corner);
+            m = m.then(Affine::rotate((after.angle - before.angle).to_radians()).about(x, y));
+        }
+        let [x, y] = m.apply(corner);
+        m.then(Affine::translate(after.x - x, after.y - y))
     }
 
     /// Where the box would be with the drag `drag` at `input`, and the snap lines used.
@@ -223,10 +234,13 @@ impl Session {
                 } else {
                     midpoint(corners[(k + 2) % 4], corners[(k + 3) % 4])
                 };
-                // Snap the dragged point itself.
-                let (sx, gx) = snap(&[input.pointer[0]], &targets.xs, tol);
-                let (sy, gy) = snap(&[input.pointer[1]], &targets.ys, tol);
-                let p = inv.apply([input.pointer[0] + sx, input.pointer[1] + sy]);
+                // The dragged point moves as far as the pointer has (it was grabbed near, not
+                // necessarily on, the pointer), and it is what snaps.
+                let at = start.apply(grabbed);
+                let to = [at[0] + input.pointer[0] - drag.from[0], at[1] + input.pointer[1] - drag.from[1]];
+                let (sx, gx) = snap(&[to[0]], &targets.xs, tol);
+                let (sy, gy) = snap(&[to[1]], &targets.ys, tol);
+                let p = inv.apply([to[0] + sx, to[1] + sy]);
                 let d0 = [grabbed[0] - held[0], grabbed[1] - held[1]];
                 let d = [p[0] - held[0], p[1] - held[1]];
                 let ratio = |num: f64, den: f64| if den.abs() < 1e-12 { 1.0 } else { num / den };
@@ -255,23 +269,38 @@ impl Session {
     }
 
     /// The transform that fits the box inside `canvas` (or, with `fill`, makes it cover
-    /// the canvas), centered, keeping its angle and aspect ratio.
+    /// the canvas), centered, scaled evenly from how it is now (so its angle, proportions
+    /// and any shear stay).
     pub fn fitted(&self, canvas: &IRect, fill: bool) -> Affine {
-        let p = self.params();
-        let (w, h) = (p.width, p.height);
-        let (cw, ch) = (canvas.width() as f64, canvas.height() as f64);
-        let (s, c) = p.angle.to_radians().sin_cos();
-        let (s, c) = (s.abs(), c.abs());
+        let m = self.current;
+        let Some(inv) = m.inverse() else { return m };
+        let c = canvas.to_f().center();
+        let mid = m.apply(self.frame.center());
+        let half = [canvas.width() as f64 * 0.5, canvas.height() as f64 * 0.5];
         let k = if fill {
-            ((cw * c + ch * s) / w).max((cw * s + ch * c) / h)
+            // Each canvas corner, as an offset in the frame from its center, must lie within
+            // half the frame.
+            let hf = [self.frame.width() * 0.5, self.frame.height() * 0.5];
+            let k = canvas.to_f().corners().iter().fold(0.0f64, |k, &q| {
+                let a = inv.apply([mid[0] + q[0] - c[0], mid[1] + q[1] - c[1]]);
+                let o = inv.apply(mid);
+                k.max(((a[0] - o[0]) / hf[0]).abs()).max(((a[1] - o[1]) / hf[1]).abs())
+            });
+            k.max(MIN_SCALE)
         } else {
-            (cw / (w * c + h * s)).min(ch / (w * s + h * c))
+            // Each corner of the box, as an offset from its center, must lie within half the
+            // canvas.
+            self.corners().iter().fold(f64::INFINITY, |k, p| {
+                let d = [(p[0] - mid[0]).abs(), (p[1] - mid[1]).abs()];
+                let kx = if d[0] > 0.0 { half[0] / d[0] } else { f64::INFINITY };
+                let ky = if d[1] > 0.0 { half[1] / d[1] } else { f64::INFINITY };
+                k.min(kx).min(ky)
+            })
         };
-        let sized = self.with_params(&Params { width: w * k, height: h * k, ..p });
-        // Center it on the canvas.
-        let centered = sized.apply(self.frame.center());
-        let [cx, cy] = canvas.to_f().center();
-        sized.then(Affine::translate(cx - centered[0], cy - centered[1]))
+        if !k.is_finite() {
+            return m;
+        }
+        m.then(Affine::translate(c[0] - mid[0], c[1] - mid[1])).then(Affine::scale(k, k).about(c[0], c[1]))
     }
 }
 
@@ -310,18 +339,28 @@ pub(crate) fn snap(values: &[f64], targets: &[f64], tol: f64) -> (f64, Option<f6
 /// The lines things snap to: the canvas's edges and center, and the edges and centers of
 /// the visible layers other than `except`.
 pub fn snap_targets(doc: &Document, except: &[LayerId]) -> SnapTargets {
+    // Layers that show: hidden groups hide everything inside them.
+    fn walk(layers: &[Arc<Layer>], except: &[LayerId], t: &mut SnapTargets) {
+        for l in layers {
+            if !l.visible {
+                continue;
+            }
+            match l.children() {
+                Some(c) => walk(c, except, t),
+                None => {
+                    if !except.contains(&l.id)
+                        && let Some(b) = l.bounds()
+                    {
+                        t.xs.extend([b.x0, b.center()[0], b.x1]);
+                        t.ys.extend([b.y0, b.center()[1], b.y1]);
+                    }
+                }
+            }
+        }
+    }
     let c = doc.canvas.rect().to_f();
     let mut t = SnapTargets { xs: vec![c.x0, c.center()[0], c.x1], ys: vec![c.y0, c.center()[1], c.y1] };
-    doc.for_each_layer(&mut |l, _| {
-        if l.visible
-            && !l.is_group()
-            && !except.contains(&l.id)
-            && let Some(b) = l.bounds()
-        {
-            t.xs.extend([b.x0, b.center()[0], b.x1]);
-            t.ys.extend([b.y0, b.center()[1], b.y1]);
-        }
-    });
+    walk(&doc.layers, except, &mut t);
     t
 }
 
@@ -404,6 +443,7 @@ impl DocState {
             drag: None,
             guides: Guides::default(),
             draft: false,
+            sampling_changed: false,
         });
         self.select_only(layer_id);
         self.revision += 1;
@@ -455,6 +495,7 @@ impl DocState {
             drag: None,
             guides: Guides::default(),
             draft: false,
+            sampling_changed: false,
         });
         self.revision += 1;
         true
@@ -468,9 +509,14 @@ impl DocState {
         if m.inverse().is_none() || (m == s.current && draft.is_some() == s.draft) {
             return;
         }
+        let delta = inv.then(m);
+        // Every object must stay where a file can hold it (see ImageObject::transform_ok);
+        // a drag or a typed number past that leaves the box where it was.
+        if !s.targets.iter().all(|t| ImageObject::transform_ok(&t.start.then(delta))) {
+            return;
+        }
         s.current = m;
         s.draft = draft.is_some();
-        let delta = inv.then(m);
         let boxed = s.sampling;
         let targets = s.targets.clone();
         let Some(p) = self.pending.as_mut() else { return };
@@ -487,6 +533,7 @@ impl DocState {
     pub fn set_box_sampling(&mut self, sampling: Sampling) {
         let Some(s) = self.transform.as_mut() else { return };
         s.sampling = sampling;
+        s.sampling_changed = true;
         for t in &mut s.targets {
             t.own = None;
         }
@@ -547,8 +594,16 @@ impl DocState {
 
     /// Makes the session's result final in the pending document (called just before it is
     /// committed): the chosen sampling everywhere, pixel objects that end on the pixel grid
-    /// back as pixels, and a paste into the active layer baked into it.
+    /// back as pixels, and a paste into the active layer baked into it. A transform that
+    /// changed nothing is dropped instead, leaving no history state.
     pub(crate) fn finish_transform(&mut self) {
+        let unchanged = self
+            .transform
+            .as_ref()
+            .is_some_and(|s| s.kind == Kind::Transform && s.current == s.start && !s.sampling_changed);
+        if unchanged {
+            return self.cancel_transform();
+        }
         let Some(s) = self.transform.take() else { return };
         let Some(p) = self.pending.as_mut() else { return };
         for t in &s.targets {
@@ -631,6 +686,7 @@ mod tests {
             drag: None,
             guides: Guides::default(),
             draft: false,
+            sampling_changed: false,
         }
     }
 
@@ -682,6 +738,81 @@ mod tests {
         s.commit_pending();
         let ObjectKind::Image(i) = &s.doc().layer(b).unwrap().objects()[0].kind else { panic!() };
         assert_eq!(i.sampling, nearest);
+    }
+
+    fn doc_state() -> DocState {
+        use opal_core::document::IdGen;
+        use opal_core::raster::RasterImage;
+        use opal_core::tile::pixel_from_f32;
+        let mut ids = IdGen::default();
+        let mut img = RasterImage::new();
+        img.set_pixel(3, 3, pixel_from_f32([1.0; 4]));
+        let mut doc = Document::new(50, 50);
+        doc.insert(Position { parent: None, index: 0 }, Layer::new_raster(ids.layer(), ids.object(), "l", img))
+            .unwrap();
+        DocState::new(crate::doc::DocId(1), "t".into(), doc, ids, "New")
+    }
+
+    #[test]
+    fn a_transform_that_changed_nothing_leaves_no_history_state() {
+        let mut s = doc_state();
+        let states = s.history.nodes().count();
+        assert!(s.begin_transform(Sampling::default()));
+        s.commit_pending();
+        assert_eq!(s.history.nodes().count(), states);
+        assert!(!s.is_dirty());
+        assert!(s.transform.is_none());
+    }
+
+    #[test]
+    fn the_box_stays_within_what_a_file_can_hold() {
+        let mut s = doc_state();
+        assert!(s.begin_transform(Sampling::default()));
+        let before = s.transform.as_ref().unwrap().current;
+        // Moved two trillion pixels away: past what a saved file may hold.
+        s.set_box(before.then(Affine::translate(2e12, 0.0)), None);
+        assert_eq!(s.transform.as_ref().unwrap().current, before);
+    }
+
+    #[test]
+    fn layers_in_hidden_groups_are_not_snapped_to() {
+        let mut doc = Document::new(100, 100);
+        let mut ids = opal_core::document::IdGen::default();
+        let g = ids.layer();
+        let mut group = Layer::new_group(g, "g");
+        group.visible = false;
+        doc.insert(Position { parent: None, index: 0 }, group).unwrap();
+        let mut img = opal_core::raster::RasterImage::new();
+        img.set_pixel(37, 37, opal_core::tile::pixel_from_f32([1.0; 4]));
+        doc.insert(Position { parent: Some(g), index: 0 }, Layer::new_raster(ids.layer(), ids.object(), "x", img))
+            .unwrap();
+        let t = snap_targets(&doc, &[]);
+        assert!(!t.xs.contains(&37.0), "{:?}", t.xs);
+    }
+
+    #[test]
+    fn editing_a_number_keeps_a_shear() {
+        // A turned image stretched one way afterwards: its frame is sheared in the document.
+        let m = Affine::rotate(0.4).then(Affine::scale(0.5, 1.0));
+        let s = session(FRect::new(0.0, 0.0, 100.0, 50.0), m);
+        let p = s.params();
+        let wider = s.edited(&p, &Params { width: p.width * 2.0, ..p });
+        // Only the frame's top edge doubles: the left edge stays as it was.
+        let left = |m: Affine| {
+            [m.apply([0.0, 50.0])[0] - m.apply([0.0, 0.0])[0], m.apply([0.0, 50.0])[1] - m.apply([0.0, 0.0])[1]]
+        };
+        assert!(close(left(wider), left(m)), "the shear was lost");
+        let top = |m: Affine| m.apply([100.0, 0.0])[0] - m.apply([0.0, 0.0])[0];
+        assert!((top(wider) - 2.0 * top(m)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_corner_grabbed_off_center_moves_with_the_pointer_without_jumping() {
+        let s = session(FRect::new(0.0, 0.0, 100.0, 100.0), Affine::IDENTITY);
+        // Grabbed 5 pixels inside the corner, then not moved.
+        let drag = Drag { handle: Handle::Corner(2), from: [95.0, 95.0], start: s.current };
+        let (m, _) = s.dragged(&drag, &input([95.0, 95.0]), &SnapTargets::default());
+        assert!(close(m.apply([100.0, 100.0]), [100.0, 100.0]), "the corner jumped to the pointer");
     }
 
     #[test]
@@ -740,13 +871,12 @@ mod tests {
     #[test]
     fn params_round_trip_and_fit_keeps_inside_the_canvas() {
         let s = session(FRect::new(0.0, 0.0, 300.0, 100.0), Affine::IDENTITY);
-        let p = Params { x: 20.0, y: 30.0, width: 150.0, height: 75.0, angle: 30.0, mirrored: true };
-        let mut s2 = session(s.frame, s.with_params(&p));
+        let p = Params { x: 20.0, y: 30.0, width: 150.0, height: 75.0, angle: 30.0, mirrored: false };
+        let mut s2 = session(s.frame, s.edited(&s.params(), &p));
         let q = s2.params();
         for (a, b) in [(p.x, q.x), (p.y, q.y), (p.width, q.width), (p.height, q.height), (p.angle, q.angle)] {
             assert!((a - b).abs() < 1e-9, "{p:?} vs {q:?}");
         }
-        assert!(q.mirrored);
         let canvas = IRect::from_size(400, 400);
         s2.current = s2.fitted(&canvas, false);
         let b = FRect::bounding(&s2.corners());

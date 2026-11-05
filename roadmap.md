@@ -1,7 +1,7 @@
 # Opal Studio — roadmap
 
-What each milestone delivers is specified in `design.md`. Status: milestone 0 is done;
-everything after it is planned.
+What each milestone delivers is specified in `design.md`. Status: milestones 0 and 1 are
+done; everything after them is planned.
 
 **Order:** 0, 1, S, 2, A, 3, 4, and so on. Photo editing comes first, with vector shapes
 taken early (milestone 4), because by then the outline tool has built most of the curve
@@ -36,7 +36,7 @@ selection core it builds on.
   that never cycle variants.
 - Tool settings panel: variant picker, basic settings, Advanced section.
 
-## 1. Paste and place
+## 1. Paste and place (done)
 - Pixel objects and image objects; the resampler (methods, anti-ringing, pyramids for
   shrinking); the canvas as a rectangle; native format version 1.
 - Paste opens the transform box: aspect lock, snapping (Alt and an on-box button), rotate,

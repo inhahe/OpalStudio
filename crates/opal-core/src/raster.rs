@@ -23,9 +23,11 @@ pub struct RasterImage {
     bounds: OnceLock<Option<IRect>>,
 }
 
+/// A clone has the same pixels and starts with no pyramid: images are cloned (through
+/// `Arc::make_mut`) to be changed, which would discard the pyramid at once.
 impl Clone for RasterImage {
     fn clone(&self) -> RasterImage {
-        RasterImage { tiles: self.tiles.clone(), pyramid: self.pyramid.clone(), bounds: self.bounds.clone() }
+        RasterImage { tiles: self.tiles.clone(), pyramid: Default::default(), bounds: self.bounds.clone() }
     }
 }
 
