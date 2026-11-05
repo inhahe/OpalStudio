@@ -16,10 +16,10 @@
 //! go unnoticed, and nothing has to report changes to the cache. Keys hold what they refer
 //! to alive, so a freed address can never be reused while a key still refers to it.
 
-use crate::document::{ImageObject, Layer, LayerContent, Object, ObjectKind, PixelObject};
-use crate::geom::{FRect, IRect};
+use crate::document::{Layer, LayerContent, Object, ObjectKind, PixelObject};
+use crate::geom::{Affine, FRect, IRect};
 use crate::raster::RasterImage;
-use crate::resample;
+use crate::resample::{self, Sampling};
 use crate::tile::{Pixel, PixelF32, TILE_PIXELS, TILE_SIZE, Tile, TileCoord, downsample};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -96,7 +96,7 @@ fn object_tile(o: &Object, c: TileCoord) -> Option<Shown<'_>> {
             (!tile.is_transparent()).then_some(Shown::Drawn(tile))
         }
         ObjectKind::Image(i) => {
-            if !image_touches(i, c) {
+            if !touches(&i.image, &i.transform, &i.sampling, c) {
                 return None;
             }
             resample::render_tile(&i.image, &i.transform, &i.sampling, c).map(Shown::Drawn)
@@ -104,20 +104,64 @@ fn object_tile(o: &Object, c: TileCoord) -> Option<Shown<'_>> {
     }
 }
 
-/// Whether image object `i` can draw anything into document tile `c`: whether the tile,
-/// carried back into the image's pixels, comes within the filter's reach of its content.
-fn image_touches(i: &ImageObject, c: TileCoord) -> bool {
-    let (Some(content), Some(inv)) = (i.image.content_bounds(), i.transform.inverse()) else { return false };
+/// Whether `image`, drawn through `transform` with `sampling`, can draw anything into tile
+/// `c`: whether the tile, carried back into the image's pixels, comes within the filter's
+/// reach of its content.
+fn touches(image: &RasterImage, transform: &Affine, sampling: &Sampling, c: TileCoord) -> bool {
+    let (Some(content), Some(inv)) = (image.content_bounds(), transform.inverse()) else { return false };
     let back = inv.bounds(&c.rect(0).to_f());
-    let r = resample::reach(&i.transform, &i.sampling);
+    let r = resample::reach(transform, sampling);
     let content =
         FRect::new(content.x0 as f64 - r, content.y0 as f64 - r, content.x1 as f64 + r, content.y1 as f64 + r);
     back.x0 < content.x1 && back.x1 > content.x0 && back.y0 < content.y1 && back.y1 > content.y0
 }
 
-/// Composites the visible layers' content at tile `c` onto `acc`. Returns whether anything
-/// was drawn.
-fn composite_into(layers: &[Arc<Layer>], c: TileCoord, acc: &mut [PixelF32]) -> bool {
+/// Object `o` placed at pyramid level `level`: its pixels, carried by the transform into
+/// that level's pixels (a level-`level` tile is then drawn like a level-0 one), and the
+/// sampling a preview draws it with (Bilinear, which is exact on whole level pixels, unless
+/// the object asks for hard pixels).
+fn at_level(o: &Object, level: u32) -> (&Arc<RasterImage>, Affine, Sampling) {
+    let down = Affine::scale(0.5f64.powi(level as i32), 0.5f64.powi(level as i32));
+    match &o.kind {
+        ObjectKind::Pixels(p) => {
+            (&p.image, Affine::translate(p.offset[0] as f64, p.offset[1] as f64).then(down), Sampling::DRAFT)
+        }
+        ObjectKind::Image(i) => {
+            let s = if i.sampling.method == resample::Method::Nearest { i.sampling } else { Sampling::DRAFT };
+            (&i.image, i.transform.then(down), s)
+        }
+    }
+}
+
+/// What object `o` shows in tile `c` of pyramid level `level`, drawn there directly.
+fn level_tile(o: &Object, c: TileCoord, level: u32) -> Option<Shown<'_>> {
+    let (image, t, s) = at_level(o, level);
+    if !touches(image, &t, &s, c) {
+        return None;
+    }
+    resample::render_tile(image, &t, &s, c).map(Shown::Drawn)
+}
+
+/// [`level_tile`] at `level`, as a [`ShowFn`] takes it.
+fn shown_at(level: u32) -> impl for<'o> Fn(&'o Object, TileCoord) -> Option<Shown<'o>> + Sync {
+    move |o, c| level_tile(o, c, level)
+}
+
+/// The token for what object `o` shows in tile `c` of pyramid level `level`.
+fn level_token(o: &Object, c: TileCoord, level: u32) -> Option<Token> {
+    let (image, t, s) = at_level(o, level);
+    touches(image, &t, &s, c).then(|| Token::Image { image: image.clone(), transform: t.to_bits(), sampling: s.key() })
+}
+
+/// What an object shows in a tile: at full resolution, or drawn at a pyramid level.
+type ShowFn<'f> = &'f (dyn for<'o> Fn(&'o Object, TileCoord) -> Option<Shown<'o>> + Sync);
+/// The key token of what an object shows in a tile.
+type TokenFn<'f> = &'f (dyn Fn(&Object, TileCoord) -> Option<Token> + Sync);
+
+/// Composites the visible layers' content at tile `c` onto `acc`, each object as `shown`
+/// draws it. Returns whether anything was drawn.
+fn composite_into(layers: &[Arc<Layer>], c: TileCoord, acc: &mut [PixelF32], shown: ShowFn) -> bool {
+    let draw = shown;
     let mut any = false;
     let mut scratch: Option<Vec<PixelF32>> = None;
     for layer in layers {
@@ -126,7 +170,7 @@ fn composite_into(layers: &[Arc<Layer>], c: TileCoord, acc: &mut [PixelF32]) -> 
         }
         match &layer.content {
             LayerContent::Objects(objects) => {
-                let shown: Vec<Shown> = objects.iter().filter_map(|o| object_tile(o, c)).collect();
+                let shown: Vec<Shown> = objects.iter().filter_map(|o| draw(o, c)).collect();
                 if shown.is_empty() {
                     continue;
                 }
@@ -148,7 +192,7 @@ fn composite_into(layers: &[Arc<Layer>], c: TileCoord, acc: &mut [PixelF32]) -> 
             }
             LayerContent::Group(children) => {
                 let mut group = vec![[0.0f32; 4]; TILE_PIXELS];
-                if composite_into(children, c, &mut group) {
+                if composite_into(children, c, &mut group, draw) {
                     over(acc, &group, layer.opacity);
                     any = true;
                 }
@@ -160,8 +204,13 @@ fn composite_into(layers: &[Arc<Layer>], c: TileCoord, acc: &mut [PixelF32]) -> 
 
 /// The composite of `layers` at level-0 tile `c`, or `None` where nothing shows.
 pub fn composite_tile(layers: &[Arc<Layer>], c: TileCoord) -> Option<Tile> {
+    composite_with(layers, c, &object_tile)
+}
+
+/// The composite of `layers` at tile `c`, each object as `shown` draws it.
+fn composite_with(layers: &[Arc<Layer>], c: TileCoord, shown: ShowFn) -> Option<Tile> {
     let mut acc = vec![[0.0f32; 4]; TILE_PIXELS];
-    if !composite_into(layers, c, &mut acc) {
+    if !composite_into(layers, c, &mut acc, shown) {
         return None;
     }
     let t = Tile::from_f32(&acc);
@@ -398,7 +447,7 @@ fn object_token(o: &Object, c: TileCoord) -> Option<Token> {
             }
             Some(Token::Shifted { phase, tiles: sources.map(|t| t.cloned()) })
         }
-        ObjectKind::Image(i) => image_touches(i, c).then(|| Token::Image {
+        ObjectKind::Image(i) => touches(&i.image, &i.transform, &i.sampling, c).then(|| Token::Image {
             image: i.image.clone(),
             transform: i.transform.to_bits(),
             sampling: i.sampling.key(),
@@ -406,8 +455,9 @@ fn object_token(o: &Object, c: TileCoord) -> Option<Token> {
     }
 }
 
-/// Appends the key of `layers` at `c` to `out`. Returns whether anything contributes.
-fn key_into(layers: &[Arc<Layer>], c: TileCoord, out: &mut Vec<Token>) -> bool {
+/// Appends the key of `layers` at `c` to `out`, each object's token from `token`. Returns
+/// whether anything contributes.
+fn key_into(layers: &[Arc<Layer>], c: TileCoord, out: &mut Vec<Token>, token: TokenFn) -> bool {
     let mut any = false;
     for layer in layers {
         if !layer.visible || layer.opacity <= 0.0 {
@@ -418,12 +468,12 @@ fn key_into(layers: &[Arc<Layer>], c: TileCoord, out: &mut Vec<Token>) -> bool {
             LayerContent::Objects(objects) => {
                 out.push(Token::Layer(layer.opacity.to_bits()));
                 let before = out.len();
-                out.extend(objects.iter().filter_map(|o| object_token(o, c)));
+                out.extend(objects.iter().filter_map(|o| token(o, c)));
                 out.len() > before
             }
             LayerContent::Group(children) => {
                 out.push(Token::Group(layer.opacity.to_bits()));
-                key_into(children, c, out)
+                key_into(children, c, out, token)
             }
         };
         if contributes {
@@ -485,7 +535,21 @@ struct Entry {
 #[derive(Default, Debug)]
 pub struct Projection {
     levels: Vec<HashMap<TileCoord, Entry>>,
+    /// Tiles drawn directly at a pyramid level (see [`Quality::Preview`]), by level.
+    preview: HashMap<(u32, TileCoord), Entry>,
     last: Option<LastUpdate>,
+}
+
+/// How [`Projection::update`] brings tiles up to date.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quality {
+    /// At full resolution, then reduced: exactly what the image is.
+    Exact,
+    /// While something is dragged: tiles out of date at the level shown (above 0) are drawn
+    /// at that level directly, from each object's reduced copy, so their cost follows the
+    /// screen rather than the image; tiles still up to date stay exact. The next exact
+    /// update recomputes what was previewed.
+    Preview,
 }
 
 /// What the last [`Projection::update`] was asked and answered, so that asking the same again
@@ -496,6 +560,7 @@ struct LastUpdate {
     layers: Vec<Arc<Layer>>,
     level: u32,
     rect: IRect,
+    quality: Quality,
     result: Vec<(TileCoord, Arc<Tile>)>,
 }
 
@@ -510,12 +575,20 @@ impl Projection {
     /// Brings the tiles of pyramid level `level` that intersect `rect` (canvas pixels) up to
     /// date with `layers`, computing any that are stale in parallel, and returns those that
     /// have content.
-    pub fn update(&mut self, layers: &[Arc<Layer>], level: u32, rect: &IRect) -> Vec<(TileCoord, Arc<Tile>)> {
+    pub fn update(
+        &mut self,
+        layers: &[Arc<Layer>],
+        level: u32,
+        rect: &IRect,
+        quality: Quality,
+    ) -> Vec<(TileCoord, Arc<Tile>)> {
         let level = level.min(MAX_LEVEL);
+        let quality = if level == 0 { Quality::Exact } else { quality };
         // Any change below the top level replaces the top-level layer holding it.
         if let Some(last) = &self.last
             && last.level == level
             && last.rect == *rect
+            && last.quality == quality
             && last.layers.len() == layers.len()
             && last.layers.iter().zip(layers).all(|(a, b)| Arc::ptr_eq(a, b))
         {
@@ -532,18 +605,96 @@ impl Projection {
             (rect.x1 + span - 1).div_euclid(span) * span,
             (rect.y1 + span - 1).div_euclid(span) * span,
         );
-        let mut coords: HashSet<TileCoord> = occupied_tiles(layers, Some(&outer));
-        prepare(layers, Some(&outer));
-        self.update_base(layers, &coords, &outer);
+        let base: HashSet<TileCoord> = occupied_tiles(layers, Some(&outer));
+        let result = match quality {
+            Quality::Exact => {
+                self.preview.clear();
+                prepare(layers, Some(&outer));
+                self.update_base(layers, &base, &outer);
+                let mut coords = base;
+                for l in 1..=level {
+                    coords = coords.iter().map(|c| c.parent()).collect();
+                    self.update_pyramid(l, &coords, &outer);
+                }
+                let top = &self.levels[level as usize];
+                coords.iter().filter_map(|c| top.get(c).and_then(|e| e.tile.clone()).map(|t| (*c, t))).collect()
+            }
+            Quality::Preview => self.update_preview(layers, level, &outer, base),
+        };
+        self.last = Some(LastUpdate { layers: layers.to_vec(), level, rect: *rect, quality, result: result.clone() });
+        result
+    }
+
+    /// [`Quality::Preview`]: the level-`level` tiles over `outer` with anything out of date
+    /// under them are drawn at that level; the others come from the exact pyramid, which is
+    /// brought up to date for them alone (their level-0 tiles are current, so that costs
+    /// little). `base` holds the level-0 tiles content occupies.
+    fn update_preview(
+        &mut self,
+        layers: &[Arc<Layer>],
+        level: u32,
+        outer: &IRect,
+        base: HashSet<TileCoord>,
+    ) -> Vec<(TileCoord, Arc<Tile>)> {
+        let up = |mut c: TileCoord| {
+            for _ in 0..level {
+                c = c.parent();
+            }
+            c
+        };
+        // The level-`level` tiles with a level-0 tile under them out of date, or emptied.
+        let cache = &self.levels[0];
+        let mut dirty: HashSet<TileCoord> = HashSet::new();
+        for &c in &base {
+            let mut tokens = Vec::new();
+            key_into(layers, c, &mut tokens, &object_token);
+            if cache.get(&c).is_none_or(|e| e.key != Key::Base(tokens)) {
+                dirty.insert(up(c));
+            }
+        }
+        for c in cache.keys() {
+            if !base.contains(c) && !c.rect(0).intersect(outer).is_empty() {
+                dirty.insert(up(*c));
+            }
+        }
+        // The exact pyramid for the rest.
+        let mut coords: HashSet<TileCoord> = base.into_iter().filter(|&c| !dirty.contains(&up(c))).collect();
         for l in 1..=level {
             coords = coords.iter().map(|c| c.parent()).collect();
-            self.update_pyramid(l, &coords, &outer);
+            self.update_pyramid(l, &coords, outer);
         }
+        // The dirty ones, drawn at the level: those whose key changed since last drawn.
+        for_each_visible_object(layers, &mut |o| {
+            if o.extent().is_some_and(|e| !e.intersect(outer).is_empty()) {
+                let (image, t, s) = at_level(o, level);
+                resample::prepare(image, &t, &s);
+            }
+        });
+        self.preview.retain(|(l, c), _| *l == level && dirty.contains(c));
+        let token = |o: &Object, c: TileCoord| level_token(o, c, level);
+        let mut stale = Vec::new();
+        for &c in &dirty {
+            let mut tokens = Vec::new();
+            key_into(layers, c, &mut tokens, &token);
+            let key = Key::Base(tokens);
+            if self.preview.get(&(level, c)).is_none_or(|e| e.key != key) {
+                stale.push((c, key));
+            }
+        }
+        let show = shown_at(level);
+        let drawn: Vec<(TileCoord, Entry)> = stale
+            .into_par_iter()
+            .map(|(c, key)| {
+                let tile = composite_with(layers, c, &show).map(Arc::new);
+                (c, Entry { key, tile })
+            })
+            .collect();
+        self.preview.extend(drawn.into_iter().map(|(c, e)| ((level, c), e)));
         let top = &self.levels[level as usize];
-        let result: Vec<(TileCoord, Arc<Tile>)> =
-            coords.iter().filter_map(|c| top.get(c).and_then(|e| e.tile.clone()).map(|t| (*c, t))).collect();
-        self.last = Some(LastUpdate { layers: layers.to_vec(), level, rect: *rect, result: result.clone() });
-        result
+        let exact = coords.iter().filter_map(|c| top.get(c).and_then(|e| e.tile.clone()).map(|t| (*c, t)));
+        let previewed =
+            dirty.iter().filter_map(|c| self.preview.get(&(level, *c)).and_then(|e| e.tile.clone()).map(|t| (*c, t)));
+        exact.chain(previewed).collect()
     }
 
     /// The cached tile at `level` and `c` as of the last [`update`](Self::update) that
@@ -559,7 +710,7 @@ impl Projection {
         let mut stale = Vec::new();
         for &c in coords {
             let mut tokens = Vec::new();
-            key_into(layers, c, &mut tokens);
+            key_into(layers, c, &mut tokens, &object_token);
             let key = Key::Base(tokens);
             if cache.get(&c).is_none_or(|e| e.key != key) {
                 stale.push((c, key));
@@ -690,7 +841,7 @@ mod tests {
         let l = add(&mut d, &mut ids, solid(IRect::new(0, 0, 600, 1), [1.0; 4]));
         let mut p = Projection::new();
         let view = IRect::from_size(600, 10);
-        let first = p.update(&d.layers, 0, &view);
+        let first = p.update(&d.layers, 0, &view, Quality::Exact);
         assert_eq!(first.len(), 3);
         let before: HashMap<TileCoord, Arc<Tile>> = first.into_iter().collect();
 
@@ -699,7 +850,7 @@ mod tests {
         let ObjectKind::Pixels(px) = &mut objects[0].kind else { panic!() };
         Arc::make_mut(&mut px.image).set_pixel(300, 0, pixel_from_f32([0.0, 0.0, 0.0, 1.0]));
 
-        let after: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 0, &view).into_iter().collect();
+        let after: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 0, &view, Quality::Exact).into_iter().collect();
         for (c, t) in &after {
             let same = Arc::ptr_eq(t, &before[c]);
             assert_eq!(same, c.x != 1, "tile {c:?} recomputed: {}", !same);
@@ -714,12 +865,12 @@ mod tests {
         let l = add(&mut d, &mut ids, solid(IRect::from_size(1, 1), [1.0; 4]));
         let mut p = Projection::new();
         let view = IRect::from_size(10, 10);
-        assert_eq!(p.update(&d.layers, 0, &view).len(), 1);
+        assert_eq!(p.update(&d.layers, 0, &view, Quality::Exact).len(), 1);
         d.layer_mut(l).unwrap().opacity = 0.5;
-        let t = p.update(&d.layers, 0, &view);
+        let t = p.update(&d.layers, 0, &view, Quality::Exact);
         assert!(close(pixel_to_f32(t[0].1.get(0, 0)), [0.5; 4]));
         d.remove(l).unwrap();
-        assert!(p.update(&d.layers, 0, &view).is_empty());
+        assert!(p.update(&d.layers, 0, &view, Quality::Exact).is_empty());
         assert!(p.tile(0, TileCoord::new(0, 0)).is_none());
     }
 
@@ -738,7 +889,7 @@ mod tests {
         }
         add(&mut d, &mut ids, img);
         let mut p = Projection::new();
-        let tiles = p.update(&d.layers, 1, &IRect::from_size(512, 512));
+        let tiles = p.update(&d.layers, 1, &IRect::from_size(512, 512), Quality::Exact);
         assert_eq!(tiles.len(), 1);
         let (c, t) = &tiles[0];
         assert_eq!(*c, TileCoord::new(0, 0));
@@ -752,7 +903,7 @@ mod tests {
         let mut d = Document::new(600, 300);
         let l = add(&mut d, &mut ids, solid(IRect::from_size(600, 300), [0.2, 0.4, 0.6, 1.0]));
         let mut p = Projection::new();
-        let shown = p.update(&d.layers, 0, &IRect::from_size(600, 300));
+        let shown = p.update(&d.layers, 0, &IRect::from_size(600, 300), Quality::Exact);
         let src = d.layer(l).unwrap().objects()[0].image().clone();
         for (c, t) in shown {
             assert!(Arc::ptr_eq(&t, src.tile(c).unwrap()), "tile {c:?} was copied");
@@ -778,7 +929,8 @@ mod tests {
         let view = IRect::new(-1000, -1000, 1000, 1000);
         for offset in [[300, 7], [-1, -1], [512, -256], [-300, 600]] {
             pixels_mut(&mut d, l).offset = offset;
-            let shown: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 0, &view).into_iter().collect();
+            let shown: HashMap<TileCoord, Arc<Tile>> =
+                p.update(&d.layers, 0, &view, Quality::Exact).into_iter().collect();
             let at = |x: i64, y: i64| {
                 let c = TileCoord::containing(x, y);
                 let r = c.rect(0);
@@ -794,7 +946,7 @@ mod tests {
         }
         // On the tile grid, the stored tile itself is shown.
         pixels_mut(&mut d, l).offset = [256, 512];
-        let shown = p.update(&d.layers, 0, &view);
+        let shown = p.update(&d.layers, 0, &view, Quality::Exact);
         let stored = d.layer(l).unwrap().objects()[0].image().tile(TileCoord::new(0, 0)).unwrap().clone();
         assert_eq!(shown.len(), 1);
         assert!(Arc::ptr_eq(&shown[0].1, &stored));
@@ -822,7 +974,7 @@ mod tests {
         d.insert(Position { parent: None, index: 1 }, layer).unwrap();
         let view = IRect::from_size(2000, 2000);
         let mut p = Projection::new();
-        let before: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 0, &view).into_iter().collect();
+        let before: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 0, &view, Quality::Exact).into_iter().collect();
         let px = flatten(&d.layers, &IRect::new(399, 100, 401, 101));
         assert_eq!(
             px,
@@ -833,7 +985,7 @@ mod tests {
         let LayerContent::Objects(objects) = &mut d.layer_mut(top).unwrap().content else { panic!() };
         let ObjectKind::Image(i) = &mut objects[0].kind else { panic!() };
         i.transform = Affine::scale(30.0, 30.0).then(Affine::translate(110.0, 100.0));
-        let after: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 0, &view).into_iter().collect();
+        let after: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 0, &view, Quality::Exact).into_iter().collect();
         let blue = TileCoord::containing(1500, 1500);
         assert!(Arc::ptr_eq(&before[&blue], &after[&blue]), "a tile the image does not touch is kept");
         let moved = TileCoord::containing(100, 100);
@@ -898,6 +1050,100 @@ mod tests {
     }
 
     #[test]
+    fn a_preview_draws_only_what_changed_at_the_level_shown() {
+        use crate::document::{ImageObject, Object};
+        use crate::geom::Affine;
+        use crate::resample::Sampling;
+        let mut ids = IdGen::default();
+        let mut d = Document::new(4096, 4096);
+        add(&mut d, &mut ids, solid(IRect::from_size(4096, 4096), [0.2, 0.4, 0.6, 1.0]));
+        let image = ImageObject {
+            image: Arc::new(solid(IRect::from_size(300, 300), [1.0, 0.0, 0.0, 1.0])),
+            frame: IRect::from_size(300, 300),
+            transform: Affine::translate(100.0, 100.0),
+            sampling: Sampling::default(),
+        };
+        let top = ids.layer();
+        let layer =
+            Layer::with_objects(top, "pasted", vec![Object { id: ids.object(), kind: ObjectKind::Image(image) }]);
+        d.insert(Position { parent: None, index: 1 }, layer).unwrap();
+        let view = IRect::from_size(4096, 4096);
+        let mut p = Projection::new();
+        let exact: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 2, &view, Quality::Exact).into_iter().collect();
+
+        // Drag the image far across: only the level-2 tiles it left or reached are redrawn.
+        let LayerContent::Objects(objects) = &mut d.layer_mut(top).unwrap().content else { panic!() };
+        let ObjectKind::Image(i) = &mut objects[0].kind else { panic!() };
+        i.transform = Affine::translate(2500.5, 2500.25);
+        let before0 = p.tile(0, TileCoord::containing(2600, 2600)).cloned();
+        let preview: HashMap<TileCoord, Arc<Tile>> =
+            p.update(&d.layers, 2, &view, Quality::Preview).into_iter().collect();
+        let far = TileCoord::new(3, 0);
+        assert!(Arc::ptr_eq(&preview[&far], &exact[&far]), "an untouched tile stays exact");
+        assert!(
+            p.tile(0, TileCoord::containing(2600, 2600)).cloned().map(|t| Arc::as_ptr(&t))
+                == before0.map(|t| Arc::as_ptr(&t)),
+            "no full-resolution tile was drawn"
+        );
+        // The previewed tile shows the image where it now is, as the exact update will.
+        let at = |tiles: &HashMap<TileCoord, Arc<Tile>>, x: i64, y: i64| {
+            let c = TileCoord::new((x >> 2).div_euclid(256) as i32, (y >> 2).div_euclid(256) as i32);
+            pixel_to_f32(tiles[&c].get(((x >> 2) % 256) as u32, ((y >> 2) % 256) as u32))
+        };
+        let exact_now: HashMap<TileCoord, Arc<Tile>> =
+            p.update(&d.layers, 2, &view, Quality::Exact).into_iter().collect();
+        for (x, y) in [(2650, 2650), (2400, 2650), (150, 150)] {
+            assert!(
+                close(at(&preview, x, y), at(&exact_now, x, y)),
+                "at ({x}, {y}): {:?} vs {:?}",
+                at(&preview, x, y),
+                at(&exact_now, x, y)
+            );
+        }
+    }
+
+    /// Times dragging a 24-megapixel image object over a 24-megapixel layer at 25%, exactly
+    /// and previewed (run with `--release --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn time_a_large_drag() {
+        use crate::document::{ImageObject, Object};
+        use crate::geom::Affine;
+        use crate::resample::Sampling;
+        let (w, h) = (6000u32, 4000u32);
+        let px: Vec<Pixel> = (0..w * h).map(|i| pixel_from_f32([(i % 251) as f32 / 251.0, 0.5, 0.25, 1.0])).collect();
+        let photo = RasterImage::from_pixels(w, h, &px);
+        let mut ids = IdGen::default();
+        let mut d = Document::new(w, h);
+        add(&mut d, &mut ids, photo.clone());
+        let image = ImageObject {
+            image: Arc::new(photo),
+            frame: IRect::from_size(6000, 4000),
+            transform: Affine::IDENTITY,
+            sampling: Sampling::DRAFT,
+        };
+        let top = ids.layer();
+        let layer =
+            Layer::with_objects(top, "pasted", vec![Object { id: ids.object(), kind: ObjectKind::Image(image) }]);
+        d.insert(Position { parent: None, index: 1 }, layer).unwrap();
+        let view = IRect::from_size(6000, 4000);
+        let mut p = Projection::new();
+        p.update(&d.layers, 2, &view, Quality::Exact);
+        for quality in [Quality::Exact, Quality::Preview] {
+            let mut total = std::time::Duration::ZERO;
+            for step in 1..=5 {
+                let LayerContent::Objects(objects) = &mut d.layer_mut(top).unwrap().content else { panic!() };
+                let ObjectKind::Image(i) = &mut objects[0].kind else { panic!() };
+                i.transform = Affine::scale(0.9, 0.9).then(Affine::translate(step as f64 * 37.3, step as f64 * 11.1));
+                let t = std::time::Instant::now();
+                p.update(&d.layers, 2, &view, quality);
+                total += t.elapsed();
+            }
+            eprintln!("{quality:?}: {:?} a frame", total / 5);
+        }
+    }
+
+    #[test]
     fn identical_children_share_one_reduced_tile() {
         // A uniform image: every full tile is the same Arc, and so is every reduction of it.
         let mut ids = IdGen::default();
@@ -909,7 +1155,7 @@ mod tests {
         }
         add(&mut d, &mut ids, img);
         let mut p = Projection::new();
-        let shown = p.update(&d.layers, 1, &IRect::from_size(2048, 2048));
+        let shown = p.update(&d.layers, 1, &IRect::from_size(2048, 2048), Quality::Exact);
         assert_eq!(shown.len(), 16);
         assert!(shown.iter().all(|(_, t)| Arc::ptr_eq(t, &shown[0].1)), "each reduced tile was computed separately");
     }

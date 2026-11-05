@@ -64,14 +64,3 @@ Vulkan backend (and Metal's `recommendedMaxWorkingSetSize`) on other platforms.
 crashed at startup. On other platforms that setting must be overridden
 (`cargo build --target <host>`). **Fix:** when the first non-Windows build is set up, move
 the override into a Windows-only build script or document per-platform `--config`.
-
-## Dragging a large image object redraws it at full resolution
-
-`crates/opal-app/src/transform_ui.rs` and `crates/opal-core/src/composite.rs`. The
-projection is computed at full resolution and reduced from there, so while a transform box
-is dragged over a large pasted image, every frame redraws all of its full-resolution tiles
-under the view, even zoomed out. A 24-megapixel image takes about 25 ms to redraw (with the
-faster method used while dragging) on a 16-core processor, so the drag keeps up there but
-would lag on a slower one, or over many layers. **Fix:** while dragging, composite the
-pyramid level on screen directly from each layer's reduced copy (as the design's
-*Previews first* plans), and recompute full resolution when the drag ends.

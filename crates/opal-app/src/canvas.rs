@@ -292,7 +292,11 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let span = i64::from(TILE_SIZE) << level;
     let wider = IRect::new(visible.x0 - span, visible.y0 - span, visible.x1 + span, visible.y1 + span);
     let layers = d.doc().layers.clone();
-    let tiles = d.projection.update(&layers, level, &wider);
+    // While something is dragged, what it changes is drawn at the level shown, so the drag
+    // keeps up however large the image (exact again on release).
+    let dragging = d.moving.is_some() || d.transform.as_ref().is_some_and(|s| s.drag.is_some());
+    let quality = if dragging { opal_core::composite::Quality::Preview } else { opal_core::composite::Quality::Exact };
+    let tiles = d.projection.update(&layers, level, &wider, quality);
     let mut draws = Vec::new();
     for (coord, _) in tiles {
         let r = coord.rect(level);
