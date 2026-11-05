@@ -21,6 +21,13 @@ milestones.
   and scrolled into view.
 - Command palette.
 - Free GPU memory queried from the OS.
+- Color engine: every color model of the colorpicker, plus OKLab and OKLCh, in Rust and
+  WGSL.
+- Settings framework: basic and advanced sections, defaults shown, changed settings marked,
+  reset, named presets. The curve editor, both with a chosen color model (the channel curve
+  editor) and without one.
+- Toolbar without hidden tool groups: one button per tool, variants as a visible control in
+  the options bar, shortcuts that never cycle variants.
 
 ## 1. Paste and place
 - Paste opens the transform box: aspect lock, snapping (Alt and an on-box button), rotate,
@@ -36,19 +43,30 @@ milestones.
 - Rectangle and ellipse; add, subtract, intersect, replace.
 - The outline tool: freehand, anchors, curves.
 - Reshape: right-drag, red preview, Tab flips the side, R + left-drag.
-- Feather (inward, outward, centered), grow/shrink, invert.
+- Feather (inward, outward, centered; falloff curve), grow/shrink (round, square, diamond),
+  invert.
 - Marching ants; the mask as a red overlay.
 - Selections in the history tree.
 - Diagnostics: "why nothing happened", starting with selection, hidden, locked, opacity and
   covered-by-a-layer-above.
 
 ## 3. Painting
-- Brush engine: a round brush with size, hardness, opacity, spacing.
+- The brush engine that every painting and retouching tool is a preset of: what it paints
+  with, how it combines, where it may act, dynamics.
+- Brush settings, basic and advanced: tip falloff curve, roundness, angle, image tips;
+  spacing, scatter, jitter; dynamics curves for pressure, tilt and speed; smoothing;
+  antialiasing (the Pencil variant) and pixel-perfect lines; build-up; color dynamics in a
+  chosen color model; compositing space.
+- Paints with a color, a gradient, or a pattern (patterns from the selection).
 - Pen input on Windows through `WM_POINTER` (pressure, tilt, eraser end); simulated pen
   input for tests.
-- Eraser, fill, basic gradient, eyedropper.
+- Blend modes, the full set, shared later by layers: one-line descriptions and live preview
+  in the picker; blending space; the color model behind Hue, Saturation, Color and
+  Luminosity; Soft Light formulas; the Channels mode. Behind and Clear for brushes.
+- Eraser (Brush variant), erasing to transparency or into the layer's mask.
+- Fill, gradient, eyedropper.
 - Painting on masks.
-- Color picker port, version 1: color engine, 2D picker, sliders; OKLab and OKLCh added.
+- Color picker, version 1: the 2D picker and sliders.
 
 ## 4. Vector shapes
 - Pen tool reusing the outline tool's curve editing; rectangle, ellipse, polygon, star.
@@ -58,22 +76,34 @@ milestones.
 
 ## 5. Adjustments
 - Adjustment layers: levels, curves, hue/saturation, gradient map.
-- Layer masks; blend modes.
+- Layer masks; the blend modes from milestone 3 on layers.
+- Blend If: curves over channels of a chosen color model, for this layer and for the pixels
+  beneath it.
 - Color management with ICC profiles; the floating-point pipeline end to end.
 
 ## 6. Retouching
 - *Sample from*: current, below, all visible, chosen and named sets.
-- Clone: offset from two points, aligned or not, ghost source preview.
-- Heal.
+- Clone: offset from two points, aligned or not, ghost source preview; source rotation,
+  scale and flip.
+- Heal: picked source (gradient-domain blending); Automatic (spot healing: nearby texture,
+  PatchMatch).
+- History brush: from any state on any branch, or a named snapshot.
+- Mix: wet paint and smudge; linear, OKLab and pigment (Kubelka–Munk) mixing.
+- Tone: lighten, darken, saturate, desaturate; tonal-range curve; option to paint into an
+  adjustment layer's mask.
+- Detail: blur to sharpen; channels it acts on; halo suppression.
 
 ## 7. Text
 - Area text and point text; editable permanently, even inside an existing layer.
 - Shaping, bidirectional text, line breaking, font fallback.
 
-## 8. Smart selection
-- Edge snapping in the outline tool (live-wire).
-- Color-range selection: curves per channel, strictness slider, eyedropper start, distance
-  mode.
+## 8. Smart selection and color matching
+- Edge snapping in the outline tool (live-wire), with adjustable edge-cost weights.
+- Color-range selection: curves per channel, weights, strictness slider, eyedropper start,
+  distance mode.
+- Color match (sampling, extent, matching, protected colors), and the tools that use it:
+  magic wand; Replace color (Brush variant); Background and Click erasers, with edge color
+  decontamination.
 - ONNX Runtime; model downloads.
 - AI object and paint-the-area: SAM 2.1, then matting and color decontamination.
 - SAM 3 as an optional download.
@@ -89,7 +119,8 @@ milestones.
 - Then the layout solver, and nesting units of either kind.
 
 ## Later
-- Content-aware fill (PatchMatch or LaMa).
+- Content-aware fill (PatchMatch or LaMa); LaMa as a method for automatic healing.
+- Auto-stroke brush (like Photoshop's Art History Brush).
 - Perspective, warp and liquify transforms.
 - PSD import; TIFF, WebP and AVIF.
 - Pen input on macOS and Linux.

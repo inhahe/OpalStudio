@@ -28,6 +28,37 @@ graphic design.
    with a visible control to put them on the active layer instead.
 4. **Discoverable without documentation.** A command palette finds any action by name, and
    every task on the *Basic-tasks checklist* must be doable by a first-time user.
+5. **No hidden constants.** Every value that affects an operation's result can be adjusted,
+   in advanced settings if not in the basic ones (see *Adjustable settings*).
+
+## Adjustable settings
+
+- **What is exposed:** every threshold, falloff, kernel, weight, response curve, range and
+  formula choice that an operation uses. This covers values other editors hardcode, such as
+  the shape of a brush's hardness falloff, the tonal ranges of dodge and burn, or the luma
+  weights behind the Luminosity blend mode. Implementation constants that do not change
+  results (tile size, cache sizes) are not settings.
+- **Basic and advanced.** Each tool and operation shows its few main settings; the rest sit
+  in an *Advanced* section, collapsed by default (its open/closed state is remembered).
+- **Every setting shows its default, a changed setting is marked, and each can be reset.** A
+  tool's settings can be saved as named presets.
+- **Ranges and curves over color are edited in a color model the user picks**, with the
+  channel curve editor below, wherever the value is about color.
+
+### Channel curve editor
+
+One shared component, used for color-range selection, color matching, the tone brush's
+tonal range, Blend If, the Channels blend mode, and any other setting defined over the
+channels of a color model.
+
+- Pick a color model: any the color engine supports.
+- One curve per channel, mapping the channel's value to an amount from 0 to 1. Control
+  points can be added, dragged and removed.
+- The histogram of the relevant pixels is drawn behind each curve; hue channels wrap around.
+- Presets, and reset.
+
+The same component, without a color model, edits every other curve: brush dynamics, tip
+falloff, feather falloff, and the falloff of distance-based color matching.
 
 ## Tech stack
 
@@ -78,7 +109,8 @@ new pixel = old pixel × (1 − m) + changed pixel × m        (m = the mask val
 
 Because every operation goes through this one step, limiting an operation to the selection
 and soft (feathered) selections work for all operations without per-operation code. The
-marching ants show where the mask crosses 0.5; a view option shows the mask as a red overlay.
+marching ants show where the mask crosses a threshold (default 0.5, adjustable); a view
+option shows the mask as a red overlay.
 
 ### The recipe
 
@@ -100,7 +132,9 @@ inside a selection runs the model on that crop.
 ### Feather
 
 The feather setting is the width of the falloff zone; it can fall inward, outward or be
-centered on the outline. It is a recipe step, so it stays adjustable.
+centered on the outline. The shape of the falloff is a curve (Gaussian by default; linear and
+custom curves are options). It is a recipe step, so it stays adjustable. Grow/shrink has an
+adjustable shape (round, square, diamond).
 
 ### The outline tool
 
@@ -112,8 +146,8 @@ differ by gesture:
 - drag from an anchor: curve
 - hold a key: segments snap to edges (live-wire / Intelligent Scissors: a shortest-path
   search over an edge-cost map computed in OKLab). Controls: snap radius and edge
-  sensitivity; contrast thresholds per channel in a chosen color model are in an advanced
-  panel.
+  sensitivity. Advanced: contrast thresholds per channel in a chosen color model, and the
+  weights of the edge-cost terms (edge strength, zero crossings, edge direction).
 
 The snapped segment is previewed live before it is committed; Backspace removes the last
 anchor.
@@ -124,8 +158,9 @@ anchor.
   stretch about to be replaced is shown in red with the new line drawn in.
 - The two ends of the new line split the closed outline into two stretches. The one nearer
   the new line is replaced; **Tab**, pressed before releasing, flips to the other.
-- Releasing far from the outline, or Esc, cancels. A right-click without a drag still opens
-  the context menu. **R + left-drag** does the same as right-drag, for touchpads.
+- Releasing far from the outline, or Esc, cancels. How near counts as "on the outline" is
+  adjustable. A right-click without a drag still opens the context menu. **R + left-drag**
+  does the same as right-drag, for touchpads.
 - Points of the outline can also be dragged directly.
 
 ### AI object and paint-the-area selection
@@ -145,8 +180,8 @@ bundling.
 
 ### Color-range selection
 
-Each channel `c` of a chosen color model gets a curve giving a membership `m_c` from 0 to 1,
-drawn over that channel's histogram (hue curves wrap around). The memberships combine by a
+Each channel `c` of a chosen color model gets a curve, in the channel curve editor, giving a
+membership `m_c` from 0 to 1. The memberships combine by a
 weighted power mean whose exponent `p` is the "strictness" slider:
 
 ```
@@ -154,21 +189,22 @@ S = ( Σ w_c · m_c^p  /  Σ w_c )^(1/p)
 p = +∞ → max (OR);  p = 1 → weighted average;  p → 0 → weighted geometric mean;  p = −∞ → min (AND)
 ```
 
-Curves start from eyedropper samples and are then adjusted. Because curves per channel can
-only select box-shaped regions of color space, a second mode selects by distance from the
-sampled colors in OKLab.
+The weights `w_c` are adjustable. Curves start from eyedropper samples and are then adjusted.
+Because curves per channel can only select box-shaped regions of color space, a second mode
+selects by distance from the sampled colors in OKLab, with an editable falloff curve. The
+same machinery drives *Color match* (see *Painting and retouching tools*).
 
 ## Layers UI
 
 - **Click to select a layer**: with the Move/Select tool, or Ctrl+click with any other tool.
-  It picks the topmost layer that visibly contributes at that point; right-click lists every
-  layer under the cursor.
+  It picks the topmost layer that visibly contributes at that point (how opaque counts as
+  visible is adjustable); right-click lists every layer under the cursor.
 - The active layer is highlighted, and scrolled into view, in the layers panel, and has a
   faint outline on the canvas.
 - **Sample from** (which layers a tool reads): current layer, layers below, all visible, or a
   chosen set (checkboxes in the layers panel; sets can be named and reused). Present on every
-  tool that reads pixels: clone, heal, eyedropper, magic wand, color range, AI selection,
-  smudge, blur brush.
+  tool that reads pixels: Clone, Heal, Mix, Detail, the eyedropper, the magic wand, color
+  match, color range and AI selection.
 - **Apply to** (which layers an operation writes) is a separate control, for moving,
   transforming or adjusting several layers at once.
 
@@ -185,7 +221,8 @@ Pasting opens a transform box instead of placing the pixels:
 
 - aspect ratio locked by default; Shift, or a lock icon on the box, frees it
 - snapping to canvas edges and centers, other layers' edges, and the selection's bounds;
-  Alt toggles snapping during a drag, and a button on the box toggles it until clicked again
+  Alt toggles snapping during a drag, and a button on the box toggles it until clicked again;
+  the snapping distance is adjustable
 - a rotate handle, and buttons to fit or fill the canvas
 - Enter commits and Esc cancels, both shown on screen, so the box never lingers like GIMP's
   floating selection
@@ -197,12 +234,152 @@ Text objects stay editable permanently, including when placed into an existing l
 **Area text**: dragging the box reflows the text. **Point text**: dragging scales it. Full
 Unicode: shaping, bidirectional text, line breaking, font fallback (emoji, CJK).
 
-## Retouching
+## Painting and retouching tools
 
-- **Clone**: two initial points define the source offset; adjustable brush size; aligned or
-  non-aligned source; a ghost preview of the source under the cursor; *Sample from*.
-- **Heal**: like clone, but blends the copied texture into the surrounding lighting.
-- **Content-aware fill** (later): PatchMatch, or the LaMa inpainting model.
+### One engine; tools are presets of it
+
+Every painting and retouching tool is a preset of one brush engine, so every brush setting
+(dynamics, blend mode, *Sample from*, the selection limit) works in every tool it applies
+to. A stroke is defined by:
+
+- **what it paints with:** a color, a gradient, a pattern, a clone source, or an earlier
+  history state;
+- **how it combines** with the layer: a blend mode, erasing, replacing channels, a tone
+  adjustment, blur/sharpen, or paint mixing;
+- **where it may act:** always within the selection mask, and optionally only where colors
+  match (*Color match*, below);
+- **how it responds** to the pen: dynamics.
+
+### No hidden tool groups
+
+Photoshop hides three or four tools behind each toolbar button and its shortcut, so pressing
+B can leave you on the Pencil when you expected the Brush. In Opal Studio:
+
+- Each toolbar button names and shows what it will do. A tool's variants are a visible
+  control in its options bar, never a flyout.
+- A shortcut selects a tool; it never cycles through hidden variants.
+- The cursor shows the active variant.
+
+| Tool | Variants | Covers Photoshop's |
+|---|---|---|
+| Brush | Paint · Pencil (antialiasing off) · Replace color | Brush, Pencil, Color Replacement; Pattern Stamp, through "paints with: pattern" |
+| Mix | Wet paint · Smudge | Mixer Brush, Smudge |
+| Tone | Lighten · Darken · Saturate · Desaturate | Dodge, Burn, Sponge |
+| Detail | one amount, from blur to sharpen | Blur, Sharpen |
+| Clone | | Clone Stamp |
+| Heal | Picked source · Automatic | Healing Brush, Spot Healing Brush |
+| History brush | | History Brush |
+| Eraser | Brush · Background · Click | Eraser, Background Eraser, Magic Eraser |
+
+### Brush settings
+
+Basic: size, opacity, flow, hardness, tip shape, what it paints with.
+
+Advanced:
+- **Tip falloff:** a curve of opacity against distance from the tip's center. The hardness
+  slider is a preset of this curve. Roundness, angle, and image tips.
+- **Spacing** between dabs (as a percentage of size), scatter, jitter.
+- **Dynamics:** pressure, tilt and speed each drive size, opacity, flow, hardness or angle
+  through an editable response curve with its own minimum and maximum.
+- **Smoothing** (stroke stabilization): method and strength. Not the same as antialiasing.
+- **Antialiasing:** amount; 0 is the Pencil. A pixel-perfect option removes the doubled
+  corner pixels of 1-pixel lines.
+- **Build-up** (airbrush): how fast paint accumulates while the pen holds still.
+- **Color dynamics:** variation per dab of each channel of a chosen color model, each with
+  its own range and distribution; and foreground-to-background color along the stroke,
+  interpolated in a chosen color model.
+- **Compositing space:** linear light, OKLab, or sRGB-encoded (how Photoshop blends by
+  default, for matching its results).
+- **Patterns:** scale, rotation, offset, anchored to the canvas or to the stroke's start. A
+  pattern can be made from the selection.
+
+### Blend modes
+
+Brushes and layers share one set: Normal, Dissolve; Darken, Multiply, Color Burn, Linear
+Burn, Darker Color; Lighten, Screen, Color Dodge, Linear Dodge (Add), Lighter Color; Overlay,
+Soft Light, Hard Light, Vivid Light, Linear Light, Pin Light, Hard Mix; Difference,
+Exclusion, Subtract, Divide; Hue, Saturation, Color, Luminosity; Channels (below). Brushes
+add Behind (paints only where the layer is transparent) and Clear.
+
+The picker describes each mode in a line, in terms of what it is for (Multiply: "darkens;
+for painting shadows"; Soft Light: "gently lightens or darkens; for shading"), and previews
+it live on the canvas while hovered.
+
+Advanced:
+- **Blending space:** linear light, sRGB-encoded (what PSD files expect), or OKLab.
+- **Hue, Saturation, Color and Luminosity** work in a chosen color model. The default is
+  OKLCh, where Luminosity shifts no hues. The W3C/PDF definition, with its fixed luma weights
+  0.30, 0.59 and 0.11 (themselves adjustable), is an option for matching PSD files.
+- **Soft Light formula:** Photoshop's, Pegtop's, or W3C's.
+- **Channels:** pick a color model; each channel of the result comes from the base, from the
+  blend, or from a mix of the two weighted by a curve. Hue, Saturation, Color and Luminosity
+  are special cases of it.
+
+**Blend If** (layers): curves over channels of a chosen color model, applied to this layer's
+pixels and to the pixels beneath it, scale the layer's opacity per pixel. It is Photoshop's
+Blend If, generalized from two-point ranges to curves in any color model, and it uses the
+channel curve editor.
+
+### Color match
+
+A limit shared by Replace color, the Background and Click erasers, and the magic wand:
+
+- **Sampling:** continuously under the brush center, once at the start of the stroke, or
+  fixed colors.
+- **Extent:** contiguous, anywhere, or contiguous but stopping at edges (edge threshold and
+  color model adjustable).
+- **Matching:** curves per channel around the sampled color in a chosen color model,
+  combined by the strictness slider (the machinery of color-range selection); or distance
+  from the sample in OKLab, with an editable falloff curve.
+- **Protected colors,** each with its own tolerance.
+- Matches are fractional, so edges are soft, instead of a yes/no match smoothed by
+  antialiasing.
+
+### Each tool
+
+- **Replace color:** color match, plus the Channels blend replacing chosen channels of a
+  chosen model. Replacing OKLCh hue and chroma while keeping lightness keeps the texture and
+  shading.
+- **Mix** (wet paint, smudge): wet (how much canvas color the brush picks up), load (how much
+  paint the brush holds), mix (the ratio of the two), flow. Advanced: the mixing model, which
+  is linear RGB, OKLab, or pigment (Kubelka–Munk spectral mixing, where blue and yellow make
+  green; spectral.js, MIT, is a reference implementation); pickup and depletion rates;
+  cleaning or reloading the brush after each stroke; for Smudge, how far color is dragged
+  and how it fades along the way (a curve).
+- **Tone:** strength and tonal range. Advanced: the tonal range is a curve over the lightness
+  channel of a chosen model, with Photoshop's fixed shadows, midtones and highlights ranges
+  as presets; which channels count as lightness and as saturation; how the adjustment is
+  applied (exposure-style multiplication in linear light, or addition to the channel);
+  protect tones (a soft-clipping curve, and a hue lock); for Saturate, a curve of how
+  strongly already-saturated colors are affected (vibrance). Option: paint into an
+  adjustment layer's mask instead of the pixels, so the effect stays editable.
+- **Detail:** one amount, from blur to sharpen. Advanced: blur kernel (Gaussian, box, lens)
+  and radius; sharpening radius, amount and threshold (unsharp mask); the channels it acts
+  on in a chosen model (by default lightness only, which avoids color fringes); halo
+  suppression.
+- **Clone:** two initial points define the source offset; adjustable brush size; aligned or
+  non-aligned source; a ghost preview of the source under the cursor; source rotation, scale
+  and flip; overlay opacity; *Sample from*.
+- **Heal:** like Clone, but blends the copied texture into its surroundings (gradient-domain
+  blending). Advanced: width of the blending border; diffusion; which channels of a chosen
+  model are matched to the surroundings. The Automatic variant (spot healing) needs no
+  source: paint over a blemish. Its method (nearby texture, PatchMatch, later the LaMa
+  inpainting model), search radius and patch size are adjustable.
+- **History brush:** paints from any history state on any branch, picked in the history
+  panel, or from a named snapshot. It can bring back part of the image from a branch you
+  abandoned. The source is the same layer in that state (matched by the layer's ID) or that
+  state's whole image.
+- **Eraser:** erases to transparency, or optionally into the layer's mask, which keeps the
+  pixels. *Background* uses color match sampled continuously, and decontaminates the color
+  of partially erased edge pixels, as hair matting does. *Click* erases the region that a
+  click matches, contiguous or anywhere: the magic wand and Delete in one step, with soft
+  edges.
+
+**Content-aware fill** (later): PatchMatch, or LaMa.
+
+**Auto-stroke brush** (later, low priority): repaints from a source state with automatically
+generated strokes, like Photoshop's Art History Brush; style, area, tolerance and stroke
+length adjustable.
 
 ## Undo history tree
 
@@ -212,7 +389,9 @@ Unicode: shaping, bidirectional text, line breaking, font fallback (emoji, CJK).
   The history panel shows the whole tree, with an automatic description per entry and a
   thumbnail on hover.
 - Selections are part of history; zoom and pan are not. A slider drag is one entry.
-- The tile store makes branches cheap. History can optionally be saved in the file.
+- The tile store makes branches cheap. History can optionally be saved in the file. How much
+  memory history may use is a setting; past it, the oldest states are dropped first.
+- Every state on every branch stays usable as a source for the History brush.
 
 ## Vectorization (raster to vector)
 
@@ -226,8 +405,10 @@ two-color images. Works within the selection like any other operation.
 
 A port of the author's colorpicker (`D:\visual studio projects\colorpicker`, MIT): its color
 engine and shaders translate to Rust and WGSL, and its panels are rebuilt in egui. OKLab and
-OKLCh are added. Its palette editor becomes the gradient editor, used by the gradient tool,
-a gradient-map adjustment and indexed-color export.
+OKLCh are added. The color engine is ported first, in the foundation milestone, because the
+channel curve editor and every setting defined in a chosen color model depend on it. Its
+palette editor becomes the gradient editor, used by the gradient tool, a gradient-map
+adjustment and indexed-color export.
 
 ## Constraints
 
@@ -238,7 +419,8 @@ For mathematically exact vector design, and later for layouts that adapt to thei
   - **Geometry solver** (nonlinear): coincident, tangent, parallel, perpendicular, symmetric,
     equal, distances and angles given by expressions such as `width = 2*r + gap`. It shows
     how many degrees of freedom remain, colors fully constrained geometry, and flags
-    conflicts. Soft "spring" constraints are opt-in, and how far each is stretched is shown.
+    conflicts. Soft "spring" constraints are opt-in, each with an adjustable stiffness, and
+    how far each is stretched is shown. The solver's tolerance is adjustable.
   - **Layout solver** (linear constraints with priorities, Cassowary-style): even spacing,
     grow to fit content, keep proportions, adapt to another aspect ratio.
 - To mix solvers, nest units, to any depth. Between levels, limits go down, sizes come up,
