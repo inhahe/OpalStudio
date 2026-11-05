@@ -171,9 +171,7 @@ mod tests {
     #[test]
     fn from_pixels_and_read_rect_round_trip() {
         let (w, h) = (300u32, 5u32);
-        let px: Vec<Pixel> = (0..w * h)
-            .map(|i| pixel_from_f32([(i % 7) as f32 / 8.0, 0.0, 0.0, 1.0]))
-            .collect();
+        let px: Vec<Pixel> = (0..w * h).map(|i| pixel_from_f32([(i % 7) as f32 / 8.0, 0.0, 0.0, 1.0])).collect();
         let img = RasterImage::from_pixels(w, h, &px);
         assert_eq!(img.tile_count(), 2);
         let back = img.read_rect(&IRect::from_size(i64::from(w), i64::from(h)));

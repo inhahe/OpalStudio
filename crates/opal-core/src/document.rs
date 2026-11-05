@@ -396,8 +396,10 @@ mod tests {
         assert_eq!(d.position(child), Some(Position { parent: Some(g), index: 0 }));
         assert!(d.is_descendant(child, g));
         assert!(!d.is_descendant(l[0], g));
-        assert_eq!(d.insert(Position { parent: Some(l[0]), index: 0 }, Layer::new_empty(ids.layer(), "x")),
-                   Err(TreeError::NotAGroup(l[0])));
+        assert_eq!(
+            d.insert(Position { parent: Some(l[0]), index: 0 }, Layer::new_empty(ids.layer(), "x")),
+            Err(TreeError::NotAGroup(l[0]))
+        );
     }
 
     #[test]

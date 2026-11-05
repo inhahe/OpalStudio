@@ -40,21 +40,11 @@ impl IRect {
         if other.is_empty() {
             return *self;
         }
-        IRect::new(
-            self.x0.min(other.x0),
-            self.y0.min(other.y0),
-            self.x1.max(other.x1),
-            self.y1.max(other.y1),
-        )
+        IRect::new(self.x0.min(other.x0), self.y0.min(other.y0), self.x1.max(other.x1), self.y1.max(other.y1))
     }
 
     pub fn intersect(&self, other: &IRect) -> IRect {
-        IRect::new(
-            self.x0.max(other.x0),
-            self.y0.max(other.y0),
-            self.x1.min(other.x1),
-            self.y1.min(other.y1),
-        )
+        IRect::new(self.x0.max(other.x0), self.y0.max(other.y0), self.x1.min(other.x1), self.y1.min(other.y1))
     }
 
     pub fn contains(&self, x: i64, y: i64) -> bool {

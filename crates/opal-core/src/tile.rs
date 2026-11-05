@@ -60,12 +60,7 @@ impl TileCoord {
     /// top-right, bottom-left, bottom-right.
     pub fn children(self) -> [TileCoord; 4] {
         let (x, y) = (self.x * 2, self.y * 2);
-        [
-            TileCoord::new(x, y),
-            TileCoord::new(x + 1, y),
-            TileCoord::new(x, y + 1),
-            TileCoord::new(x + 1, y + 1),
-        ]
+        [TileCoord::new(x, y), TileCoord::new(x + 1, y), TileCoord::new(x, y + 1), TileCoord::new(x + 1, y + 1)]
     }
 
     /// All tiles at pyramid level `level` that intersect `rect`.

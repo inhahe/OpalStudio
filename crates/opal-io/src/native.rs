@@ -90,9 +90,8 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path) -> Result<(), IoError> {
         let zip_err = |e: zip::result::ZipError| IoError::io(path, std::io::Error::other(e));
         let mut zip = ZipWriter::new(out);
         let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-        let deflated = SimpleFileOptions::default()
-            .compression_method(CompressionMethod::Deflated)
-            .compression_level(Some(3));
+        let deflated =
+            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated).compression_level(Some(3));
         zip.start_file("mimetype", stored).map_err(zip_err)?;
         write_all(&mut zip, MIME_TYPE.as_bytes(), path)?;
         zip.start_file("document.json", deflated).map_err(zip_err)?;
@@ -362,7 +361,8 @@ mod tests {
             zip.start_file("mimetype", o).unwrap();
             std::io::Write::write_all(&mut zip, MIME_TYPE.as_bytes()).unwrap();
             zip.start_file("document.json", o).unwrap();
-            let json = r#"{"format":"opal-studio","version":99,"canvas":{"width":1,"height":1},"next_id":1,"layers":[]}"#;
+            let json =
+                r#"{"format":"opal-studio","version":99,"canvas":{"width":1,"height":1},"next_id":1,"layers":[]}"#;
             std::io::Write::write_all(&mut zip, json.as_bytes()).unwrap();
             zip.finish().unwrap();
         }

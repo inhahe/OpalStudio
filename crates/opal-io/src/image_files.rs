@@ -34,14 +34,9 @@ pub fn import(path: &Path) -> Result<Imported, IoError> {
 /// Like [`import`], from bytes already in memory; `path` is used only in messages.
 pub fn import_bytes(bytes: &[u8], path: &Path) -> Result<Imported, IoError> {
     let decode_err = |e: image::ImageError| IoError::Decode { path: path.to_owned(), message: e.to_string() };
-    let reader = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|e| IoError::io(path, e))?;
+    let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(|e| IoError::io(path, e))?;
     if reader.format().is_none() {
-        return Err(IoError::Unsupported {
-            path: path.to_owned(),
-            message: "not a PNG or JPEG image".into(),
-        });
+        return Err(IoError::Unsupported { path: path.to_owned(), message: "not a PNG or JPEG image".into() });
     }
     let mut decoder = reader.into_decoder().map_err(decode_err)?;
     let orientation = decoder.orientation().map_err(decode_err)?;
@@ -52,7 +47,10 @@ pub fn import_bytes(bytes: &[u8], path: &Path) -> Result<Imported, IoError> {
     let (width, height) = (img.width(), img.height());
     let sixteen_bit = matches!(
         img,
-        DynamicImage::ImageLuma16(_) | DynamicImage::ImageLumaA16(_) | DynamicImage::ImageRgb16(_) | DynamicImage::ImageRgba16(_)
+        DynamicImage::ImageLuma16(_)
+            | DynamicImage::ImageLumaA16(_)
+            | DynamicImage::ImageRgb16(_)
+            | DynamicImage::ImageRgba16(_)
     );
     let pixels = if sixteen_bit {
         pixels_from_rgba16(img.to_rgba16().as_raw())
@@ -150,7 +148,8 @@ mod tests {
     }
 
     fn gradient_png(w: u32, h: u32) -> Vec<u8> {
-        let img = image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 7) as u8, (y * 3) as u8, 200, (x + y) as u8]));
+        let img =
+            image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([(x * 7) as u8, (y * 3) as u8, 200, (x + y) as u8]));
         let mut bytes = Vec::new();
         DynamicImage::ImageRgba8(img).write_with_encoder(PngEncoder::new(&mut bytes)).unwrap();
         bytes
@@ -194,7 +193,12 @@ mod tests {
     fn exif_orientation_is_applied() {
         // A 2×1 JPEG, red on the left, carrying EXIF orientation 6 (rotate 90° clockwise)
         // comes out 1×2 with red on top.
-        let img = image::RgbImage::from_fn(16, 8, |x, _| if x < 8 { image::Rgb([255, 0, 0]) } else { image::Rgb([0, 0, 255]) });
+        let img =
+            image::RgbImage::from_fn(
+                16,
+                8,
+                |x, _| if x < 8 { image::Rgb([255, 0, 0]) } else { image::Rgb([0, 0, 255]) },
+            );
         let mut jpeg = Vec::new();
         DynamicImage::ImageRgb8(img).write_with_encoder(JpegEncoder::new_with_quality(&mut jpeg, 95)).unwrap();
         let with_exif = insert_exif_orientation(&jpeg, 6);

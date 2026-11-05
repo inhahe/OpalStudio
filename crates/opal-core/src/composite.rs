@@ -116,8 +116,7 @@ pub fn occupied_tiles(layers: &[Arc<Layer>], range: Option<&IRect>) -> HashSet<T
 /// Composites every tile `layers` occupy into one bitmap (for merging and flattening).
 pub fn composite_all(layers: &[Arc<Layer>]) -> RasterImage {
     let coords: Vec<TileCoord> = occupied_tiles(layers, None).into_iter().collect();
-    let tiles: Vec<(TileCoord, Option<Tile>)> =
-        coords.par_iter().map(|&c| (c, composite_tile(layers, c))).collect();
+    let tiles: Vec<(TileCoord, Option<Tile>)> = coords.par_iter().map(|&c| (c, composite_tile(layers, c))).collect();
     let mut img = RasterImage::new();
     for (c, t) in tiles {
         img.set_tile(c, t.map(Arc::new));
@@ -128,8 +127,7 @@ pub fn composite_all(layers: &[Arc<Layer>]) -> RasterImage {
 /// The composite of `layers` over `rect`, as a row-major buffer (for exporting).
 pub fn flatten(layers: &[Arc<Layer>], rect: &IRect) -> Vec<Pixel> {
     let coords: Vec<TileCoord> = occupied_tiles(layers, Some(rect)).into_iter().collect();
-    let tiles: Vec<(TileCoord, Option<Tile>)> =
-        coords.par_iter().map(|&c| (c, composite_tile(layers, c))).collect();
+    let tiles: Vec<(TileCoord, Option<Tile>)> = coords.par_iter().map(|&c| (c, composite_tile(layers, c))).collect();
     let mut img = RasterImage::new();
     for (c, t) in tiles {
         img.set_tile(c, t.map(Arc::new));
@@ -283,10 +281,7 @@ impl Projection {
             self.update_pyramid(l, &coords, &outer);
         }
         let top = &self.levels[level as usize];
-        coords
-            .iter()
-            .filter_map(|c| top.get(c).and_then(|e| e.tile.clone()).map(|t| (*c, t)))
-            .collect()
+        coords.iter().filter_map(|c| top.get(c).and_then(|e| e.tile.clone()).map(|t| (*c, t))).collect()
     }
 
     /// The cached tile at `level` and `c` as of the last [`update`](Self::update) that

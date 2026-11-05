@@ -42,10 +42,9 @@ pub(crate) fn write_atomically(
     path: &Path,
     write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<(), IoError>,
 ) -> Result<(), IoError> {
-    let file_name = path.file_name().ok_or_else(|| IoError::Unsupported {
-        path: path.to_owned(),
-        message: "not a file path".into(),
-    })?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| IoError::Unsupported { path: path.to_owned(), message: "not a file path".into() })?;
     let mut tmp_name = std::ffi::OsString::from(".");
     tmp_name.push(file_name);
     tmp_name.push(format!(".{}.tmp", std::process::id()));

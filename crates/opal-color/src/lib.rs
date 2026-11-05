@@ -24,31 +24,22 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------------------
 
 /// Linear sRGB (IEC 61966-2-1, D65) to CIE XYZ.
-pub const SRGB_TO_XYZ: Mat3 = [
-    [0.4124564, 0.3575761, 0.1804375],
-    [0.2126729, 0.7151522, 0.0721750],
-    [0.0193339, 0.1191920, 0.9503041],
-];
+pub const SRGB_TO_XYZ: Mat3 =
+    [[0.4124564, 0.3575761, 0.1804375], [0.2126729, 0.7151522, 0.0721750], [0.0193339, 0.1191920, 0.9503041]];
 /// CIE XYZ to linear sRGB.
 pub const XYZ_TO_SRGB: Mat3 = invert(&SRGB_TO_XYZ);
 
 /// Linear Adobe RGB (1998), D65, to CIE XYZ.
-const ADOBE_TO_XYZ: Mat3 = [
-    [0.5767309, 0.1855540, 0.1881852],
-    [0.2973769, 0.6273491, 0.0752741],
-    [0.0270343, 0.0706872, 0.9911085],
-];
+const ADOBE_TO_XYZ: Mat3 =
+    [[0.5767309, 0.1855540, 0.1881852], [0.2973769, 0.6273491, 0.0752741], [0.0270343, 0.0706872, 0.9911085]];
 const ADOBE_TO_SRGB: Mat3 = mul(&XYZ_TO_SRGB, &ADOBE_TO_XYZ);
 const SRGB_TO_ADOBE: Mat3 = invert(&ADOBE_TO_SRGB);
 /// Adobe RGB's transfer exponent, 563/256.
 const ADOBE_GAMMA: f64 = 2.19921875;
 
 /// CIE XYZ to LMS cone responses (Hunt–Pointer–Estevez).
-const XYZ_TO_LMS: Mat3 = [
-    [0.4002400, 0.7076000, -0.0808100],
-    [-0.2263000, 1.1653200, 0.0457000],
-    [0.0000000, 0.0000000, 0.9182200],
-];
+const XYZ_TO_LMS: Mat3 =
+    [[0.4002400, 0.7076000, -0.0808100], [-0.2263000, 1.1653200, 0.0457000], [0.0000000, 0.0000000, 0.9182200]];
 const SRGB_TO_LMS: Mat3 = mul(&XYZ_TO_LMS, &SRGB_TO_XYZ);
 const LMS_TO_SRGB: Mat3 = invert(&SRGB_TO_LMS);
 
@@ -247,9 +238,7 @@ impl ColorModel {
                 "CIE 1976 L*a*b*, roughly perceptually uniform. L* is lightness, a* green to \
                  red, b* blue to yellow. Referenced to D65."
             }
-            ColorModel::Lch => {
-                "L*a*b* in polar form: lightness, chroma (colorfulness) and hue angle."
-            }
+            ColorModel::Lch => "L*a*b* in polar form: lightness, chroma (colorfulness) and hue angle.",
             ColorModel::Oklab => {
                 "A modern perceptually uniform space (Björn Ottosson, 2020), more even in hue \
                  than L*a*b*. L is lightness, a green to red, b blue to yellow."
@@ -294,31 +283,23 @@ impl ColorModel {
                 ch("g", "Green", 0.0, 1.0, Bounded),
                 ch("b", "Blue", 0.0, 1.0, Bounded),
             ],
-            ColorModel::Xyz => [
-                ch("x", "X", 0.0, 1.1, Bounded),
-                ch("y", "Y", 0.0, 1.1, Bounded),
-                ch("z", "Z", 0.0, 1.1, Bounded),
-            ],
+            ColorModel::Xyz => {
+                [ch("x", "X", 0.0, 1.1, Bounded), ch("y", "Y", 0.0, 1.1, Bounded), ch("z", "Z", 0.0, 1.1, Bounded)]
+            }
             ColorModel::Lab => [
                 ch("l", "L*", 0.0, 100.0, Bounded),
                 ch("a", "a*", -128.0, 127.0, Signed),
                 ch("b", "b*", -128.0, 127.0, Signed),
             ],
-            ColorModel::Lch => [
-                ch("l", "L*", 0.0, 100.0, Bounded),
-                ch("c", "C*", 0.0, 150.0, Bounded),
-                ch("h", "h", 0.0, 360.0, Hue),
-            ],
-            ColorModel::Oklab => [
-                ch("l", "L", 0.0, 1.0, Bounded),
-                ch("a", "a", -0.4, 0.4, Signed),
-                ch("b", "b", -0.4, 0.4, Signed),
-            ],
-            ColorModel::Oklch => [
-                ch("l", "L", 0.0, 1.0, Bounded),
-                ch("c", "C", 0.0, 0.4, Bounded),
-                ch("h", "h", 0.0, 360.0, Hue),
-            ],
+            ColorModel::Lch => {
+                [ch("l", "L*", 0.0, 100.0, Bounded), ch("c", "C*", 0.0, 150.0, Bounded), ch("h", "h", 0.0, 360.0, Hue)]
+            }
+            ColorModel::Oklab => {
+                [ch("l", "L", 0.0, 1.0, Bounded), ch("a", "a", -0.4, 0.4, Signed), ch("b", "b", -0.4, 0.4, Signed)]
+            }
+            ColorModel::Oklch => {
+                [ch("l", "L", 0.0, 1.0, Bounded), ch("c", "C", 0.0, 0.4, Bounded), ch("h", "h", 0.0, 360.0, Hue)]
+            }
             ColorModel::Hsb => [
                 ch("h", "Hue", 0.0, 360.0, Hue),
                 ch("s", "Saturation", 0.0, 100.0, Bounded),
