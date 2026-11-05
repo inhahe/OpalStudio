@@ -436,13 +436,26 @@ pub fn history_panel(ui: &mut egui::Ui, st: &mut AppState) {
         ui.label(RichText::new("No image is open.").color(st.palette.weak_text));
         return;
     }
+    let weak = st.palette.weak_text;
+    let (memory, dropped) = st.active().map(|d| (d.history.memory(), d.history.dropped())).expect("checked above");
+    let limit = st.prefs.f64("history.memory") * 1e9;
     ui.horizontal(|ui| {
         icon_command(ui, st, Cmd::Undo);
         icon_command(ui, st, Cmd::Redo);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let mut tip = format!(
+                "What the earlier states hold beyond the image as it is now. History may use up to {} \
+                 (Preferences › History).",
+                crate::dialogs::bytes(limit as u64)
+            );
+            if dropped > 0 {
+                tip.push_str(&format!("\n{dropped} of the oldest states have been dropped to stay within it."));
+            }
+            ui.label(RichText::new(crate::dialogs::bytes(memory)).color(weak)).on_hover_text(tip);
+        });
     });
     ui.separator();
     let accent = st.palette.accent;
-    let weak = st.palette.weak_text;
     // The document and the thumbnails, borrowed apart.
     let active = st.active_doc;
     let d = st.docs.iter().find(|d| Some(d.id) == active).expect("checked above");

@@ -3,7 +3,7 @@
 use crate::settings::{Def, Init, Kind, Settings};
 use opal_core::resample::{Method, Sampling};
 
-pub const SECTIONS: &[&str] = &["Interface", "Canvas", "Navigation", "Transform", "Resize", "Export"];
+pub const SECTIONS: &[&str] = &["Interface", "Canvas", "Navigation", "History", "Transform", "Resize", "Export"];
 
 /// The resampling methods, as a setting's choices.
 const METHODS: &[(&str, &str)] =
@@ -271,6 +271,18 @@ pub static PREFS: &[Def] = &[
         kind: Kind::Float { min: 2.0, max: 500.0, decimals: 0, suffix: " px", log: true },
         default: Init::Float(10.0),
         advanced: true,
+    },
+    // History
+    Def {
+        key: "history.memory",
+        label: "History may use",
+        help: "How much memory each image's undo history may take beyond the image itself. \
+               Past it, the oldest states are dropped, and the History panel says so. The \
+               state you are in, and anything it shares with older ones, is never dropped.",
+        section: "History",
+        kind: Kind::Float { min: 0.25, max: 256.0, decimals: 2, suffix: " GB", log: true },
+        default: Init::Float(4.0),
+        advanced: false,
     },
     // Transform
     sampling_def!("transform", "Transform", method),

@@ -846,3 +846,19 @@ fn a_late_paste_waits_for_a_crop_box_changed_meanwhile() {
     h.run();
     assert_eq!(h.state().state().active().unwrap().pending_label(), Some("Paste"), "placed once the tool changed");
 }
+
+#[test]
+fn the_history_panel_says_what_history_holds() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 600, 400);
+    h.state_mut().state_mut().queue.push(Cmd::FlipHorizontal);
+    h.run();
+    h.get_by_label(&format!("{}  History", crate::icons::HISTORY)).click();
+    h.run();
+    // The flip made a copy of every tile: the state before holds them alone.
+    let expected = crate::dialogs::bytes(h.state().state().active().unwrap().history.memory());
+    assert_ne!(expected, "0 KB");
+    assert!(h.query_by_label(&expected).is_some(), "the panel does not show {expected}");
+    render(&mut h, "history-panel");
+}

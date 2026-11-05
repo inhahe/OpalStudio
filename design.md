@@ -785,7 +785,11 @@ qualities of ink, 浓淡干湿 (dense, light, dry, wet), are each part of the br
   a layer that appeared (one the action added, or one undo restored) becomes active; if the
   active layer disappeared, the layer now in its place does.
 - The tile store makes branches cheap. History can optionally be saved in the file. How much
-  memory history may use is a setting; past it, the oldest states are dropped first.
+  memory history may use is a setting (4 GB by default): what the other states hold that
+  the current one does not, counted once per tile. Past it, the oldest states are dropped
+  first: the root when it has one child (which becomes the root), otherwise the oldest
+  state with no children, so the history stays one tree and the current state stays. The
+  History panel shows what history holds, and the first drop is announced.
 - Every state on every branch stays usable as a source for the History brush.
 
 ## Vectorization (raster to vector)

@@ -28,14 +28,6 @@ unused. Fine for ordinary images; a huge document panned end to end keeps all of
 memory. **Fix:** evict least recently used tiles beyond a memory budget, using the GPU
 memory query for the texture side.
 
-## History keeps every state
-
-`crates/opal-core/src/history.rs`. Nothing is ever dropped, so a long session of large
-edits grows without limit. The design's history memory budget is not implemented yet.
-**Fix:** with milestone 3 (painting, the first source of large edits), count the tile
-bytes each state alone holds and drop the oldest states beyond the budget set in the
-preferences.
-
 ## Exporting and saving hold whole copies of the image in memory
 
 `crates/opal-io/src/image_files.rs` (`export`) flattens the canvas into one buffer, converts

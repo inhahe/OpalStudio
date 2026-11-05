@@ -595,6 +595,10 @@ impl eframe::App for OpalApp {
         self.st.poll_copies();
         self.st.poll_paste(ctx.input(|i| i.pointer.any_down()));
         self.st.thumbs.end_frame();
+        let budget = (self.st.prefs.f64("history.memory") * 1e9) as u64;
+        for d in &mut self.st.docs {
+            d.set_history_budget(budget);
+        }
         // What operations on documents asked to say.
         let notices: Vec<String> = self.st.docs.iter_mut().filter_map(|d| d.notice.take()).collect();
         for n in notices {

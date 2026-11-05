@@ -133,6 +133,8 @@ pub struct DocState {
     pub crop_drag: Option<crate::crop::CropDrag>,
     /// Something an operation on the document wants said in the status bar.
     pub notice: Option<String>,
+    /// Whether the user has been told that history states are being dropped.
+    told_dropped: bool,
 }
 
 impl DocState {
@@ -158,6 +160,26 @@ impl DocState {
             crop: None,
             crop_drag: None,
             notice: None,
+            told_dropped: false,
+        }
+    }
+
+    /// Limits the memory the history may use beyond the document itself (see
+    /// [`History::set_budget`]).
+    pub fn set_history_budget(&mut self, bytes: u64) {
+        self.history.set_budget(bytes);
+        self.note_dropped();
+    }
+
+    /// Says, the first time it happens, that the oldest history states are being dropped.
+    fn note_dropped(&mut self) {
+        if self.history.dropped() > 0 && !self.told_dropped {
+            self.told_dropped = true;
+            self.notice = Some(
+                "The oldest history states are being dropped, to keep history within its memory limit \
+                 (Preferences › History)."
+                    .into(),
+            );
         }
     }
 
@@ -290,6 +312,7 @@ impl DocState {
         let mut d = before.clone();
         f(&mut d, &mut self.ids)?;
         self.history.commit(d, label);
+        self.note_dropped();
         self.revision += 1;
         self.fix_active_layer(Some(&before));
         Ok(())
@@ -320,6 +343,7 @@ impl DocState {
         self.finish_transform();
         if let Some(p) = self.pending.take() {
             self.history.commit(p.doc, p.label);
+            self.note_dropped();
             self.revision += 1;
         }
     }
@@ -491,5 +515,31 @@ mod tests {
             (center - Vec2::new(250.0, 250.0)).length() < 1.0,
             "the canvas is centered wherever it lies: {center:?}"
         );
+    }
+
+    #[test]
+    fn dropping_history_states_is_said_once() {
+        let mut s = state();
+        let layer = add_layer(&mut s, "paint");
+        let paint = |s: &mut DocState, x: i64| {
+            s.apply::<()>("Paint", |d, ids| {
+                let mut img = opal_core::raster::RasterImage::new();
+                img.set_pixel(x, 0, opal_core::tile::pixel_from_f32([1.0; 4]));
+                let l = Layer::new_raster(layer, ids.object(), "paint", img);
+                d.remove(layer).unwrap();
+                d.insert(Position { parent: None, index: 1 }, l).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        };
+        for x in 0..4 {
+            paint(&mut s, x);
+        }
+        assert!(s.notice.is_none());
+        s.set_history_budget(0);
+        assert!(s.history.dropped() > 0);
+        assert!(s.notice.take().is_some_and(|n| n.contains("Preferences")), "the first drop is announced");
+        paint(&mut s, 9);
+        assert!(s.notice.is_none(), "and only the first");
     }
 }
