@@ -75,22 +75,31 @@ impl JobThread {
 /// Helpers for tests of work done off the interface thread.
 #[cfg(test)]
 pub mod testing {
-    use std::sync::{Arc, Condvar, Mutex, mpsc};
+    use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 
     /// Every thread of a pool, kept busy until this is dropped.
-    pub struct Held(Arc<(Mutex<bool>, Condvar)>);
+    pub struct Held {
+        release: Arc<(Mutex<bool>, Condvar)>,
+        /// This test's turn to hold the pool (see [`hold`]); let go after the threads.
+        _turn: MutexGuard<'static, ()>,
+    }
 
     impl Drop for Held {
         fn drop(&mut self) {
-            let (go, c) = &*self.0;
+            let (go, c) = &*self.release;
             *go.lock().unwrap_or_else(|e| e.into_inner()) = true;
             c.notify_all();
         }
     }
 
     /// Holds every thread of `pool` (rayon's global pool if `None`), returning once they
-    /// all are.
+    /// all are. One test holds a pool at a time: two at once would each take some of its
+    /// threads and wait for the rest forever.
     pub fn hold(pool: Option<&rayon::ThreadPool>) -> Held {
+        // A turn for rayon's global pool, and one for any other (tests hold only the
+        // background pool besides it).
+        static TURNS: [Mutex<()>; 2] = [Mutex::new(()), Mutex::new(())];
+        let turn = TURNS[usize::from(pool.is_some())].lock().unwrap_or_else(|e| e.into_inner());
         let n = pool.map_or_else(rayon::current_num_threads, |p| p.current_num_threads());
         let (started, all_started) = mpsc::channel();
         let release = Arc::new((Mutex::new(false), Condvar::new()));
@@ -112,7 +121,7 @@ pub mod testing {
         for _ in 0..n {
             all_started.recv().unwrap();
         }
-        Held(release)
+        Held { release, _turn: turn }
     }
 }
 
