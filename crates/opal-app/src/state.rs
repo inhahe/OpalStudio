@@ -525,7 +525,10 @@ impl AppState {
         let mut doc = Document::new(spec.width, spec.height);
         let image = match spec.background {
             Background::Transparent => RasterImage::new(),
-            Background::White => filled(spec.width, spec.height, [1.0, 1.0, 1.0, 1.0]),
+            Background::White => RasterImage::filled(
+                &IRect::from_size(i64::from(spec.width), i64::from(spec.height)),
+                pixel_from_f32([1.0; 4]),
+            ),
         };
         let layer = Layer::new_raster(ids.layer(), ids.object(), "Background", image);
         doc.insert(Position { parent: None, index: 0 }, layer).expect("an empty document takes a layer");
@@ -813,12 +816,6 @@ impl AppState {
     }
 }
 
-/// A `width × height` image of colour `rgba` from the origin: inside, along the right edge,
-/// along the bottom and in the corner, one tile each ([`RasterImage::filled`]).
-fn filled(width: u32, height: u32, rgba: [f32; 4]) -> RasterImage {
-    RasterImage::filled(&IRect::from_size(i64::from(width), i64::from(height)), pixel_from_f32(rgba))
-}
-
 /// The name a file is shown under.
 fn file_title(path: &Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
@@ -887,7 +884,7 @@ mod tests {
     #[test]
     fn a_new_white_image_shares_its_tiles_alike() {
         // Tiles inside, along the right edge, along the bottom, and the corner.
-        let img = filled(1000, 600, [1.0; 4]);
+        let img = RasterImage::filled(&IRect::from_size(1000, 600), pixel_from_f32([1.0; 4]));
         let distinct: std::collections::HashSet<*const opal_core::tile::Tile> =
             img.tiles().map(|(_, t)| Arc::as_ptr(t)).collect();
         assert_eq!((img.tile_count(), distinct.len()), (12, 4));

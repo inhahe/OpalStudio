@@ -55,14 +55,12 @@ pub const COPY_BYTES: u64 = 56;
 /// Why `w × h` pixels cannot go on the system clipboard, if they cannot: on Windows, its
 /// bitmaps (the format every program reads) hold at most 4 GB, about a billion pixels.
 pub fn check_copy(w: u64, h: u64) -> Result<(), String> {
-    #[cfg(windows)]
-    if 4 * w * h > u64::from(u32::MAX) {
+    if cfg!(windows) && 4 * w * h > u64::from(u32::MAX) {
         return Err(format!(
             "{w} × {h} pixels is more than the clipboard can hold: its bitmaps hold at most 4 GB, about a \
              billion pixels."
         ));
     }
-    let _ = (w, h);
     Ok(())
 }
 
@@ -257,6 +255,16 @@ fn bitmap_memory(header: &[u8], size: u64) -> Option<u64> {
     Some(size.saturating_add(pixels.saturating_mul(20)))
 }
 
+/// Why an image on the clipboard is not pasted: it would need `need` bytes, `free` are free.
+#[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
+fn too_large_to_paste(need: u64, free: u64) -> String {
+    format!(
+        "pasting the image on the clipboard would need about {} of memory, but only {} is free",
+        opal_io::bytes(need),
+        opal_io::bytes(free)
+    )
+}
+
 /// What reading an image the clipboard offers gave: the image, `None` if it was not one
 /// that can be read (so that what else is offered is tried), or an error if it is one but
 /// would need more memory than is free (so that the paste says why).
@@ -264,7 +272,7 @@ fn bitmap_memory(header: &[u8], size: u64) -> Option<u64> {
 fn imported(read: Result<image_files::Imported, opal_io::IoError>) -> Result<Option<Pasted>, String> {
     match read {
         Ok(i) => Ok(Some(from_import(i))),
-        Err(e @ opal_io::IoError::TooLarge { .. }) => Err(e.to_string()),
+        Err(opal_io::IoError::TooLarge { need, free, .. }) => Err(too_large_to_paste(need, free)),
         Err(_) => Ok(None),
     }
 }
@@ -286,11 +294,7 @@ fn read_system(own: Option<OwnCopy>) -> ReadResult {
     if let (Some(need), Some(free)) = (clipboard_bitmap_memory(), crate::memory::free())
         && need > free
     {
-        return Err(format!(
-            "pasting the image on the clipboard would need about {} of memory, but only {} is free",
-            opal_io::bytes(need),
-            opal_io::bytes(free)
-        ));
+        return Err(too_large_to_paste(need, free));
     }
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     #[cfg(not(windows))]
@@ -542,7 +546,10 @@ mod tests {
         let path = std::path::PathBuf::from("clipboard.png");
         let too_large = opal_io::IoError::TooLarge { path: path.clone(), need: 2_000_000_000, free: 1_000_000_000 };
         let why = imported(Err(too_large)).unwrap_err();
-        assert!(why.contains("2.0 GB") && why.contains("1.0 GB"), "{why}");
+        assert_eq!(
+            why,
+            "pasting the image on the clipboard would need about 2.0 GB of memory, but only 1.0 GB is free"
+        );
         let unreadable = opal_io::IoError::Decode { path, message: "not an image".into() };
         assert!(matches!(imported(Err(unreadable)), Ok(None)), "what else is offered is not tried");
     }
