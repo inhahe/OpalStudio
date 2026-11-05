@@ -23,7 +23,7 @@ use crate::resample::{self, Sampling};
 use crate::tile::{Pixel, PixelF32, TILE_PIXELS, TILE_SIZE, Tile, TileCoord, downsample};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 /// Composites `dst = src × opacity over dst`, premultiplied.
 fn over(dst: &mut [PixelF32], src: &[PixelF32], opacity: f32) {
@@ -251,7 +251,11 @@ fn shown_at(level: u32, reduced: &Reduced) -> impl for<'o> Fn(&'o Object, TileCo
 /// The token for what object `o` shows in tile `c` of pyramid level `level`.
 fn level_token(o: &Object, c: TileCoord, level: u32) -> Option<Token> {
     let (image, t, s) = at_level(o, level);
-    touches(image, &t, &s, c).then(|| Token::Image { image: image.clone(), transform: t.to_bits(), sampling: s.key() })
+    touches(image, &t, &s, c).then(|| Token::Image {
+        image: Arc::downgrade(image),
+        transform: t.to_bits(),
+        sampling: s.key(),
+    })
 }
 
 /// What an object shows in a tile: at full resolution, or drawn at a pyramid level.
@@ -540,34 +544,38 @@ enum Token {
     /// A group begins, with this opacity.
     Group(u32),
     /// A stored tile, lying exactly on the tile.
-    Tile(Arc<Tile>),
+    Tile(Weak<Tile>),
     /// Pixels off the tile grid: their offset within a tile, and the stored tiles that show
     /// (in [`pixel_sources`]'s order).
-    Shifted { phase: [i64; 2], tiles: [Option<Arc<Tile>>; 4] },
+    Shifted { phase: [i64; 2], tiles: [Option<Weak<Tile>>; 4] },
     /// An image object: its pixels (the image stands for all of them, since an image
     /// object's pixels are not changed in place) and how it is drawn.
-    Image { image: Arc<RasterImage>, transform: [u64; 6], sampling: [u32; 4] },
+    Image { image: Weak<RasterImage>, transform: [u64; 6], sampling: [u32; 4] },
     /// The innermost open layer or group ends.
     End,
 }
 
+/// Tokens name what they stand for by weak references, compared by address: a cached key
+/// then keeps no pixels alive (a tile the document has let go of is freed, though the
+/// cache still names it), and the address cannot be reused while it is named, so a new
+/// tile never passes for an old one.
 impl PartialEq for Token {
     fn eq(&self, other: &Token) -> bool {
-        let same = |a: &Option<Arc<Tile>>, b: &Option<Arc<Tile>>| match (a, b) {
+        let same = |a: &Option<Weak<Tile>>, b: &Option<Weak<Tile>>| match (a, b) {
             (None, None) => true,
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (Some(a), Some(b)) => Weak::ptr_eq(a, b),
             _ => false,
         };
         match (self, other) {
             (Token::Layer(a), Token::Layer(b)) | (Token::Group(a), Token::Group(b)) => a == b,
-            (Token::Tile(a), Token::Tile(b)) => Arc::ptr_eq(a, b),
+            (Token::Tile(a), Token::Tile(b)) => Weak::ptr_eq(a, b),
             (Token::Shifted { phase: p, tiles: a }, Token::Shifted { phase: q, tiles: b }) => {
                 p == q && a.iter().zip(b).all(|(a, b)| same(a, b))
             }
             (
                 Token::Image { image: a, transform: m, sampling: s },
                 Token::Image { image: b, transform: n, sampling: t },
-            ) => Arc::ptr_eq(a, b) && m == n && s == t,
+            ) => Weak::ptr_eq(a, b) && m == n && s == t,
             (Token::End, Token::End) => true,
             _ => false,
         }
@@ -581,15 +589,15 @@ fn object_token(o: &Object, c: TileCoord) -> Option<Token> {
             let sources = pixel_sources(p, c);
             let (_, phase) = tile_offset(p);
             if phase == [0, 0] {
-                return sources[0].map(|t| Token::Tile(t.clone()));
+                return sources[0].map(|t| Token::Tile(Arc::downgrade(t)));
             }
             if sources.iter().all(Option::is_none) {
                 return None;
             }
-            Some(Token::Shifted { phase, tiles: sources.map(|t| t.cloned()) })
+            Some(Token::Shifted { phase, tiles: sources.map(|t| t.map(Arc::downgrade)) })
         }
         ObjectKind::Image(i) => touches(&i.image, &i.transform, &i.sampling, c).then(|| Token::Image {
-            image: i.image.clone(),
+            image: Arc::downgrade(&i.image),
             transform: i.transform.to_bits(),
             sampling: i.sampling.key(),
         }),
@@ -637,7 +645,7 @@ fn key_into(layers: &[Arc<Layer>], c: TileCoord, out: &mut Vec<Token>, token: To
 /// The source tile, if `tokens` describe exactly one stored tile lying on the tile, from one
 /// layer at full opacity (perhaps inside groups at full opacity): the composite is then
 /// that tile unchanged.
-fn lone_source(tokens: &[Token]) -> Option<&Arc<Tile>> {
+fn lone_source(tokens: &[Token]) -> Option<&Weak<Tile>> {
     let full = 1.0f32.to_bits();
     let mut tile = None;
     for t in tokens {
@@ -668,9 +676,11 @@ enum Key {
 enum Pixels {
     /// Nothing shows in the tile.
     Empty,
-    /// The pixels, and whether the cache made them (rather than showing a layer's own tile,
-    /// which costs nothing more).
-    Held(Arc<Tile>, bool),
+    /// Pixels the cache made.
+    Held(Arc<Tile>),
+    /// A layer's own tile, shown as it is: it costs nothing more, and is held weakly so that
+    /// it is freed with the layer's (an entry current with the layers can always reach it).
+    Layer(Weak<Tile>),
     /// Let go to keep within the budget; made again from the key, which still holds, when
     /// they are needed.
     Dropped,
@@ -690,11 +700,22 @@ struct Entry {
 }
 
 impl Entry {
-    fn held(&self) -> Option<&Arc<Tile>> {
+    /// The tile's pixels, if it has them at hand.
+    fn held(&self) -> Option<Arc<Tile>> {
         match &self.pixels {
-            Pixels::Held(t, _) => Some(t),
+            Pixels::Held(t) => Some(t.clone()),
+            Pixels::Layer(t) => t.upgrade(),
             _ => None,
         }
+    }
+}
+
+/// What a level-0 tile with key `tokens` shows, composited at `c` from `layers` (whose tiles
+/// are those the key names): a lone source tile is shown as it is, without a copy.
+fn base_pixels(layers: &[Arc<Layer>], c: TileCoord, tokens: &[Token]) -> Pixels {
+    match lone_source(tokens) {
+        Some(t) => Pixels::Layer(t.clone()),
+        None => composite_tile(layers, c).map_or(Pixels::Empty, |t| Pixels::Held(Arc::new(t))),
     }
 }
 
@@ -934,7 +955,7 @@ impl Projection {
         drop(show);
         for (c, key, tile) in drawn {
             let version = if tile.is_some() { self.next_version() } else { 0 };
-            let pixels = tile.map_or(Pixels::Empty, |t| Pixels::Held(t, true));
+            let pixels = tile.map_or(Pixels::Empty, Pixels::Held);
             self.levels[level as usize].insert(c, Entry { key, pixels, version, checked: generation });
         }
         self.shown(level, coords.iter().chain(&dirty))
@@ -957,7 +978,7 @@ impl Projection {
         let mut holders: HashMap<usize, usize> = HashMap::new();
         for cache in &self.levels {
             for e in cache.values() {
-                if let Pixels::Held(t, true) = &e.pixels {
+                if let Pixels::Held(t) = &e.pixels {
                     *holders.entry(ptr(t)).or_default() += 1;
                 }
             }
@@ -976,18 +997,23 @@ impl Projection {
         for (l, cache) in self.levels.iter().enumerate() {
             let below = (l as u32) < level;
             for (c, e) in cache {
+                // Only pixels the cache made cost anything; the rest (keys, a layer's own
+                // tiles) are kept, so as not to be built again.
+                if !matches!(e.pixels, Pixels::Held(_)) {
+                    continue;
+                }
                 let r = c.rect(l as u32);
                 // A preview off the level shown is out of date: the next exact update
                 // replaces it.
                 if l as u32 > level || r.intersect(outer).is_empty() || (below && matches!(e.key, Key::Preview(_))) {
                     away.push((gap(&r), l, *c));
-                } else if below && matches!(e.pixels, Pixels::Held(_, true)) {
+                } else if below {
                     under.push((l, *c));
                 }
             }
         }
         let mut release = |bytes: &mut u64, p: &Pixels| {
-            if let Pixels::Held(t, true) = p {
+            if let Pixels::Held(t) = p {
                 let n = holders.get_mut(&ptr(t)).expect("counted");
                 *n -= 1;
                 if *n == 0 {
@@ -1043,21 +1069,16 @@ impl Projection {
                 todo.into_par_iter()
                     .map(|c| {
                         let Key::Base(tokens) = &cache[&c].key else { unreachable!("a level-0 key") };
-                        let pixels = match lone_source(tokens) {
-                            Some(t) => Pixels::Held(t.clone(), false),
-                            None => {
-                                composite_tile(layers, c).map_or(Pixels::Empty, |t| Pixels::Held(Arc::new(t), true))
-                            }
-                        };
-                        (c, pixels)
+                        (c, base_pixels(layers, c, tokens))
                     })
                     .collect()
             } else {
                 let below = &self.levels[l - 1];
                 todo.into_par_iter()
                     .map(|c| {
-                        let kids = c.children().map(|k| below.get(&k).and_then(Entry::held).map(|t| &**t));
-                        (c, downsample(kids).map_or(Pixels::Empty, |t| Pixels::Held(Arc::new(t), true)))
+                        let kids = c.children().map(|k| below.get(&k).and_then(Entry::held));
+                        let tile = downsample(kids.each_ref().map(|k| k.as_deref()));
+                        (c, tile.map_or(Pixels::Empty, |t| Pixels::Held(Arc::new(t))))
                     })
                     .collect()
             };
@@ -1070,12 +1091,12 @@ impl Projection {
     /// The tiles of level `level` at `coords` that have content.
     fn shown<'a>(&self, level: u32, coords: impl Iterator<Item = &'a TileCoord>) -> Vec<(TileCoord, Arc<Tile>)> {
         let top = &self.levels[level as usize];
-        coords.filter_map(|c| top.get(c).and_then(Entry::held).map(|t| (*c, t.clone()))).collect()
+        coords.filter_map(|c| top.get(c).and_then(Entry::held).map(|t| (*c, t))).collect()
     }
 
     /// The cached tile at `level` and `c` as of the last [`update`](Self::update) that
-    /// covered it, if its pixels are held.
-    pub fn tile(&self, level: u32, c: TileCoord) -> Option<&Arc<Tile>> {
+    /// covered it, if its pixels are at hand.
+    pub fn tile(&self, level: u32, c: TileCoord) -> Option<Arc<Tile>> {
         self.levels.get(level as usize)?.get(&c)?.held()
     }
 
@@ -1108,12 +1129,7 @@ impl Projection {
             .into_par_iter()
             .map(|(c, key)| {
                 let Key::Base(tokens) = &key else { unreachable!() };
-                // A tile that one layer at full opacity supplies alone is shown as it is,
-                // without a copy.
-                let pixels = match lone_source(tokens) {
-                    Some(t) => Pixels::Held(t.clone(), false),
-                    None => composite_tile(layers, c).map_or(Pixels::Empty, |t| Pixels::Held(Arc::new(t), true)),
-                };
+                let pixels = base_pixels(layers, c, tokens);
                 (c, key, pixels)
             })
             .collect();
@@ -1151,7 +1167,7 @@ impl Projection {
         }
         self.restore(layers, level - 1, stale.iter().flat_map(|(c, _)| c.children()));
         let below = &self.levels[l - 1];
-        let pixels = |k: TileCoord| below.get(&k).and_then(Entry::held).cloned();
+        let pixels = |k: TileCoord| below.get(&k).and_then(Entry::held);
         // Tiles with the same four children (a uniform image is full of them) are reduced
         // once and share the result.
         let ptr = |t: &Option<Arc<Tile>>| t.as_ref().map_or(0, |t| Arc::as_ptr(t) as usize);
@@ -1170,7 +1186,7 @@ impl Projection {
         for (c, kids, id) in of {
             let tile = reduced[&id].clone();
             let version = if tile.is_some() { self.next_version() } else { 0 };
-            let pixels = tile.map_or(Pixels::Empty, |t| Pixels::Held(t, true));
+            let pixels = tile.map_or(Pixels::Empty, Pixels::Held);
             self.levels[l].insert(c, Entry { key: Key::Pyramid(kids), pixels, version, checked: 0 });
         }
     }
@@ -1483,7 +1499,7 @@ mod tests {
         let LayerContent::Objects(objects) = &mut d.layer_mut(top).unwrap().content else { panic!() };
         let ObjectKind::Image(i) = &mut objects[0].kind else { panic!() };
         i.transform = Affine::translate(2500.5, 2500.25);
-        let before0 = p.tile(0, TileCoord::containing(2600, 2600)).cloned();
+        let before0 = p.tile(0, TileCoord::containing(2600, 2600));
         let preview: HashMap<TileCoord, Arc<Tile>> =
             p.update(&d.layers, 2, &view, Quality::Preview).into_iter().collect();
         let far = TileCoord::new(3, 0);
@@ -1504,8 +1520,7 @@ mod tests {
         shows_what_it_returned(&p, 2, &again);
         let preview = again;
         assert!(
-            p.tile(0, TileCoord::containing(2600, 2600)).cloned().map(|t| Arc::as_ptr(&t))
-                == before0.map(|t| Arc::as_ptr(&t)),
+            p.tile(0, TileCoord::containing(2600, 2600)).map(|t| Arc::as_ptr(&t)) == before0.map(|t| Arc::as_ptr(&t)),
             "no full-resolution tile was drawn"
         );
         // The previewed tile shows the image where it now is, as the exact update will.
@@ -1529,7 +1544,7 @@ mod tests {
     fn shows_what_it_returned(p: &Projection, level: u32, returned: &HashMap<TileCoord, Arc<Tile>>) {
         for (c, t) in returned {
             let shown = p.tile(level, *c).unwrap_or_else(|| panic!("tile {c:?} is not shown"));
-            assert!(Arc::ptr_eq(shown, t), "tile {c:?} shows something else");
+            assert!(Arc::ptr_eq(&shown, t), "tile {c:?} shows something else");
         }
     }
 
@@ -1771,7 +1786,7 @@ mod tests {
         let mut ptrs = HashSet::new();
         for cache in &p.levels {
             for e in cache.values() {
-                if let Pixels::Held(t, true) = &e.pixels {
+                if let Pixels::Held(t) = &e.pixels {
                     ptrs.insert(Arc::as_ptr(t) as usize);
                 }
             }
@@ -1811,6 +1826,54 @@ mod tests {
         let want = Projection::new().update(&d.layers, 0, &near, Quality::Exact);
         for (c, t) in want {
             assert!(got[&c].pixels() == t.pixels(), "tile {c:?}");
+        }
+    }
+
+    #[test]
+    fn the_cache_keeps_no_tile_the_document_let_go_of() {
+        // A layer's own tiles shown as they are (opaque), and composites keyed on them
+        // (translucent).
+        for opacity in [1.0, 0.5] {
+            let mut ids = IdGen::default();
+            let mut d = Document::new(2048, 256);
+            let mut img = RasterImage::new();
+            for x in 0..8 {
+                let mut t = Tile::filled(pixel_from_f32([0.5, 0.5, 0.5, 1.0]));
+                t.set(x, 0, pixel_from_f32([1.0, 0.0, 0.0, 1.0]));
+                img.set_tile(TileCoord::new(x as i32, 0), Some(Arc::new(t)));
+            }
+            let l = add(&mut d, &mut ids, img);
+            d.layer_mut(l).unwrap().opacity = opacity;
+            let mut p = Projection::new();
+            p.update(&d.layers, 0, &IRect::new(0, 0, 1024, 256), Quality::Exact);
+            p.update(&d.layers, 0, &IRect::new(1024, 0, 2048, 256), Quality::Exact);
+            // The whole layer replaced while the view is elsewhere.
+            let LayerContent::Objects(objects) = &mut d.layer_mut(l).unwrap().content else { panic!() };
+            let ObjectKind::Pixels(o) = &mut objects[0].kind else { panic!() };
+            let old = Arc::downgrade(o.image.tile(TileCoord::new(0, 0)).unwrap());
+            o.image = Arc::new(solid(IRect::from_size(2048, 256), [0.0, 0.0, 1.0, 1.0]));
+            p.update(&d.layers, 0, &IRect::new(1024, 0, 2048, 256), Quality::Exact);
+            assert!(old.upgrade().is_none(), "the cache keeps the old tile alive (opacity {opacity})");
+        }
+    }
+
+    #[test]
+    fn trimming_keeps_what_costs_nothing() {
+        // Composites beside the view (a translucent layer over the opaque one), and the
+        // opaque layer's own tiles, farther away.
+        let mut ids = IdGen::default();
+        let mut d = Document::new(4096, 256);
+        add(&mut d, &mut ids, solid(IRect::from_size(4096, 256), [0.2, 0.4, 0.6, 1.0]));
+        add(&mut d, &mut ids, solid(IRect::new(2048, 0, 3072, 4), [1.0, 0.0, 0.0, 0.5]));
+        let mut p = Projection::new();
+        p.update(&d.layers, 0, &IRect::new(0, 0, 3072, 256), Quality::Exact);
+        p.set_budget(Some(0));
+        p.update(&d.layers, 0, &IRect::new(3072, 0, 4096, 256), Quality::Exact);
+        for x in 8..12 {
+            assert!(!p.levels[0].contains_key(&TileCoord::new(x, 0)), "a composite out of view stays");
+        }
+        for x in 0..8 {
+            assert!(p.levels[0].contains_key(&TileCoord::new(x, 0)), "a tile that cost nothing went");
         }
     }
 
