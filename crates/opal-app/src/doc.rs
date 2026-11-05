@@ -40,7 +40,8 @@ impl Default for View {
 pub const DROP_NOTE: &str =
     "The oldest history states are being dropped, to keep history within its memory limit (Preferences › History).";
 
-pub const MIN_ZOOM: f32 = 1.0 / 128.0;
+/// Far enough out that the largest canvas (`dialogs::MAX_SIDE`) fits a window.
+pub const MIN_ZOOM: f32 = 1.0 / 1024.0;
 pub const MAX_ZOOM: f32 = 128.0;
 
 impl View {

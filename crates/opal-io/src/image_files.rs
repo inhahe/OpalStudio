@@ -115,6 +115,9 @@ pub struct ExportSize {
     pub sampling: Sampling,
 }
 
+/// The largest JPEG image, along either side (the format stores sizes in 16 bits).
+pub const JPEG_MAX_SIDE: u32 = 65_535;
+
 /// How many rows of the exported image are made at a time.
 const BAND: i64 = TILE_SIZE as i64;
 
@@ -410,6 +413,13 @@ pub fn export_in(
     pool: Option<&rayon::ThreadPool>,
     progress: &Progress,
 ) -> Result<(), IoError> {
+    if let ExportFormat::Jpeg { .. } = format {
+        let (w, h) = size.map_or((doc.canvas.width, doc.canvas.height), |s| (s.width, s.height));
+        if w.max(h) > JPEG_MAX_SIDE {
+            let message = format!("a JPEG image can be at most {JPEG_MAX_SIDE} pixels wide and tall");
+            return Err(IoError::Unsupported { path: path.to_owned(), message });
+        }
+    }
     let cancelled = || IoError::Cancelled { path: path.to_owned() };
     let mut rows = Exported::new(doc, size, progress).ok_or_else(cancelled)?;
     let (width, height) = (rows.width, rows.height);
@@ -882,6 +892,22 @@ mod tests {
         *m.lock().unwrap() = true;
         c.notify_all();
         assert_eq!(done, Ok(true), "the export waited for the global pool");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_jpeg_too_large_for_the_format_is_refused_before_anything_is_made() {
+        let d = Document::new(70_000, 10);
+        let path = temp("too-wide.jpg");
+        let jpeg = ExportFormat::Jpeg { quality: 90, background: [255; 3] };
+        let p = Progress::default();
+        let r = export_in(&d, &path, &jpeg, None, None, &p);
+        assert!(matches!(&r, Err(IoError::Unsupported { message, .. }) if message.contains("65535")), "{r:?}");
+        assert_eq!(p.fraction(), None, "begun all the same");
+        assert!(!path.exists());
+        // At a size within the limit, it is written.
+        let size = ExportSize { width: 7000, height: 1, sampling: Sampling::default() };
+        export_in(&d, &path, &jpeg, Some(&size), None, &p).unwrap();
         std::fs::remove_file(&path).unwrap();
     }
 

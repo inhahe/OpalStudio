@@ -1518,3 +1518,32 @@ fn a_view_taking_a_while_says_so() {
     h.run();
     assert!(h.query_by_label("Drawing…").is_none(), "still said once the view was done");
 }
+
+#[test]
+fn the_export_dialog_says_when_a_jpeg_would_be_too_large() {
+    use egui_kittest::kittest::NodeT;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 70_000, 100);
+    let st = h.state_mut().state_mut();
+    st.last_export = crate::state::ExportKind::Jpeg;
+    st.queue.push(Cmd::Export);
+    h.run();
+    let said = "A JPEG image can be at most 65535 pixels wide and tall: choose PNG, or a smaller size.";
+    assert!(h.query_by_label(said).is_some(), "not said");
+    assert!(h.get_by_label("Export…").accesskit_node().is_disabled(), "offered all the same");
+    // As PNG, it can be.
+    h.get_by_label("PNG").click();
+    h.run();
+    assert!(h.query_by_label(said).is_none());
+    assert!(!h.get_by_label("Export…").accesskit_node().is_disabled());
+}
+
+#[test]
+fn the_largest_canvas_fits_the_window() {
+    let mut v = crate::doc::View::default();
+    let side = crate::dialogs::MAX_SIDE as f32;
+    let viewport = egui::vec2(600.0, 400.0);
+    v.fit(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(side, side)), viewport, 1.0);
+    assert!(side * v.zoom <= viewport.y, "zoom {} leaves it {} pixels tall", v.zoom, side * v.zoom);
+}

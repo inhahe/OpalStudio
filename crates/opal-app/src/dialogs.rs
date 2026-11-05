@@ -7,9 +7,11 @@ use crate::settings::{self, Show};
 use crate::state::{AppState, Background, Confirm, ExportKind, MessageKind, NewImage};
 use eframe::egui::{self, RichText, ViewportCommand};
 
-/// The largest canvas side the New Image dialog accepts (Photoshop's limit for PSD files).
-/// A layer filling a canvas this size holds 7.2 GB, at 8 bytes a pixel.
-pub const MAX_SIDE: u32 = 30_000;
+/// The largest canvas side (Photoshop's limit, for its large-document format). A layer
+/// filling a canvas this size would hold 720 GB, at 8 bytes a pixel: a canvas this large
+/// is for content that leaves most of it empty or uniform (whose tiles cost nothing), and
+/// work needing more memory than is free is refused (see `memory`).
+pub const MAX_SIDE: u32 = 300_000;
 
 pub fn show_all(ctx: &egui::Context, st: &mut AppState) {
     // Only one modal at a time: the first that has something to show.
@@ -171,16 +173,8 @@ fn new_image(ctx: &egui::Context, st: &mut AppState) {
             });
             ui.end_row();
         });
-        let pixels = f64::from(spec.width) * f64::from(spec.height);
-        ui.label(
-            RichText::new(format!(
-                "{:.1} megapixels; a layer covering it all takes about {} of memory",
-                pixels / 1e6,
-                bytes((pixels * 8.0) as u64)
-            ))
-            .small()
-            .color(st.palette.weak_text),
-        );
+        let note = size_note(spec.width, spec.height, crate::memory::free());
+        ui.label(RichText::new(note).small().color(st.palette.weak_text));
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.button("Create").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -203,6 +197,22 @@ fn new_image(ctx: &egui::Context, st: &mut AppState) {
         Some(false) => st.new_image = None,
         None => st.new_image = Some(spec),
     }
+}
+
+/// What the New Image dialog says of a `width × height` canvas: its pixels, and the memory
+/// a layer covering it takes, which on a large canvas may be more than is `free`.
+fn size_note(width: u32, height: u32, free: Option<u64>) -> String {
+    let pixels = u64::from(width) * u64::from(height);
+    let full = pixels * 8;
+    let mut note =
+        format!("{:.1} megapixels; a layer covering it all takes about {} of memory", pixels as f64 / 1e6, bytes(full));
+    if let Some(free) = free.filter(|&f| full > f) {
+        note += &format!(
+            " (more than the {} free: fill only part of it; a white background costs next to nothing)",
+            bytes(free)
+        );
+    }
+    note
 }
 
 fn export(ctx: &egui::Context, st: &mut AppState) {
@@ -239,9 +249,20 @@ fn export(ctx: &egui::Context, st: &mut AppState) {
         if changed {
             st.settings_touched();
         }
+        let max = opal_io::image_files::JPEG_MAX_SIDE;
+        let too_large = spec.kind == ExportKind::Jpeg && spec.width.max(spec.height) > max;
+        if too_large {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(format!(
+                    "A JPEG image can be at most {max} pixels wide and tall: choose PNG, or a smaller size."
+                ))
+                .color(ui.visuals().error_fg_color),
+            );
+        }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.button("Export…").clicked() {
+            if ui.add_enabled(!too_large, egui::Button::new("Export…")).clicked() {
                 done = Some(true);
             }
             if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -372,7 +393,8 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
             egui::Grid::new("resize-canvas-margins").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                 for (name, i) in [("Left", 0), ("Top", 1), ("Right", 2), ("Bottom", 3)] {
                     ui.label(name);
-                    ui.add(egui::DragValue::new(&mut spec.margins[i]).range(-30_000..=30_000).suffix(" px"));
+                    let side = i64::from(MAX_SIDE);
+                    ui.add(egui::DragValue::new(&mut spec.margins[i]).range(-side..=side).suffix(" px"));
                     ui.end_row();
                 }
             });
@@ -571,5 +593,19 @@ pub fn bytes(n: u64) -> String {
         format!("{:.0} MB", n / 1e6)
     } else {
         format!("{:.0} KB", n / 1e3)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_canvas_larger_than_memory_allows_says_so() {
+        let plain = size_note(1000, 1000, Some(1 << 30));
+        assert_eq!(plain, "1.0 megapixels; a layer covering it all takes about 8 MB of memory");
+        let huge = size_note(MAX_SIDE, MAX_SIDE, Some(16_000_000_000));
+        assert!(huge.contains("720.0 GB") && huge.contains("more than the 16.0 GB free"), "{huge}");
+        assert!(!size_note(MAX_SIDE, MAX_SIDE, None).contains("free"), "said without knowing");
     }
 }

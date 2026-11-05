@@ -29,8 +29,8 @@ cargo test --workspace                     # all tests, interface tests included
   Studio's own `.opal` files, which keep every layer. Save as `.opal`; export the canvas
   to PNG (8 or 16 bits) or JPEG, at its own size or another. Saving and exporting run in
   the background, so the window stays usable; the status bar shows how far they have got
-  and can cancel them. A save that fails or is cancelled never damages the existing file. Drop files on the window to open them; several images open
-  as tabs.
+  and can cancel them. A save that fails or is cancelled never damages the existing file.
+  Drop files on the window to open them; several images open as tabs.
 - **Paste and place.** Ctrl+V pastes an image (from Opal Studio, another program, or an
   image file copied in Explorer) into a box that moves, scales and rotates it, snapping to
   the canvas and other layers; Enter places it. A pasted image keeps its own pixels, so it
@@ -44,7 +44,9 @@ cargo test --workspace                     # all tests, interface tests included
   Transform (Ctrl+T) scales and rotates layers, losslessly.
 - **The image.** The Crop tool, with aspect ratios, guides and straightening; Crop to
   Content; Resize Image and Resize Canvas; quarter turns, flips and rotation by any angle.
-  Cropping and resizing the canvas never delete anything unless asked to.
+  Cropping and resizing the canvas never delete anything unless asked to. Canvases go up
+  to 300,000 pixels a side; anything that would need more memory than the computer has
+  free is refused, with how much it needs, rather than run out of it.
 - **Layers and groups.** Add, duplicate, delete, group, reorder (buttons or dragging,
   into and out of groups), rename, hide, lock, change opacity; select several with Ctrl
   and Shift; merge down, merge selected, merge visible, merge a group, stamp visible,

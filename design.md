@@ -533,6 +533,12 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   sits in the new, or the margins to add on each side. Only the canvas changes.
 - **Rotate:** quarter turns either way, half a turn, flip horizontally or vertically
   (exact for pixel objects), and Rotate by an angle, which can grow the canvas to fit.
+- **The largest canvas** is 300,000 pixels a side (Photoshop's limit, for its
+  large-document format; zooming out reaches 1/1024 so that it fits a window). A layer
+  filling it would take 720 GB, so a canvas that large is for content that leaves most of
+  it empty or uniform: those tiles cost nothing (a new white canvas is four tiles), and
+  work needing more memory than is free is refused (see *Size limits*). Shown whole, it
+  costs about 800 MB of view cache and a second after each edit (`known-issues.md`).
 
 ## Export
 
@@ -542,7 +548,9 @@ aspect ratio locked by default, with a resampling method. Export never changes t
 document. The image is made and encoded a band of rows (a tile's height) at a time and
 streamed into the PNG or JPEG encoder, so exporting at the canvas's size holds one band,
 never the whole image; at another size it holds the canvas once more (averaged in blocks
-first when shrinking by 2 or more), which the bands are drawn from.
+first when shrinking by 2 or more), which the bands are drawn from. A JPEG is at most
+65,535 pixels a side (the format's limit): the dialog says so and offers no export past
+it.
 
 ## Thumbnails
 
