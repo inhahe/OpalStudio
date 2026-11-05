@@ -912,13 +912,20 @@ Every write, `.opal` and exports alike, goes to a temporary file beside the targ
 replaces it only when complete, so a failed save never damages the existing file. Writes
 run on a thread of their own, one after another in the order asked (so two writes to one
 file never overlap), with the document as it was when the write was asked for: the
-interface stays live, and the status bar says what is being written. The image takes the
-file chosen at once (so a save asked for before the first is written goes there too; a
-failure gives it back the file it had), and once written it is marked saved at the history
-state written, so an edit made meanwhile leaves it unsaved. "Save" in the close and quit
-questions closes or quits once the writes are done, asking again about an image changed
-meanwhile; quitting otherwise waits for writes still under way; any failed write stops
-quitting, so that it is seen. A close question never replaces another on screen: it
+interface stays live, and the status bar says what is being written, how far it has got,
+and offers to cancel it. Progress is shared through an `opal_io::Progress` (work done of a
+total, and a cancel flag): an export counts pixels (the canvas's as they are composited,
+when exporting at another size, then the result's as the encoder takes them), a save
+counts tiles. Once cancelled, the temporary file takes no more writes, so an encoder or
+archive stops at its next one; compositing the source of a resized export checks between
+tile rows; and the rename is skipped. Any failure after a cancel counts as the cancel. The
+image takes the file chosen at once (so a save asked for before the first is written goes
+there too; a failure or cancel gives it back the file it had), and once written it is
+marked saved at the history state written, so an edit made meanwhile leaves it unsaved.
+"Save" in the close and quit questions closes or quits once the writes are done, asking
+again about an image changed meanwhile; quitting otherwise waits for writes still under
+way; any failed or cancelled write stops quitting (and a close waiting for it), so that it
+is seen. A close question never replaces another on screen: it
 waits its turn (and for a free moment: no dialog, no box open on the image, the button
 not held), and one about an image that closes goes with it. Quitting likewise waits for
 a close question on screen to be answered.

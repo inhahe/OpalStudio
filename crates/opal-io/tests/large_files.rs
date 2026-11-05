@@ -130,7 +130,7 @@ fn export_resized() {
 fn save_native() {
     let (d, ids) = large();
     let path = temp("doc.opal");
-    measure("Save", || opal_io::native::save(&d, &ids, &path).unwrap());
+    measure("Save", || opal_io::native::save(&d, &ids, &path, &opal_io::Progress::default()).unwrap());
     std::fs::remove_file(path).unwrap();
 }
 

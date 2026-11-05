@@ -8,7 +8,7 @@ use crate::prefs::PREFS;
 use crate::settings::{Settings, Value};
 use crate::theme::{self, Palette, Scheme};
 use crate::tools::{self, ToolId};
-use crate::writer::{Then, Written};
+use crate::writer::{Failure, Then, Written};
 use eframe::egui;
 use opal_core::document::{Document, IdGen, Layer, LayerId, Position};
 use opal_core::geom::IRect;
@@ -620,7 +620,7 @@ impl AppState {
         // The document as it is now: it can be edited while this is written.
         let (doc, ids, at) = (d.history.doc().clone(), d.ids.clone(), d.history.current());
         let written = Written::Save { doc: id, at, path: path.clone(), before };
-        let job = Box::new(move || native::save(&doc, &ids, &path).map_err(|e| e.to_string()));
+        let job = Box::new(move |p: &_| native::save(&doc, &ids, &path, p).map_err(|e| e.to_string()));
         self.writer.write(written, then, job, ctx);
     }
 
@@ -651,7 +651,7 @@ impl AppState {
                         Then::Nothing => self.notify(format!("Saved \"{title}\".")),
                     }
                 }
-                (Written::Save { doc, path, before, .. }, Err(e)) => {
+                (Written::Save { doc, path, before, .. }, Err(failure)) => {
                     // The image gets back the file it had before; if it has been given
                     // another since, the save to that one gives this back if it fails too.
                     match self.doc_mut(doc) {
@@ -662,10 +662,20 @@ impl AppState {
                         }
                         None => {}
                     }
-                    self.message(MessageKind::Error, "Could not save", e);
+                    match failure {
+                        Failure::Cancelled => self.notify(format!(
+                            "Saving \"{}\" was cancelled; the file was left as it was.",
+                            file_title(&path)
+                        )),
+                        Failure::Error(e) => self.message(MessageKind::Error, "Could not save", e),
+                    }
                 }
                 (Written::Export { path }, Ok(())) => self.notify(format!("Exported \"{}\".", file_title(&path))),
-                (Written::Export { .. }, Err(e)) => self.message(MessageKind::Error, "Could not export", e),
+                (Written::Export { path }, Err(Failure::Cancelled)) => self
+                    .notify(format!("Exporting \"{}\" was cancelled; the file was left as it was.", file_title(&path))),
+                (Written::Export { .. }, Err(Failure::Error(e))) => {
+                    self.message(MessageKind::Error, "Could not export", e)
+                }
             }
         }
         if self.exit_after_writes && !self.writer.busy() {
@@ -736,9 +746,9 @@ impl AppState {
         ctx: &egui::Context,
     ) {
         let written = Written::Export { path: path.clone() };
-        let job = Box::new(move || {
+        let job = Box::new(move |p: &_| {
             let pool = Some(crate::background::pool());
-            image_files::export_in(&doc, &path, &format, size.as_ref(), pool).map_err(|e| e.to_string())
+            image_files::export_in(&doc, &path, &format, size.as_ref(), pool, p).map_err(|e| e.to_string())
         });
         self.writer.write(written, Then::Nothing, job, ctx);
     }

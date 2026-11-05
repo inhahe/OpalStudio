@@ -1,7 +1,7 @@
 //! Importing and exporting ordinary image files (PNG and JPEG).
 
 use crate::pixels::{from_srgb8, pixels_from_rgba8, pixels_from_rgba16, pixels_to_rgba8, pixels_to_rgba16};
-use crate::{IoError, write_atomically};
+use crate::{IoError, Progress, write_atomically};
 use half::f16;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
@@ -137,15 +137,25 @@ enum Source<'d> {
 }
 
 impl<'d> Exported<'d> {
-    pub fn new(doc: &'d Document, size: Option<&ExportSize>) -> Exported<'d> {
+    /// The canvas of `doc` to export, at `size` if given. `progress` is told the work there
+    /// is, in pixels: those of the result, and at another size those of the canvas too,
+    /// which is composited here (and counted as it is). `None` if `progress` is cancelled
+    /// meanwhile.
+    pub fn new(doc: &'d Document, size: Option<&ExportSize>, progress: &Progress) -> Option<Exported<'d>> {
         let canvas = doc.canvas.rect();
         let (w, h) = (doc.canvas.width, doc.canvas.height);
-        match size {
+        let pixels = |w: u32, h: u32| u64::from(w) * u64::from(h);
+        Some(match size {
             Some(s) if (s.width, s.height) != (w, h) && w > 0 && h > 0 => {
-                Exported { width: s.width, height: s.height, source: resized(&doc.layers, &canvas, s), next: 0 }
+                progress.begin(pixels(w, h) + pixels(s.width, s.height));
+                let source = resized(&doc.layers, &canvas, s, progress)?;
+                Exported { width: s.width, height: s.height, source, next: 0 }
             }
-            _ => Exported { width: w, height: h, source: Source::Canvas { layers: &doc.layers, canvas }, next: 0 },
-        }
+            _ => {
+                progress.begin(pixels(w, h));
+                Exported { width: w, height: h, source: Source::Canvas { layers: &doc.layers, canvas }, next: 0 }
+            }
+        })
     }
 
     /// The next band of rows, top to bottom: its pixels row by row, `width` to a row.
@@ -178,30 +188,58 @@ impl<'d> Exported<'d> {
 /// blocks first when shrinking by 2 or more, which leaves the resampler a factor under 2
 /// along each axis, and so a narrow reach), with its edge pixels copied outward as far as
 /// the filter reaches. The canvas is the whole image: what lies past it must not bleed into
-/// the edges, and the edges must not fade out either.
-fn resized<'d>(layers: &'d [Arc<Layer>], canvas: &IRect, s: &ExportSize) -> Source<'d> {
+/// the edges, and the edges must not fade out either. The canvas's pixels composited
+/// advance `progress`; `None` if it is cancelled meanwhile.
+fn resized<'d>(layers: &'d [Arc<Layer>], canvas: &IRect, s: &ExportSize, progress: &Progress) -> Option<Source<'d>> {
     let (w, h) = (canvas.width() as u32, canvas.height() as u32);
     let (kx, ky) = ((w / s.width.max(1)).max(1), (h / s.height.max(1)).max(1));
     // The image, and where in it the canvas's pixels are.
     let (mut image, at) = if kx * ky >= 2 {
-        let (image, sw, sh) = shrunk(layers, canvas, kx, ky);
+        let (image, sw, sh) = shrunk(layers, canvas, kx, ky, progress)?;
         (image, IRect::from_size(i64::from(sw), i64::from(sh)))
     } else {
-        (composite_within(layers, canvas), *canvas)
+        (composited(layers, canvas, progress)?, *canvas)
     };
     let to_size = Affine::translate(-at.x0 as f64, -at.y0 as f64)
         .then(Affine::scale(f64::from(s.width) / at.width() as f64, f64::from(s.height) / at.height() as f64));
     let border = resample::reach(&to_size, &s.sampling).ceil() as i64 + 1;
     frame_edges(&mut image, &at, border);
-    Source::Resized { image: Box::new(image), to_size, sampling: s.sampling }
+    Some(Source::Resized { image: Box::new(image), to_size, sampling: s.sampling })
+}
+
+/// The canvas composited ([`composite_within`]), a tile row at a time, each advancing
+/// `progress` by its pixels; `None` if it is cancelled meanwhile. Tiles are composited
+/// whole, so the result is the same as compositing the canvas at once.
+fn composited(layers: &[Arc<Layer>], canvas: &IRect, progress: &Progress) -> Option<RasterImage> {
+    let mut out = RasterImage::new();
+    let mut y = canvas.y0;
+    while y < canvas.y1 {
+        if progress.is_cancelled() {
+            return None;
+        }
+        let y1 = ((y.div_euclid(BAND) + 1) * BAND).min(canvas.y1);
+        for (c, t) in composite_within(layers, &IRect::new(canvas.x0, y, canvas.x1, y1)).tiles() {
+            out.set_tile(c, Some(t.clone()));
+        }
+        progress.advance((canvas.width() * (y1 - y)) as u64);
+        y = y1;
+    }
+    Some(out)
 }
 
 /// The canvas averaged in blocks of `kx × ky` pixels (the blocks along the right and bottom
 /// edges average the pixels they hold, when the factors do not divide the size), placed at
 /// the origin, with its width and height. The canvas is composited a tile row at a time;
 /// the block rows a band holds whole are averaged in parallel, and one a band ends inside
-/// is summed on into the next.
-fn shrunk(layers: &[Arc<Layer>], canvas: &IRect, kx: u32, ky: u32) -> (RasterImage, u32, u32) {
+/// is summed on into the next. Each band advances `progress` by its pixels; `None` if it
+/// is cancelled meanwhile.
+fn shrunk(
+    layers: &[Arc<Layer>],
+    canvas: &IRect,
+    kx: u32,
+    ky: u32,
+    progress: &Progress,
+) -> Option<(RasterImage, u32, u32)> {
     let (w, h, kx, ky) = (canvas.width() as usize, canvas.height() as usize, kx as usize, ky as usize);
     let (sw, sh) = (w.div_ceil(kx), h.div_ceil(ky));
     // Adds the rows `rows` to the block sums `acc`, groups of rows in parallel, each into
@@ -246,6 +284,9 @@ fn shrunk(layers: &[Arc<Layer>], canvas: &IRect, kx: u32, ky: u32) -> (RasterIma
     let mut written = 0;
     let mut y = 0;
     while y < h {
+        if progress.is_cancelled() {
+            return None;
+        }
         let top = canvas.y0 + y as i64;
         let y1 = (((top.div_euclid(BAND) + 1) * BAND - canvas.y0) as usize).min(h);
         let px = flatten(layers, &IRect::new(canvas.x0, top, canvas.x1, canvas.y0 + y1 as i64));
@@ -287,9 +328,10 @@ fn shrunk(layers: &[Arc<Layer>], canvas: &IRect, kx: u32, ky: u32) -> (RasterIma
             written += ready;
             done.clear();
         }
+        progress.advance(((y1 - y) * w) as u64);
         y = y1;
     }
-    (out, sw as u32, sh as u32)
+    Some((out, sw as u32, sh as u32))
 }
 
 /// Copies the pixels along the edges of `rect` in `image` outward, `border` deep on every
@@ -317,20 +359,24 @@ fn frame_edges(image: &mut RasterImage, rect: &IRect, border: i64) {
 /// while the encoder compresses this one, so a canvas exported at its own size is never
 /// held whole.
 pub fn export(doc: &Document, path: &Path, format: &ExportFormat, size: Option<&ExportSize>) -> Result<(), IoError> {
-    export_in(doc, path, format, size, None)
+    export_in(doc, path, format, size, None, &Progress::default())
 }
 
-/// [`export`], compositing in `pool` (rayon's global pool if `None`). The bands are made on
-/// a thread of their own, which gives its parallel work to `pool`; the encoder, which waits
-/// for them, runs on the calling thread (which may be one of `pool`'s, if it has another).
+/// [`export`], compositing in `pool` (rayon's global pool if `None`), telling `progress`
+/// how far it has got (see [`Exported::new`]: the result's pixels count as the encoder
+/// takes them), and stopping if it is cancelled. The bands are made on a thread of their
+/// own, which gives its parallel work to `pool`; the encoder, which waits for them, runs
+/// on the calling thread (which may be one of `pool`'s, if it has another).
 pub fn export_in(
     doc: &Document,
     path: &Path,
     format: &ExportFormat,
     size: Option<&ExportSize>,
     pool: Option<&rayon::ThreadPool>,
+    progress: &Progress,
 ) -> Result<(), IoError> {
-    let mut rows = Exported::new(doc, size);
+    let cancelled = || IoError::Cancelled { path: path.to_owned() };
+    let mut rows = Exported::new(doc, size, progress).ok_or_else(cancelled)?;
     let (width, height) = (rows.width, rows.height);
     let encode_err = |message: String| IoError::Encode { path: path.to_owned(), message };
     std::thread::scope(|scope| {
@@ -350,13 +396,14 @@ pub fn export_in(
                 None => make(),
             }
         });
-        write_atomically(path, |out| match format {
+        let bands = rx.iter().inspect(|band| progress.advance(band.len() as u64));
+        write_atomically(path, Some(progress), |out| match format {
             ExportFormat::Png { sixteen_bit } => {
-                write_png(out, width, height, rx.iter(), *sixteen_bit).map_err(|e| encode_err(e.to_string()))
+                write_png(out, width, height, bands, *sixteen_bit).map_err(|e| encode_err(e.to_string()))
             }
             ExportFormat::Jpeg { quality, background } => {
                 let bg = from_srgb8([background[0], background[1], background[2], 255]);
-                let rows = JpegRows::new(rx.iter(), width, height, bg);
+                let rows = JpegRows::new(bands, width, height, bg);
                 JpegEncoder::new_with_quality(out, (*quality).clamp(1, 100))
                     .encode_image(&rows)
                     .map_err(|e| encode_err(e.to_string()))
@@ -459,7 +506,7 @@ mod tests {
 
     /// The whole exported image at once, with its width and height.
     fn flatten_canvas(doc: &Document, size: Option<&ExportSize>) -> (Vec<Pixel>, u32, u32) {
-        let mut rows = Exported::new(doc, size);
+        let mut rows = Exported::new(doc, size, &Progress::default()).expect("not cancelled");
         let (w, h) = (rows.width, rows.height);
         let mut out = Vec::new();
         while let Some(band) = rows.band() {
@@ -590,7 +637,7 @@ mod tests {
         let mut d = Document::new(3, 1);
         let layer = Layer::new_raster(ids.layer(), ids.object(), "l", RasterImage::from_pixels(3, 1, &px));
         d.insert(Position { parent: None, index: 0 }, layer).unwrap();
-        let (out, w, h) = shrunk(&d.layers, &d.canvas.rect(), 2, 1);
+        let (out, w, h) = shrunk(&d.layers, &d.canvas.rect(), 2, 1, &Progress::default()).unwrap();
         assert_eq!((w, h), (2, 1));
         assert_eq!(pixel_to_f32(out.pixel(0, 0))[0], 0.0);
         assert_eq!(pixel_to_f32(out.pixel(1, 0))[0], 1.0);
@@ -719,7 +766,9 @@ mod tests {
         for (w, h) in [(450, 1100), (200, 500), (40, 2)] {
             let size = ExportSize { width: w, height: h, sampling: Sampling::default() };
             let (banded, ..) = flatten_canvas(&d, Some(&size));
-            let Source::Resized { image, to_size, sampling } = resized(&d.layers, &d.canvas.rect(), &size) else {
+            let Source::Resized { image, to_size, sampling } =
+                resized(&d.layers, &d.canvas.rect(), &size, &Progress::default()).unwrap()
+            else {
                 panic!("a resized source")
             };
             let out = IRect::from_size(i64::from(w), i64::from(h));
@@ -740,7 +789,7 @@ mod tests {
 
     fn blocks_average(d: &Document, kx: usize, ky: usize) {
         use opal_core::tile::pixel_to_f32;
-        let (out, sw, sh) = shrunk(&d.layers, &d.canvas.rect(), kx as u32, ky as u32);
+        let (out, sw, sh) = shrunk(&d.layers, &d.canvas.rect(), kx as u32, ky as u32, &Progress::default()).unwrap();
         assert_eq!((sw as usize, sh as usize), (300usize.div_ceil(kx), 700usize.div_ceil(ky)));
         let whole = flatten(&d.layers, &d.canvas.rect());
         let (last_x, last_y) = (sw as usize - 1, sh as usize - 1);
@@ -789,7 +838,8 @@ mod tests {
         let (p, at) = (pool.clone(), path.clone());
         std::thread::spawn(move || {
             let d = tall_document();
-            let r = p.install(|| export_in(&d, &at, &ExportFormat::Png { sixteen_bit: false }, None, Some(&p)));
+            let png = ExportFormat::Png { sixteen_bit: false };
+            let r = p.install(|| export_in(&d, &at, &png, None, Some(&p), &Progress::default()));
             let _ = tx.send(r.is_ok());
         });
         let done = rx.recv_timeout(Duration::from_secs(10));
@@ -798,5 +848,67 @@ mod tests {
         c.notify_all();
         assert_eq!(done, Ok(true), "the export waited for the global pool");
         std::fs::remove_file(&path).unwrap();
+    }
+
+    /// The exports to try progress on: at the canvas's size, shrunk (by block averages), and
+    /// enlarged (from the canvas composited whole), in each format.
+    fn kinds_of_export() -> Vec<(ExportFormat, Option<ExportSize>)> {
+        let png = ExportFormat::Png { sixteen_bit: false };
+        let jpeg = ExportFormat::Jpeg { quality: 90, background: [255; 3] };
+        let shrink = ExportSize { width: 100, height: 200, sampling: Sampling::default() };
+        let enlarge = ExportSize { width: 450, height: 800, sampling: Sampling::default() };
+        vec![
+            (png.clone(), None),
+            (jpeg.clone(), None),
+            (png.clone(), Some(shrink)),
+            (jpeg, Some(shrink)),
+            (png, Some(enlarge)),
+        ]
+    }
+
+    #[test]
+    fn an_export_counts_all_its_work_once() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let d = tall_document();
+        let path = temp("counted.png");
+        for (format, size) in kinds_of_export() {
+            let p = Progress::default();
+            export_in(&d, &path, &format, size.as_ref(), None, &p).unwrap();
+            let (done, total) = (p.done.load(Relaxed), p.total.load(Relaxed));
+            assert!(total > 0 && done == total, "{format:?} at {size:?}: {done} of {total}");
+            assert_eq!(p.fraction(), Some(1.0));
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_cancelled_export_leaves_the_file_as_it_was() {
+        let d = tall_document();
+        let path = temp("cancelled.png");
+        std::fs::write(&path, b"before").unwrap();
+        for (format, size) in kinds_of_export() {
+            let p = Progress::default();
+            p.cancel();
+            let r = export_in(&d, &path, &format, size.as_ref(), None, &p);
+            assert!(matches!(r, Err(IoError::Cancelled { .. })), "{format:?} at {size:?}: {r:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), b"before");
+        }
+        let left: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".cancelled.png"))
+            .collect();
+        std::fs::remove_file(&path).unwrap();
+        assert!(left.is_empty(), "left behind: {left:?}");
+    }
+
+    #[test]
+    fn a_resized_export_stops_compositing_once_cancelled() {
+        let d = tall_document();
+        for (_, size) in kinds_of_export() {
+            let p = Progress::default();
+            p.cancel();
+            assert!(Exported::new(&d, size.as_ref(), &p).is_none() == size.is_some(), "{size:?}");
+        }
     }
 }

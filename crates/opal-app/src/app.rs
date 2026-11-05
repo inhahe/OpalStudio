@@ -538,14 +538,30 @@ impl OpalApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(w) = self.st.writer.pending().next() {
+                // The write under way: how far it has got, and a way to stop it.
+                if let Some((w, progress)) = self.st.writer.pending().next() {
                     let (doing, path) = match w {
                         crate::writer::Written::Save { path, .. } => ("Saving", path),
                         crate::writer::Written::Export { path } => ("Exporting", path),
                     };
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    if progress.is_cancelled() {
+                        ui.label(RichText::new("Cancelling…").color(weak));
+                    } else if ui
+                        .small_button("Cancel")
+                        .on_hover_text(format!("Stop {} {name}; the file is left as it was.", doing.to_lowercase()))
+                        .clicked()
+                    {
+                        progress.cancel();
+                    }
+                    if let Some(f) = progress.fraction() {
+                        // As text of its own, so that it is read out too.
+                        let pct = format!("{}%", (f * 100.0).floor());
+                        ui.add(egui::ProgressBar::new(f).desired_width(90.0).desired_height(14.0).text(pct));
+                    }
                     ui.label(RichText::new(format!("{}  {doing} {name}…", crate::icons::SAVE)).color(weak));
                     ui.separator();
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
                 }
                 if let Some((used, budget)) = self.st.gpu.memory {
                     ui.label(RichText::new(format!("GPU {} / {}", bytes(used), bytes(budget))).color(weak))

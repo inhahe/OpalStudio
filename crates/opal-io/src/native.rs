@@ -17,7 +17,7 @@
 //! (sign, exponent, top of the mantissa) of neighboring values are similar, so grouping them
 //! lets deflate compress photos far better.
 
-use crate::{IoError, write_all, write_atomically};
+use crate::{IoError, Progress, write_all, write_atomically};
 use opal_core::document::{
     Canvas, Document, IdGen, ImageObject, Layer, LayerContent, LayerId, Object, ObjectId, ObjectKind, PixelObject,
 };
@@ -109,8 +109,9 @@ impl FileObjectKind {
 
 use opal_core::document::MAX_COORD;
 
-/// Saves `doc` with the identifier generator's state to `path` (atomically).
-pub fn save(doc: &Document, ids: &IdGen, path: &Path) -> Result<(), IoError> {
+/// Saves `doc` with the identifier generator's state to `path` (atomically), telling
+/// `progress` how far it has got in tiles written, and stopping if it is cancelled.
+pub fn save(doc: &Document, ids: &IdGen, path: &Path, progress: &Progress) -> Result<(), IoError> {
     // Number the distinct tiles, keeping their order of first appearance.
     let mut numbers: HashMap<*const Tile, usize> = HashMap::new();
     let mut tiles: Vec<Arc<Tile>> = Vec::new();
@@ -123,8 +124,9 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path) -> Result<(), IoError> {
         layers,
     };
     let json = serde_json::to_vec_pretty(&file).expect("the document serializes");
+    progress.begin(tiles.len() as u64);
 
-    write_atomically(path, |out| {
+    write_atomically(path, Some(progress), |out| {
         let zip_err = |e: zip::result::ZipError| IoError::io(path, std::io::Error::other(e));
         let mut zip = ZipWriter::new(out);
         let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
@@ -134,7 +136,7 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path) -> Result<(), IoError> {
         write_all(&mut zip, MIME_TYPE.as_bytes(), path)?;
         zip.start_file("document.json", deflated).map_err(zip_err)?;
         write_all(&mut zip, &json, path)?;
-        write_tiles(&mut zip, &tiles, deflated, TILES_AT_ONCE).map_err(zip_err)?;
+        write_tiles(&mut zip, &tiles, deflated, TILES_AT_ONCE, progress).map_err(zip_err)?;
         zip.finish().map_err(zip_err)?;
         Ok(())
     })
@@ -142,12 +144,14 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path) -> Result<(), IoError> {
 
 /// Writes `tiles` to `zip` as `tiles/<n>.bin`, numbered and stored in order, compressing
 /// `at_once` of them at a time in parallel: each worker compresses a few into an archive of
-/// its own, which is then copied in whole, without compressing again.
+/// its own, which is then copied in whole, without compressing again. Each batch written
+/// advances `progress` by its tiles.
 fn write_tiles<W: Write + Seek>(
     zip: &mut ZipWriter<W>,
     tiles: &[Arc<Tile>],
     options: SimpleFileOptions,
     at_once: usize,
+    progress: &Progress,
 ) -> ZipResult<()> {
     for (b, batch) in tiles.chunks(at_once).enumerate() {
         let parts: Vec<Vec<u8>> = batch
@@ -165,6 +169,7 @@ fn write_tiles<W: Write + Seek>(
         for part in parts {
             zip.merge_archive(ZipArchive::new(Cursor::new(part))?)?;
         }
+        progress.advance(batch.len() as u64);
     }
     Ok(())
 }
@@ -461,10 +466,29 @@ mod tests {
     }
 
     #[test]
+    fn a_save_counts_its_tiles_and_stops_once_cancelled() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (doc, ids) = sample();
+        let path = std::env::temp_dir().join(format!("opal-native-progress-{}.opal", std::process::id()));
+        let p = Progress::default();
+        save(&doc, &ids, &path, &p).unwrap();
+        let (done, total) = (p.done.load(Relaxed), p.total.load(Relaxed));
+        let saved = std::fs::read(&path).unwrap();
+        let cancelled = Progress::default();
+        cancelled.cancel();
+        let r = save(&doc, &ids, &path, &cancelled);
+        let back = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(total > 0 && done == total, "{done} of {total}");
+        assert!(matches!(r, Err(IoError::Cancelled { .. })), "{r:?}");
+        assert!(back == saved, "the file saved before was changed");
+    }
+
+    #[test]
     fn save_and_load_round_trip() {
         let (doc, ids) = sample();
         let path = std::env::temp_dir().join(format!("opal-native-{}.opal", std::process::id()));
-        save(&doc, &ids, &path).unwrap();
+        save(&doc, &ids, &path, &Progress::default()).unwrap();
         let loaded = load(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
 
@@ -514,7 +538,7 @@ mod tests {
         doc.insert(Position { parent: None, index: 2 }, layer).unwrap();
 
         let path = std::env::temp_dir().join(format!("opal-native-v1-{}.opal", std::process::id()));
-        save(&doc, &ids, &path).unwrap();
+        save(&doc, &ids, &path, &Progress::default()).unwrap();
         let loaded = load(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
         let d = loaded.doc;
@@ -652,7 +676,7 @@ mod tests {
         for at_once in [5, 20] {
             let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
             let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-            write_tiles(&mut zip, &tiles, options, at_once).unwrap();
+            write_tiles(&mut zip, &tiles, options, at_once, &Progress::default()).unwrap();
             let mut back = ZipArchive::new(Cursor::new(zip.finish().unwrap().into_inner())).unwrap();
             assert_eq!(back.len(), 23);
             for (i, t) in tiles.iter().enumerate() {

@@ -117,7 +117,7 @@ pub fn save(st: &AppState) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    opal_io::write_atomically(&path, |out| opal_io::write_all(out, json.as_bytes(), &path))
+    opal_io::write_atomically(&path, None, |out| opal_io::write_all(out, json.as_bytes(), &path))
         .map_err(std::io::Error::other)
 }
 

@@ -1137,12 +1137,95 @@ fn the_first_drop_of_history_is_said_once_the_status_bar_is_free() {
 fn held_result(fails: bool) -> (crate::writer::Job, std::sync::mpsc::Sender<()>) {
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     (
-        Box::new(move || {
+        Box::new(move |_: &opal_io::Progress| {
             let _ = rx.recv();
             if fails { Err("the disk is full".into()) } else { Ok(()) }
         }),
         tx,
     )
+}
+
+/// A write a quarter done that waits until cancelled (failing then), or until the sender
+/// returned is dropped (succeeding).
+fn cancellable_write() -> (crate::writer::Job, std::sync::mpsc::Sender<()>) {
+    use std::sync::mpsc::RecvTimeoutError;
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    (
+        Box::new(move |p: &opal_io::Progress| {
+            p.begin(4);
+            p.advance(1);
+            loop {
+                if p.is_cancelled() {
+                    return Err("cancelled".into());
+                }
+                if rx.recv_timeout(std::time::Duration::from_millis(5)) != Err(RecvTimeoutError::Timeout) {
+                    return Ok(());
+                }
+            }
+        }),
+        tx,
+    )
+}
+
+#[test]
+fn a_write_under_way_shows_how_far_it_has_got_and_can_be_cancelled() {
+    let _gpu = gpu_lock();
+    for save in [true, false] {
+        let mut h = harness();
+        image_of(&mut h, 64, 64);
+        // An edit to save, which a cancelled save leaves unsaved.
+        h.state_mut().state_mut().queue.push(Cmd::NewLayer);
+        h.run();
+        let ctx = h.ctx.clone();
+        let (job, _release) = cancellable_write();
+        let st = h.state_mut().state_mut();
+        let id = st.active_doc.unwrap();
+        assert!(st.active().unwrap().is_dirty());
+        let (before, title) = (std::env::temp_dir().join("before.opal"), "before".to_string());
+        let dir = std::env::temp_dir();
+        if save {
+            // As Save As to another file, to be closed once written, and then quit.
+            let d = st.active_mut().unwrap();
+            let (at, path) = (d.history.current(), dir.join("never-saved.opal"));
+            d.path = Some(path.clone());
+            d.title = "never-saved".into();
+            let written =
+                crate::writer::Written::Save { doc: id, at, path, before: (Some(before.clone()), title.clone()) };
+            st.writer.write(written, crate::writer::Then::Close, job, &ctx);
+            st.queue.push(Cmd::Exit);
+        } else {
+            let written = crate::writer::Written::Export { path: dir.join("never-exported.png") };
+            st.writer.write(written, crate::writer::Then::Nothing, job, &ctx);
+        }
+        let mut shown = false;
+        for _ in 0..500 {
+            h.run();
+            if h.query_by_label("25%").is_some() {
+                shown = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(shown, "the status bar does not say how far the write has got");
+        if save {
+            render(&mut h, "saving");
+        }
+        h.get_by_label("Cancel").click();
+        h.run();
+        assert!(h.query_by_label("Cancelling…").is_some(), "not said to be cancelling");
+        until_written(&mut h);
+        let st = h.state().state();
+        assert!(st.messages.is_empty(), "a cancel reported as a failure: {:?}", st.messages.front().map(|m| &m.title));
+        let notice = st.notice.as_ref().map(|n| n.0.as_str()).unwrap_or_default();
+        assert!(notice.contains("was cancelled"), "{notice:?}");
+        assert!(h.query_by_label("Cancel").is_none(), "still offered once done");
+        if save {
+            let d = st.doc(id).expect("closed though its save was cancelled");
+            assert_eq!((d.path.as_ref(), &d.title), (Some(&before), &title), "the file it had was not given back");
+            assert!(d.is_dirty());
+            assert!(!st.exit_confirmed && !st.exit_after_writes && st.confirm.is_none(), "went on quitting");
+        }
+    }
 }
 
 #[test]
@@ -1214,7 +1297,7 @@ fn a_save_takes_its_file_at_once_and_gives_it_back_if_it_fails() {
     let to: Vec<std::path::PathBuf> = st
         .writer
         .pending()
-        .filter_map(|w| match w {
+        .filter_map(|(w, _)| match w {
             crate::writer::Written::Save { path, .. } => Some(path.clone()),
             _ => None,
         })
