@@ -13,7 +13,6 @@ use opal_core::geom::IRect;
 use opal_core::raster::RasterImage;
 use opal_core::tile::Pixel;
 use opal_io::image_files;
-use opal_io::pixels::pixels_from_rgba8;
 #[cfg(not(windows))]
 use opal_io::pixels::pixels_to_rgba8;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -254,12 +253,12 @@ fn clipboard_bitmap_memory() -> Option<u64> {
 
 /// The memory pasting a bitmap of `size` bytes, whose header (a `BITMAPINFOHEADER`) begins
 /// `header`, takes as it is read: the bitmap, the image at 8 bits a channel (4 bytes a
-/// pixel), the working pixels (8) and their tiles (8).
+/// pixel), and its tiles, kept at 8 bits (4).
 #[cfg(any(windows, test))]
 fn bitmap_memory(header: &[u8], size: u64) -> Option<u64> {
     let int = |at: usize| Some(i32::from_le_bytes(header.get(at..at + 4)?.try_into().ok()?));
     let pixels = u64::from(int(4)?.unsigned_abs()) * u64::from(int(8)?.unsigned_abs());
-    Some(size.saturating_add(pixels.saturating_mul(20)))
+    Some(size.saturating_add(pixels.saturating_mul(8)))
 }
 
 /// Why an image on the clipboard is not pasted: it would need `need` bytes, `free` are free.
@@ -321,7 +320,8 @@ fn read_system(own: Option<OwnCopy>) -> ReadResult {
                 return Ok(Some(own.pasted));
             }
             let (w, h) = (img.width as u32, img.height as u32);
-            let image = RasterImage::from_pixels(w, h, &pixels_from_rgba8(&img.bytes));
+            // Kept at 8 bits, as the clipboard gave it.
+            let image = RasterImage::from_srgb8(w, h, bytemuck::cast_slice(&img.bytes));
             Ok(Some(Pasted { width: w, height: h, image, from: None, warnings: Vec::new() }))
         }
         Err(arboard::Error::ContentNotAvailable) => Ok(None),
@@ -559,7 +559,7 @@ mod tests {
         header[4..8].copy_from_slice(&30_000i32.to_le_bytes());
         header[8..12].copy_from_slice(&(-20_000i32).to_le_bytes());
         let size = 40 + 4 * 30_000 * 20_000;
-        assert_eq!(bitmap_memory(&header, size), Some(size + 20 * 600_000_000));
+        assert_eq!(bitmap_memory(&header, size), Some(size + 8 * 600_000_000));
         assert_eq!(bitmap_memory(&header[..6], size), None, "a header cut short");
     }
 

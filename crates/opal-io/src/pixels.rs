@@ -5,12 +5,6 @@ use half::f16;
 use opal_color::{srgb_decode, srgb_encode};
 use opal_core::tile::Pixel;
 use rayon::prelude::*;
-use std::sync::OnceLock;
-
-fn decode_lut_8() -> &'static [f32; 256] {
-    static LUT: OnceLock<[f32; 256]> = OnceLock::new();
-    LUT.get_or_init(|| std::array::from_fn(|i| srgb_decode(i as f64 / 255.0) as f32))
-}
 
 fn premultiply(r: f32, g: f32, b: f32, a: f32) -> Pixel {
     if a <= 0.0 {
@@ -19,10 +13,10 @@ fn premultiply(r: f32, g: f32, b: f32, a: f32) -> Pixel {
     [f16::from_f32(r * a), f16::from_f32(g * a), f16::from_f32(b * a), f16::from_f32(a)]
 }
 
-/// An 8-bit sRGB pixel with straight alpha, as PNG and JPEG store them.
-pub fn from_srgb8([r, g, b, a]: [u8; 4]) -> Pixel {
-    let lut = decode_lut_8();
-    premultiply(lut[r as usize], lut[g as usize], lut[b as usize], f32::from(a) / 255.0)
+/// An 8-bit sRGB pixel with straight alpha, as PNG and JPEG store them (the conversion
+/// tiles kept at 8 bits read through, so the two always agree).
+pub fn from_srgb8(p: [u8; 4]) -> Pixel {
+    opal_core::tile::pixel_from_srgb8(p)
 }
 
 /// A 16-bit sRGB pixel with straight alpha.

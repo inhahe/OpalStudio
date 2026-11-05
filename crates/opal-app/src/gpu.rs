@@ -418,13 +418,12 @@ fn with_border(sources: &[Option<Arc<Tile>>; 9]) -> Vec<Pixel> {
         let (ny, sy) = pick(oy);
         // Interior rows copy a whole row of the middle tile at once.
         if let (1, Some(t)) = (ny, &sources[4]) {
-            let row = &t.pixels()[sy * n..(sy + 1) * n];
-            out[oy * w + 1..oy * w + 1 + n].copy_from_slice(row);
+            t.read_row(sy as u32, 0, &mut out[oy * w + 1..oy * w + 1 + n]);
         }
         for ox in [0, w - 1].into_iter().chain(if ny == 1 { None } else { Some(1..w - 1) }.into_iter().flatten()) {
             let (nx, sx) = pick(ox);
             if let Some(t) = &sources[ny * 3 + nx] {
-                out[oy * w + ox] = t.pixels()[sy * n + sx];
+                out[oy * w + ox] = t.get(sx as u32, sy as u32);
             }
         }
     }

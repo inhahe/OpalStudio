@@ -10,10 +10,19 @@
 //!
 //! Half floats keep about 11 significant bits at every brightness, which beats 8-bit sRGB
 //! everywhere, and GPUs sample and blend them natively.
+//!
+//! # Storage
+//!
+//! A tile holds working pixels, or, for pixels no finer than an 8-bit file's (an 8-bit
+//! image just opened), the 8-bit sRGB values with straight alpha they came from: half the
+//! memory. Such a tile stands for exactly the working pixels [`pixel_from_srgb8`] makes of
+//! them, and reads as those everywhere; changing it makes it working pixels.
 
 use crate::geom::IRect;
 use half::f16;
 use half::slice::HalfFloatSliceExt;
+use std::borrow::Cow;
+use std::sync::OnceLock;
 
 /// Width and height of a tile, in pixels.
 pub const TILE_SIZE: u32 = 256;
@@ -76,90 +85,235 @@ impl TileCoord {
     }
 }
 
-/// A square of `TILE_SIZE`² pixels. Cloning copies the pixels (512 KiB); share tiles
-/// through `Arc<Tile>` and copy them with `Arc::make_mut` only when changing them.
-#[derive(Clone, PartialEq)]
+/// A square of `TILE_SIZE`² pixels. Cloning copies the pixels (512 KiB, or 256 KiB at 8
+/// bits); share tiles through `Arc<Tile>` and copy them with `Arc::make_mut` only when
+/// changing them.
+#[derive(Clone)]
 pub struct Tile {
-    px: Box<[Pixel]>,
+    data: Data,
+}
+
+#[derive(Clone)]
+enum Data {
+    /// Working pixels.
+    Wide(Box<[Pixel]>),
+    /// 8-bit sRGB with straight alpha, standing for the working pixels
+    /// [`pixel_from_srgb8`] makes of them (see the module documentation).
+    Srgb8(Box<[[u8; 4]]>),
+}
+
+/// Tiles are alike when their pixels are, however they are stored.
+impl PartialEq for Tile {
+    fn eq(&self, other: &Tile) -> bool {
+        match (&self.data, &other.data) {
+            (Data::Wide(a), Data::Wide(b)) => a == b,
+            (Data::Srgb8(a), Data::Srgb8(b)) => a == b,
+            _ => *self.pixels() == *other.pixels(),
+        }
+    }
 }
 
 impl std::fmt::Debug for Tile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let visible = self.px.iter().filter(|p| p[3] != f16::ZERO).count();
-        write!(f, "Tile({visible} non-transparent pixels)")
+        let visible = (0..TILE_PIXELS).filter(|&i| self.alpha_at(i)).count();
+        let kind = if self.is_srgb8() { ", 8-bit" } else { "" };
+        write!(f, "Tile({visible} non-transparent pixels{kind})")
     }
 }
 
 impl Tile {
     /// A fully transparent tile.
     pub fn transparent() -> Tile {
-        Tile { px: vec![[f16::ZERO; 4]; TILE_PIXELS].into_boxed_slice() }
+        Tile { data: Data::Wide(vec![[f16::ZERO; 4]; TILE_PIXELS].into_boxed_slice()) }
     }
 
     /// A tile filled with one pixel value.
     pub fn filled(p: Pixel) -> Tile {
-        Tile { px: vec![p; TILE_PIXELS].into_boxed_slice() }
+        Tile { data: Data::Wide(vec![p; TILE_PIXELS].into_boxed_slice()) }
     }
 
-    /// The pixels, row by row from the top-left.
-    pub fn pixels(&self) -> &[Pixel] {
-        &self.px
+    /// A tile of `TILE_PIXELS` 8-bit sRGB pixels with straight alpha, row by row, kept as
+    /// they are (see the module documentation).
+    pub fn from_srgb8(px: Vec<[u8; 4]>) -> Tile {
+        assert_eq!(px.len(), TILE_PIXELS);
+        Tile { data: Data::Srgb8(px.into_boxed_slice()) }
     }
 
+    /// Whether the tile keeps its pixels as 8-bit sRGB.
+    pub fn is_srgb8(&self) -> bool {
+        matches!(self.data, Data::Srgb8(_))
+    }
+
+    /// The 8-bit sRGB pixels a tile keeps as such, row by row.
+    pub fn srgb8(&self) -> Option<&[[u8; 4]]> {
+        match &self.data {
+            Data::Srgb8(px) => Some(px),
+            Data::Wide(_) => None,
+        }
+    }
+
+    /// The memory the pixels take.
+    pub fn bytes(&self) -> u64 {
+        match &self.data {
+            Data::Wide(_) => (TILE_PIXELS * std::mem::size_of::<Pixel>()) as u64,
+            Data::Srgb8(_) => (TILE_PIXELS * 4) as u64,
+        }
+    }
+
+    /// The pixels, row by row from the top-left (made for an 8-bit tile, so prefer
+    /// [`read_row`](Self::read_row) or [`to_f32`](Self::to_f32) where they serve).
+    pub fn pixels(&self) -> Cow<'_, [Pixel]> {
+        match &self.data {
+            Data::Wide(px) => Cow::Borrowed(px),
+            Data::Srgb8(px) => Cow::Owned(px.iter().map(|&p| pixel_from_srgb8(p)).collect()),
+        }
+    }
+
+    /// The pixels to change, row by row; an 8-bit tile becomes working pixels first.
     pub fn pixels_mut(&mut self) -> &mut [Pixel] {
-        &mut self.px
+        if let Data::Srgb8(px) = &self.data {
+            self.data = Data::Wide(px.iter().map(|&p| pixel_from_srgb8(p)).collect());
+        }
+        match &mut self.data {
+            Data::Wide(px) => px,
+            Data::Srgb8(_) => unreachable!("made working pixels above"),
+        }
     }
 
     /// The pixel at `(x, y)` within the tile.
     pub fn get(&self, x: u32, y: u32) -> Pixel {
-        self.px[index(x, y)]
+        match &self.data {
+            Data::Wide(px) => px[index(x, y)],
+            Data::Srgb8(px) => pixel_from_srgb8(px[index(x, y)]),
+        }
     }
 
     pub fn set(&mut self, x: u32, y: u32, p: Pixel) {
-        self.px[index(x, y)] = p;
+        self.pixels_mut()[index(x, y)] = p;
+    }
+
+    /// Copies `out.len()` pixels of row `y`, from column `x`, into `out`.
+    pub fn read_row(&self, y: u32, x: u32, out: &mut [Pixel]) {
+        let start = index(x, y);
+        let end = start + out.len();
+        assert!(x as usize + out.len() <= TILE_SIZE as usize, "past the row's end");
+        match &self.data {
+            Data::Wide(px) => out.copy_from_slice(&px[start..end]),
+            Data::Srgb8(px) => out.iter_mut().zip(&px[start..end]).for_each(|(o, &p)| *o = pixel_from_srgb8(p)),
+        }
+    }
+
+    /// [`read_row`](Self::read_row), in single precision.
+    pub fn read_row_f32(&self, y: u32, x: u32, out: &mut [PixelF32]) {
+        let start = index(x, y);
+        let end = start + out.len();
+        assert!(x as usize + out.len() <= TILE_SIZE as usize, "past the row's end");
+        match &self.data {
+            Data::Wide(px) => {
+                let src: &[f16] = bytemuck::cast_slice(&px[start..end]);
+                src.convert_to_f32_slice(bytemuck::cast_slice_mut(out));
+            }
+            Data::Srgb8(px) => {
+                out.iter_mut().zip(&px[start..end]).for_each(|(o, &p)| *o = pixel_to_f32(pixel_from_srgb8(p)))
+            }
+        }
     }
 
     /// Whether every pixel is fully transparent.
     pub fn is_transparent(&self) -> bool {
-        self.px.iter().all(|p| p[3] == f16::ZERO)
+        !(0..TILE_PIXELS).any(|i| self.alpha_at(i))
+    }
+
+    /// Whether pixel `i` (row by row) is not fully transparent.
+    fn alpha_at(&self, i: usize) -> bool {
+        match &self.data {
+            Data::Wide(px) => px[i][3] != f16::ZERO,
+            Data::Srgb8(px) => px[i][3] != 0,
+        }
     }
 
     /// Converts the pixels to single precision, into `out` (which must hold `TILE_PIXELS`).
     pub fn to_f32(&self, out: &mut [PixelF32]) {
         assert_eq!(out.len(), TILE_PIXELS);
-        let src: &[f16] = bytemuck::cast_slice(&self.px);
-        let dst: &mut [f32] = bytemuck::cast_slice_mut(out);
-        src.convert_to_f32_slice(dst);
+        match &self.data {
+            Data::Wide(px) => {
+                let src: &[f16] = bytemuck::cast_slice(px);
+                src.convert_to_f32_slice(bytemuck::cast_slice_mut(out));
+            }
+            Data::Srgb8(px) => out.iter_mut().zip(px.iter()).for_each(|(o, &p)| *o = pixel_to_f32(pixel_from_srgb8(p))),
+        }
     }
 
     /// A tile made from single-precision pixels (`TILE_PIXELS` of them).
     pub fn from_f32(src: &[PixelF32]) -> Tile {
         assert_eq!(src.len(), TILE_PIXELS);
-        let mut t = Tile::transparent();
-        let src: &[f32] = bytemuck::cast_slice(src);
-        let dst: &mut [f16] = bytemuck::cast_slice_mut(&mut t.px);
-        dst.convert_from_f32_slice(src);
-        t
+        let mut px = vec![[f16::ZERO; 4]; TILE_PIXELS];
+        let dst: &mut [f16] = bytemuck::cast_slice_mut(&mut px);
+        dst.convert_from_f32_slice(bytemuck::cast_slice(src));
+        Tile { data: Data::Wide(px.into_boxed_slice()) }
     }
 
     /// A tile made from `TILE_PIXELS` stored pixels, row by row.
     pub fn from_pixels(px: Vec<Pixel>) -> Tile {
         assert_eq!(px.len(), TILE_PIXELS);
-        Tile { px: px.into_boxed_slice() }
+        Tile { data: Data::Wide(px.into_boxed_slice()) }
+    }
+
+    /// The tile with every pixel outside `keep` (`[x0, y0, x1, y1]` within it) made
+    /// transparent, stored as this one is.
+    pub fn kept_within(&self, keep: [u32; 4]) -> Tile {
+        let [x0, y0, x1, y1] = keep;
+        let inside = |i: usize| {
+            let (x, y) = ((i % TILE_SIZE as usize) as u32, (i / TILE_SIZE as usize) as u32);
+            (x0..x1).contains(&x) && (y0..y1).contains(&y)
+        };
+        let data = match &self.data {
+            Data::Wide(px) => {
+                Data::Wide(px.iter().enumerate().map(|(i, &p)| if inside(i) { p } else { [f16::ZERO; 4] }).collect())
+            }
+            Data::Srgb8(px) => {
+                Data::Srgb8(px.iter().enumerate().map(|(i, &p)| if inside(i) { p } else { [0; 4] }).collect())
+            }
+        };
+        Tile { data }
     }
 
     /// The smallest rectangle (`[x0, y0, x1, y1]` within the tile) holding every pixel that
     /// is not fully transparent, or `None` if there is none.
     pub fn content_rect(&self) -> Option<[u32; 4]> {
         let n = TILE_SIZE as usize;
-        let opaque_row = |y: usize| self.px[y * n..(y + 1) * n].iter().any(|p| p[3] != f16::ZERO);
+        let opaque_row = |y: usize| (y * n..(y + 1) * n).any(|i| self.alpha_at(i));
         let y0 = (0..n).find(|&y| opaque_row(y))?;
         let y1 = (y0..n).rev().find(|&y| opaque_row(y)).unwrap_or(y0) + 1;
-        let opaque_col = |x: usize| (y0..y1).any(|y| self.px[y * n + x][3] != f16::ZERO);
+        let opaque_col = |x: usize| (y0..y1).any(|y| self.alpha_at(y * n + x));
         let x0 = (0..n).find(|&x| opaque_col(x)).unwrap_or(0);
         let x1 = (x0..n).rev().find(|&x| opaque_col(x)).unwrap_or(x0) + 1;
         Some([x0 as u32, y0 as u32, x1 as u32, y1 as u32])
     }
+}
+
+/// An 8-bit sRGB pixel with straight alpha, as PNG and JPEG store them, as a working pixel:
+/// decoded to linear light and premultiplied, then rounded to half floats.
+pub fn pixel_from_srgb8([r, g, b, a]: [u8; 4]) -> Pixel {
+    let row = &srgb8_table()[a as usize];
+    [row[r as usize], row[g as usize], row[b as usize], row[256]]
+}
+
+/// For each alpha, each 8-bit sRGB value decoded and premultiplied by it as a half float,
+/// then the alpha itself (all 0 for alpha 0, as a clear pixel has).
+fn srgb8_table() -> &'static [[f16; 257]; 256] {
+    static TABLE: OnceLock<Box<[[f16; 257]; 256]>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut t = Box::new([[f16::ZERO; 257]; 256]);
+        for (a, row) in t.iter_mut().enumerate().skip(1) {
+            let alpha = a as f32 / 255.0;
+            for (v, e) in row.iter_mut().take(256).enumerate() {
+                *e = f16::from_f32(opal_color::srgb_decode(v as f64 / 255.0) as f32 * alpha);
+            }
+            row[256] = f16::from_f32(alpha);
+        }
+        t
+    })
 }
 
 /// Halves four tiles (top-left, top-right, bottom-left, bottom-right) into one, averaging
@@ -251,5 +405,73 @@ mod tests {
         t.set(3, 200, pixel_from_f32([0.0, 0.0, 0.0, 0.5]));
         t.set(17, 9, pixel_from_f32([0.0, 0.0, 0.0, 0.5]));
         assert_eq!(t.content_rect(), Some([3, 9, 18, 201]));
+    }
+
+    /// What an 8-bit sRGB pixel with straight alpha means, worked out afresh: decoded,
+    /// premultiplied, rounded to half floats.
+    fn by_formula([r, g, b, a]: [u8; 4]) -> Pixel {
+        if a == 0 {
+            return [f16::ZERO; 4];
+        }
+        let alpha = f32::from(a) / 255.0;
+        let c = |v: u8| f16::from_f32(opal_color::srgb_decode(f64::from(v) / 255.0) as f32 * alpha);
+        [c(r), c(g), c(b), f16::from_f32(alpha)]
+    }
+
+    #[test]
+    fn eight_bit_pixels_read_as_the_formula_says_for_every_value_and_alpha() {
+        for a in 0..=255u8 {
+            for v in 0..=255u8 {
+                let p = [v, 255 - v, v / 2, a];
+                assert_eq!(pixel_from_srgb8(p), by_formula(p), "{p:?}");
+            }
+        }
+    }
+
+    /// An 8-bit tile of every kind of pixel, and the same tile as working pixels.
+    fn both_ways() -> (Tile, Tile) {
+        let px: Vec<[u8; 4]> =
+            (0..TILE_PIXELS).map(|i| [i as u8, (i / 256) as u8, (i * 7) as u8, (i / 3) as u8]).collect();
+        let wide = Tile::from_pixels(px.iter().map(|&p| by_formula(p)).collect());
+        (Tile::from_srgb8(px), wide)
+    }
+
+    #[test]
+    fn an_eight_bit_tile_reads_as_its_working_pixels_every_way() {
+        let (eight, wide) = both_ways();
+        assert!(eight.is_srgb8() && !wide.is_srgb8());
+        assert_eq!(eight.bytes() * 2, wide.bytes());
+        assert!(eight == wide, "alike, however stored");
+        assert!(*eight.pixels() == *wide.pixels());
+        assert_eq!(eight.get(200, 100), wide.get(200, 100));
+        let (mut a, mut b) = (vec![[f16::ZERO; 4]; 100], vec![[f16::ZERO; 4]; 100]);
+        eight.read_row(37, 150, &mut a);
+        wide.read_row(37, 150, &mut b);
+        assert_eq!(a, b);
+        let (mut a, mut b) = (vec![[0.0f32; 4]; 100], vec![[0.0f32; 4]; 100]);
+        eight.read_row_f32(37, 150, &mut a);
+        wide.read_row_f32(37, 150, &mut b);
+        assert_eq!(a, b);
+        let (mut a, mut b) = (vec![[0.0f32; 4]; TILE_PIXELS], vec![[0.0f32; 4]; TILE_PIXELS]);
+        eight.to_f32(&mut a);
+        wide.to_f32(&mut b);
+        assert_eq!(a, b);
+        assert_eq!(eight.content_rect(), wide.content_rect());
+        assert_eq!(eight.is_transparent(), wide.is_transparent());
+    }
+
+    #[test]
+    fn changing_an_eight_bit_tile_makes_it_working_pixels_and_cropping_one_keeps_it() {
+        let (eight, wide) = both_ways();
+        let kept = eight.kept_within([10, 20, 30, 40]);
+        assert!(kept.is_srgb8(), "cropping is a copy, not a change");
+        assert!(kept == wide.kept_within([10, 20, 30, 40]));
+        assert_eq!(kept.content_rect(), wide.kept_within([10, 20, 30, 40]).content_rect());
+        let mut changed = eight.clone();
+        changed.set(5, 5, pixel_from_f32([1.0; 4]));
+        assert!(!changed.is_srgb8());
+        let mut want = wide.clone();
+        want.set(5, 5, pixel_from_f32([1.0; 4]));
+        assert!(changed == want);
     }
 }

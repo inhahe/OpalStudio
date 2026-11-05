@@ -120,7 +120,12 @@ not a goal.
   D65 white, premultiplied by alpha, and extended range (out-of-gamut colors are stored as
   values below 0 or above 1, as scRGB does). Half floats keep about 11 significant bits at
   every brightness, more than 8-bit sRGB anywhere, and GPUs sample them natively.
-  Computation converts to single precision.
+  Computation converts to single precision. A tile whose pixels are no finer than an
+  8-bit file's (an 8-bit PNG or JPEG opened, an 8-bit image pasted) keeps them as the
+  8-bit sRGB values with straight alpha they came from, in half the memory, and reads as
+  exactly the working pixels converting them makes (through a table, one lookup a
+  channel); copies that move pixels without changing them (quarter turns, flips,
+  cropping) stay 8-bit, and changing a tile makes it working pixels.
 - **Compositing.** The CPU reference compositor flattens the layers into the
   **projection**, cached per tile, with a pyramid of half-size levels for zoomed-out views.
   A cached tile keeps the list of what produced it: source tiles (as pointers, with the
@@ -937,13 +942,14 @@ server. Both rest on one language-neutral API.
 
 ## Native file format
 
-`.opal`, version 1: a zip archive holding `mimetype` (stored first, uncompressed:
+`.opal`, version 2: a zip archive holding `mimetype` (stored first, uncompressed:
 `application/x-opal-studio`), `document.json` (the canvas rectangle, the layer tree and the
-next free identifier) and `tiles/<n>.bin`, one tile each. Objects are pixel objects (their
-tiles and whole-pixel offset) or image objects (their tiles, frame, transform and
-sampling). A tile shared by several layers is stored once. A tile file is the tile's half
-floats byte-shuffled (all low bytes, then all high bytes), which lets deflate compress
-photos far better. Saving compresses the tiles in parallel, a batch at a time, so it holds
+next free identifier) and `tiles/<n>.bin` or `tiles/<n>.srgb8`, one tile each. Objects are
+pixel objects (their tiles and whole-pixel offset) or image objects (their tiles, frame,
+transform and sampling). A tile shared by several layers is stored once. A `.bin` tile is
+the tile's half floats byte-shuffled (all low bytes, then all high bytes), which lets
+deflate compress photos far better; a `.srgb8` tile (version 2) one kept at 8 bits, its
+reds, then greens, blues and alphas. Version 1 (no `.srgb8` tiles) is read as well. Saving compresses the tiles in parallel, a batch at a time, so it holds
 a batch of them beyond the document rather than a copy of every tile. Numbers are written
 so they read back exactly. Version 0 (pixel objects
 only, a canvas at the origin) is still read; a newer version is refused with a message

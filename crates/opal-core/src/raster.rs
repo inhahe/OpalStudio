@@ -1,7 +1,7 @@
 //! Sparse, unbounded bitmaps.
 
 use crate::geom::IRect;
-use crate::tile::{Pixel, TILE_SIZE, Tile, TileCoord, downsample};
+use crate::tile::{Pixel, TILE_PIXELS, TILE_SIZE, Tile, TileCoord, downsample};
 use half::f16;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -156,6 +156,61 @@ impl RasterImage {
         img
     }
 
+    /// Builds an image from `width × height` 8-bit sRGB pixels with straight alpha, row by
+    /// row (as 8-bit files hold them), placed with its top-left corner at the canvas origin
+    /// and kept at 8 bits (see [`Tile::from_srgb8`]). Tiles all clear are left out, and
+    /// those of one colour throughout (a flat background) are one tile for each colour.
+    pub fn from_srgb8(width: u32, height: u32, rgba: &[[u8; 4]]) -> RasterImage {
+        let (w, h) = (width as usize, height as usize);
+        assert_eq!(rgba.len(), w * h, "buffer size");
+        let n = TILE_SIZE as usize;
+        let coords: Vec<TileCoord> = TileCoord::covering(&IRect::from_size(w as i64, h as i64), 0).collect();
+        let made: Vec<(TileCoord, Tile)> = coords
+            .into_par_iter()
+            .filter_map(|c| {
+                let r = c.rect(0);
+                let mut px = vec![[0u8; 4]; TILE_PIXELS];
+                for y in r.y0 as usize..(r.y1 as usize).min(h) {
+                    let row = &rgba[y * w + r.x0 as usize..y * w + (r.x1 as usize).min(w)];
+                    px[(y - r.y0 as usize) * n..][..row.len()].copy_from_slice(row);
+                }
+                px.iter().any(|p| p[3] != 0).then(|| (c, Tile::from_srgb8(px)))
+            })
+            .collect();
+        let mut flat: HashMap<[u8; 4], Arc<Tile>> = HashMap::new();
+        let mut img = RasterImage::new();
+        for (c, t) in made {
+            let px = t.srgb8().expect("made at 8 bits");
+            let tile = if px.iter().all(|p| *p == px[0]) {
+                flat.entry(px[0]).or_insert_with(|| Arc::new(t)).clone()
+            } else {
+                Arc::new(t)
+            };
+            img.tiles.insert(c, tile);
+        }
+        img
+    }
+
+    /// The pixels of `rect`, row by row, as 8-bit sRGB with straight alpha, if every tile
+    /// there keeps them so (clear where there is none): what copying them exactly needs.
+    pub fn read_rect_srgb8(&self, rect: &IRect) -> Option<Vec<[u8; 4]>> {
+        let (w, h) = (rect.width() as usize, rect.height() as usize);
+        let mut out = vec![[0u8; 4]; w * h];
+        for c in TileCoord::covering(rect, 0) {
+            let Some(tile) = self.tiles.get(&c) else { continue };
+            let px = tile.srgb8()?;
+            let tr = c.rect(0);
+            let r = tr.intersect(rect);
+            let n = (r.x1 - r.x0) as usize;
+            for y in r.y0..r.y1 {
+                let start = (y - tr.y0) as usize * TILE_SIZE as usize + (r.x0 - tr.x0) as usize;
+                let dst = (y - rect.y0) as usize * w + (r.x0 - rect.x0) as usize;
+                out[dst..dst + n].copy_from_slice(&px[start..start + n]);
+            }
+        }
+        Some(out)
+    }
+
     /// Replaces the pixels of `rect` with `pixels`, row by row. Tiles that come out fully
     /// transparent are removed.
     pub fn write_rect(&mut self, rect: &IRect, pixels: &[Pixel]) {
@@ -187,9 +242,8 @@ impl RasterImage {
             let r = tr.intersect(rect);
             let n = (r.x1 - r.x0) as usize;
             for y in r.y0..r.y1 {
-                let start = (y - tr.y0) as usize * TILE_SIZE as usize + (r.x0 - tr.x0) as usize;
                 let dst = (y - rect.y0) as usize * w + (r.x0 - rect.x0) as usize;
-                out[dst..dst + n].copy_from_slice(&tile.pixels()[start..start + n]);
+                tile.read_row((y - tr.y0) as u32, (r.x0 - tr.x0) as u32, &mut out[dst..dst + n]);
             }
         }
         out
@@ -407,6 +461,35 @@ mod tests {
         assert_eq!(distinct.len(), 9);
         assert_eq!(img.content_bounds(), Some(area));
         assert_eq!((img.pixel(-100, 30), img.pixel(4999, 2999)), (p, p));
+    }
+
+    #[test]
+    fn an_eight_bit_image_keeps_its_tiles_so_and_reads_as_working_pixels() {
+        use crate::tile::pixel_from_srgb8;
+        let (w, h) = (600u32, 600u32);
+        // Clear on the right, one colour on the left, varied between.
+        let rgba: Vec<[u8; 4]> = (0..w * h)
+            .map(|i| {
+                let x = i % w;
+                if x < 256 {
+                    [10, 20, 30, 255]
+                } else if x >= 512 {
+                    [0; 4]
+                } else {
+                    [x as u8, (i / w) as u8, 77, 200]
+                }
+            })
+            .collect();
+        let img = RasterImage::from_srgb8(w, h, &rgba);
+        let wide = RasterImage::from_pixels(w, h, &rgba.iter().map(|&p| pixel_from_srgb8(p)).collect::<Vec<_>>());
+        assert!(img.tiles().all(|(_, t)| t.is_srgb8()));
+        assert_eq!(img.tile_count(), wide.tile_count(), "the clear tiles are left out as before");
+        let whole = IRect::from_size(i64::from(w), i64::from(h));
+        assert!(img.read_rect(&whole) == wide.read_rect(&whole));
+        // The two tiles of one colour throughout are one.
+        assert!(Arc::ptr_eq(img.tile(TileCoord::new(0, 0)).unwrap(), img.tile(TileCoord::new(0, 1)).unwrap()));
+        assert_eq!(img.read_rect_srgb8(&whole).unwrap()[..(w * h) as usize], rgba[..]);
+        assert!(wide.read_rect_srgb8(&whole).is_none(), "working pixels are not 8-bit");
     }
 
     #[test]

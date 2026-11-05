@@ -215,6 +215,19 @@ fn render_exact(image: &RasterImage, g: &GridMap, dest: &IRect) -> Option<Tile> 
     if src.intersect(&image.tile_bounds()).is_empty() {
         return None;
     }
+    // Pixels kept at 8 bits are copied as they are, and stay so.
+    if let Some(buf) = image.read_rect_srgb8(&src) {
+        let w = src.width();
+        let px: Vec<[u8; 4]> = (0..TILE_PIXELS)
+            .map(|i| {
+                let (x, y) = (dest.x0 + (i as i64 % i64::from(TILE_SIZE)), dest.y0 + (i as i64 / i64::from(TILE_SIZE)));
+                let (u, v) = gi.pixel(x, y);
+                buf[((v - src.y0) * w + (u - src.x0)) as usize]
+            })
+            .collect();
+        let tile = Tile::from_srgb8(px);
+        return (!tile.is_transparent()).then_some(tile);
+    }
     let buf = image.read_rect(&src);
     let tile = if (g.a, g.b, g.c, g.d) == (1, 0, 0, 1) {
         Tile::from_pixels(buf)
@@ -273,11 +286,8 @@ impl<'a> Region<'a> {
             let r = tr.intersect(&rect);
             let n = r.width() as usize;
             for y in r.y0..r.y1 {
-                let s = (y - tr.y0) as usize * TILE_SIZE as usize + (r.x0 - tr.x0) as usize;
                 let d = (y - rect.y0) as usize * w + (r.x0 - rect.x0) as usize;
-                let src: &[f16] = bytemuck::cast_slice(&tile.pixels()[s..s + n]);
-                let dst: &mut [f32] = bytemuck::cast_slice_mut(&mut buf[d..d + n]);
-                src.convert_to_f32_slice(dst);
+                tile.read_row_f32((y - tr.y0) as u32, (r.x0 - tr.x0) as u32, &mut buf[d..d + n]);
             }
         }
         Region { rect, px: buf }
@@ -776,6 +786,24 @@ mod tests {
     }
 
     #[test]
+    fn turning_an_eight_bit_image_exactly_keeps_it_eight_bit() {
+        use crate::tile::pixel_from_srgb8;
+        let (w, h) = (300u32, 200u32);
+        let rgba: Vec<[u8; 4]> =
+            (0..w * h).map(|i| [(i % w) as u8, (i / w) as u8, (i * 13) as u8, (i % 7 * 36) as u8]).collect();
+        let eight = RasterImage::from_srgb8(w, h, &rgba);
+        let wide = RasterImage::from_pixels(w, h, &rgba.iter().map(|&p| pixel_from_srgb8(p)).collect::<Vec<_>>());
+        let turn = Affine::rotate(std::f64::consts::FRAC_PI_2).then(Affine::translate(200.0, 0.0));
+        let s = Sampling::default();
+        let (a, b) = (render_image(&eight, &turn, &s, None), render_image(&wide, &turn, &s, None));
+        assert!(a.tiles().all(|(_, t)| t.is_srgb8()), "turned into working pixels");
+        let all = IRect::from_size(i64::from(h), i64::from(w));
+        assert!(a.read_rect(&all) == b.read_rect(&all));
+        // Not on the grid, it is drawn, into working pixels.
+        assert!(render_image(&eight, &Affine::rotate(0.3), &s, None).tiles().all(|(_, t)| !t.is_srgb8()));
+    }
+
+    #[test]
     fn grid_maps_copy_pixels_exactly_whatever_the_method() {
         let px: Vec<Pixel> = (0..300 * 7).map(|i| pixel_from_f32([(i % 13) as f32 / 13.0, 0.0, 0.0, 1.0])).collect();
         let img = RasterImage::from_pixels(300, 7, &px);
@@ -843,7 +871,7 @@ mod tests {
                 assert_eq!(a.tile_count(), b.tile_count());
                 for (c, t) in a.tiles() {
                     let u = b.tile(c).expect("the same tiles");
-                    for (p, q) in t.pixels().iter().zip(u.pixels()) {
+                    for (p, q) in t.pixels().iter().zip(u.pixels().iter()) {
                         let (p, q) = (pixel_to_f32(*p), pixel_to_f32(*q));
                         for ch in 0..4 {
                             assert!((p[ch] - q[ch]).abs() < 2e-3, "{s:?}: {p:?} vs {q:?}");

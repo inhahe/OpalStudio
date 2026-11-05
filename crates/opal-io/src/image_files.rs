@@ -1,6 +1,6 @@
 //! Importing and exporting ordinary image files (PNG and JPEG).
 
-use crate::pixels::{from_srgb8, pixels_from_rgba8, pixels_from_rgba16, pixels_to_rgba8, pixels_to_rgba16};
+use crate::pixels::{from_srgb8, pixels_from_rgba16, pixels_to_rgba8, pixels_to_rgba16};
 use crate::{IoError, Progress, write_atomically};
 use half::f16;
 use image::codecs::jpeg::JpegEncoder;
@@ -44,7 +44,11 @@ pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<u64>) -> Result<Impo
     }
     let mut decoder = reader.into_decoder().map_err(decode_err)?;
     let orientation = decoder.orientation().map_err(decode_err)?;
-    let need = import_memory(decoder.dimensions(), decoder.total_bytes(), orientation);
+    let sixteen = matches!(
+        decoder.color_type(),
+        image::ColorType::L16 | image::ColorType::La16 | image::ColorType::Rgb16 | image::ColorType::Rgba16
+    );
+    let need = import_memory(decoder.dimensions(), decoder.total_bytes(), orientation, sixteen);
     if let Some(free) = free.filter(|&f| need > f) {
         return Err(IoError::TooLarge { path: path.to_owned(), need, free });
     }
@@ -60,10 +64,11 @@ pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<u64>) -> Result<Impo
             | DynamicImage::ImageRgb16(_)
             | DynamicImage::ImageRgba16(_)
     );
-    let pixels = if sixteen_bit {
-        pixels_from_rgba16(img.to_rgba16().as_raw())
+    // 8-bit images are kept at 8 bits, which reads as the same working pixels.
+    let image = if sixteen_bit {
+        RasterImage::from_pixels(width, height, &pixels_from_rgba16(img.to_rgba16().as_raw()))
     } else {
-        pixels_from_rgba8(img.to_rgba8().as_raw())
+        RasterImage::from_srgb8(width, height, bytemuck::cast_slice(img.to_rgba8().as_raw()))
     };
 
     let mut warnings = Vec::new();
@@ -76,18 +81,24 @@ pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<u64>) -> Result<Impo
                 .to_owned(),
         );
     }
-    Ok(Imported { width, height, image: RasterImage::from_pixels(width, height, &pixels), warnings })
+    Ok(Imported { width, height, image, warnings })
 }
 
 /// The memory opening an image of `dimensions` takes at once, given the bytes its decoder
 /// makes (`decoded`): those, a turned copy of them if `orientation` turns it, and per pixel
-/// the image at 8 or 16 bits a channel (up to 8 bytes), the working pixels (8) and their
-/// tiles (8).
-fn import_memory(dimensions: (u32, u32), decoded: u64, orientation: image::metadata::Orientation) -> u64 {
+/// the image as RGBA and its tiles: at 8 bits (4 and 4 bytes, kept at 8 bits), or at 16
+/// (8, and 8 for working pixels and 8 for their tiles).
+fn import_memory(
+    dimensions: (u32, u32),
+    decoded: u64,
+    orientation: image::metadata::Orientation,
+    sixteen: bool,
+) -> u64 {
     // Saturating: a header may claim any size, and a wrapped sum would pass the check.
     let pixels = u64::from(dimensions.0) * u64::from(dimensions.1);
     let turned = if orientation == image::metadata::Orientation::NoTransforms { 0 } else { decoded };
-    decoded.saturating_add(turned).saturating_add(pixels.saturating_mul(24))
+    let per_pixel = if sixteen { 24 } else { 8 };
+    decoded.saturating_add(turned).saturating_add(pixels.saturating_mul(per_pixel))
 }
 
 /// Whether an ICC profile is (by its description) one of the sRGB profiles, which need no
@@ -615,6 +626,20 @@ mod tests {
     }
 
     #[test]
+    fn an_eight_bit_image_opens_at_eight_bits_and_a_sixteen_bit_one_as_working_pixels() {
+        let eight = import_bytes(&gradient_png(300, 260), Path::new("8.png"), None).unwrap();
+        assert!(eight.image.tiles().all(|(_, t)| t.is_srgb8()));
+        // What it reads as is what converting each pixel gives.
+        let img = image::load_from_memory(&gradient_png(300, 260)).unwrap().to_rgba8();
+        let whole = IRect::from_size(300, 260);
+        let want: Vec<Pixel> = img.pixels().map(|p| from_srgb8(p.0)).collect();
+        assert!(eight.image.read_rect(&whole) == want);
+        let px = vec![opal_core::tile::pixel_from_f32([0.3, 0.6, 0.9, 1.0]); 300 * 260];
+        let sixteen = import_bytes(&encode_png16(&px, 300, 260), Path::new("16.png"), None).unwrap();
+        assert!(sixteen.image.tiles().all(|(_, t)| !t.is_srgb8()), "16 bits kept at 8");
+    }
+
+    #[test]
     fn png16_for_the_clipboard_keeps_16_bits() {
         use opal_core::tile::pixel_from_f32;
         // A value between two 8-bit levels survives.
@@ -929,14 +954,17 @@ mod tests {
     #[test]
     fn an_image_needing_more_memory_than_is_free_is_refused_before_decoding() {
         let png = gradient_png(100, 50);
-        // 5,000 pixels: 20 KB decoded, 120 KB beyond.
-        let r = import_bytes(&png, Path::new("big.png"), Some(100_000));
+        // 5,000 pixels at 8 bits: 20 KB decoded, 40 KB beyond (kept at 8 bits).
+        let r = import_bytes(&png, Path::new("big.png"), Some(50_000));
         let Err(IoError::TooLarge { need, free, .. }) = r else { panic!("not refused: {:?}", r.map(|i| i.width)) };
-        assert_eq!((need, free), (140_000, 100_000));
-        assert!(import_bytes(&png, Path::new("big.png"), Some(140_000)).is_ok());
+        assert_eq!((need, free), (60_000, 50_000));
+        assert!(import_bytes(&png, Path::new("big.png"), Some(60_000)).is_ok());
         assert!(import_bytes(&png, Path::new("big.png"), None).is_ok());
         // A size no sum of which may wrap past the check.
-        assert_eq!(import_memory((u32::MAX, u32::MAX), u64::MAX - 1, image::metadata::Orientation::Rotate90), u64::MAX);
+        assert_eq!(
+            import_memory((u32::MAX, u32::MAX), u64::MAX - 1, image::metadata::Orientation::Rotate90, true),
+            u64::MAX
+        );
     }
 
     #[test]

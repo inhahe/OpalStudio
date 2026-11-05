@@ -184,13 +184,8 @@ fn cropped(p: &PixelObject, canvas: &IRect) -> PixelObject {
             out.set_tile(c, Some(t.clone()));
             continue;
         }
-        let mut tile = opal_core::tile::Tile::transparent();
-        for y in keep.y0..keep.y1 {
-            for x in keep.x0..keep.x1 {
-                let (u, v) = ((x - r.x0) as u32, (y - r.y0) as u32);
-                tile.set(u, v, t.get(u, v));
-            }
-        }
+        let within = [keep.x0 - r.x0, keep.y0 - r.y0, keep.x1 - r.x0, keep.y1 - r.y0].map(|v| v as u32);
+        let tile = t.kept_within(within);
         // Only tiles with content are kept.
         if !tile.is_transparent() {
             out.set_tile(c, Some(Arc::new(tile)));
@@ -566,6 +561,18 @@ mod tests {
         let c = b.canvas();
         assert_eq!(c.width, crate::dialogs::MAX_SIDE);
         assert_eq!(c.x + i64::from(c.width) / 2, 500, "{c:?}");
+    }
+
+    #[test]
+    fn cropping_keeps_eight_bit_pixels_eight_bit() {
+        let rgba: Vec<[u8; 4]> = (0..400 * 300).map(|i| [(i % 400) as u8, 50, 90, 255]).collect();
+        let img = opal_core::raster::RasterImage::from_srgb8(400, 300, &rgba);
+        let p = PixelObject { image: Arc::new(img.clone()), offset: [0, 0] };
+        let keep = IRect::new(10, 20, 330, 290);
+        let out = cropped(&p, &keep);
+        assert!(out.image.tiles().all(|(_, t)| t.is_srgb8()), "made working pixels");
+        assert!(out.image.read_rect(&keep) == img.read_rect(&keep));
+        assert!(out.image.pixel(5, 25)[3].to_f32() == 0.0, "kept what was cropped away");
     }
 
     #[test]

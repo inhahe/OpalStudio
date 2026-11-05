@@ -26,10 +26,11 @@ cargo test --workspace                     # all tests, interface tests included
 ## What works so far
 
 - **Files.** Open PNG and JPEG (8 and 16 bits; EXIF orientation honored) and Opal
-  Studio's own `.opal` files, which keep every layer. Save as `.opal`; export the canvas
-  to PNG (8 or 16 bits) or JPEG, at its own size or another. Saving and exporting run in
-  the background, so the window stays usable; the status bar shows how far they have got
-  and can cancel them. A save that fails or is cancelled never damages the existing file.
+  Studio's own `.opal` files, which keep every layer. An 8-bit image takes half the
+  memory until it is changed: its pixels are kept as they were read. Save as `.opal`;
+  export the canvas to PNG (8 or 16 bits) or JPEG, at its own size or another. Saving and
+  exporting run in the background, so the window stays usable; the status bar shows how far
+  they have got and can cancel them. A save that fails or is cancelled never damages the existing file.
   Drop files on the window to open them; several images open as tabs.
 - **Paste and place.** Ctrl+V pastes an image (from Opal Studio, another program, or an
   image file copied in Explorer) into a box that moves, scales and rotates it, snapping to

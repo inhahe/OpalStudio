@@ -7,6 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+opal-color = { workspace = true }
 half = { workspace = true }
 bytemuck = { workspace = true }
 rayon = { workspace = true }

@@ -6,7 +6,7 @@
 //! (see [`History::set_budget`]), the oldest states are dropped.
 
 use crate::document::{Document, Layer, LayerContent, ObjectKind};
-use crate::raster::{RasterImage, TILE_BYTES};
+use crate::raster::RasterImage;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -285,20 +285,24 @@ impl History {
 struct Usage {
     /// Each distinct layer the states hold: in how many states, its tiles and its images.
     layers: HashMap<usize, Held>,
-    /// Each distinct tile and image: in how many of those layers.
-    tiles: Counted<()>,
+    /// Each distinct tile (with the memory it takes) and image: in how many of those layers.
+    tiles: Counted<u64>,
     images: Counted<Arc<RasterImage>>,
+    /// The memory those tiles take.
+    tile_bytes: u64,
     /// The current state's layers, and their tiles and images, each with how many of
-    /// those layers hold it.
+    /// those layers hold it, and the memory those tiles take.
     current_layers: HashSet<usize>,
-    current: Counted<()>,
+    current: Counted<u64>,
     current_images: Counted<()>,
+    current_bytes: u64,
 }
 
 #[derive(Clone, Debug)]
 struct Held {
     states: usize,
-    tiles: Vec<usize>,
+    /// Its tiles' addresses, with the memory each takes.
+    tiles: Vec<(usize, u64)>,
     images: Vec<Arc<RasterImage>>,
 }
 
@@ -313,22 +317,18 @@ impl<V> Default for Counted<V> {
 }
 
 impl<V> Counted<V> {
-    /// One more holder of `key` (with `value`, if it is new).
-    fn add(&mut self, key: usize, value: impl FnOnce() -> V) {
-        self.0.entry(key).or_insert_with(|| (0, value())).0 += 1;
+    /// One more holder of `key` (with `value`, if it is new); whether it is.
+    fn add(&mut self, key: usize, value: impl FnOnce() -> V) -> bool {
+        let e = self.0.entry(key).or_insert_with(|| (0, value()));
+        e.0 += 1;
+        e.0 == 1
     }
 
-    /// One holder fewer of `key`, which goes once none is left.
-    fn remove(&mut self, key: usize) {
+    /// One holder fewer of `key`, which goes once none is left; its value then.
+    fn remove(&mut self, key: usize) -> Option<V> {
         let e = self.0.get_mut(&key).expect("counted");
         e.0 -= 1;
-        if e.0 == 0 {
-            self.0.remove(&key);
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.0.len()
+        if e.0 == 0 { self.0.remove(&key).map(|(_, v)| v) } else { None }
     }
 
     fn contains(&self, key: usize) -> bool {
@@ -344,11 +344,17 @@ impl Usage {
     /// Counts a new state's document (only its layers not counted already are walked).
     fn add(&mut self, doc: &Document) {
         for l in layers_of(doc) {
-            let (tiles, images) = (&mut self.tiles, &mut self.images);
+            let (tiles, images, bytes) = (&mut self.tiles, &mut self.images, &mut self.tile_bytes);
             let e = self.layers.entry(address(l)).or_insert_with(|| {
                 let (t, im) = held_by(l);
-                t.iter().for_each(|&k| tiles.add(k, || ()));
-                im.iter().for_each(|i| images.add(address(i), || i.clone()));
+                for &(k, b) in &t {
+                    if tiles.add(k, || b) {
+                        *bytes += b;
+                    }
+                }
+                im.iter().for_each(|i| {
+                    images.add(address(i), || i.clone());
+                });
                 Held { states: 0, tiles: t, images: im }
             });
             e.states += 1;
@@ -365,8 +371,14 @@ impl Usage {
                 continue;
             }
             let held = self.layers.remove(&key).expect("counted");
-            held.tiles.into_iter().for_each(|k| self.tiles.remove(k));
-            held.images.iter().for_each(|i| self.images.remove(address(i)));
+            for (k, _) in held.tiles {
+                if let Some(b) = self.tiles.remove(k) {
+                    self.tile_bytes -= b;
+                }
+            }
+            held.images.iter().for_each(|i| {
+                self.images.remove(address(i));
+            });
         }
     }
 
@@ -376,13 +388,25 @@ impl Usage {
         let now: HashSet<usize> = layers_of(doc).into_iter().map(address).collect();
         for k in self.current_layers.difference(&now) {
             let h = &self.layers[k];
-            h.tiles.iter().for_each(|&t| self.current.remove(t));
-            h.images.iter().for_each(|i| self.current_images.remove(address(i)));
+            for &(t, _) in &h.tiles {
+                if let Some(b) = self.current.remove(t) {
+                    self.current_bytes -= b;
+                }
+            }
+            h.images.iter().for_each(|i| {
+                self.current_images.remove(address(i));
+            });
         }
         for k in now.difference(&self.current_layers) {
             let h = &self.layers[k];
-            h.tiles.iter().for_each(|&t| self.current.add(t, || ()));
-            h.images.iter().for_each(|i| self.current_images.add(address(i), || ()));
+            for &(t, b) in &h.tiles {
+                if self.current.add(t, || b) {
+                    self.current_bytes += b;
+                }
+            }
+            h.images.iter().for_each(|i| {
+                self.current_images.add(address(i), || ());
+            });
         }
         self.current_layers = now;
     }
@@ -390,7 +414,7 @@ impl Usage {
     /// The bytes the current state does not hold: tiles, and the reduced copies of images
     /// (built when shown, so counted as they are now).
     fn extra(&self) -> u64 {
-        let tiles = (self.tiles.len() - self.current.len()) as u64 * TILE_BYTES;
+        let tiles = self.tile_bytes - self.current_bytes;
         let reduced: u64 = self
             .images
             .0
@@ -418,7 +442,7 @@ fn layers_of(doc: &Document) -> Vec<&Arc<Layer>> {
 }
 
 /// The tiles (by address) and the images layer `l`'s own objects hold, each once.
-fn held_by(l: &Layer) -> (Vec<usize>, Vec<Arc<RasterImage>>) {
+fn held_by(l: &Layer) -> (Vec<(usize, u64)>, Vec<Arc<RasterImage>>) {
     let LayerContent::Objects(objects) = &l.content else { return (Vec::new(), Vec::new()) };
     let mut images: Vec<Arc<RasterImage>> = objects
         .iter()
@@ -429,7 +453,8 @@ fn held_by(l: &Layer) -> (Vec<usize>, Vec<Arc<RasterImage>>) {
         .collect();
     images.sort_unstable_by_key(address);
     images.dedup_by_key(|i| address(i));
-    let mut tiles: Vec<usize> = images.iter().flat_map(|i| i.tiles().map(|(_, t)| address(t))).collect();
+    let mut tiles: Vec<(usize, u64)> =
+        images.iter().flat_map(|i| i.tiles().map(|(_, t)| (address(t), t.bytes()))).collect();
     tiles.sort_unstable();
     tiles.dedup();
     (tiles, images)
@@ -439,6 +464,7 @@ fn held_by(l: &Layer) -> (Vec<usize>, Vec<Arc<RasterImage>>) {
 mod tests {
     use super::*;
     use crate::document::{IdGen, Layer, Position};
+    use crate::raster::TILE_BYTES;
 
     fn with_layer(doc: &Document, ids: &mut IdGen, name: &str) -> Document {
         let mut d = doc.clone();
@@ -554,6 +580,22 @@ mod tests {
         let d = painted(h.doc(), 50);
         h.commit(d, "Paint 6");
         assert_eq!(h.nodes().map(|(_, n)| n.label.as_str()).collect::<Vec<_>>(), ["Paint 4", "Paint 5", "Paint 6"]);
+    }
+
+    #[test]
+    fn a_state_holding_an_eight_bit_tile_counts_its_own_size() {
+        let mut ids = IdGen::default();
+        let mut doc = Document::new(10, 10);
+        let eight = crate::raster::RasterImage::from_srgb8(1, 1, &[[200, 100, 50, 255]]);
+        doc.insert(Position { parent: None, index: 0 }, Layer::new_raster(ids.layer(), ids.object(), "8", eight))
+            .unwrap();
+        let mut h = History::new(doc, "Open");
+        // Painting makes the tile working pixels; the state before holds the 8-bit one.
+        let d = painted(h.doc(), 5);
+        h.commit(d, "Paint");
+        assert_eq!(h.memory(), TILE_BYTES / 2);
+        assert!(h.undo());
+        assert_eq!(h.memory(), TILE_BYTES, "the state after holds a working tile");
     }
 
     #[test]

@@ -36,8 +36,11 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 pub const MIME_TYPE: &str = "application/x-opal-studio";
-pub const FORMAT_VERSION: u32 = 1;
+/// Version 2 adds tiles kept at 8 bits (`tiles/<n>.srgb8`).
+pub const FORMAT_VERSION: u32 = 2;
 const TILE_BYTES: usize = TILE_PIXELS * 4 * 2;
+/// The bytes of a tile kept at 8 bits.
+const SRGB8_BYTES: usize = TILE_PIXELS * 4;
 /// How many tiles saving compresses (in parallel) before writing them: what it holds at
 /// once beyond the document.
 const TILES_AT_ONCE: usize = 256;
@@ -160,8 +163,17 @@ fn write_tiles<W: Write + Seek>(
             .map(|(k, part)| {
                 let mut w = ZipWriter::new(Cursor::new(Vec::new()));
                 for (n, t) in part.iter().enumerate() {
-                    w.start_file(format!("tiles/{}.bin", b * at_once + k * TILES_PER_PART + n), options)?;
-                    w.write_all(&shuffle(t.pixels()))?;
+                    let n = b * at_once + k * TILES_PER_PART + n;
+                    match t.srgb8() {
+                        Some(px) => {
+                            w.start_file(format!("tiles/{n}.srgb8"), options)?;
+                            w.write_all(&planes(px))?;
+                        }
+                        None => {
+                            w.start_file(format!("tiles/{n}.bin"), options)?;
+                            w.write_all(&shuffle(&t.pixels()))?;
+                        }
+                    }
                 }
                 Ok(w.finish()?.into_inner())
             })
@@ -277,16 +289,25 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<u64>) -> Re
     if let Some(free) = free.filter(|&f| need > f) {
         return Err(IoError::TooLarge { path: path.to_owned(), need, free });
     }
-    let mut raw: Vec<(usize, Vec<u8>)> = Vec::with_capacity(wanted.len());
+    // Each as stored: at 8 bits, or as working pixels.
+    let mut raw: Vec<(usize, bool, Vec<u8>)> = Vec::with_capacity(wanted.len());
     for n in wanted {
-        let bytes = read_entry(&mut zip, &format!("tiles/{n}.bin"), TILE_BYTES, path)?;
-        if bytes.len() != TILE_BYTES {
-            return Err(bad(format!("tiles/{n}.bin has {} bytes, not {TILE_BYTES}", bytes.len())));
+        let at_8 = format!("tiles/{n}.srgb8");
+        let (name, size, srgb8) = if zip.index_for_name(&at_8).is_some() {
+            (at_8, SRGB8_BYTES, true)
+        } else {
+            (format!("tiles/{n}.bin"), TILE_BYTES, false)
+        };
+        let bytes = read_entry(&mut zip, &name, size, path)?;
+        if bytes.len() != size {
+            return Err(bad(format!("{name} has {} bytes, not {size}", bytes.len())));
         }
-        raw.push((n, bytes));
+        raw.push((n, srgb8, bytes));
     }
-    let tiles: HashMap<usize, Arc<Tile>> =
-        raw.into_par_iter().map(|(n, bytes)| (n, Arc::new(unshuffle(&bytes)))).collect();
+    let tiles: HashMap<usize, Arc<Tile>> = raw
+        .into_par_iter()
+        .map(|(n, srgb8, bytes)| (n, Arc::new(if srgb8 { from_planes(&bytes) } else { unshuffle(&bytes) })))
+        .collect();
 
     let mut layers = Vec::with_capacity(file.layers.len());
     for l in file.layers {
@@ -431,6 +452,18 @@ fn shuffle(px: &[Pixel]) -> Vec<u8> {
     out
 }
 
+/// A tile's 8-bit pixels as stored: all the reds, then the greens, blues and alphas, which
+/// deflate compresses far better than the pixels as they are.
+fn planes(px: &[[u8; 4]]) -> Vec<u8> {
+    (0..4).flat_map(|c| px.iter().map(move |p| p[c])).collect()
+}
+
+/// The tile kept at 8 bits from its planes ([`planes`]).
+fn from_planes(bytes: &[u8]) -> Tile {
+    let n = bytes.len() / 4;
+    Tile::from_srgb8((0..n).map(|i| [bytes[i], bytes[n + i], bytes[2 * n + i], bytes[3 * n + i]]).collect())
+}
+
 /// The tile from its shuffled bytes. Values that are not numbers, or infinite, which only a
 /// damaged file holds, are read as 0.
 fn unshuffle(bytes: &[u8]) -> Tile {
@@ -471,6 +504,31 @@ mod tests {
         copy.locked = true;
         d.insert(Position { parent: Some(g), index: 0 }, copy).unwrap();
         (d, ids)
+    }
+
+    #[test]
+    fn tiles_kept_at_eight_bits_are_saved_and_read_back_so() {
+        let (mut doc, mut ids) = sample();
+        let rgba: Vec<[u8; 4]> =
+            (0..300 * 200).map(|i| [(i % 300) as u8, (i / 300) as u8, 40, (i % 5 * 60) as u8]).collect();
+        let eight = RasterImage::from_srgb8(300, 200, &rgba);
+        doc.insert(
+            Position { parent: None, index: 2 },
+            Layer::new_raster(ids.layer(), ids.object(), "8", eight.clone()),
+        )
+        .unwrap();
+        let path = std::env::temp_dir().join(format!("opal-native-8-{}.opal", std::process::id()));
+        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        let loaded = load(&path, None).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let back = loaded.doc.layers[2].objects()[0].image().clone();
+        assert!(back.tiles().all(|(_, t)| t.is_srgb8()), "read back as working pixels");
+        let whole = IRect::from_size(300, 200);
+        assert_eq!(back.read_rect_srgb8(&whole), eight.read_rect_srgb8(&whole));
+        // The working pixels beside them come back as they were.
+        let base = loaded.doc.layers[0].objects()[0].image().clone();
+        assert!(base.tiles().all(|(_, t)| !t.is_srgb8()));
+        assert_eq!(base.pixel(-700, 40), pixel_from_f32([-0.125, 1.5, 0.0, 0.5]));
     }
 
     #[test]
@@ -595,10 +653,10 @@ mod tests {
     fn shuffling_round_trips() {
         let mut t = Tile::transparent();
         t.set(1, 2, pixel_from_f32([1.0, -2.0, 0.001, 0.5]));
-        assert_eq!(unshuffle(&shuffle(t.pixels())), t);
+        assert_eq!(unshuffle(&shuffle(&t.pixels())), t);
         // A value that is not a number comes back as 0.
         t.set(3, 3, [half::f16::NAN, half::f16::INFINITY, half::f16::ONE, half::f16::ONE]);
-        let back = unshuffle(&shuffle(t.pixels()));
+        let back = unshuffle(&shuffle(&t.pixels()));
         assert_eq!(back.get(3, 3), [half::f16::ZERO, half::f16::ZERO, half::f16::ONE, half::f16::ONE]);
     }
 
