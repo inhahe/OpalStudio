@@ -480,6 +480,7 @@ impl OpalApp {
         (st.new_image.is_some(), st.export.is_some(), st.prefs_open, st.about_open, st.gallery_open, &st.help)
             .hash(&mut h);
         (st.resize_image.is_some(), st.resize_canvas.is_some(), st.rotate_by.is_some()).hash(&mut h);
+        st.reading.is_some().hash(&mut h);
         st.notice.as_ref().map(|n| &n.0).hash(&mut h);
         h.finish()
     }
@@ -591,6 +592,7 @@ impl eframe::App for OpalApp {
         self.sync_panes();
         self.handle_exit(&ctx);
         self.save_settings_if_due(&ctx);
+        self.st.poll_paste();
         self.st.thumbs.end_frame();
         // What operations on documents asked to say.
         let notices: Vec<String> = self.st.docs.iter_mut().filter_map(|d| d.notice.take()).collect();

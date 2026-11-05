@@ -1,8 +1,10 @@
 //! Copy, Paste and Transform: what the commands do.
 
-use crate::clipboard::{Copied, Pasted};
+use crate::clipboard::{Copied, Pasted, Read, ReadResult};
+use crate::doc::DocId;
 use crate::prefs;
-use crate::state::{AppState, MessageKind};
+use crate::state::{AppState, MessageKind, Reading};
+use eframe::egui;
 use opal_core::composite::composite_within;
 use opal_core::document::{Document, IdGen, Layer, Position};
 use opal_core::geom::Affine;
@@ -43,9 +45,45 @@ impl AppState {
     }
 
     /// Pastes the clipboard's image: into the transform box on the active document, or as a
-    /// new image when none is open. `in_place` puts it where it was copied from.
-    pub(crate) fn paste(&mut self, in_place: bool) {
-        let pasted = match self.clipboard.read_image() {
+    /// new image when none is open. `in_place` puts it where it was copied from. Reading
+    /// the system clipboard runs on a worker thread; the paste lands when it is done (see
+    /// [`AppState::poll_paste`]), on the document active when it was asked for.
+    pub(crate) fn paste(&mut self, in_place: bool, ctx: &egui::Context) {
+        let target = self.active_doc;
+        match self.clipboard.read_image() {
+            Read::Ready(result) => self.paste_read(*result, in_place, target),
+            Read::Later(work) => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    // The receiver may be gone (another paste replaced this one); then the
+                    // result is simply dropped.
+                    let _ = tx.send(work());
+                    ctx.request_repaint();
+                });
+                self.reading = Some(Reading { rx, in_place, target });
+                self.notify("Reading the clipboard…");
+            }
+        }
+    }
+
+    /// Finishes a paste whose clipboard reading has come back.
+    pub(crate) fn poll_paste(&mut self) {
+        let Some(r) = &self.reading else { return };
+        let result = match r.rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("reading the clipboard failed".into()),
+        };
+        let r = self.reading.take().expect("checked above");
+        self.notice = None;
+        self.paste_read(result, r.in_place, r.target);
+    }
+
+    /// Pastes what reading the clipboard gave, into document `target` (or a new image if it
+    /// is gone, or was none).
+    fn paste_read(&mut self, result: ReadResult, in_place: bool, target: Option<DocId>) {
+        let pasted = match result {
             Ok(Some(p)) => p,
             Ok(None) => {
                 let why = if self.clipboard.has_text() {
@@ -62,9 +100,10 @@ impl AppState {
         for w in &pasted.warnings {
             self.message(MessageKind::Warning, "Pasted", w.clone());
         }
-        if self.active().is_none() {
+        let Some(target) = target.filter(|&id| self.doc(id).is_some()) else {
             return self.new_image_from(&pasted);
-        }
+        };
+        self.show_doc(target);
         let sampling = prefs::sampling(&self.prefs, "transform");
         let fit_large = self.prefs.bool("transform.fit_large");
         let d = self.active_mut().expect("checked above");

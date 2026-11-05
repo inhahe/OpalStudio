@@ -91,6 +91,16 @@ pub enum ExportFormat {
     Jpeg { quality: u8, background: [u8; 3] },
 }
 
+/// `w × h` pixels as a 16-bit PNG file's bytes (for the clipboard), compressed quickly.
+pub fn encode_png16(pixels: &[Pixel], w: u32, h: u32) -> Vec<u8> {
+    use image::codecs::png::{CompressionType, FilterType};
+    let buffer = image::ImageBuffer::from_raw(w, h, pixels_to_rgba16(pixels)).expect("buffer size");
+    let mut out = Vec::new();
+    let encoder = PngEncoder::new_with_quality(&mut out, CompressionType::Fast, FilterType::Adaptive);
+    DynamicImage::ImageRgba16(buffer).write_with_encoder(encoder).expect("encoding into memory cannot fail");
+    out
+}
+
 /// A size to export at other than the canvas's, and how to resample to it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExportSize {
@@ -242,6 +252,19 @@ mod tests {
         let mut bytes = Vec::new();
         DynamicImage::ImageRgba8(img).write_with_encoder(PngEncoder::new(&mut bytes)).unwrap();
         bytes
+    }
+
+    #[test]
+    fn png16_for_the_clipboard_keeps_16_bits() {
+        use opal_core::tile::pixel_from_f32;
+        // A value between two 8-bit levels survives.
+        let px = vec![pixel_from_f32([0.30001, 0.5, 0.7, 1.0]), pixel_from_f32([0.0, 0.0, 0.0, 0.25])];
+        let bytes = encode_png16(&px, 2, 1);
+        let back = import_bytes(&bytes, Path::new("clip.png")).unwrap();
+        let p = back.image.pixel(0, 0);
+        let expect = crate::pixels::to_srgb16(px[0]);
+        assert_eq!(crate::pixels::to_srgb16(p), expect);
+        assert_eq!(crate::pixels::to_srgb16(back.image.pixel(1, 0))[3], crate::pixels::to_srgb16(px[1])[3]);
     }
 
     #[test]

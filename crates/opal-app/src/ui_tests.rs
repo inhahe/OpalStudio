@@ -401,7 +401,8 @@ fn pasted(w: u32, h: u32, rgba: [f32; 4]) -> crate::clipboard::Pasted {
 }
 
 fn put_on_clipboard(h: &mut Harness<'static, OpalApp>, p: crate::clipboard::Pasted) {
-    h.state_mut().state_mut().clipboard = Box::new(crate::clipboard::TestClipboard { image: Some(p), text: false });
+    h.state_mut().state_mut().clipboard =
+        Box::new(crate::clipboard::TestClipboard { image: Some(p), ..Default::default() });
 }
 
 fn image_of(h: &mut Harness<'static, OpalApp>, w: u32, ht: u32) {
@@ -622,4 +623,31 @@ fn opening_a_dialog_from_the_queue_asks_for_a_repaint() {
     let before = h.state().signature();
     h.state_mut().state_mut().run(Cmd::ResizeImage, &egui::Context::default());
     assert_ne!(h.state().signature(), before, "the dialog would wait for the pointer to move");
+}
+
+#[test]
+fn a_slow_clipboard_is_read_off_the_interface_thread_and_pasted_when_ready() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    let doc = h.state().state().active_doc;
+    h.state_mut().state_mut().clipboard = Box::new(crate::clipboard::TestClipboard {
+        image: Some(pasted(20, 10, [1.0; 4])),
+        slow: true,
+        ..Default::default()
+    });
+    h.state_mut().state_mut().queue.push(Cmd::Paste);
+    h.run();
+    // The worker thread delivers in its own time: wait for it, a frame at a time.
+    for _ in 0..500 {
+        if h.state().state().reading.is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.run();
+    }
+    let st = h.state().state();
+    assert!(st.reading.is_none(), "the paste never arrived");
+    assert_eq!(st.active_doc, doc);
+    assert!(st.active().unwrap().transform.is_some(), "the box opened on the document pasted into");
 }

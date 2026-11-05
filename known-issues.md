@@ -75,16 +75,3 @@ faster method used while dragging) on a 16-core processor, so the drag keeps up 
 would lag on a slower one, or over many layers. **Fix:** while dragging, composite the
 pyramid level on screen directly from each layer's reduced copy (as the design's
 *Previews first* plans), and recompute full resolution when the drag ends.
-
-## Copies to other programs are 8-bit
-
-`crates/opal-app/src/clipboard.rs` (`write_image`). Copying puts the image on the system
-clipboard as 8-bit PNG and bitmap, through `arboard`; pasting back into Opal Studio uses
-the full-precision copy it keeps, but other programs get 8 bits per channel. **Fix:** also
-write a 16-bit PNG under the registered "PNG" format with `clipboard-win`.
-
-## Pasting decodes the clipboard on the interface thread
-
-`crates/opal-app/src/paste.rs`. Reading and decoding a very large image from the clipboard
-(a 50-megapixel PNG) holds up the interface for as long as that takes. **Fix:** read and
-decode on a worker thread and open the transform box when the image is ready.

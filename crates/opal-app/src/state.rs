@@ -177,6 +177,16 @@ pub struct AppState {
     pub resize_canvas: Option<ResizeCanvas>,
     pub rotate_by: Option<RotateBy>,
     pub thumbs: crate::thumbs::Thumbnails,
+    /// A paste waiting for the clipboard to be read.
+    pub reading: Option<Reading>,
+}
+
+/// A paste whose clipboard reading runs on a worker thread.
+pub struct Reading {
+    pub rx: std::sync::mpsc::Receiver<crate::clipboard::ReadResult>,
+    pub in_place: bool,
+    /// The document it goes to: the one active when it was asked for.
+    pub target: Option<DocId>,
 }
 
 impl AppState {
@@ -230,6 +240,7 @@ impl AppState {
             resize_canvas: None,
             rotate_by: None,
             thumbs: Default::default(),
+            reading: None,
         }
     }
 
@@ -351,8 +362,8 @@ impl AppState {
             }
             Cmd::Copy => self.copy(false),
             Cmd::CopyMerged => self.copy(true),
-            Cmd::Paste => self.paste(false),
-            Cmd::PasteInPlace => self.paste(true),
+            Cmd::Paste => self.paste(false, ctx),
+            Cmd::PasteInPlace => self.paste(true, ctx),
             Cmd::Transform => self.transform(),
             Cmd::CropToContent => self.crop_to_content(),
             Cmd::ResizeImage => {
