@@ -9,6 +9,10 @@
 
 /// Physical memory free now, in bytes, if the system says.
 pub fn free() -> Option<u64> {
+    #[cfg(test)]
+    if let Some(free) = testing::FREE.get() {
+        return free;
+    }
     #[cfg(windows)]
     {
         use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
@@ -65,6 +69,32 @@ impl Allowance {
                 self.taken = need;
                 Ok(())
             }
+        }
+    }
+}
+
+/// For tests: what is free, made up.
+#[cfg(test)]
+pub mod testing {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// What [`free`](super::free) says on this thread, while pretended.
+        pub(super) static FREE: Cell<Option<Option<u64>>> = const { Cell::new(None) };
+    }
+
+    /// Makes [`free`](super::free) say `free` on this thread (only, so tests running beside
+    /// it are not affected) until what this returns is dropped.
+    pub fn pretend_free(free: Option<u64>) -> Pretend {
+        FREE.set(Some(free));
+        Pretend
+    }
+
+    pub struct Pretend;
+
+    impl Drop for Pretend {
+        fn drop(&mut self) {
+            FREE.set(None);
         }
     }
 }

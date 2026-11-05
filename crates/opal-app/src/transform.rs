@@ -12,11 +12,12 @@
 
 use crate::clipboard::Pasted;
 use crate::doc::{DocState, Pending};
+use crate::image_ops::Drawing;
 use crate::memory::Allowance;
 use opal_core::document::{
     Document, ImageObject, Layer, LayerContent, LayerId, Object, ObjectId, ObjectKind, PixelObject, Position,
 };
-use opal_core::geom::{Affine, FRect, GridMap, IRect};
+use opal_core::geom::{Affine, FRect, IRect};
 use opal_core::resample::{self, Sampling};
 use std::sync::Arc;
 
@@ -617,8 +618,11 @@ impl DocState {
         }
         let Some(s) = self.transform.take() else { return };
         let Some(p) = self.pending.as_mut() else { return };
-        let mut memory = Allowance::now();
-        let mut refused = None;
+        // Pixel objects ending exactly on the grid are pixels again (see `image_ops::on_grid`):
+        // moved, the same pixels; turned or flipped, copied exactly if there is memory for
+        // it, else left images, which are drawn as exactly.
+        let mut to = Drawing::new(p.doc.canvas.rect(), Allowance::now());
+        let (mut turned, mut refused) = (0, Vec::new());
         for t in &s.targets {
             let Some(o) = object_mut(&mut p.doc, t.layer, t.object) else { continue };
             let ObjectKind::Image(i) = &mut o.kind else { continue };
@@ -626,14 +630,19 @@ impl DocState {
             if t.was_pixels
                 && let Some(g) = i.transform.grid_map()
             {
-                match back_to_pixels(i, &g, &mut memory) {
+                turned += 1;
+                match crate::image_ops::on_grid(&i.image, &i.transform, &g, &i.sampling, &mut to) {
                     Ok(pixels) => o.kind = pixels,
-                    Err(why) => refused = Some(why),
+                    Err(why) => refused.push(why),
                 }
             }
         }
-        if let Some(why) = refused {
-            self.notice = Some(format!("Turned layers stay images, not drawn into pixels: {why}"));
+        if let Some(why) = refused.first() {
+            let which =
+                if turned == 1 { "The layer".to_string() } else { format!("{} of the {turned} layers", refused.len()) };
+            self.notice = Some(format!("{which} stay images, drawn as exactly, not as pixels: {why}"));
+        } else if to.clipped {
+            self.notice = Some(crate::layer_ops::CLIPPED.into());
         }
         if let Some(paste) = &s.paste
             && paste.into_active
@@ -656,18 +665,6 @@ impl DocState {
         v.extend(self.active_layer());
         v
     }
-}
-
-/// Image object `i`, whose transform maps the grid onto itself (`g`), as pixels again: as
-/// they are, moved, or copied turned or flipped (exactly) if `memory` holds the copy; else
-/// why not (it is drawn as exactly as an image).
-fn back_to_pixels(i: &ImageObject, g: &GridMap, memory: &mut Allowance) -> Result<ObjectKind, String> {
-    if (g.a, g.b, g.c, g.d) == (1, 0, 0, 1) {
-        return Ok(ObjectKind::Pixels(PixelObject { image: i.image.clone(), offset: [g.e, g.f] }));
-    }
-    memory.take(resample::render_cost(&i.image, &i.transform, &i.sampling, None))?;
-    let turned = resample::render_image(&i.image, &i.transform, &i.sampling, None);
-    Ok(ObjectKind::Pixels(PixelObject { image: Arc::new(turned), offset: [0, 0] }))
 }
 
 /// Draws image object `object` of layer `dest` into the layer's pixels: into its topmost
@@ -743,29 +740,27 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_back_to_pixels_needing_more_than_is_free_stays_an_image() {
-        let img = opal_core::raster::RasterImage::filled(
-            &IRect::from_size(600, 300),
-            opal_core::tile::pixel_from_f32([0.2, 0.4, 0.6, 1.0]),
-        );
-        let half = Affine::scale(-1.0, -1.0).then(Affine::translate(600.0, 300.0));
-        let i = ImageObject {
-            image: Arc::new(img),
-            frame: IRect::from_size(600, 300),
-            transform: half,
-            sampling: Sampling::default(),
+    fn a_layer_turned_back_on_the_grid_is_pixels_again_if_the_copy_fits() {
+        // Flipped across the canvas: a copy, exactly.
+        let flip = |s: &mut DocState| {
+            assert!(s.begin_transform(Sampling::default()));
+            let m = s.transform.as_ref().unwrap().current.then(Affine::scale(-1.0, 1.0).about(25.0, 25.0));
+            s.set_box(m, None);
+            s.commit_pending();
         };
-        let g = half.grid_map().unwrap();
-        let need = resample::render_cost(&i.image, &half, &i.sampling, None);
-        assert!(need > 0);
-        let why = back_to_pixels(&i, &g, &mut Allowance::of(Some(need - 1))).unwrap_err();
-        assert!(why.contains("memory"), "{why}");
-        let turned = back_to_pixels(&i, &g, &mut Allowance::of(Some(need))).unwrap();
-        assert!(matches!(turned, ObjectKind::Pixels(_)));
-        // Moved, it is the same pixels, and takes nothing.
-        let moved = Affine::translate(256.0, 0.0);
-        let i = ImageObject { transform: moved, ..i };
-        assert!(back_to_pixels(&i, &moved.grid_map().unwrap(), &mut Allowance::of(Some(0))).is_ok());
+        let only = |s: &DocState| s.doc().layers[0].objects()[0].kind.clone();
+        let mut s = doc_state();
+        flip(&mut s);
+        let ObjectKind::Pixels(p) = only(&s) else { panic!("not pixels again") };
+        assert_eq!(p.image.pixel(46, 3), opal_core::tile::pixel_from_f32([1.0; 4]), "not flipped across x = 25");
+        assert!(s.notice.is_none());
+        // With no memory free, it stays an image, drawn as exactly, and says so.
+        let mut s = doc_state();
+        let _none = crate::memory::testing::pretend_free(Some(0));
+        flip(&mut s);
+        assert!(matches!(only(&s), ObjectKind::Image(_)), "drawn into pixels all the same");
+        let notice = s.notice.clone().unwrap_or_default();
+        assert!(notice.starts_with("The layer stay") && notice.contains("memory"), "{notice}");
     }
 
     #[test]

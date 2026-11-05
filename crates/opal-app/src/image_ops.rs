@@ -8,7 +8,7 @@
 use crate::memory::Allowance;
 use crate::state::{AppState, MessageKind};
 use opal_core::document::{Canvas, Document, ImageObject, Layer, LayerContent, ObjectKind, PixelObject};
-use opal_core::geom::{Affine, FRect, IRect};
+use opal_core::geom::{Affine, FRect, GridMap, IRect};
 use opal_core::raster::RasterImage;
 use opal_core::resample::{self, Sampling};
 use std::sync::Arc;
@@ -110,7 +110,7 @@ pub fn transform_all(
     sampling: Sampling,
     keep: &IRect,
 ) -> Result<bool, String> {
-    let mut to = Drawing { keep: *keep, clipped: false, memory: Allowance::now() };
+    let mut to = Drawing::new(*keep, Allowance::now());
     fn walk(
         layer: &mut Layer,
         m: &Affine,
@@ -135,11 +135,7 @@ pub fn transform_all(
                         ObjectKind::Pixels(p) => {
                             let placed = Affine::translate(p.offset[0] as f64, p.offset[1] as f64).then(*m);
                             match (placed.grid_map(), resample_with) {
-                                (Some(g), _) if (g.a, g.b, g.c, g.d) == (1, 0, 0, 1) => {
-                                    ObjectKind::Pixels(PixelObject { image: p.image.clone(), offset: [g.e, g.f] })
-                                }
-                                // A quarter turn or flip: copied exactly.
-                                (Some(_), _) => drawn(&p.image, &placed, &sampling, to)?,
+                                (Some(g), _) => on_grid(&p.image, &placed, &g, &sampling, to)?,
                                 (None, Some(s)) => drawn(&p.image, &placed, &s, to)?,
                                 (None, None) if !ImageObject::transform_ok(&placed) => {
                                     drawn(&p.image, &placed, &sampling, to)?
@@ -173,12 +169,35 @@ pub fn transform_all(
 }
 
 /// What drawing into pixels may take, and what it has done.
-struct Drawing {
+pub(crate) struct Drawing {
     /// The part to keep of what reaches too far (see `layer_ops::drawable`).
     keep: IRect,
     /// Whether part of something drawn was left out.
-    clipped: bool,
+    pub clipped: bool,
     memory: Allowance,
+}
+
+impl Drawing {
+    /// Drawing that keeps the part within `keep` of what reaches too far, within `memory`.
+    pub(crate) fn new(keep: IRect, memory: Allowance) -> Drawing {
+        Drawing { keep, clipped: false, memory }
+    }
+}
+
+/// `image`, placed by `placed`, which maps the grid onto itself (`g`), as a pixel object:
+/// the same pixels moved, or turned or flipped, copied exactly (see [`drawn`]).
+pub(crate) fn on_grid(
+    image: &Arc<RasterImage>,
+    placed: &Affine,
+    g: &GridMap,
+    sampling: &Sampling,
+    to: &mut Drawing,
+) -> Result<ObjectKind, String> {
+    if (g.a, g.b, g.c, g.d) == (1, 0, 0, 1) {
+        Ok(ObjectKind::Pixels(PixelObject { image: image.clone(), offset: [g.e, g.f] }))
+    } else {
+        drawn(image, placed, sampling, to)
+    }
 }
 
 /// `image` drawn through `t` into a pixel object, keeping only the part within `to.keep` of
