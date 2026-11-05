@@ -233,6 +233,12 @@ impl RasterImage {
         cell.get().expect("the level was just stored")
     }
 
+    /// The bytes the reduced copies built so far take.
+    pub fn reduced_bytes(&self) -> u64 {
+        let tiles: usize = self.pyramid.iter().filter_map(|c| c.get()).map(|r| r.tile_count()).sum();
+        tiles as u64 * TILE_BYTES as u64
+    }
+
     /// Whether level `k` of the pyramid has been built.
     pub fn has_reduced(&self, k: u32) -> bool {
         k == 0 || self.pyramid.get(k as usize - 1).is_some_and(|c| c.get().is_some())

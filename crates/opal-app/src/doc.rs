@@ -371,6 +371,11 @@ impl DocState {
 
     pub fn goto(&mut self, node: NodeId) {
         self.commit_pending();
+        // Committing can drop old states to keep history within its budget.
+        if !self.history.contains(node) {
+            self.notice = Some("That state was dropped to keep history within its memory limit.".into());
+            return;
+        }
         let before = self.history.doc().clone();
         self.history.goto(node);
         self.revision += 1;
@@ -514,6 +519,39 @@ mod tests {
             (center - Vec2::new(250.0, 250.0)).length() < 1.0,
             "the canvas is centered wherever it lies: {center:?}"
         );
+    }
+
+    #[test]
+    fn going_to_a_state_that_committing_drops_does_nothing() {
+        let mut s = state();
+        let layer = add_layer(&mut s, "paint");
+        let root = s.history.root();
+        let paint = |s: &mut DocState, x: i64| {
+            s.apply::<()>("Paint", |d, ids| {
+                let mut img = opal_core::raster::RasterImage::new();
+                img.set_pixel(x, 0, opal_core::tile::pixel_from_f32([1.0; 4]));
+                d.remove(layer).unwrap();
+                d.insert(Position { parent: None, index: 1 }, Layer::new_raster(layer, ids.object(), "paint", img))
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        };
+        paint(&mut s, 0);
+        paint(&mut s, 1);
+        s.history.set_budget(0);
+        // Only the current state and the one before are left.
+        let oldest = s.history.root();
+        assert_ne!(oldest, root, "states were dropped");
+        assert_eq!(s.history.node(s.history.current()).parent, Some(oldest));
+        // With an edit pending, going to the oldest commits the edit first, which makes the
+        // oldest droppable, and drops it.
+        let bg = s.doc().layers[0].id;
+        s.edit_pending("Opacity", |d| d.layer_mut(bg).unwrap().opacity = 0.5);
+        s.goto(oldest);
+        assert!(!s.history.contains(oldest));
+        assert_eq!(s.history.undo_label(), Some("Opacity"), "the edit was committed and stays current");
+        assert!(s.notice.is_some(), "nothing says why the click did nothing");
     }
 
     #[test]
