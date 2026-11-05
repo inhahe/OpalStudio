@@ -1,8 +1,10 @@
 //! The memory the system has free, so that work needing more is refused with the reason
 //! rather than started: an allocation that fails ends the program, losing unsaved work.
 //!
-//! On Windows this is the available physical memory `GlobalMemoryStatusEx` reports; on
-//! Linux, `MemAvailable` from `/proc/meminfo`. Elsewhere it is not known, and nothing is
+//! On Windows this is the available physical memory `GlobalMemoryStatusEx` reports, or
+//! what the process may still commit if that is less (an allocation fails at the commit
+//! limit, which a small page file can bring below the physical memory free); on Linux,
+//! `MemAvailable` from `/proc/meminfo`. Elsewhere it is not known, and nothing is
 //! refused for want of memory.
 
 /// Physical memory free now, in bytes, if the system says.
@@ -14,7 +16,7 @@ pub fn free() -> Option<u64> {
             MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
         // SAFETY: `status` is a valid output struct whose `dwLength` is set, as the call requires.
         unsafe { GlobalMemoryStatusEx(&mut status) }.ok()?;
-        Some(status.ullAvailPhys)
+        Some(status.ullAvailPhys.min(status.ullAvailPageFile))
     }
     #[cfg(target_os = "linux")]
     {

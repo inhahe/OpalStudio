@@ -220,8 +220,6 @@ impl OpalApp {
         }
     }
 
-    /// Enter, Esc and the arrow keys: applying or cancelling the transform box, and moving
-    /// it or the selected layers by a pixel (or, with Shift, by the nudge distance).
     /// Esc cancels a paste still being read, or waiting to be placed, unless a box on the
     /// image shown takes it first.
     fn cancel_paste_key(&mut self, ctx: &egui::Context) {
@@ -235,6 +233,8 @@ impl OpalApp {
         }
     }
 
+    /// Enter, Esc and the arrow keys: applying or cancelling the transform box, and moving
+    /// it or the selected layers by a pixel (or, with Shift, by the nudge distance).
     fn editing_keys(&mut self, ctx: &egui::Context) {
         let far = self.st.prefs.f64("nav.nudge").round() as i64;
         let crop_tool = self.st.tool == ToolId::Crop;
