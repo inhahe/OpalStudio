@@ -29,3 +29,8 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[profile.release]
+# Optimizes across crates (the pixel loops call into opal-core from opal-app) at a modest
+# cost in build time.
+lto = "thin"
