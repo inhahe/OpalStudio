@@ -1145,23 +1145,16 @@ fn held_result(fails: bool) -> (crate::writer::Job, std::sync::mpsc::Sender<()>)
     )
 }
 
-/// A write a quarter done that waits until cancelled (failing then), or until the sender
-/// returned is dropped (succeeding).
+/// A write a quarter done that waits until the sender returned is dropped, then fails if it
+/// was cancelled meanwhile (as a real write stops at its next step), else succeeds.
 fn cancellable_write() -> (crate::writer::Job, std::sync::mpsc::Sender<()>) {
-    use std::sync::mpsc::RecvTimeoutError;
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     (
         Box::new(move |p: &opal_io::Progress| {
             p.begin(4);
             p.advance(1);
-            loop {
-                if p.is_cancelled() {
-                    return Err("cancelled".into());
-                }
-                if rx.recv_timeout(std::time::Duration::from_millis(5)) != Err(RecvTimeoutError::Timeout) {
-                    return Ok(());
-                }
-            }
+            let _ = rx.recv();
+            if p.is_cancelled() { Err("cancelled".into()) } else { Ok(()) }
         }),
         tx,
     )
@@ -1177,7 +1170,7 @@ fn a_write_under_way_shows_how_far_it_has_got_and_can_be_cancelled() {
         h.state_mut().state_mut().queue.push(Cmd::NewLayer);
         h.run();
         let ctx = h.ctx.clone();
-        let (job, _release) = cancellable_write();
+        let (job, release) = cancellable_write();
         let st = h.state_mut().state_mut();
         let id = st.active_doc.unwrap();
         assert!(st.active().unwrap().is_dirty());
@@ -1213,6 +1206,7 @@ fn a_write_under_way_shows_how_far_it_has_got_and_can_be_cancelled() {
         h.get_by_label("Cancel").click();
         h.run();
         assert!(h.query_by_label("Cancelling…").is_some(), "not said to be cancelling");
+        drop(release);
         until_written(&mut h);
         let st = h.state().state();
         assert!(st.messages.is_empty(), "a cancel reported as a failure: {:?}", st.messages.front().map(|m| &m.title));
