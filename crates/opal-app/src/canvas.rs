@@ -362,15 +362,23 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     if let Some(t) = d.projector.behind_for() {
         if t >= BEHIND {
             let at = Rect::from_min_size(rect.right_top() + Vec2::new(-112.0, 8.0), Vec2::new(104.0, 22.0));
-            ui.painter().rect_filled(at.expand(2.0), 4.0, palette.backdrop.gamma_multiply(0.85));
-            ui.put(at, |ui: &mut egui::Ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.add(egui::Spinner::new().size(14.0));
-                    // Not selectable, so it takes no presses: the canvas under it does.
-                    ui.add(egui::Label::new("Drawing…").selectable(false))
-                })
-                .inner
-            });
+            // Painted, and one widget that only senses hovering (read out as a label), so it
+            // never takes a press from the canvas under it.
+            const SAID: &str = "Drawing…";
+            let sign = ui.interact(at, ui.scope_id().with("drawing"), egui::Sense::hover());
+            sign.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, SAID));
+            let painter = ui.painter();
+            painter.rect_filled(at.expand(2.0), 4.0, palette.backdrop.gamma_multiply(0.85));
+            let spinner = Rect::from_center_size(at.left_center() + Vec2::new(11.0, 0.0), Vec2::splat(14.0));
+            egui::Spinner::new().size(14.0).paint_at(ui, spinner);
+            let font = egui::TextStyle::Body.resolve(ui.style());
+            painter.text(
+                at.left_center() + Vec2::new(24.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                SAID,
+                font,
+                ui.visuals().text_color(),
+            );
         } else {
             ctx.request_repaint_after(BEHIND - t);
         }
