@@ -26,8 +26,9 @@ graphic design.
    editor says why (see *Diagnostics*).
 3. **New things get their own layer.** Pastes, text and shapes go on a new layer by default,
    with a visible control to put them on the active layer instead.
-4. **Discoverable without documentation.** A command palette finds any action by name, and
-   every task on the *Basic-tasks checklist* must be doable by a first-time user.
+4. **Discoverable without documentation.** The ribbon shows commands grouped and labeled,
+   command search finds any action by name, and every task on the *Basic-tasks checklist*
+   must be doable by a first-time user.
 5. **No hidden constants.** Every value that affects an operation's result can be adjusted,
    in advanced settings if not in the basic ones (see *Adjustable settings*).
 
@@ -194,6 +195,66 @@ Because curves per channel can only select box-shaped regions of color space, a 
 selects by distance from the sampled colors in OKLab, with an editable falloff curve. The
 same machinery drives *Color match* (see *Painting and retouching tools*).
 
+## Interface layout
+
+Commands (one-shot actions such as Crop, Feather or Merge Down) are on a ribbon; tools (what
+the pointer does on the canvas) are in a group pinned to the ribbon; the active tool's
+settings are in a panel.
+
+### Command registry
+
+Every command is defined once: name, icon, one-line description, longer help text, keyboard
+shortcut, and the condition under which it is available, with the reason shown when it is
+not. The ribbon, command search, context menus, keyboard shortcuts, keytips and the help
+pages are all generated from it, so a command looks and behaves the same everywhere.
+
+### Ribbon
+
+- Tabs of grouped command buttons, each with an icon and a short label: File, Home, Image,
+  Layer, Select, Adjust and View to begin with; Filter, Vector and others as features
+  arrive.
+- **Tabs that apply only to some objects** (Text, Shape, and later others) are always
+  present. They are dimmed while nothing they apply to is selected, and light up when
+  something is. A dimmed tab can still be opened to browse its commands, which are disabled
+  and say what to select first. Tabs never switch on their own.
+- **Tooltips**, not text on the ribbon, carry the details: name, shortcut, the one-line
+  description, and for a disabled command the reason. The hover delay is adjustable, and
+  tooltips can be turned off.
+- **Help:** F1 while hovering a button opens the built-in help page for its group, at that
+  button. A small ? appears while the pointer is over a group's label and opens the same
+  page. Help pages ship with the application and work offline.
+- **Keytips:** pressing Alt shows a letter on every tab and button, so everything can be
+  reached from the keyboard without memorized shortcuts.
+- **Command search:** a search box at the ribbon's right end finds any command by name.
+- **Sizes:** full (icons and labels) or a single line. As the window narrows, groups shrink
+  in steps: large buttons become small ones, then a whole group collapses into a dropdown.
+
+### Tools
+
+- The tool buttons sit in a group pinned at the left end of the ribbon, the same on every
+  tab and styled so it reads as separate from the tabs. A single-line ribbon still shows
+  them, and when the window narrows the command groups collapse first.
+- The group can be moved to a vertical strip at either side of the window, for narrow
+  screens or by preference.
+- Tool buttons are icons, named by their tooltips. At about 34 px per button in two rows,
+  the twenty or so tools planned take about 375 px: comfortable on a screen 1920 px wide,
+  but on a laptop showing 1280–1536 px it leaves the command groups noticeably less room.
+  That is what the side strip is for.
+
+### Tool settings panel
+
+A docked panel: the active tool's variant picker at the top, then its basic settings, then
+its Advanced section. It is a panel rather than a bar because the Advanced settings include
+curve editors.
+
+### Look
+
+- egui restyled. A neutral gray theme by default, so the interface does not skew judgment of
+  the image's colors; a light theme as an option.
+- One accent color, slightly rounded corners, subtle hover and press animations.
+- Fluent UI System Icons (Microsoft's, MIT), rendered sharp at any display scaling.
+- The system font: Segoe UI on Windows; a bundled open font elsewhere.
+
 ## Layers UI
 
 - **Click to select a layer**: with the Move/Select tool, or Ctrl+click with any other tool.
@@ -296,8 +357,9 @@ to. A stroke is defined by:
 Photoshop hides three or four tools behind each toolbar button and its shortcut, so pressing
 B can leave you on the Pencil when you expected the Brush. In Opal Studio:
 
-- Each toolbar button names and shows what it will do. A tool's variants are a visible
-  control in its options bar, never a flyout.
+- Each tool button shows what it will do: its icon reflects the active variant, and its
+  tooltip names it. A tool's variants are a visible control at the top of the *Tool
+  settings* panel, never a flyout.
 - A shortcut selects a tool; it never cycles through hidden variants.
 - The cursor shows the active variant.
 

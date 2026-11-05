@@ -19,15 +19,21 @@ milestones.
 - Open and save PNG and JPEG (honoring EXIF orientation); native file format, version 0.
 - Layers panel: add, delete, reorder, visibility, opacity, lock; active layer highlighted
   and scrolled into view.
-- Command palette.
+- Command registry, and generated from it: the ribbon (tabs, groups that shrink as the
+  window narrows, full and single-line sizes, object tabs always present and dimmed when
+  not applicable), tooltips with the reason a command is disabled, keytips, command search,
+  context menus, and built-in help pages per group (F1, and the ? on group labels).
+- The theme: neutral gray and light; Fluent UI icons.
 - Free GPU memory queried from the OS.
 - Color engine: every color model of the colorpicker, plus OKLab and OKLCh, in Rust and
   WGSL.
 - Settings framework: basic and advanced sections, defaults shown, changed settings marked,
   reset, named presets. The curve editor, both with a chosen color model (the channel curve
   editor) and without one.
-- Toolbar without hidden tool groups: one button per tool, variants as a visible control in
-  the options bar, shortcuts that never cycle variants.
+- Tools without hidden groups: one button per tool, in a group pinned to the ribbon that can
+  move to a side strip; variants as a visible control in the Tool settings panel; shortcuts
+  that never cycle variants.
+- Tool settings panel: variant picker, basic settings, Advanced section.
 
 ## 1. Paste and place
 - Paste opens the transform box: aspect lock, snapping (Alt and an on-box button), rotate,
