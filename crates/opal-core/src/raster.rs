@@ -180,11 +180,14 @@ impl RasterImage {
         let mut flat: HashMap<[u8; 4], Arc<Tile>> = HashMap::new();
         let mut img = RasterImage::new();
         for (c, t) in made {
-            let px = t.srgb8().expect("made at 8 bits");
-            let tile = if px.iter().all(|p| *p == px[0]) {
-                flat.entry(px[0]).or_insert_with(|| Arc::new(t)).clone()
-            } else {
-                Arc::new(t)
+            let flat_colour = {
+                let r = t.reader();
+                let px = r.srgb8().expect("made at 8 bits");
+                px.iter().all(|p| *p == px[0]).then_some(px[0])
+            };
+            let tile = match flat_colour {
+                Some(colour) => flat.entry(colour).or_insert_with(|| Arc::new(t)).clone(),
+                None => Arc::new(t),
             };
             img.tiles.insert(c, tile);
         }
@@ -198,7 +201,8 @@ impl RasterImage {
         let mut out = vec![[0u8; 4]; w * h];
         for c in TileCoord::covering(rect, 0) {
             let Some(tile) = self.tiles.get(&c) else { continue };
-            let px = tile.srgb8()?;
+            let reader = tile.reader();
+            let px = reader.srgb8()?;
             let tr = c.rect(0);
             let r = tr.intersect(rect);
             let n = (r.x1 - r.x0) as usize;
@@ -241,9 +245,10 @@ impl RasterImage {
             let tr = c.rect(0);
             let r = tr.intersect(rect);
             let n = (r.x1 - r.x0) as usize;
+            let reader = tile.reader();
             for y in r.y0..r.y1 {
                 let dst = (y - rect.y0) as usize * w + (r.x0 - rect.x0) as usize;
-                tile.read_row((y - tr.y0) as u32, (r.x0 - tr.x0) as u32, &mut out[dst..dst + n]);
+                reader.read_row((y - tr.y0) as u32, (r.x0 - tr.x0) as u32, &mut out[dst..dst + n]);
             }
         }
         out

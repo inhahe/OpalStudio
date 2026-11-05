@@ -226,3 +226,39 @@ fn import_large_png() {
     let imported = opened.unwrap().expect("opened");
     assert_eq!((imported.width, imported.height), (side, side));
 }
+
+/// Exporting a document three times larger than the memory its tiles may take: the tiles
+/// go to disk and come back as the export reads them.
+#[test]
+#[ignore]
+fn export_spilled() {
+    let (one, _) = large();
+    let mut d = one.clone();
+    let mut ids = IdGen::default();
+    for i in 1..3 {
+        let mut layer = (*one.layers[0]).clone();
+        layer.id = ids.layer();
+        layer.opacity = 0.5;
+        // Its own tiles, so that the three take three times the memory.
+        if let opal_core::document::LayerContent::Objects(objects) = &mut layer.content
+            && let opal_core::document::ObjectKind::Pixels(p) = &mut objects[0].kind
+        {
+            Arc::make_mut(&mut p.image).set_pixel(i, 0, pixel_from_f32([1.0; 4]));
+            let copied: Vec<_> = p.image.tiles().map(|(c, t)| (c, Arc::new((**t).clone()))).collect();
+            let image = Arc::make_mut(&mut p.image);
+            for (c, t) in copied {
+                image.set_tile(c, Some(t));
+            }
+        }
+        d.insert(Position { parent: None, index: i as usize }, layer).unwrap();
+    }
+    opal_core::store::set_budget(Some(200 << 20));
+    let path = temp("spilled.png");
+    measure("PNG of 3 × 192 MB layers, 200 MB in memory", || {
+        export(&d, &path, &ExportFormat::Png { sixteen_bit: false }, None).unwrap()
+    });
+    let s = opal_core::store::status();
+    eprintln!("  {} MB in memory, {} MB on disk", s.resident >> 20, s.on_disk >> 20);
+    opal_core::store::set_budget(None);
+    std::fs::remove_file(path).unwrap();
+}

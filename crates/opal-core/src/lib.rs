@@ -19,6 +19,7 @@ pub mod geom;
 pub mod history;
 pub mod raster;
 pub mod resample;
+pub mod store;
 pub mod tile;
 
 // The tests allocate tiles as the application does: through mimalloc (see opal-app's

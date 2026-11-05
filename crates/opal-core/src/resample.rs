@@ -285,9 +285,10 @@ impl<'a> Region<'a> {
             let tr = c.rect(0);
             let r = tr.intersect(&rect);
             let n = r.width() as usize;
+            let reader = tile.reader();
             for y in r.y0..r.y1 {
                 let d = (y - rect.y0) as usize * w + (r.x0 - rect.x0) as usize;
-                tile.read_row_f32((y - tr.y0) as u32, (r.x0 - tr.x0) as u32, &mut buf[d..d + n]);
+                reader.read_row_f32((y - tr.y0) as u32, (r.x0 - tr.x0) as u32, &mut buf[d..d + n]);
             }
         }
         Region { rect, px: buf }

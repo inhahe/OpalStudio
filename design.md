@@ -126,6 +126,16 @@ not a goal.
   exactly the working pixels converting them makes (through a table, one lookup a
   channel); copies that move pixels without changing them (quarter turns, flips,
   cropping) stay 8-bit, and changing a tile makes it working pixels.
+- **Tiles go to disk past a budget** (`opal_core::store`): the pixels of open images may
+  take a share of the computer's memory (Preferences › Memory, 60% by default); past it,
+  the tiles read least recently go to a scratch file in the temporary folder (deleted when
+  the program ends) and come back when next read. Room is made on the thread that took
+  memory past the budget (down to nine tenths of it), so memory never runs ahead of it,
+  and a tile being read or changed never goes meanwhile (each tile's pixels sit behind a
+  read-write lock; loops over many rows hold a tile's `Reader` once). A tile brought back
+  keeps its copy on disk while unchanged, so it can go again without being written. The
+  status bar says how much is on disk; if writing there fails (a full disk), tiles stop
+  going, and the user is told once.
 - **Compositing.** The CPU reference compositor flattens the layers into the
   **projection**, cached per tile, with a pyramid of half-size levels for zoomed-out views.
   A cached tile keeps the list of what produced it: source tiles (as pointers, with the
@@ -435,7 +445,8 @@ curve editors.
   into a layer, or resampling on Resize Image, keeps only the part around the canvas then,
   and says so. Within those limits, nothing is drawn into pixels that would need more
   memory than is free when the work begins (the available physical memory, on Windows
-  and Linux; `memory.rs`), since a failed allocation ends the program: merging counts
+  and Linux, and what tiles going to disk could give back, as far as the disk holds it;
+  `memory.rs`), since a failed allocation ends the program: merging counts
   exactly the tiles it would make (none for those it shares), drawing into pixels exactly
   the tiles it draws (`render_cost`), summed over everything one command draws; Rasterize
   counts every image object it draws, hidden or not, and no pixel object. A transform box

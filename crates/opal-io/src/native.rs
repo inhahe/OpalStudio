@@ -164,14 +164,15 @@ fn write_tiles<W: Write + Seek>(
                 let mut w = ZipWriter::new(Cursor::new(Vec::new()));
                 for (n, t) in part.iter().enumerate() {
                     let n = b * at_once + k * TILES_PER_PART + n;
-                    match t.srgb8() {
-                        Some(px) => {
+                    let r = t.reader();
+                    match (r.srgb8(), r.wide()) {
+                        (Some(px), _) => {
                             w.start_file(format!("tiles/{n}.srgb8"), options)?;
                             w.write_all(&planes(px))?;
                         }
-                        None => {
+                        (None, px) => {
                             w.start_file(format!("tiles/{n}.bin"), options)?;
-                            w.write_all(&shuffle(&t.pixels()))?;
+                            w.write_all(&shuffle(px.expect("a tile is 8-bit or working pixels")))?;
                         }
                     }
                 }
@@ -469,14 +470,14 @@ fn from_planes(bytes: &[u8]) -> Tile {
 fn unshuffle(bytes: &[u8]) -> Tile {
     let n = bytes.len() / 2;
     let (lo, hi) = bytes.split_at(n);
-    let mut t = Tile::transparent();
-    let values: &mut [u16] = bytemuck::cast_slice_mut(t.pixels_mut());
+    let mut px = vec![[half::f16::ZERO; 4]; TILE_PIXELS];
+    let values: &mut [u16] = bytemuck::cast_slice_mut(&mut px);
     for i in 0..n {
         let v = u16::from_le_bytes([lo[i], hi[i]]);
         // Exponent all ones: infinity or not a number.
         values[i] = if v & 0x7c00 == 0x7c00 { 0 } else { v };
     }
-    t
+    Tile::from_pixels(px)
 }
 
 #[cfg(test)]

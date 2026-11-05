@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 opal-color = { workspace = true }
 half = { workspace = true }
+parking_lot = { workspace = true }
 bytemuck = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }

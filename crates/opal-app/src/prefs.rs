@@ -3,7 +3,8 @@
 use crate::settings::{Def, Init, Kind, Settings};
 use opal_core::resample::{Method, Sampling};
 
-pub const SECTIONS: &[&str] = &["Interface", "Canvas", "Navigation", "History", "Transform", "Resize", "Export"];
+pub const SECTIONS: &[&str] =
+    &["Interface", "Canvas", "Navigation", "History", "Memory", "Transform", "Resize", "Export"];
 
 /// The resampling methods, as a setting's choices.
 const METHODS: &[(&str, &str)] =
@@ -287,6 +288,18 @@ pub static PREFS: &[Def] = &[
         kind: Kind::Float { min: 2.0, max: 500.0, decimals: 0, suffix: " px", log: true },
         default: Init::Float(10.0),
         advanced: true,
+    },
+    // Memory
+    Def {
+        key: "memory.tiles",
+        label: "Images may keep in memory",
+        help: "How much of this computer's memory the pixels of open images may take. Past it, \
+               the parts looked at least lately go to a scratch file on disk, and come back when \
+               needed: images larger than memory can be worked on, only more slowly.",
+        section: "Memory",
+        kind: Kind::Float { min: 10.0, max: 100.0, decimals: 0, suffix: "%", log: false },
+        default: Init::Float(60.0),
+        advanced: false,
     },
     // History
     Def {

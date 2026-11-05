@@ -186,6 +186,10 @@ pub struct AppState {
     pub thumbs: crate::thumbs::Thumbnails,
     /// A paste waiting for the clipboard to be read.
     pub reading: Option<Reading>,
+    /// The memory images' tiles may take before going to disk, as last given to the store.
+    tile_budget: Option<u64>,
+    /// Whether tiles failing to go to disk has been said.
+    told_store_trouble: bool,
 }
 
 /// How long the status bar shows a notice.
@@ -263,6 +267,8 @@ impl AppState {
             rotate_by: None,
             thumbs: Default::default(),
             reading: None,
+            tile_budget: None,
+            told_store_trouble: false,
         }
     }
 
@@ -310,6 +316,26 @@ impl AppState {
         ctx.global_style_mut(|s| {
             s.interaction.tooltip_delay = if tooltips { delay as f32 } else { f32::INFINITY };
         });
+    }
+
+    /// Lets images' tiles take the share of memory the preference says, before they go to
+    /// disk; and says once if they could not go.
+    pub fn apply_tile_budget(&mut self) {
+        let budget = tile_budget(self.prefs.f64("memory.tiles"), crate::memory::total());
+        if budget != self.tile_budget {
+            self.tile_budget = budget;
+            opal_core::store::set_budget(budget);
+        }
+        if !self.told_store_trouble
+            && let Some(why) = opal_core::store::status().trouble
+        {
+            self.told_store_trouble = true;
+            self.message(
+                MessageKind::Warning,
+                "Images can no longer go to disk",
+                format!("{why}. Images now stay in memory, so working on more than it holds will be refused."),
+            );
+        }
     }
 
     pub fn settings_touched(&mut self) {
@@ -816,6 +842,12 @@ impl AppState {
     }
 }
 
+/// The memory images' tiles may take before going to disk: `percent` of the computer's
+/// `total` memory; none set (they never go) if the total is not known.
+fn tile_budget(percent: f64, total: Option<u64>) -> Option<u64> {
+    total.map(|t| (t as f64 * percent.clamp(0.0, 100.0) / 100.0) as u64)
+}
+
 /// The name a file is shown under.
 fn file_title(path: &Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
@@ -879,6 +911,14 @@ mod tests {
         st.copy_within(true, crate::memory::Allowance::of(None), &ctx());
         st.poll_copies();
         assert!(st.notice.as_ref().is_some_and(|n| n.0.starts_with("Copied")), "{:?}", st.notice);
+    }
+
+    #[test]
+    fn images_may_keep_the_share_of_memory_the_preference_says() {
+        assert_eq!(tile_budget(60.0, Some(32_000_000_000)), Some(19_200_000_000));
+        assert_eq!(tile_budget(100.0, Some(8_000_000_000)), Some(8_000_000_000));
+        assert_eq!(tile_budget(60.0, None), None, "not knowing the memory, nothing goes to disk");
+        assert_eq!(tile_budget(AppState::new().prefs.f64("memory.tiles"), Some(10_000)), Some(6_000), "60% by default");
     }
 
     #[test]

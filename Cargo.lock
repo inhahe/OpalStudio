@@ -2444,6 +2444,7 @@ dependencies = [
  "half",
  "mimalloc",
  "opal-color",
+ "parking_lot",
  "rayon",
  "serde",
 ]

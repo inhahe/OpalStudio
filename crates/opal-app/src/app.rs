@@ -562,6 +562,16 @@ impl OpalApp {
                     ui.separator();
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
                 }
+                let tiles = opal_core::store::status();
+                if tiles.on_disk > 0 {
+                    ui.label(RichText::new(format!("{} on disk", bytes(tiles.on_disk))).color(weak)).on_hover_text(
+                        format!(
+                            "Parts of the open images not looked at lately, kept in a scratch file until they are                              needed again (Preferences › Memory); {} of them are in memory.",
+                            bytes(tiles.resident)
+                        ),
+                    );
+                    ui.separator();
+                }
                 if let Some((used, budget)) = self.st.gpu.memory {
                     ui.label(RichText::new(format!("GPU {} / {}", bytes(used), bytes(budget))).color(weak))
                         .on_hover_text(format!(
@@ -659,6 +669,7 @@ impl eframe::App for OpalApp {
         for d in &mut self.st.docs {
             d.set_history_budget(budget);
         }
+        self.st.apply_tile_budget();
         // What operations on documents asked to say.
         let notices: Vec<String> = self.st.docs.iter_mut().filter_map(|d| d.notice.take()).collect();
         for n in notices {

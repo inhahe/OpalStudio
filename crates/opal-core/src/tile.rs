@@ -19,10 +19,11 @@
 //! them, and reads as those everywhere; changing it makes it working pixels.
 
 use crate::geom::IRect;
+use crate::store::{Body, Slot};
 use half::f16;
 use half::slice::HalfFloatSliceExt;
-use std::borrow::Cow;
-use std::sync::OnceLock;
+use parking_lot::{MappedRwLockWriteGuard, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, OnceLock};
 
 /// Width and height of a tile, in pixels.
 pub const TILE_SIZE: u32 = 256;
@@ -87,14 +88,15 @@ impl TileCoord {
 
 /// A square of `TILE_SIZE`² pixels. Cloning copies the pixels (512 KiB, or 256 KiB at 8
 /// bits); share tiles through `Arc<Tile>` and copy them with `Arc::make_mut` only when
-/// changing them.
-#[derive(Clone)]
+/// changing them. The pixels may be on disk ([`crate::store`]): reading them brings them
+/// back.
 pub struct Tile {
-    data: Data,
+    slot: Arc<Slot>,
 }
 
+/// A tile's pixels as stored.
 #[derive(Clone)]
-enum Data {
+pub(crate) enum Data {
     /// Working pixels.
     Wide(Box<[Pixel]>),
     /// 8-bit sRGB with straight alpha, standing for the working pixels
@@ -102,113 +104,65 @@ enum Data {
     Srgb8(Box<[[u8; 4]]>),
 }
 
-/// Tiles are alike when their pixels are, however they are stored.
-impl PartialEq for Tile {
-    fn eq(&self, other: &Tile) -> bool {
-        match (&self.data, &other.data) {
-            (Data::Wide(a), Data::Wide(b)) => a == b,
-            (Data::Srgb8(a), Data::Srgb8(b)) => a == b,
-            _ => *self.pixels() == *other.pixels(),
+impl Data {
+    /// All clear, as working pixels or (`srgb8`) at 8 bits.
+    pub(crate) fn empty(srgb8: bool) -> Data {
+        if srgb8 {
+            Data::Srgb8(vec![[0; 4]; TILE_PIXELS].into_boxed_slice())
+        } else {
+            Data::Wide(vec![[f16::ZERO; 4]; TILE_PIXELS].into_boxed_slice())
         }
     }
-}
 
-impl std::fmt::Debug for Tile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let visible = (0..TILE_PIXELS).filter(|&i| self.alpha_at(i)).count();
-        let kind = if self.is_srgb8() { ", 8-bit" } else { "" };
-        write!(f, "Tile({visible} non-transparent pixels{kind})")
-    }
-}
-
-impl Tile {
-    /// A fully transparent tile.
-    pub fn transparent() -> Tile {
-        Tile { data: Data::Wide(vec![[f16::ZERO; 4]; TILE_PIXELS].into_boxed_slice()) }
-    }
-
-    /// A tile filled with one pixel value.
-    pub fn filled(p: Pixel) -> Tile {
-        Tile { data: Data::Wide(vec![p; TILE_PIXELS].into_boxed_slice()) }
-    }
-
-    /// A tile of `TILE_PIXELS` 8-bit sRGB pixels with straight alpha, row by row, kept as
-    /// they are (see the module documentation).
-    pub fn from_srgb8(px: Vec<[u8; 4]>) -> Tile {
-        assert_eq!(px.len(), TILE_PIXELS);
-        Tile { data: Data::Srgb8(px.into_boxed_slice()) }
-    }
-
-    /// Whether the tile keeps its pixels as 8-bit sRGB.
-    pub fn is_srgb8(&self) -> bool {
-        matches!(self.data, Data::Srgb8(_))
-    }
-
-    /// The 8-bit sRGB pixels a tile keeps as such, row by row.
-    pub fn srgb8(&self) -> Option<&[[u8; 4]]> {
-        match &self.data {
-            Data::Srgb8(px) => Some(px),
-            Data::Wide(_) => None,
-        }
+    pub(crate) fn is_srgb8(&self) -> bool {
+        matches!(self, Data::Srgb8(_))
     }
 
     /// The memory the pixels take.
-    pub fn bytes(&self) -> u64 {
-        match &self.data {
-            Data::Wide(_) => (TILE_PIXELS * std::mem::size_of::<Pixel>()) as u64,
-            Data::Srgb8(_) => (TILE_PIXELS * 4) as u64,
+    pub(crate) fn bytes(&self) -> u64 {
+        self.as_bytes().len() as u64
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        match self {
+            Data::Wide(px) => bytemuck::cast_slice(px),
+            Data::Srgb8(px) => bytemuck::cast_slice(px),
         }
     }
 
-    /// The pixels, row by row from the top-left (made for an 8-bit tile, so prefer
-    /// [`read_row`](Self::read_row) or [`to_f32`](Self::to_f32) where they serve).
-    pub fn pixels(&self) -> Cow<'_, [Pixel]> {
-        match &self.data {
-            Data::Wide(px) => Cow::Borrowed(px),
-            Data::Srgb8(px) => Cow::Owned(px.iter().map(|&p| pixel_from_srgb8(p)).collect()),
+    pub(crate) fn as_bytes_mut(&mut self) -> &mut [u8] {
+        match self {
+            Data::Wide(px) => bytemuck::cast_slice_mut(px),
+            Data::Srgb8(px) => bytemuck::cast_slice_mut(px),
         }
     }
 
-    /// The pixels to change, row by row; an 8-bit tile becomes working pixels first.
-    pub fn pixels_mut(&mut self) -> &mut [Pixel] {
-        if let Data::Srgb8(px) = &self.data {
-            self.data = Data::Wide(px.iter().map(|&p| pixel_from_srgb8(p)).collect());
-        }
-        match &mut self.data {
-            Data::Wide(px) => px,
-            Data::Srgb8(_) => unreachable!("made working pixels above"),
+    fn get(&self, i: usize) -> Pixel {
+        match self {
+            Data::Wide(px) => px[i],
+            Data::Srgb8(px) => pixel_from_srgb8(px[i]),
         }
     }
 
-    /// The pixel at `(x, y)` within the tile.
-    pub fn get(&self, x: u32, y: u32) -> Pixel {
-        match &self.data {
-            Data::Wide(px) => px[index(x, y)],
-            Data::Srgb8(px) => pixel_from_srgb8(px[index(x, y)]),
+    /// Whether pixel `i` (row by row) is not fully transparent.
+    fn shows(&self, i: usize) -> bool {
+        match self {
+            Data::Wide(px) => px[i][3] != f16::ZERO,
+            Data::Srgb8(px) => px[i][3] != 0,
         }
     }
 
-    pub fn set(&mut self, x: u32, y: u32, p: Pixel) {
-        self.pixels_mut()[index(x, y)] = p;
-    }
-
-    /// Copies `out.len()` pixels of row `y`, from column `x`, into `out`.
-    pub fn read_row(&self, y: u32, x: u32, out: &mut [Pixel]) {
-        let start = index(x, y);
+    fn read_row(&self, start: usize, out: &mut [Pixel]) {
         let end = start + out.len();
-        assert!(x as usize + out.len() <= TILE_SIZE as usize, "past the row's end");
-        match &self.data {
+        match self {
             Data::Wide(px) => out.copy_from_slice(&px[start..end]),
             Data::Srgb8(px) => out.iter_mut().zip(&px[start..end]).for_each(|(o, &p)| *o = pixel_from_srgb8(p)),
         }
     }
 
-    /// [`read_row`](Self::read_row), in single precision.
-    pub fn read_row_f32(&self, y: u32, x: u32, out: &mut [PixelF32]) {
-        let start = index(x, y);
+    fn read_row_f32(&self, start: usize, out: &mut [PixelF32]) {
         let end = start + out.len();
-        assert!(x as usize + out.len() <= TILE_SIZE as usize, "past the row's end");
-        match &self.data {
+        match self {
             Data::Wide(px) => {
                 let src: &[f16] = bytemuck::cast_slice(&px[start..end]);
                 src.convert_to_f32_slice(bytemuck::cast_slice_mut(out));
@@ -218,30 +172,179 @@ impl Tile {
             }
         }
     }
+}
+
+/// A tile's pixels, held for reading: none of them goes to disk meanwhile. For reading
+/// many rows of a tile without taking it each time.
+pub struct Reader<'a> {
+    body: RwLockReadGuard<'a, Body>,
+}
+
+impl Reader<'_> {
+    fn data(&self) -> &Data {
+        match &*self.body {
+            Body::Here { data, .. } => data,
+            Body::Away { .. } => unreachable!("brought back to be read"),
+        }
+    }
+
+    /// The pixel at `(x, y)` within the tile.
+    pub fn get(&self, x: u32, y: u32) -> Pixel {
+        self.data().get(index(x, y))
+    }
+
+    /// Copies `out.len()` pixels of row `y`, from column `x`, into `out`.
+    pub fn read_row(&self, y: u32, x: u32, out: &mut [Pixel]) {
+        assert!(x as usize + out.len() <= TILE_SIZE as usize, "past the row's end");
+        self.data().read_row(index(x, y), out);
+    }
+
+    /// [`read_row`](Self::read_row), in single precision.
+    pub fn read_row_f32(&self, y: u32, x: u32, out: &mut [PixelF32]) {
+        assert!(x as usize + out.len() <= TILE_SIZE as usize, "past the row's end");
+        self.data().read_row_f32(index(x, y), out);
+    }
+
+    /// The 8-bit sRGB pixels a tile keeps as such, row by row.
+    pub fn srgb8(&self) -> Option<&[[u8; 4]]> {
+        match self.data() {
+            Data::Srgb8(px) => Some(px),
+            Data::Wide(_) => None,
+        }
+    }
+
+    /// The working pixels a tile keeps as such, row by row.
+    pub fn wide(&self) -> Option<&[Pixel]> {
+        match self.data() {
+            Data::Wide(px) => Some(px),
+            Data::Srgb8(_) => None,
+        }
+    }
+}
+
+impl Clone for Tile {
+    fn clone(&self) -> Tile {
+        Tile::of(self.reader().data().clone())
+    }
+}
+
+/// Tiles are alike when their pixels are, however they are stored.
+impl PartialEq for Tile {
+    fn eq(&self, other: &Tile) -> bool {
+        if Arc::ptr_eq(&self.slot, &other.slot) {
+            return true;
+        }
+        let (a, b) = (self.reader(), other.reader());
+        match (a.data(), b.data()) {
+            (Data::Wide(x), Data::Wide(y)) => x == y,
+            (Data::Srgb8(x), Data::Srgb8(y)) => x == y,
+            (x, y) => (0..TILE_PIXELS).all(|i| x.get(i) == y.get(i)),
+        }
+    }
+}
+
+impl std::fmt::Debug for Tile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let r = self.reader();
+        let visible = (0..TILE_PIXELS).filter(|&i| r.data().shows(i)).count();
+        let kind = if r.data().is_srgb8() { ", 8-bit" } else { "" };
+        write!(f, "Tile({visible} non-transparent pixels{kind})")
+    }
+}
+
+impl Tile {
+    fn of(data: Data) -> Tile {
+        Tile { slot: Slot::new(data) }
+    }
+
+    /// The pixels held for reading (brought back from disk first if they are there).
+    pub fn reader(&self) -> Reader<'_> {
+        Reader { body: self.slot.read() }
+    }
+
+    /// The pixels to change, as working pixels (an 8-bit tile becomes working pixels).
+    fn wide_mut(&mut self) -> MappedRwLockWriteGuard<'_, [Pixel]> {
+        let mut body = self.slot.write();
+        let Body::Here { data, .. } = &mut *body else { unreachable!("brought back to be changed") };
+        if let Data::Srgb8(px) = data {
+            let wide = Data::Wide(px.iter().map(|&p| pixel_from_srgb8(p)).collect());
+            self.slot.resized(data.bytes(), wide.bytes());
+            *data = wide;
+        }
+        RwLockWriteGuard::map(body, |b| match b {
+            Body::Here { data: Data::Wide(px), .. } => &mut px[..],
+            _ => unreachable!("made working pixels above"),
+        })
+    }
+
+    /// A fully transparent tile.
+    pub fn transparent() -> Tile {
+        Tile::of(Data::empty(false))
+    }
+
+    /// A tile filled with one pixel value.
+    pub fn filled(p: Pixel) -> Tile {
+        Tile::of(Data::Wide(vec![p; TILE_PIXELS].into_boxed_slice()))
+    }
+
+    /// A tile of `TILE_PIXELS` 8-bit sRGB pixels with straight alpha, row by row, kept as
+    /// they are (see the module documentation).
+    pub fn from_srgb8(px: Vec<[u8; 4]>) -> Tile {
+        assert_eq!(px.len(), TILE_PIXELS);
+        Tile::of(Data::Srgb8(px.into_boxed_slice()))
+    }
+
+    /// Whether the tile keeps its pixels as 8-bit sRGB (asked without bringing them back).
+    pub fn is_srgb8(&self) -> bool {
+        self.slot.peek().1
+    }
+
+    /// The memory the pixels take in memory (asked without bringing them back).
+    pub fn bytes(&self) -> u64 {
+        self.slot.peek().0
+    }
+
+    /// The pixels, row by row from the top-left, made for an 8-bit tile: prefer
+    /// [`reader`](Self::reader) or [`to_f32`](Self::to_f32) where they serve.
+    pub fn pixels(&self) -> Vec<Pixel> {
+        let r = self.reader();
+        (0..TILE_PIXELS).map(|i| r.data().get(i)).collect()
+    }
+
+    /// The pixels to change, row by row; an 8-bit tile becomes working pixels first.
+    pub fn pixels_mut(&mut self) -> MappedRwLockWriteGuard<'_, [Pixel]> {
+        self.wide_mut()
+    }
+
+    /// The pixel at `(x, y)` within the tile.
+    pub fn get(&self, x: u32, y: u32) -> Pixel {
+        self.reader().get(x, y)
+    }
+
+    pub fn set(&mut self, x: u32, y: u32, p: Pixel) {
+        self.wide_mut()[index(x, y)] = p;
+    }
+
+    /// Copies `out.len()` pixels of row `y`, from column `x`, into `out`.
+    pub fn read_row(&self, y: u32, x: u32, out: &mut [Pixel]) {
+        self.reader().read_row(y, x, out);
+    }
+
+    /// [`read_row`](Self::read_row), in single precision.
+    pub fn read_row_f32(&self, y: u32, x: u32, out: &mut [PixelF32]) {
+        self.reader().read_row_f32(y, x, out);
+    }
 
     /// Whether every pixel is fully transparent.
     pub fn is_transparent(&self) -> bool {
-        !(0..TILE_PIXELS).any(|i| self.alpha_at(i))
-    }
-
-    /// Whether pixel `i` (row by row) is not fully transparent.
-    fn alpha_at(&self, i: usize) -> bool {
-        match &self.data {
-            Data::Wide(px) => px[i][3] != f16::ZERO,
-            Data::Srgb8(px) => px[i][3] != 0,
-        }
+        let r = self.reader();
+        !(0..TILE_PIXELS).any(|i| r.data().shows(i))
     }
 
     /// Converts the pixels to single precision, into `out` (which must hold `TILE_PIXELS`).
     pub fn to_f32(&self, out: &mut [PixelF32]) {
         assert_eq!(out.len(), TILE_PIXELS);
-        match &self.data {
-            Data::Wide(px) => {
-                let src: &[f16] = bytemuck::cast_slice(px);
-                src.convert_to_f32_slice(bytemuck::cast_slice_mut(out));
-            }
-            Data::Srgb8(px) => out.iter_mut().zip(px.iter()).for_each(|(o, &p)| *o = pixel_to_f32(pixel_from_srgb8(p))),
-        }
+        self.reader().data().read_row_f32(0, out);
     }
 
     /// A tile made from single-precision pixels (`TILE_PIXELS` of them).
@@ -250,13 +353,13 @@ impl Tile {
         let mut px = vec![[f16::ZERO; 4]; TILE_PIXELS];
         let dst: &mut [f16] = bytemuck::cast_slice_mut(&mut px);
         dst.convert_from_f32_slice(bytemuck::cast_slice(src));
-        Tile { data: Data::Wide(px.into_boxed_slice()) }
+        Tile::of(Data::Wide(px.into_boxed_slice()))
     }
 
     /// A tile made from `TILE_PIXELS` stored pixels, row by row.
     pub fn from_pixels(px: Vec<Pixel>) -> Tile {
         assert_eq!(px.len(), TILE_PIXELS);
-        Tile { data: Data::Wide(px.into_boxed_slice()) }
+        Tile::of(Data::Wide(px.into_boxed_slice()))
     }
 
     /// The tile with every pixel outside `keep` (`[x0, y0, x1, y1]` within it) made
@@ -267,7 +370,7 @@ impl Tile {
             let (x, y) = ((i % TILE_SIZE as usize) as u32, (i / TILE_SIZE as usize) as u32);
             (x0..x1).contains(&x) && (y0..y1).contains(&y)
         };
-        let data = match &self.data {
+        let data = match self.reader().data() {
             Data::Wide(px) => {
                 Data::Wide(px.iter().enumerate().map(|(i, &p)| if inside(i) { p } else { [f16::ZERO; 4] }).collect())
             }
@@ -275,17 +378,19 @@ impl Tile {
                 Data::Srgb8(px.iter().enumerate().map(|(i, &p)| if inside(i) { p } else { [0; 4] }).collect())
             }
         };
-        Tile { data }
+        Tile::of(data)
     }
 
     /// The smallest rectangle (`[x0, y0, x1, y1]` within the tile) holding every pixel that
     /// is not fully transparent, or `None` if there is none.
     pub fn content_rect(&self) -> Option<[u32; 4]> {
+        let r = self.reader();
+        let shows = |i: usize| r.data().shows(i);
         let n = TILE_SIZE as usize;
-        let opaque_row = |y: usize| (y * n..(y + 1) * n).any(|i| self.alpha_at(i));
+        let opaque_row = |y: usize| (y * n..(y + 1) * n).any(shows);
         let y0 = (0..n).find(|&y| opaque_row(y))?;
         let y1 = (y0..n).rev().find(|&y| opaque_row(y)).unwrap_or(y0) + 1;
-        let opaque_col = |x: usize| (y0..y1).any(|y| self.alpha_at(y * n + x));
+        let opaque_col = |x: usize| (y0..y1).any(|y| shows(y * n + x));
         let x0 = (0..n).find(|&x| opaque_col(x)).unwrap_or(0);
         let x1 = (x0..n).rev().find(|&x| opaque_col(x)).unwrap_or(x0) + 1;
         Some([x0 as u32, y0 as u32, x1 as u32, y1 as u32])
