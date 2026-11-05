@@ -44,6 +44,9 @@ selection core it builds on.
 - Crop, resize the image, resize the canvas, rotate.
 - Export PNG and JPEG at a chosen size.
 - Layer thumbnails in the Layers panel; history thumbnails on hover.
+- Selecting several layers in the Layers panel; Merge Selected, Merge Visible, Merge
+  Group, Stamp Visible.
+- Rasterize Layer (first for a pasted image's transform).
 
 ## S. Scripting and MCP (right after milestone 1)
 - Parameterized commands: every command callable with parameters as well as from the
@@ -96,6 +99,8 @@ selection core it builds on.
 - Fill, gradient, eyedropper.
 - Painting on masks.
 - Color picker, version 1: the 2D picker and sliders.
+- Compositing caches for each group and for everything below the active layer, so painting
+  recombines only what is above it.
 
 ## 4. Vector shapes
 - Pen tool reusing the outline tool's curve editing; rectangle, ellipse, polygon, star.
@@ -116,6 +121,8 @@ selection core it builds on.
   floating-point pipeline end to end.
 - A GPU compositor matching the CPU reference, so adjustments preview at interactive speed
   on large images.
+- Previews at screen resolution first while a setting is dragged; the performance view
+  (which layers cost the most, with Rasterize and Stamp Visible offered).
 
 ## 6. Retouching
 - *Sample from*: current, below, all visible, chosen and named sets.

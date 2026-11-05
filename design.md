@@ -322,6 +322,36 @@ curve editors.
 - **Apply to** (which layers an operation writes) is a separate control, for moving,
   transforming or adjusting several layers at once.
 
+### Merging and rasterizing
+
+- **Merge Down** and **Flatten Image** bake layers into one pixel layer (built).
+- **Merge Selected**, **Merge Visible**, **Merge Group**, and **Stamp Visible**: a new layer
+  holding everything visible merged, the originals kept, for retouching on a flat copy.
+- **Rasterize Layer** turns a layer's editable content (a transformed pasted image, shapes,
+  text, effects) into plain pixels at the canvas's resolution. It is never required: no
+  tool refuses to work on editable content. It exists for when pixels are wanted, to make a
+  file smaller, or to make a heavy layer cost nothing; like everything, it can be undone.
+- Merging and rasterizing keep the look exactly: the result composites like what it
+  replaces.
+
+### Performance with many layers
+
+Editable content does not mean recomputing everything on each change.
+
+- **Only what changed is recomputed.** Every cached tile of the projection knows the
+  source tiles that produced it (see *Compositing*), so an edit recomputes the tiles it
+  touches and nothing else.
+- **Editable objects are cached as pixels.** Shapes, text, effects and transformed images
+  are drawn once, per tile, at the resolution shown, and redrawn only when edited; for
+  display they cost what a pixel layer costs. Editability costs memory more than time.
+- **Intermediate caches:** the composite of each group, and of everything below the active
+  layer, so painting recombines only the active layer and what is above it, over a stored
+  picture of the rest.
+- **Previews first:** while a heavy effect's setting is being dragged, the result is
+  computed at the resolution on screen first and at full resolution in the background.
+- **Saying what is slow:** a performance view lists the layers that cost the most time and
+  memory, and offers Rasterize Layer or Stamp Visible for them.
+
 ### Diagnostics
 
 When an action changes nothing visible, the editor says why: painting outside the active
