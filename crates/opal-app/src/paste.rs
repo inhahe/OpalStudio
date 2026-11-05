@@ -74,7 +74,7 @@ impl AppState {
                     ctx.request_repaint();
                 });
                 let d = target.and_then(|t| self.doc(t));
-                let notice = "Reading the clipboard…".to_string();
+                let notice = "Reading the clipboard… (Esc cancels the paste)".to_string();
                 self.reading = Some(Reading {
                     rx,
                     result: None,
@@ -105,7 +105,7 @@ impl AppState {
             return;
         }
         if let Some(until) = self.paste_waits() {
-            let text = format!("The paste will be placed when {until}.");
+            let text = format!("The paste will be placed when {until}. (Esc cancels it.)");
             let r = self.reading.as_mut().expect("checked above");
             if r.notice != text {
                 r.notice = text.clone();
@@ -116,6 +116,14 @@ impl AppState {
         let r = self.reading.take().expect("checked above");
         self.take_down(&r.notice);
         self.paste_read(r.result.expect("received above"), r.in_place, r.target);
+    }
+
+    /// Gives up the paste being read or waiting to be placed, if there is one.
+    pub(crate) fn cancel_paste(&mut self) {
+        if let Some(r) = self.reading.take() {
+            self.take_down(&r.notice);
+            self.notify("Paste cancelled.");
+        }
     }
 
     /// Clears the status bar if it still shows `notice`.

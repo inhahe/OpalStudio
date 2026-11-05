@@ -1370,3 +1370,40 @@ fn a_save_as_failing_while_a_later_one_is_written_passes_its_file_on() {
     until_written(&mut h);
     assert_eq!(h.state().state().active().unwrap().path.as_ref(), Some(&a));
 }
+
+#[test]
+fn escape_cancels_a_paste_being_read_unless_a_box_takes_it() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 64, 64);
+    // A reading still under way (its sender kept, so it never ends).
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reading = |st: &crate::state::AppState, rx| crate::state::Reading {
+        rx,
+        result: None,
+        in_place: false,
+        target: st.active_doc,
+        box_then: None,
+        crop_then: None,
+        notice: String::new(),
+    };
+    let st = h.state_mut().state_mut();
+    st.reading = Some(reading(st, rx));
+    // With a box open, Esc is the box's.
+    st.queue.push(Cmd::Transform);
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    let st = h.state().state();
+    assert!(st.active().unwrap().transform.is_none(), "the box stayed");
+    assert!(st.reading.is_some(), "the paste went with the box");
+    // Then Esc cancels the paste, which never lands.
+    h.key_press(egui::Key::Escape);
+    h.run();
+    let st = h.state().state();
+    assert!(st.reading.is_none(), "Esc did not cancel the paste");
+    assert_eq!(st.notice.as_ref().map(|n| n.0.as_str()), Some("Paste cancelled."));
+    let _ = tx.send(Ok(Some(pasted(10, 10, [1.0; 4]))));
+    h.run();
+    assert!(h.state().state().active().unwrap().transform.is_none(), "the cancelled paste landed");
+}

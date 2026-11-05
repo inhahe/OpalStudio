@@ -140,6 +140,7 @@ impl OpalApp {
         let typing = ctx.egui_wants_keyboard_input();
         if !typing {
             self.clipboard_events(ctx, paste_presses);
+            self.cancel_paste_key(ctx);
             self.editing_keys(ctx);
         }
         // Keytips: Alt pressed and released on its own toggles them.
@@ -220,6 +221,19 @@ impl OpalApp {
 
     /// Enter, Esc and the arrow keys: applying or cancelling the transform box, and moving
     /// it or the selected layers by a pixel (or, with Shift, by the nudge distance).
+    /// Esc cancels a paste still being read, or waiting to be placed, unless a box on the
+    /// image shown takes it first.
+    fn cancel_paste_key(&mut self, ctx: &egui::Context) {
+        if self.st.reading.is_none() {
+            return;
+        }
+        let crop_tool = self.st.tool == ToolId::Crop;
+        let boxed = self.st.active().is_some_and(|d| d.transform.is_some() || (crop_tool && d.crop.is_some()));
+        if !boxed && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            self.st.cancel_paste();
+        }
+    }
+
     fn editing_keys(&mut self, ctx: &egui::Context) {
         let far = self.st.prefs.f64("nav.nudge").round() as i64;
         let crop_tool = self.st.tool == ToolId::Crop;
