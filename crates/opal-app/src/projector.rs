@@ -276,52 +276,18 @@ mod tests {
     #[test]
     fn a_busy_global_pool_does_not_hold_up_the_projection() {
         // Every thread of rayon's global pool held until the projection is done.
-        let n = rayon::current_num_threads();
-        let (started, all_started) = std::sync::mpsc::channel();
-        let release = Arc::new((Mutex::new(false), Condvar::new()));
-        for _ in 0..n {
-            let (started, release) = (started.clone(), release.clone());
-            rayon::spawn(move || {
-                started.send(()).unwrap();
-                let (m, c) = &*release;
-                let mut go = m.lock().unwrap();
-                while !*go {
-                    go = c.wait(go).unwrap();
-                }
-            });
-        }
-        for _ in 0..n {
-            all_started.recv().unwrap();
-        }
+        let held = crate::background::testing::hold(None);
         let mut p = Projector::new();
         p.ask(&heavy_layers(), 0, &IRect::from_size(4096, 4096), Quality::Exact, None, &egui::Context::default());
         let shown = p.shown(Duration::from_secs(10));
-        let (m, c) = &*release;
-        *m.lock().unwrap() = true;
-        c.notify_all();
+        drop(held);
         assert!(shown.is_some(), "the projection waited for the global pool");
     }
 
     #[test]
     fn a_request_not_done_is_waited_for_once() {
-        // Every projection thread held, so the update cannot be done.
-        let n = pool().current_num_threads();
-        let (started, all_started) = std::sync::mpsc::channel();
-        let release = Arc::new((Mutex::new(false), Condvar::new()));
-        for _ in 0..n {
-            let (started, release) = (started.clone(), release.clone());
-            pool().spawn(move || {
-                started.send(()).unwrap();
-                let (m, c) = &*release;
-                let mut go = m.lock().unwrap();
-                while !*go {
-                    go = c.wait(go).unwrap();
-                }
-            });
-        }
-        for _ in 0..n {
-            all_started.recv().unwrap();
-        }
+        // Every background thread held, so the update cannot be done.
+        let held = crate::background::testing::hold(Some(pool()));
         let mut p = Projector::new();
         p.ask(&heavy_layers(), 0, &IRect::from_size(4096, 4096), Quality::Exact, None, &egui::Context::default());
         let wait = Duration::from_millis(100);
@@ -331,9 +297,7 @@ mod tests {
         let t = std::time::Instant::now();
         p.shown(wait);
         let again_took = t.elapsed();
-        let (m, c) = &*release;
-        *m.lock().unwrap() = true;
-        c.notify_all();
+        drop(held);
         assert!(first.is_none() && first_took >= wait, "the first look did not wait");
         assert!(again_took < wait / 2, "it waited again for the same request ({again_took:?})");
     }

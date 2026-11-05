@@ -977,18 +977,6 @@ fn until_written(h: &mut Harness<'static, crate::app::OpalApp>) {
     panic!("the writes never finished");
 }
 
-/// A write that waits until the sender returned is dropped (or sent to).
-fn held_write() -> (crate::writer::Job, std::sync::mpsc::Sender<()>) {
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    (
-        Box::new(move || {
-            let _ = rx.recv();
-            Ok(())
-        }),
-        tx,
-    )
-}
-
 #[test]
 fn a_save_is_written_off_the_interface_thread_and_marks_the_image_clean() {
     let _gpu = gpu_lock();
@@ -1016,7 +1004,7 @@ fn quitting_waits_for_the_files_being_written() {
     let mut h = harness();
     image_of(&mut h, 64, 64);
     let ctx = h.ctx.clone();
-    let (job, release) = held_write();
+    let (job, release) = held_result(false);
     let st = h.state_mut().state_mut();
     let path = std::env::temp_dir().join("never-written.png");
     st.writer.write(crate::writer::Written::Export { path }, crate::writer::Then::Nothing, job, &ctx);
@@ -1038,7 +1026,7 @@ fn saving_then_closing_closes_once_written_and_asks_again_if_edited_meanwhile() 
         let mut h = harness();
         image_of(&mut h, 64, 64);
         let ctx = h.ctx.clone();
-        let (job, release) = held_write();
+        let (job, release) = held_result(false);
         let st = h.state_mut().state_mut();
         let id = st.active_doc.unwrap();
         let at = st.active().unwrap().history.current();
@@ -1076,13 +1064,8 @@ fn saving_all_then_quitting(fails: bool) {
     let mut h = harness();
     image_of(&mut h, 64, 64);
     let ctx = h.ctx.clone();
-    let (first, release_first) = held_write();
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let second: crate::writer::Job = Box::new(move || {
-        let _ = rx.recv();
-        if fails { Err("the disk is full".into()) } else { Ok(()) }
-    });
-    let release_second = tx;
+    let (first, release_first) = held_result(false);
+    let (second, release_second) = held_result(fails);
     let st = h.state_mut().state_mut();
     let id = st.active_doc.unwrap();
     let at = st.active().unwrap().history.current();

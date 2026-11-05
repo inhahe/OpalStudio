@@ -72,11 +72,54 @@ impl JobThread {
     }
 }
 
+/// Helpers for tests of work done off the interface thread.
+#[cfg(test)]
+pub mod testing {
+    use std::sync::{Arc, Condvar, Mutex, mpsc};
+
+    /// Every thread of a pool, kept busy until this is dropped.
+    pub struct Held(Arc<(Mutex<bool>, Condvar)>);
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            let (go, c) = &*self.0;
+            *go.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            c.notify_all();
+        }
+    }
+
+    /// Holds every thread of `pool` (rayon's global pool if `None`), returning once they
+    /// all are.
+    pub fn hold(pool: Option<&rayon::ThreadPool>) -> Held {
+        let n = pool.map_or_else(rayon::current_num_threads, |p| p.current_num_threads());
+        let (started, all_started) = mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        for _ in 0..n {
+            let (started, release) = (started.clone(), release.clone());
+            let wait = move || {
+                started.send(()).unwrap();
+                let (go, c) = &*release;
+                let mut g = go.lock().unwrap_or_else(|e| e.into_inner());
+                while !*g {
+                    g = c.wait(g).unwrap_or_else(|e| e.into_inner());
+                }
+            };
+            match pool {
+                Some(p) => p.spawn(wait),
+                None => rayon::spawn(wait),
+            }
+        }
+        for _ in 0..n {
+            all_started.recv().unwrap();
+        }
+        Held(release)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rayon::prelude::*;
-    use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
 
     #[test]
@@ -99,32 +142,14 @@ mod tests {
     #[test]
     fn jobs_do_their_parallel_work_off_the_global_pool() {
         // Every thread of rayon's global pool held while the job runs.
-        let n = rayon::current_num_threads();
-        let (started, all_started) = mpsc::channel();
-        let release = Arc::new((Mutex::new(false), Condvar::new()));
-        for _ in 0..n {
-            let (started, release) = (started.clone(), release.clone());
-            rayon::spawn(move || {
-                started.send(()).unwrap();
-                let (m, c) = &*release;
-                let mut go = m.lock().unwrap();
-                while !*go {
-                    go = c.wait(go).unwrap();
-                }
-            });
-        }
-        for _ in 0..n {
-            all_started.recv().unwrap();
-        }
+        let held = testing::hold(None);
         let mut t = JobThread::new("test jobs");
         let (tx, rx) = mpsc::channel();
         let numbers: Vec<u64> = (0..100_000).collect();
         let work = move || numbers.par_iter().sum::<u64>();
         t.run(work, move |r| tx.send(r.ok()).unwrap(), &egui::Context::default());
         let got = rx.recv_timeout(Duration::from_secs(10));
-        let (m, c) = &*release;
-        *m.lock().unwrap() = true;
-        c.notify_all();
+        drop(held);
         assert_eq!(got.ok().flatten(), Some(4_999_950_000), "the job waited for the global pool");
     }
 }
