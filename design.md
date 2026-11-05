@@ -915,7 +915,9 @@ state written, so an edit made meanwhile leaves it unsaved. "Save" in the close 
 questions closes or quits once the writes are done, asking again about an image changed
 meanwhile; quitting otherwise waits for writes still under way; any failed write stops
 quitting, so that it is seen. A close question never replaces another on screen: it
-waits its turn, and one about an image that closes goes with it.
+waits its turn (and for a free moment: no dialog, no box open on the image, the button
+not held), and one about an image that closes goes with it. Quitting likewise waits for
+a close question on screen to be answered.
 
 ## Settings storage
 

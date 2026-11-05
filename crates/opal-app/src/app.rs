@@ -355,6 +355,17 @@ impl OpalApp {
         if !wants || self.st.exit_confirmed {
             return;
         }
+        // A question about closing an image is answered first (the quit asks after it); one
+        // about quitting is being asked already.
+        if let Some(c) = &self.st.confirm {
+            if window_close {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            }
+            if matches!(c, Confirm::Close(_)) {
+                self.st.exit_requested = true;
+            }
+            return;
+        }
         // Files still being written are finished first.
         if self.st.writer.busy() {
             if window_close {
@@ -612,7 +623,7 @@ impl eframe::App for OpalApp {
         self.handle_exit(&ctx);
         self.save_settings_if_due(&ctx);
         self.st.poll_copies();
-        self.st.poll_writes();
+        self.st.poll_writes(ctx.input(|i| i.pointer.any_down()));
         self.st.poll_paste(ctx.input(|i| i.pointer.any_down()));
         self.st.thumbs.end_frame();
         let budget = crate::prefs::bytes(&self.st.prefs, "history.memory");

@@ -1286,3 +1286,55 @@ fn closing_waits_its_turn_and_takes_its_question_with_it() {
     h.run();
     assert_eq!(h.state().state().confirm, Some(crate::state::Confirm::Close(a)));
 }
+
+#[test]
+fn a_close_after_saving_waits_for_the_button_to_be_let_go() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 64, 64);
+    let ctx = h.ctx.clone();
+    let (job, release) = held_result(false);
+    let st = h.state_mut().state_mut();
+    let id = st.active_doc.unwrap();
+    let at = st.active().unwrap().history.current();
+    let path = std::env::temp_dir().join("never-saved.opal");
+    st.active_mut().unwrap().path = Some(path.clone());
+    let written = crate::writer::Written::Save { doc: id, at, path, before: (None, "Untitled".into()) };
+    st.writer.write(written, crate::writer::Then::Close, job, &ctx);
+    // Changed while it is written, so closing asks again; meanwhile a drag goes on.
+    st.queue.push(Cmd::NewLayer);
+    h.run();
+    let at = h.state().state().active().unwrap().view.screen_rect.center();
+    h.drag_at(at);
+    h.run();
+    drop(release);
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.run();
+    }
+    assert!(h.state().state().confirm.is_none(), "asked in the middle of a drag");
+    h.drop_at(at);
+    h.run();
+    assert_eq!(h.state().state().confirm, Some(crate::state::Confirm::Close(id)));
+}
+
+#[test]
+fn quitting_waits_for_a_close_question_on_screen() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 64, 64);
+    image_of(&mut h, 32, 32);
+    let st = h.state_mut().state_mut();
+    let (a, b) = (st.docs[0].id, st.docs[1].id);
+    for id in [a, b] {
+        st.doc_mut(id).unwrap().saved_at = None;
+    }
+    st.confirm = Some(crate::state::Confirm::Close(a));
+    st.exit_requested = true;
+    h.run();
+    assert_eq!(h.state().state().confirm, Some(crate::state::Confirm::Close(a)), "the close question was replaced");
+    // Answered, the quit asks about what is left.
+    h.state_mut().state_mut().close_now(a);
+    h.run();
+    assert_eq!(h.state().state().confirm, Some(crate::state::Confirm::Exit(vec![b])));
+}

@@ -625,8 +625,9 @@ impl AppState {
     }
 
     /// Reports the saves and exports done since the last frame, and does what was to follow
-    /// them.
-    pub fn poll_writes(&mut self) {
+    /// them. A close waits for a free moment: no dialog, no box open on the image, and the
+    /// button not held (`pointer_held`), so its question never lands in the middle of a drag.
+    pub fn poll_writes(&mut self, pointer_held: bool) {
         let finished = self.writer.finished();
         // A failure stops a quit waiting for the writes, so that it is seen.
         if finished.iter().any(|f| f.result.is_err()) {
@@ -645,7 +646,7 @@ impl AppState {
                     }
                     match f.then {
                         // Changed while it was written: asked about again.
-                        Then::Close => self.request_close(doc),
+                        Then::Close => self.close_queue.push_back(doc),
                         Then::Nothing => self.notify(format!("Saved \"{title}\".")),
                     }
                 }
@@ -666,9 +667,12 @@ impl AppState {
             self.exit_after_writes = false;
             self.exit_requested = true;
         }
-        while self.confirm.is_none()
-            && let Some(id) = self.close_queue.pop_front()
+        while !self.dialog_open()
+            && !pointer_held
+            && let Some(&id) = self.close_queue.front()
+            && self.doc(id).is_none_or(|d| d.transform.is_none())
         {
+            self.close_queue.pop_front();
             self.request_close(id);
         }
     }
