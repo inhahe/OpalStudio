@@ -298,8 +298,10 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let wider = IRect::new(visible.x0 - span, visible.y0 - span, visible.x1 + span, visible.y1 + span);
     let layers = d.doc().layers.clone();
     // While something is dragged, what it changes is drawn at the level shown, so the drag
-    // keeps up however large the image (exact again on release).
-    let dragging = d.moving.is_some() || d.transform.as_ref().is_some_and(|s| s.drag.is_some());
+    // keeps up however large the image. The frame the button is let go is exact, whether
+    // or not the code that ends the drag has run yet.
+    let held = ctx.input(|i| i.pointer.primary_down());
+    let dragging = held && (d.moving.is_some() || d.transform.as_ref().is_some_and(|s| s.drag.is_some()));
     let quality = if dragging { opal_core::composite::Quality::Preview } else { opal_core::composite::Quality::Exact };
     let tiles = d.projection.update(&layers, level, &wider, quality);
     let mut draws = Vec::new();

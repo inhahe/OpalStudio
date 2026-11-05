@@ -824,7 +824,7 @@ fn a_late_paste_waits_for_a_crop_box_changed_meanwhile() {
         result: Some(Ok(Some(pasted(20, 10, [1.0; 4])))),
         in_place: false,
         target: st.active_doc,
-        box_then: false,
+        box_then: None,
         crop_then: st.active().unwrap().crop,
         notice: String::new(),
     };
@@ -861,4 +861,105 @@ fn the_history_panel_says_what_history_holds() {
     assert_ne!(expected, "0 KB");
     assert!(h.query_by_label(&expected).is_some(), "the panel does not show {expected}");
     render(&mut h, "history-panel");
+}
+
+#[test]
+fn letting_go_of_the_box_draws_exactly_at_once() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 800, 600);
+    put_on_clipboard(&mut h, pasted(200, 200, [0.0, 0.0, 1.0, 1.0]));
+    // Zoomed out, so drags draw previews; with the chosen method while dragging.
+    let st = h.state_mut().state_mut();
+    st.prefs.set("transform.draft", crate::settings::Value::Bool(false));
+    st.prefs.set("transform.snapping", crate::settings::Value::Bool(false));
+    st.active_mut().unwrap().view.zoom = 0.5;
+    st.queue.push(Cmd::Paste);
+    h.run();
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let at = |x: f32, y: f32| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    h.hover_at(at(400.0, 300.0));
+    h.run();
+    h.drag_at(at(400.0, 300.0));
+    h.run();
+    for x in [420.0, 460.0] {
+        h.hover_at(at(x, 300.0));
+        h.run();
+    }
+    assert!(h.state().state().active().unwrap().projection.shows_previews(), "the drag draws previews");
+    // The frame the button is let go, alone: nothing promises another.
+    h.event(egui::Event::PointerButton {
+        pos: at(460.0, 300.0),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    assert!(!h.state().state().active().unwrap().projection.shows_previews(), "the previews stay after the drag");
+}
+
+/// A paste for document `target` whose reading has come back with `result`, asked for
+/// when `target`'s box (if any) and crop box were as they are now.
+fn read_back(st: &crate::state::AppState, result: crate::clipboard::ReadResult) -> crate::state::Reading {
+    let d = st.active();
+    crate::state::Reading {
+        rx: std::sync::mpsc::channel().1,
+        result: Some(result),
+        in_place: false,
+        target: st.active_doc,
+        box_then: d.and_then(|d| d.transform.as_ref()).map(|s| s.serial),
+        crop_then: d.and_then(|d| d.crop),
+        notice: String::new(),
+    }
+}
+
+#[test]
+fn a_new_paste_takes_down_what_the_one_it_replaces_said() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    let ctx = h.ctx.clone();
+    let st = h.state_mut().state_mut();
+    let mut waiting = read_back(st, Ok(Some(pasted(20, 10, [1.0; 4]))));
+    waiting.notice = "The paste will be placed when the transform box closes.".into();
+    st.notify(waiting.notice.clone());
+    st.reading = Some(waiting);
+    st.clipboard =
+        Box::new(crate::clipboard::TestClipboard { image: Some(pasted(7, 5, [1.0; 4])), ..Default::default() });
+    st.run(Cmd::Paste, &ctx);
+    assert!(st.notice.is_none(), "{:?}", st.notice);
+}
+
+#[test]
+fn a_box_opened_after_the_one_open_when_pasting_is_waited_for() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    h.state_mut().state_mut().queue.push(Cmd::Transform);
+    h.run();
+    let ctx = h.ctx.clone();
+    let st = h.state_mut().state_mut();
+    st.reading = Some(read_back(st, Ok(Some(pasted(20, 10, [1.0; 4])))));
+    // That box is applied, and another opened, before the paste is placed.
+    st.active_mut().unwrap().commit_pending();
+    st.run(Cmd::Transform, &ctx);
+    h.run();
+    let st = h.state().state();
+    assert!(st.reading.is_some(), "the paste ended the newer box");
+    assert_eq!(st.active().unwrap().pending_label(), Some("Transform"));
+}
+
+#[test]
+fn a_paste_for_a_closed_image_says_nothing_about_the_clipboard() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    let st = h.state_mut().state_mut();
+    st.reading = Some(read_back(st, Ok(None)));
+    st.queue.push(Cmd::Close);
+    h.run();
+    let st = h.state().state();
+    assert!(st.messages.is_empty(), "a message about a clipboard nobody is pasting from");
+    assert!(st.notice.as_ref().is_some_and(|n| n.0.contains("closed")), "{:?}", st.notice);
 }

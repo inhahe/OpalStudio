@@ -138,14 +138,27 @@ fn at_level(o: &Object, level: u32) -> (&Arc<RasterImage>, Affine, Sampling) {
 struct Reduced {
     tiles: HashMap<(usize, u32, TileCoord), Option<Arc<Tile>>>,
     held: HashMap<usize, Arc<RasterImage>>,
+    /// For each image, by level: the tiles with some of the image under them.
+    occupied: HashMap<usize, Vec<HashSet<TileCoord>>>,
+}
+
+/// Tile `c` of `image` reduced to `level`, from `tiles` (a [`Reduced`]'s), if it was made
+/// and has content.
+fn reduced_tile<'a>(
+    tiles: &'a HashMap<(usize, u32, TileCoord), Option<Arc<Tile>>>,
+    image: &'a Arc<RasterImage>,
+    level: u32,
+    c: TileCoord,
+) -> Option<&'a Arc<Tile>> {
+    if level == 0 {
+        return image.tile(c);
+    }
+    tiles.get(&(Arc::as_ptr(image) as usize, level, c))?.as_ref()
 }
 
 impl Reduced {
     fn get<'a>(&'a self, image: &'a Arc<RasterImage>, level: u32, c: TileCoord) -> Option<&'a Arc<Tile>> {
-        if level == 0 {
-            return image.tile(c);
-        }
-        self.tiles.get(&(Arc::as_ptr(image) as usize, level, c))?.as_ref()
+        reduced_tile(&self.tiles, image, level, c)
     }
 
     fn has(&self, image: &Arc<RasterImage>, level: u32, c: TileCoord) -> bool {
@@ -153,16 +166,29 @@ impl Reduced {
     }
 
     /// Makes the level-`level` tiles `need` of `image`, and the finer ones they are made
-    /// from, each from the four below it.
+    /// from, each from the four below it. Only tiles with some of the image under them are
+    /// made; the rest of `need` is recorded as empty.
     fn make(&mut self, image: &Arc<RasterImage>, level: u32, need: HashSet<TileCoord>) {
         let id = Arc::as_ptr(image) as usize;
-        self.held.entry(id).or_insert_with(|| image.clone());
+        let Reduced { tiles, held, occupied } = self;
+        held.entry(id).or_insert_with(|| image.clone());
+        let occupied = occupied.entry(id).or_insert_with(|| vec![image.tiles().map(|(c, _)| c).collect()]);
+        while occupied.len() <= level as usize {
+            let up = occupied.last().expect("level 0").iter().map(|c| c.parent()).collect();
+            occupied.push(up);
+        }
         // What each level needs, from the top down.
+        let (full, empty): (HashSet<TileCoord>, HashSet<TileCoord>) =
+            need.into_iter().partition(|c| occupied[level as usize].contains(c));
+        tiles.extend(empty.into_iter().map(|c| ((id, level, c), None)));
         let mut wanted = vec![HashSet::new(); level as usize + 1];
-        wanted[level as usize] = need;
+        wanted[level as usize] = full;
         for l in (2..=level).rev() {
-            let below: HashSet<TileCoord> =
-                wanted[l as usize].iter().flat_map(|c| c.children()).filter(|&k| !self.has(image, l - 1, k)).collect();
+            let below: HashSet<TileCoord> = wanted[l as usize]
+                .iter()
+                .flat_map(|c| c.children())
+                .filter(|k| occupied[l as usize - 1].contains(k) && !tiles.contains_key(&(id, l - 1, *k)))
+                .collect();
             wanted[l as usize - 1] = below;
         }
         // Made from the bottom up, each level in parallel.
@@ -170,11 +196,11 @@ impl Reduced {
             let made: Vec<(TileCoord, Option<Arc<Tile>>)> = std::mem::take(&mut wanted[l as usize])
                 .into_par_iter()
                 .map(|c| {
-                    let kids = c.children().map(|k| self.get(image, l - 1, k).map(|t| &**t));
+                    let kids = c.children().map(|k| reduced_tile(tiles, image, l - 1, k).map(|t| &**t));
                     (c, downsample(kids).map(Arc::new))
                 })
                 .collect();
-            self.tiles.extend(made.into_iter().map(|(c, t)| ((id, l, c), t)));
+            tiles.extend(made.into_iter().map(|(c, t)| ((id, l, c), t)));
         }
     }
 }
@@ -656,6 +682,11 @@ impl Projection {
         Projection::default()
     }
 
+    /// Whether the last update drew what changed as a preview (see [`Quality::Preview`]).
+    pub fn shows_previews(&self) -> bool {
+        self.last.as_ref().is_some_and(|l| l.quality == Quality::Preview)
+    }
+
     /// Brings the tiles of pyramid level `level` that intersect `rect` (canvas pixels) up to
     /// date with `layers`, computing any that are stale in parallel, and returns those that
     /// have content.
@@ -770,8 +801,10 @@ impl Projection {
                     resample::prepare(image, &t, &s);
                 }
                 ObjectKind::Pixels(p) => {
+                    let (image, t, s) = at_level(o, level);
                     let tiles: HashSet<TileCoord> = stale
                         .iter()
+                        .filter(|(c, _)| touches(image, &t, &s, *c))
                         .flat_map(|(c, _)| TileCoord::covering(&reduced_area(p, level, *c), 0))
                         .filter(|&rc| !self.reduced.has(&p.image, level, rc))
                         .collect();
@@ -1273,6 +1306,41 @@ mod tests {
             assert!(close(at(&preview, x, y), at(&exact, x, y)));
         }
         assert!(close(at(&preview, 500, 500), [0.2, 0.4, 0.6, 1.0]), "the old place shows what is under it");
+    }
+
+    #[test]
+    fn a_preview_reduces_only_tiles_with_content_under_them() {
+        let mut ids = IdGen::default();
+        let mut d = Document::new(8192, 8192);
+        // A small sticker far from a pixel layer dragged at level 3.
+        let sticker = Arc::new(solid(IRect::new(7000, 7000, 7010, 7010), [1.0, 0.0, 0.0, 1.0]));
+        let big = Arc::new(solid(IRect::from_size(600, 600), [0.0, 1.0, 0.0, 1.0]));
+        for (name, image) in [("sticker", &sticker), ("big", &big)] {
+            let object = Object {
+                id: ids.object(),
+                kind: ObjectKind::Pixels(PixelObject { image: image.clone(), offset: [0, 0] }),
+            };
+            let index = d.layers.len();
+            d.insert(Position { parent: None, index }, Layer::with_objects(ids.layer(), name, vec![object])).unwrap();
+        }
+        let top = d.layers[1].id;
+        let view = IRect::from_size(8192, 8192);
+        let mut p = Projection::new();
+        p.update(&d.layers, 3, &view, Quality::Exact);
+        let LayerContent::Objects(objects) = &mut d.layer_mut(top).unwrap().content else { panic!() };
+        let ObjectKind::Pixels(o) = &mut objects[0].kind else { panic!() };
+        o.offset = [1001, 999];
+        p.update(&d.layers, 3, &view, Quality::Preview);
+        let (sticker_id, big_id) = (Arc::as_ptr(&sticker) as usize, Arc::as_ptr(&big) as usize);
+        assert!(p.reduced.tiles.keys().all(|k| k.0 != sticker_id), "the sticker was reduced for a drag far from it");
+        assert!(p.reduced.tiles.keys().any(|k| k.0 == big_id));
+        // Below the level shown, only tiles with some of the image under them were made.
+        for &(id, l, c) in p.reduced.tiles.keys() {
+            assert!(
+                id != big_id || l == 3 || !c.rect(l).intersect(&IRect::from_size(600, 600)).is_empty(),
+                "{l} {c:?}"
+            );
+        }
     }
 
     #[test]

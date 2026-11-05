@@ -116,6 +116,8 @@ pub struct Params {
 }
 
 pub struct Session {
+    /// Tells sessions apart: no two sessions get the same one.
+    pub serial: u64,
     pub kind: Kind,
     pub targets: Vec<Target>,
     pub frame: FRect,
@@ -137,6 +139,12 @@ pub struct Session {
 
 /// The smallest scale a drag may leave along an axis, so the box never collapses.
 const MIN_SCALE: f64 = 1e-4;
+
+/// A serial for a new session.
+fn next_serial() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 impl Session {
     pub fn label(&self) -> &'static str {
@@ -432,6 +440,7 @@ impl DocState {
         }
         self.pending = Some(Pending { doc, label: "Paste".into() });
         self.transform = Some(Session {
+            serial: next_serial(),
             kind: Kind::Paste,
             targets: vec![Target { layer: layer_id, object, start: place, was_pixels: false, own: None }],
             frame: frame.to_f(),
@@ -484,6 +493,7 @@ impl DocState {
         };
         self.pending = Some(Pending { doc, label: "Transform".into() });
         self.transform = Some(Session {
+            serial: next_serial(),
             kind: Kind::Transform,
             targets: found.into_iter().map(|(t, _)| t).collect(),
             frame,
@@ -675,6 +685,7 @@ mod tests {
 
     fn session(frame: FRect, current: Affine) -> Session {
         Session {
+            serial: next_serial(),
             kind: Kind::Transform,
             targets: Vec::new(),
             frame,

@@ -34,7 +34,10 @@ cargo test --workspace                     # all tests, interface tests included
   image file copied in Explorer) into a box that moves, scales and rotates it, snapping to
   the canvas and other layers; Enter places it. A pasted image keeps its own pixels, so it
   can be resized again later without losing quality. Paste in Place, Copy and Copy Merged;
-  pasting with nothing open makes a new image.
+  pasting with nothing open makes a new image. Copies keep their full precision when pasted
+  back, and on Windows reach other programs as 16-bit PNG. A large image is read in the
+  background: anything started meanwhile (a dialog, a drag, another box) is finished
+  first.
 - **Moving and transforming.** The Move tool drags the selected layers (clicking picks the
   layer under the pointer; right-click lists every layer there); the arrow keys nudge;
   Transform (Ctrl+T) scales and rotates layers, losslessly.

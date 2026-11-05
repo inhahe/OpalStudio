@@ -58,8 +58,10 @@ impl AppState {
     /// [`AppState::poll_paste`]), on the document active when it was asked for.
     pub(crate) fn paste(&mut self, in_place: bool, ctx: &egui::Context) {
         let target = self.active_doc;
-        // This paste replaces one still being read.
-        self.reading = None;
+        // This paste replaces one still being read, and what that one said.
+        if let Some(r) = self.reading.take() {
+            self.take_down(&r.notice);
+        }
         match self.clipboard.read_image() {
             Read::Ready(result) => self.paste_read(*result, in_place, target),
             Read::Later(work) => {
@@ -78,7 +80,7 @@ impl AppState {
                     result: None,
                     in_place,
                     target,
-                    box_then: d.is_some_and(|d| d.transform.is_some()),
+                    box_then: d.and_then(|d| d.transform.as_ref()).map(|s| s.serial),
                     crop_then: d.and_then(|d| d.crop),
                     notice: notice.clone(),
                 });
@@ -112,10 +114,15 @@ impl AppState {
             return;
         }
         let r = self.reading.take().expect("checked above");
-        if self.notice.as_ref().is_some_and(|(text, _)| *text == r.notice) {
+        self.take_down(&r.notice);
+        self.paste_read(r.result.expect("received above"), r.in_place, r.target);
+    }
+
+    /// Clears the status bar if it still shows `notice`.
+    fn take_down(&mut self, notice: &str) {
+        if self.notice.as_ref().is_some_and(|(text, _)| text == notice) {
             self.notice = None;
         }
-        self.paste_read(r.result.expect("received above"), r.in_place, r.target);
     }
 
     /// What a paste that has been read waits for, if it must wait.
@@ -125,7 +132,7 @@ impl AppState {
             return Some("the dialog closes");
         }
         let d = r.target.and_then(|t| self.doc(t))?;
-        if d.transform.is_some() && !r.box_then {
+        if d.transform.as_ref().is_some_and(|s| Some(s.serial) != r.box_then) {
             Some("the transform box closes")
         } else if d.crop.is_some() && d.crop != r.crop_then {
             Some("you crop or leave the Crop tool")
@@ -137,6 +144,10 @@ impl AppState {
     /// Pastes what reading the clipboard gave, into document `target` (a new image if it
     /// was none).
     fn paste_read(&mut self, result: ReadResult, in_place: bool, target: Option<DocId>) {
+        // Nothing about the clipboard matters to a paste whose image is gone.
+        if target.is_some_and(|id| self.doc(id).is_none()) {
+            return self.notify("The image the paste was for has been closed, so nothing was pasted.");
+        }
         let pasted = match result {
             Ok(Some(p)) => p,
             Ok(None) => {
@@ -151,9 +162,6 @@ impl AppState {
             }
             Err(e) => return self.message(MessageKind::Error, "Could not paste", e),
         };
-        if target.is_some_and(|id| self.doc(id).is_none()) {
-            return self.notify("The image the paste was for has been closed, so nothing was pasted.");
-        }
         for w in &pasted.warnings {
             self.message(MessageKind::Warning, "Pasted", w.clone());
         }

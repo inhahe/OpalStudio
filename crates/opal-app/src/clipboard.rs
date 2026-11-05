@@ -353,61 +353,48 @@ fn dib_v5(pixels: &[Pixel], w: u32, h: u32) -> Vec<u8> {
 }
 
 /// The formats `arboard` does not read, or reads only at 8 bits: PNG and JPEG as files
-/// would hold them, and copied files. The clipboard is held only while they are fetched,
-/// not while they are decoded.
+/// would hold them, and copied files. Each is fetched only if the ones before it gave no
+/// image, and the clipboard is held only while one is fetched, not while it is decoded.
 #[cfg(windows)]
 #[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
 fn read_windows_formats() -> Result<Option<Pasted>, String> {
     use clipboard_win::{formats, raw};
-    /// What the clipboard offers, in the order it is tried.
-    enum Offered {
-        Encoded(Vec<u8>, &'static str),
-        Files(Vec<std::path::PathBuf>),
-    }
-    let offered = {
+    let named = |name: &str| raw::register_format(name).map(|f| f.get());
+    // The bytes the clipboard holds as `format`, if it offers it and `also` holds.
+    let fetch = |format: Option<u32>, also: &dyn Fn() -> bool| -> Result<Option<Vec<u8>>, String> {
+        let Some(format) = format else { return Ok(None) };
         let _open = open_clipboard()?;
-        let named = |name: &str| raw::register_format(name).map(|f| f.get()).filter(|&f| raw::is_format_avail(f));
-        let bytes = |f: u32| {
-            let mut bytes = Vec::new();
-            raw::get_vec(f, &mut bytes).is_ok().then_some(bytes)
-        };
-        let mut offered = Vec::new();
-        for name in ["PNG", "image/png"] {
-            if let Some(b) = named(name).and_then(bytes) {
-                offered.push(Offered::Encoded(b, "clipboard.png"));
-            }
+        if !raw::is_format_avail(format) || !also() {
+            return Ok(None);
         }
-        let mut files = Vec::new();
-        if raw::is_format_avail(formats::CF_HDROP) && raw::get_file_list_path(&mut files).is_ok() {
-            offered.push(Offered::Files(files));
-        }
-        // The system bitmap (what most programs put on the clipboard) is read by arboard;
-        // JPEG is the last resort, since a program offering it offers a bitmap too.
-        if !raw::is_format_avail(formats::CF_DIB)
-            && !raw::is_format_avail(formats::CF_DIBV5)
-            && let Some(b) = named("JFIF").and_then(bytes)
-        {
-            offered.push(Offered::Encoded(b, "clipboard.jpg"));
-        }
-        offered
+        let mut bytes = Vec::new();
+        Ok(raw::get_vec(format, &mut bytes).is_ok().then_some(bytes))
     };
-    for o in offered {
-        match o {
-            Offered::Encoded(bytes, as_file) => {
-                if let Ok(i) = image_files::import_bytes(&bytes, std::path::Path::new(as_file)) {
-                    return Ok(Some(from_import(i)));
-                }
-            }
-            Offered::Files(files) => {
-                for f in files {
-                    if let Ok(i) = image_files::import(&f) {
-                        return Ok(Some(from_import(i)));
-                    }
-                }
-            }
+    let decoded = |bytes: Vec<u8>, as_file: &str| {
+        image_files::import_bytes(&bytes, std::path::Path::new(as_file)).ok().map(from_import)
+    };
+    for name in ["PNG", "image/png"] {
+        if let Some(p) = fetch(named(name), &|| true)?.and_then(|b| decoded(b, "clipboard.png")) {
+            return Ok(Some(p));
         }
     }
-    Ok(None)
+    let files = {
+        let _open = open_clipboard()?;
+        let mut files = Vec::new();
+        if raw::is_format_avail(formats::CF_HDROP) {
+            let _ = raw::get_file_list_path(&mut files);
+        }
+        files
+    };
+    for f in files {
+        if let Ok(i) = image_files::import(&f) {
+            return Ok(Some(from_import(i)));
+        }
+    }
+    // The system bitmap (what most programs put on the clipboard) is read by arboard;
+    // JPEG is the last resort, since a program offering it offers a bitmap too.
+    let no_bitmap = || !raw::is_format_avail(formats::CF_DIB) && !raw::is_format_avail(formats::CF_DIBV5);
+    Ok(fetch(named("JFIF"), &no_bitmap)?.and_then(|b| decoded(b, "clipboard.jpg")))
 }
 
 /// A clipboard for tests: holds what was last written, or what a test put there. With
@@ -494,5 +481,10 @@ mod system_tests {
         // And, once written, Opal Studio reads back its own full-precision copy at once.
         let Read::Ready(own) = cb.read_image() else { panic!("its own copy is read at once") };
         assert_eq!((*own).unwrap().unwrap().from, Some(IRect::from_size(2, 2)));
+        // Without its own copy, it reads the 16-bit PNG, as another program's.
+        let Read::Later(read) = SystemClipboard::default().read_image() else { panic!("read off the thread") };
+        let other = read().unwrap().unwrap();
+        assert_eq!(other.from, None);
+        assert_eq!(opal_io::pixels::to_srgb16(other.image.pixel(1, 1)), opal_io::pixels::to_srgb16(px[0]));
     }
 }

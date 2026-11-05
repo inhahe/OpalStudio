@@ -189,10 +189,10 @@ pub struct Reading {
     pub in_place: bool,
     /// The document it goes to: the one active when it was asked for.
     pub target: Option<DocId>,
-    /// Whether `target` had the transform box open, and its crop box, when the paste was
-    /// asked for. A box opened (or a crop box changed) after that is the user's newer work,
-    /// which the paste waits for rather than ending it.
-    pub box_then: bool,
+    /// The transform box `target` had open when the paste was asked for (its session's
+    /// serial), and its crop box. A box opened (or a crop box changed) after that is the
+    /// user's newer work, which the paste waits for rather than ending it.
+    pub box_then: Option<u64>,
     pub crop_then: Option<crate::crop::CropBox>,
     /// The status-bar notice this paste put up, taken down when it is placed.
     pub notice: String,
