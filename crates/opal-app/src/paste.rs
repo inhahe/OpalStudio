@@ -89,7 +89,7 @@ impl AppState {
                     ctx.request_repaint();
                 });
                 let d = target.and_then(|t| self.doc(t));
-                let notice = "Reading the clipboard… (Esc cancels the paste)".to_string();
+                let notice = self.reading_notice().to_string();
                 self.reading = Some(Reading {
                     rx,
                     result: None,
@@ -108,19 +108,30 @@ impl AppState {
     /// middle of something it would end: a dialog, a drag (`pointer_held`: it is placed
     /// when the button is let go), or a box opened on its document after it was asked for.
     pub(crate) fn poll_paste(&mut self, pointer_held: bool) {
+        let reading = self.reading_notice();
         let Some(r) = &mut self.reading else { return };
         if r.result.is_none() {
-            r.result = Some(match r.rx.try_recv() {
-                Ok(result) => result,
-                Err(std::sync::mpsc::TryRecvError::Empty) => return,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("reading the clipboard failed".into()),
-            });
+            match r.rx.try_recv() {
+                Ok(result) => r.result = Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Kept true as boxes open and close.
+                    if r.notice != reading {
+                        r.notice = reading.to_string();
+                        self.notify(reading);
+                    }
+                    return;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    r.result = Some(Err("reading the clipboard failed".into()))
+                }
+            }
         }
         if pointer_held {
             return;
         }
         if let Some(until) = self.paste_waits() {
-            let text = format!("The paste will be placed when {until}. (Esc cancels it.)");
+            // What it waits for takes Esc; once placed, its own box does, and cancels it.
+            let text = format!("The paste will be placed when {until}.");
             let r = self.reading.as_mut().expect("checked above");
             if r.notice != text {
                 r.notice = text.clone();
@@ -131,6 +142,23 @@ impl AppState {
         let r = self.reading.take().expect("checked above");
         self.take_down(&r.notice);
         self.paste_read(r.result.expect("received above"), r.in_place, r.target);
+    }
+
+    /// What the status bar says while the clipboard is read: that Esc cancels the paste,
+    /// unless a box would take Esc first (see [`box_takes_escape`](Self::box_takes_escape)).
+    fn reading_notice(&self) -> &'static str {
+        if self.box_takes_escape() {
+            "Reading the clipboard…"
+        } else {
+            "Reading the clipboard… (Esc cancels the paste)"
+        }
+    }
+
+    /// Whether Esc goes to a box on the image shown (a transform box, or the crop box while
+    /// cropping) rather than to a paste.
+    pub(crate) fn box_takes_escape(&self) -> bool {
+        let crop_tool = self.tool == crate::tools::ToolId::Crop;
+        self.active().is_some_and(|d| d.transform.is_some() || (crop_tool && d.crop.is_some()))
     }
 
     /// Gives up the paste being read or waiting to be placed, if there is one.

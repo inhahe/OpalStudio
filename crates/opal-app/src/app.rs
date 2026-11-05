@@ -226,9 +226,7 @@ impl OpalApp {
         if self.st.reading.is_none() {
             return;
         }
-        let crop_tool = self.st.tool == ToolId::Crop;
-        let boxed = self.st.active().is_some_and(|d| d.transform.is_some() || (crop_tool && d.crop.is_some()));
-        if !boxed && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        if !self.st.box_takes_escape() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             self.st.cancel_paste();
         }
     }

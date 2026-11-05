@@ -1466,14 +1466,20 @@ fn escape_cancels_a_paste_being_read_unless_a_box_takes_it() {
     };
     let st = h.state_mut().state_mut();
     st.reading = Some(reading(st, rx));
-    // With a box open, Esc is the box's.
-    st.queue.push(Cmd::Transform);
+    let notice = |h: &Harness<'static, OpalApp>| h.state().state().notice.as_ref().map(|n| n.0.clone());
+    let says_esc = "Reading the clipboard… (Esc cancels the paste)";
     h.run();
+    assert_eq!(notice(&h).as_deref(), Some(says_esc));
+    // With a box open, Esc is the box's, and the status bar does not say otherwise.
+    h.state_mut().state_mut().queue.push(Cmd::Transform);
+    h.run();
+    assert_eq!(notice(&h).as_deref(), Some("Reading the clipboard…"));
     h.key_press(egui::Key::Escape);
     h.run();
     let st = h.state().state();
     assert!(st.active().unwrap().transform.is_none(), "the box stayed");
     assert!(st.reading.is_some(), "the paste went with the box");
+    assert_eq!(notice(&h).as_deref(), Some(says_esc));
     // Then Esc cancels the paste, which never lands.
     h.key_press(egui::Key::Escape);
     h.run();

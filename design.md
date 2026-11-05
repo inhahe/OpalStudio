@@ -507,7 +507,9 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   is ready, on the image that was active. What the user started in the meantime comes
   first: the paste waits for a dialog to close, a drag to end, or a box opened (or crop
   box changed) on that image to be finished, and is dropped if the image was closed.
-  Esc cancels a paste being read or waiting (a box on screen takes Esc first).
+  Esc cancels a paste being read, unless a box on screen takes Esc first (the status bar
+  says Esc cancels only while it does); a paste waiting for a dialog or box to close is
+  placed in a box of its own, where Esc cancels it.
   Copy (Ctrl+C) copies the selected layers within the canvas; Copy Merged (Ctrl+Shift+C)
   everything visible within the canvas. Copies are encoded and written on a worker
   thread too, in the order made, and a paste waits for one still being written. On
