@@ -113,6 +113,8 @@ selection core it builds on.
 - The ink brush for Chinese calligraphy: bristles that spread and splay, ink that runs dry
   into flying white, dipping to add ink, density and wetness, rice-paper bleeding; strokes
   re-renderable with other ink settings.
+- The ink can: pots of dense ink, light ink and water at the canvas's edge to dip the brush
+  in, and a gauge of the ink left in the brush.
 
 ## 5. Adjustments
 - Adjustments: levels, curves, hue/saturation, gradient map, channel matrix (3×3 weights

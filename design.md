@@ -616,6 +616,13 @@ qualities of ink, 浓淡干湿 (dense, light, dry, wet), are each part of the br
 - **Adding ink.** The brush is reloaded by dipping (a key or button), or automatically at
   the start of each stroke, or every few strokes (setting); how much it takes up is a
   setting.
+- **The ink can.** Ink also comes from pots on a small dish at the edge of the canvas, which
+  is never printed or exported: dense ink (浓墨), light ink (淡墨) and clear water. Moving the
+  brush into a pot and lifting it out dips it, as with a real brush: ink loads it at that
+  pot's density, and water thins what the brush holds. A small gauge beside the cursor shows
+  how much ink is left in the brush, so a dry stroke can be planned for. More pots, each with
+  its own density, can be added; the dish can be moved or hidden. (The idea, and its name,
+  come from a friend's pun: "dry is good, add ink can too".)
 - **Density and wetness.** Ink density (浓/淡, from thick black to pale gray) and wetness
   (湿/干) are separate settings: wetness is how much water the brush holds, which governs
   how far ink spreads into the paper.
