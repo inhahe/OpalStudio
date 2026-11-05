@@ -29,8 +29,6 @@ pub enum Then {
     Nothing,
     /// Close the document saved (asking again if it changed meanwhile).
     Close,
-    /// Quit, once every write marked so is done.
-    Exit,
 }
 
 /// The work of a write: writes the file, or says why it could not.
@@ -106,20 +104,5 @@ impl Writer {
 
     pub fn busy(&self) -> bool {
         !self.pending.is_empty()
-    }
-
-    /// Whether a write marked to quit after is still to be done.
-    pub fn exit_pending(&self) -> bool {
-        self.pending.iter().any(|p| p.2 == Then::Exit)
-    }
-
-    /// Forgets that the writes still to be done were to quit after (one failed, or was not
-    /// started).
-    pub fn cancel_exit(&mut self) {
-        for p in &mut self.pending {
-            if p.2 == Then::Exit {
-                p.2 = Then::Nothing;
-            }
-        }
     }
 }

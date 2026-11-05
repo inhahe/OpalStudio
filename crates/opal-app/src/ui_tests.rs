@@ -1089,8 +1089,10 @@ fn saving_all_then_quitting(fails: bool) {
     for job in [first, second] {
         let path = std::env::temp_dir().join("never-saved.opal");
         let written = crate::writer::Written::Save { doc: id, at, path, before: (None, "Untitled".into()) };
-        st.writer.write(written, crate::writer::Then::Exit, job, &ctx);
+        st.writer.write(written, crate::writer::Then::Nothing, job, &ctx);
     }
+    // As "Save all" in the quit question leaves it.
+    st.exit_after_writes = true;
     drop(release_first);
     for _ in 0..50 {
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -1194,9 +1196,10 @@ fn a_failure_reported_with_the_last_save_stops_saving_all_then_quitting() {
         let (job, release) = held_result(fails);
         let path = std::env::temp_dir().join("never-saved.opal");
         let written = crate::writer::Written::Save { doc: id, at, path, before: (None, "Untitled".into()) };
-        st.writer.write(written, crate::writer::Then::Exit, job, &ctx);
+        st.writer.write(written, crate::writer::Then::Nothing, job, &ctx);
         releases.push(release);
     }
+    st.exit_after_writes = true;
     // Both done before the next frame looks.
     drop(releases);
     std::thread::sleep(std::time::Duration::from_millis(200));

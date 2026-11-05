@@ -165,8 +165,8 @@ pub struct AppState {
     pub exit_requested: bool,
     /// Saves and exports, written off the interface thread.
     pub writer: crate::writer::Writer,
-    /// Quitting was asked for while files were being written: it goes ahead when they are
-    /// (unless one fails).
+    /// Quitting waits for files being written ("Save all" in the quit question, or quitting
+    /// while they were): it goes ahead when they are, unless one fails.
     pub exit_after_writes: bool,
     /// Documents to ask about closing once the question on screen is answered.
     pub close_queue: VecDeque<DocId>,
@@ -628,11 +628,8 @@ impl AppState {
     /// them.
     pub fn poll_writes(&mut self) {
         let finished = self.writer.finished();
-        // A failure stops quitting (whether quitting was to follow these writes or waits for
-        // them), so that it is seen; the writes done with it are judged together.
-        let failed = finished.iter().any(|f| f.result.is_err());
-        if failed {
-            self.writer.cancel_exit();
+        // A failure stops a quit waiting for the writes, so that it is seen.
+        if finished.iter().any(|f| f.result.is_err()) {
             self.exit_after_writes = false;
         }
         for f in finished {
@@ -649,8 +646,6 @@ impl AppState {
                     match f.then {
                         // Changed while it was written: asked about again.
                         Then::Close => self.request_close(doc),
-                        Then::Exit if !failed && !self.writer.exit_pending() => self.exit_requested = true,
-                        Then::Exit => {}
                         Then::Nothing => self.notify(format!("Saved \"{title}\".")),
                     }
                 }
@@ -739,7 +734,6 @@ impl AppState {
         self.writer.write(written, Then::Nothing, job, ctx);
     }
 
-    /// Closes a document, first asking about unsaved changes.
     /// Closes a document, first asking about unsaved changes (after the question on screen,
     /// if one is). One already to close once its save is written just waits.
     pub fn request_close(&mut self, id: DocId) {
