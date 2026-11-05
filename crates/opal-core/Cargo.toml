@@ -11,3 +11,6 @@ half = { workspace = true }
 bytemuck = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
+mimalloc = { workspace = true }

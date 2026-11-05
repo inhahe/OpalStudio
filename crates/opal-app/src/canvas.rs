@@ -97,7 +97,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let space = ctx.input(|i| i.key_down(Key::Space)) && !ctx.egui_wants_keyboard_input();
     let tool = if space { ToolId::Hand } else { st.tool };
     let Some(d) = st.doc_mut(id) else { return };
-    let canvas = Vec2::new(d.doc().canvas.width as f32, d.doc().canvas.height as f32);
+    let canvas = crate::doc::canvas_rect(&d.doc().canvas);
     d.view.viewport = vp;
     d.view.screen_rect = rect;
     if !d.view.placed {
@@ -231,8 +231,8 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let nearest = view.zoom >= prefs.sharp_from;
     let uniforms = ViewUniforms {
         vp_size: [vp.x, vp.y],
-        canvas_origin: [view.offset.x, view.offset.y],
-        canvas_size: [canvas.x * view.zoom, canvas.y * view.zoom],
+        canvas_origin: view.to_screen(canvas.min.to_vec2()).into(),
+        canvas_size: (canvas.size() * view.zoom).into(),
         checker_px: (prefs.checker_size * ppp).max(1.0),
         off_canvas: prefs.off_canvas,
         checker_a: theme::linear(prefs.checker_a),
@@ -245,8 +245,8 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let callback = CanvasCallback { view_key: doc_key, level, uniforms, tiles: draws, nearest };
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, callback));
     if prefs.border {
-        let min = rect.min + view.offset / ppp;
-        let r = Rect::from_min_size(min, canvas * view.zoom / ppp);
+        let min = rect.min + view.to_screen(canvas.min.to_vec2()) / ppp;
+        let r = Rect::from_min_size(min, canvas.size() * view.zoom / ppp);
         ui.painter().with_clip_rect(rect).rect_stroke(
             r,
             0.0,

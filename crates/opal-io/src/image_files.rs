@@ -8,8 +8,9 @@ use image::codecs::png::PngEncoder;
 use image::{DynamicImage, ImageDecoder, ImageReader};
 use opal_core::composite::flatten;
 use opal_core::document::Document;
-use opal_core::geom::IRect;
+use opal_core::geom::{Affine, IRect};
 use opal_core::raster::RasterImage;
+use opal_core::resample::{self, Sampling};
 use opal_core::tile::Pixel;
 use rayon::prelude::*;
 use std::io::Cursor;
@@ -90,11 +91,59 @@ pub enum ExportFormat {
     Jpeg { quality: u8, background: [u8; 3] },
 }
 
-/// Flattens the canvas of `doc` and writes it to `path` (atomically).
-pub fn export(doc: &Document, path: &Path, format: &ExportFormat) -> Result<(), IoError> {
+/// A size to export at other than the canvas's, and how to resample to it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExportSize {
+    pub width: u32,
+    pub height: u32,
+    pub sampling: Sampling,
+}
+
+/// The canvas of `doc` flattened, at the canvas's size or at `size`: the pixels row by
+/// row, with the width and height.
+pub fn flatten_canvas(doc: &Document, size: Option<&ExportSize>) -> (Vec<Pixel>, u32, u32) {
+    let canvas = doc.canvas.rect();
     let (w, h) = (doc.canvas.width, doc.canvas.height);
-    let rect = IRect::from_size(i64::from(w), i64::from(h));
-    let pixels = flatten(&doc.layers, &rect);
+    let flat = flatten(&doc.layers, &canvas);
+    if w == 0 || h == 0 {
+        return (flat, w, h);
+    }
+    match size {
+        Some(s) if (s.width, s.height) != (w, h) => {
+            let to_size = Affine::scale(f64::from(s.width) / f64::from(w), f64::from(s.height) / f64::from(h));
+            // The canvas is the whole image: what lies past it must not bleed into the
+            // edges, and the edges must not fade out either. So the resampler gets the
+            // canvas alone, framed by copies of its edge pixels as far as its filter reaches.
+            let border = resample::reach(&to_size, &s.sampling).ceil() as u32 + 1;
+            let framed = extend_edges(&flat, w, h, border);
+            let source = RasterImage::from_pixels(w + 2 * border, h + 2 * border, &framed);
+            let b = f64::from(border);
+            let out = IRect::from_size(i64::from(s.width), i64::from(s.height));
+            let resized = resample::render_image(&source, &Affine::translate(-b, -b).then(to_size), &s.sampling, Some(&out));
+            (resized.read_rect(&out), s.width, s.height)
+        }
+        _ => (flat, w, h),
+    }
+}
+
+/// `w × h` pixels with `border` more on every side, each a copy of the nearest edge pixel.
+fn extend_edges(px: &[Pixel], w: u32, h: u32, border: u32) -> Vec<Pixel> {
+    let (w, h, b) = (w as usize, h as usize, border as usize);
+    let ew = w + 2 * b;
+    let mut out = Vec::with_capacity(ew * (h + 2 * b));
+    for y in 0..h + 2 * b {
+        let row = &px[y.saturating_sub(b).min(h - 1) * w..][..w];
+        out.extend(std::iter::repeat_n(row[0], b));
+        out.extend_from_slice(row);
+        out.extend(std::iter::repeat_n(row[w - 1], b));
+    }
+    out
+}
+
+/// Flattens the canvas of `doc`, at its own size or at `size`, and writes it to `path`
+/// (atomically).
+pub fn export(doc: &Document, path: &Path, format: &ExportFormat, size: Option<&ExportSize>) -> Result<(), IoError> {
+    let (pixels, w, h) = flatten_canvas(doc, size);
     let encode_err = |e: image::ImageError| IoError::Encode { path: path.to_owned(), message: e.to_string() };
     let img = match format {
         ExportFormat::Png { sixteen_bit: false } => {
@@ -167,7 +216,7 @@ mod tests {
         assert_eq!((imported.width, imported.height), (37, 300));
         assert!(imported.warnings.is_empty());
         let path = temp("round.png");
-        export(&doc_from(imported), &path, &ExportFormat::Png { sixteen_bit: false }).unwrap();
+        export(&doc_from(imported), &path, &ExportFormat::Png { sixteen_bit: false }, None).unwrap();
         let back = image::open(&path).unwrap().to_rgba8();
         std::fs::remove_file(&path).unwrap();
         let orig = image::load_from_memory(&src).unwrap().to_rgba8();
@@ -187,11 +236,47 @@ mod tests {
         let mut d = Document::new(8, 8);
         d.insert(Position { parent: None, index: 0 }, Layer::new_empty(ids.layer(), "empty")).unwrap();
         let path = temp("bg.jpg");
-        export(&d, &path, &ExportFormat::Jpeg { quality: 95, background: [255, 0, 0] }).unwrap();
+        export(&d, &path, &ExportFormat::Jpeg { quality: 95, background: [255, 0, 0] }, None).unwrap();
         let px = image::open(&path).unwrap().to_rgb8();
         std::fs::remove_file(&path).unwrap();
         let p = px.get_pixel(4, 4);
         assert!(p[0] > 240 && p[1] < 20 && p[2] < 20, "{p:?}");
+    }
+
+    #[test]
+    fn exports_at_a_chosen_size_cover_the_canvas_wherever_it_lies() {
+        use opal_core::tile::{pixel_from_f32, pixel_to_f32};
+        let mut ids = IdGen::default();
+        // A 40×20 canvas at (100, 50): its left half red, its right half blue, and green
+        // outside it, which must not show.
+        let mut img = RasterImage::new();
+        for y in 40..80 {
+            for x in 90..150 {
+                let c = if !(100..140).contains(&x) || !(50..70).contains(&y) {
+                    [0.0, 1.0, 0.0, 1.0]
+                } else if x < 120 {
+                    [1.0, 0.0, 0.0, 1.0]
+                } else {
+                    [0.0, 0.0, 1.0, 1.0]
+                };
+                img.set_pixel(x, y, pixel_from_f32(c));
+            }
+        }
+        let mut d = Document::new(40, 20);
+        d.canvas.x = 100;
+        d.canvas.y = 50;
+        d.insert(Position { parent: None, index: 0 }, Layer::new_raster(ids.layer(), ids.object(), "l", img)).unwrap();
+        let size = ExportSize { width: 10, height: 5, sampling: Sampling::default() };
+        let (px, w, h) = flatten_canvas(&d, Some(&size));
+        assert_eq!((w, h, px.len()), (10, 5, 50));
+        let at = |x: usize, y: usize| pixel_to_f32(px[y * 10 + x]);
+        assert!(at(1, 2)[0] > 0.99 && at(8, 2)[2] > 0.99, "red left, blue right");
+        // The edges are the canvas's own pixels, not the green beyond it, and not faded.
+        assert!(at(0, 0)[1] < 0.01 && at(9, 4)[1] < 0.01, "{:?} {:?}", at(0, 0), at(9, 4));
+        assert!(at(0, 0)[3] > 0.99 && at(9, 4)[3] > 0.99, "{:?} {:?}", at(0, 0), at(9, 4));
+        let (same, w, h) = flatten_canvas(&d, None);
+        assert_eq!((w, h), (40, 20));
+        assert_eq!(pixel_to_f32(same[0]), [1.0, 0.0, 0.0, 1.0]);
     }
 
     #[test]

@@ -1,8 +1,9 @@
 # Opal Studio — design
 
-Status: nothing is implemented yet. This file records what was decided in the design
-discussions that began on 2026-11-04. Items marked **TBD** are deliberately undecided and
-get settled when the milestone that needs them starts (see `roadmap.md`).
+This file records what was decided in the design discussions that began on 2026-11-04, and
+is kept current as features are built; `roadmap.md` says which milestone each feature
+belongs to and which are done. Items marked **TBD** are deliberately undecided and get
+settled when the milestone that needs them starts.
 
 ## Goal
 
@@ -74,6 +75,7 @@ falloff, feather falloff, and the falloff of distance-based color matching.
 | Text shaping and layout | **TBD** (a HarfBuzz-class shaper with bidi, line breaking and font fallback) |
 | Vector rendering | **TBD** (vello, tiny-skia, or our own) |
 | Tests | egui's test harness, egui_kittest (simulated input, rendering with wgpu to an image); unit tests for everything below the interface |
+| Memory allocator | mimalloc. A tile is 512 KiB, just past the size from which Windows' own heap returns each block to the system when freed, so with it every new tile costs fresh pages, and the page faults serialize the threads compositing in parallel. |
 | Toolchain on Windows | the MSVC target (`.cargo/config.toml`). With the MinGW toolchain the app's test binary crashed at startup in a static initializer the GNU linker left unrelocated. |
 
 egui and wgpu also compile to WebAssembly, so a browser build remains possible later; it is
@@ -81,19 +83,35 @@ not a goal.
 
 ## Document model
 
-- A **document** has a canvas (size, later a color profile) and a tree of **layers**.
-- A **layer** is either a **group**, holding child layers, or holds **objects**: raster (a
-  tiled bitmap, later with a transform), and later vector paths, text, brush strokes and
+- A **document** has a **canvas** (later with a color profile) and a tree of **layers**.
+  The canvas is a rectangle in the document's coordinates: what is exported, and how big
+  the image is. Cropping and resizing the canvas move or resize that rectangle and change
+  no pixels, so what falls outside can be brought back by enlarging the canvas again.
+  Coordinates shown to the user count from the canvas's top-left corner.
+- A **layer** is either a **group**, holding child layers, or holds **objects**: pixel
+  objects and image objects (below), and later vector paths, text, brush strokes and
   adjustments. A group composites its children by themselves first, then applies its own
   visibility and opacity. Layers have **no boundary**, not even the canvas edge: content
   past the canvas is kept, shown dimmed, and left out of exports.
+- **Pixel objects and image objects.** Bitmaps come in two kinds.
+  - A **pixel object** is a tiled bitmap on the document's pixel grid. It moves only by
+    whole pixels, so moving it never resamples it.
+  - An **image object** (a pasted image, or a pixel object transformed freely) keeps its
+    own pixels and draws them through a transform: an affine map (position, scale,
+    rotation; skew later) and a resampling method of its own (see *Resampling*).
+    Transforming it again redraws from those pixels, so any number of transforms loses
+    nothing. Rasterize Layer turns it into a pixel object; pasting into an existing layer
+    bakes it into that layer's pixels at once.
+  - Whole-image operations (Resize Image, Rotate, Straighten) keep the originals the same
+    way: pixel objects become image objects, except where the change is exact on the pixel
+    grid (quarter turns and flips), which pixel objects undergo directly. Resize Image can
+    resample instead, when a smaller file is the point.
+  - How painting treats an image object is **TBD** (milestone 3): painting into its own
+    pixels through the transform, or onto a pixel object above it in the same layer.
 - **Identifiers.** Layers and objects get identifiers that stay unique across every history
   branch, so the generator lives beside the history, not inside a snapshot (two branches
   that each add a layer must not reuse an identifier). The `.opal` file stores the next
   free one.
-- A **pasted image** is a raster object that keeps its original pixels and a transform, so
-  resizing it later never loses quality. Pixels are baked only when pasting into an existing
-  layer.
 - **Tiles.** Raster content is stored in 256×256-pixel tiles, and only tiles with content
   exist. Tiles are copy-on-write: an edit copies only the tiles it touches, and untouched
   tiles are shared by every history state and every branch. Tiles are a storage detail and
@@ -105,9 +123,10 @@ not a goal.
   Computation converts to single precision.
 - **Compositing.** The CPU reference compositor flattens the layers into the
   **projection**, cached per tile, with a pyramid of half-size levels for zoomed-out views.
-  A cached tile keeps the list of source tiles (as pointers) and opacities that produced it,
-  and is recomputed exactly when that list changes, so nothing has to report changes to the
-  cache. Stale tiles are computed in parallel. The GPU only shows projection tiles; a GPU
+  A cached tile keeps the list of what produced it: source tiles (as pointers, with the
+  offset of pixels moved off the tile grid), each image object's pixels, transform and
+  sampling, and opacities. It is recomputed exactly when that list changes, so nothing has
+  to report changes to the cache. Stale tiles are computed in parallel. The GPU only shows projection tiles; a GPU
   compositor matching the reference comes when adjustments need interactive speed
   (milestone 5).
 - **Display.** Each projection tile is uploaded as a 258×258 texture: the tile plus a
@@ -118,6 +137,24 @@ not a goal.
   inside the canvas and dims what lies beyond it.
 - The default perceptual color space, for edge detection, color-range selection and
   vectorization, is **OKLab**.
+
+### Resampling
+
+One resampler draws image objects, and serves Resize Image, Rotate, export at a chosen
+size, and Rasterize Layer, so each gives the same pixels the canvas shows.
+
+- **Methods:** Nearest (hard pixels, for pixel art), Bilinear, Bicubic (the
+  Mitchell–Netravali family, with B and C adjustable; Catmull–Rom by default) and Lanczos
+  (2 to 4 lobes). Bicubic is the default.
+- **Anti-ringing**, on by default: each result is kept within the range of the source
+  pixels nearest it, which removes the halos sharp filters draw along hard edges.
+- **Shrinking never aliases.** An image keeps a pyramid of half-size copies, built when
+  first needed; a shrunk image is sampled from the copy just finer than the result, with
+  the filter widened by the remaining factor along each axis.
+- **Exact cases are exact:** moves by whole pixels, quarter turns and flips copy pixels
+  without filtering.
+- While a transform is being dragged, Bilinear is used so the drag keeps up (a setting);
+  the object's own method takes over on release.
 
 ## Selections
 
@@ -311,31 +348,51 @@ curve editors.
 
 ## Layers UI
 
-- **Click to select a layer**: with the Move/Select tool, or Ctrl+click with any other tool.
-  It picks the topmost layer that visibly contributes at that point (how opaque counts as
-  visible is adjustable); right-click lists every layer under the cursor.
+- **Click to select a layer**: with the Move tool, or Ctrl+click with any other tool. It
+  picks the topmost layer that visibly contributes at that point (how opaque counts as
+  visible is adjustable); right-click lists every layer under the cursor. Clicking selects
+  layers, never groups; Alt+click selects the group around the layer instead.
 - The active layer is highlighted, and scrolled into view, in the layers panel, and has a
-  faint outline on the canvas.
+  faint outline on the canvas (around its content; the transformed outline for an image
+  object).
+- **Several layers can be selected:** Ctrl+click in the layers panel adds or removes one,
+  Shift+click selects a range. The active layer is the one last clicked. Commands that act
+  on layers (Delete, Duplicate, Group, Merge Selected, Copy, Rasterize, Move, Transform)
+  act on all of them.
+- **The Move tool** drags the selected layers by whole pixels; Shift keeps the move
+  horizontal, vertical or diagonal. It snaps as the transform box does (*Paste and
+  transform*). The arrow keys nudge by one pixel, and with Shift by ten (adjustable), with
+  any tool. Clicking first selects the layer under the pointer (a setting turns that off,
+  to drag the selected layers from anywhere).
 - **Sample from** (which layers a tool reads): current layer, layers below, all visible, or a
   chosen set (checkboxes in the layers panel; sets can be named and reused). Present on every
   tool that reads pixels: Clone, Heal, Mix, Detail, the eyedropper, the magic wand, color
   match, color range and AI selection.
 - **Apply to** (which layers an operation writes) is a separate control, for moving,
-  transforming or adjusting several layers at once.
+  transforming or adjusting several layers at once. Until it is built, operations apply to
+  the selected layers.
 
 ### Merging and rasterizing
 
 - **Merge Down** and **Flatten Image** bake layers into one pixel layer (built).
 - **Locks:** a locked layer cannot be changed, merged or deleted, and neither can a group
   with a locked layer inside; locked layers can still be moved up and down the stack.
-- **Merge Selected**, **Merge Visible**, **Merge Group**, and **Stamp Visible**: a new layer
-  holding everything visible merged, the originals kept, for retouching on a flat copy.
-- **Rasterize Layer** turns a layer's editable content (a transformed pasted image, shapes,
-  text, effects) into plain pixels at the canvas's resolution. It is never required: no
-  tool refuses to work on editable content. It exists for when pixels are wanted, to make a
-  file smaller, or to make a heavy layer cost nothing; like everything, it can be undone.
+- **Merge Selected** merges the selected layers into one, where the topmost of them was.
+  Hidden selected layers are left as they are.
+- **Merge Visible** merges every visible layer into one, where the topmost of them was;
+  hidden layers stay, and keep their order among themselves.
+- **Merge Group** turns a group into one pixel layer with the group's name, opacity and
+  visibility.
+- **Stamp Visible** adds a layer holding everything visible merged, above the active layer
+  (outside any group), the originals kept, for retouching on a flat copy.
+- **Rasterize Layer** turns the selected layers' editable content (image objects, and later
+  shapes, text and effects) into pixel objects at the document's resolution. It is never
+  required: no tool refuses to work on editable content. It exists for when pixels are
+  wanted, to make a file smaller, or to make a heavy layer cost nothing; like everything,
+  it can be undone.
 - Merging and rasterizing keep the look exactly: the result composites like what it
-  replaces.
+  replaces. (Merging layers that are not adjacent moves the lower ones above whatever lay
+  between them, which can change the look where those overlap; the status bar says so.)
 
 ### Performance with many layers
 
@@ -344,9 +401,11 @@ Editable content does not mean recomputing everything on each change.
 - **Only what changed is recomputed.** Every cached tile of the projection knows the
   source tiles that produced it (see *Compositing*), so an edit recomputes the tiles it
   touches and nothing else.
-- **Editable objects are cached as pixels.** Shapes, text, effects and transformed images
-  are drawn once, per tile, at the resolution shown, and redrawn only when edited; for
+- **Editable objects are cached as pixels.** Shapes, text, effects and image objects are
+  drawn per tile and redrawn only when they or what they are composited with change; for
   display they cost what a pixel layer costs. Editability costs memory more than time.
+  Image objects are cheap enough to redraw as part of the projection tiles they touch;
+  objects that are expensive to draw (text, shapes, effects) get a cache of their own.
 - **Intermediate caches:** the composite of each group, and of everything below the active
   layer, so painting recombines only the active layer and what is above it, over a stored
   picture of the rest.
@@ -362,18 +421,70 @@ selection; on a hidden layer, a locked one, or one whose transparency is locked;
 opacity; where a layer above completely covers the spot; on the layer's mask instead of the
 layer; or off the canvas (kept, but not exported).
 
-## Paste
+## Paste and transform
 
-Pasting opens a transform box instead of placing the pixels:
+Pasting opens the **transform box** instead of placing the pixels. The same box transforms
+existing layers: Transform (Ctrl+T) opens it on the selected layers.
 
-- aspect ratio locked by default; Shift, or a lock icon on the box, frees it
-- snapping to canvas edges and centers, other layers' edges, and the selection's bounds;
-  Alt toggles snapping during a drag, and a button on the box toggles it until clicked again;
-  the snapping distance is adjustable
-- a rotate handle, and buttons to fit or fill the canvas
-- Enter commits and Esc cancels, both shown on screen, so the box never lingers like GIMP's
-  floating selection
-- goes on a new layer by default; a button puts it on the active layer instead (baked)
+- **Where a paste goes:** onto a new layer above the active one, as an image object. A
+  button on the box puts it into the active layer instead, baked into that layer's pixels
+  when committed. Pasting with no document open makes a new image of the clipboard.
+- **Where it starts:** centered on the view at its own size, or shrunk to fit the canvas
+  when larger (a setting). Paste in Place (Ctrl+Shift+V) puts a copy made in Opal Studio
+  back where it was copied from, and anything else at the canvas's top-left corner.
+- **Handles:** drag inside the box to move; corners scale, edges scale one side, and a
+  handle above the box rotates around its center. The aspect ratio is locked by default;
+  Shift, or the lock button on the box, frees it. Ctrl scales from the center. Shift while
+  rotating steps by 15° (adjustable). Dragging outside the box rotates too.
+- **Snapping** to the canvas's edges and center and to other layers' edges (later the
+  selection's bounds too). Alt toggles it during a drag, a button on the box toggles it
+  until clicked again, and the snapping distance is adjustable.
+- **On the box:** Fit (into the canvas), Fill (cover the canvas), the aspect lock, snapping,
+  Into active layer, and Commit and Cancel, also on Enter and Esc, so the box never
+  lingers like GIMP's floating selection. While dragging, the box shows the size and angle.
+- **Settings:** the resampling method (*Resampling*), and the numbers: position, size in
+  pixels and percent, and angle, each editable.
+- **One history state:** the whole session in the box, from paste to commit, is one entry
+  ("Paste" or "Transform"). Cancel leaves the document as it was.
+- **The clipboard:** PNG first (keeping 16-bit color and transparency), then the other
+  image formats the clipboard offers, then copied image files. Copy (Ctrl+C) copies the
+  selected layers within the canvas; Copy Merged (Ctrl+Shift+C) everything visible within
+  the canvas. A copy made in Opal Studio also keeps its full precision for pasting back
+  into Opal Studio.
+
+## Image size, crop and rotation
+
+- **Crop tool** (C): a box over the canvas with handles, starting as the whole canvas;
+  dragging outside it draws a new one. Aspect ratio free, the original, or a preset (1:1,
+  4:3, 3:2, 16:9, 5:4) or custom one, either way round; guides (rule of thirds, grid, or
+  none); what is cropped away is darkened (adjustable). **Straighten:** dragging outside
+  the box's corners rotates it; the content is turned to match when committed. Enter
+  crops, Esc cancels. Cropping only moves the canvas, so nothing is lost, unless *Delete
+  cropped pixels* is set. A crop box larger than the canvas enlarges it.
+- **Crop to Content** shrinks the canvas to the visible content.
+- **Resize Image:** a size in pixels or percent (aspect ratio locked by default) and a
+  resampling method. Image objects are scaled with the canvas. Pixel objects too become
+  image objects, keeping their pixels (enlarging again later loses nothing), unless
+  *Resample pixels* is set, which resamples them now for a smaller file; the dialog says
+  which happens.
+- **Resize Canvas:** a size, with an anchor (one of nine points) for where the old canvas
+  sits in the new, or the margins to add on each side. Only the canvas changes.
+- **Rotate:** quarter turns either way, half a turn, flip horizontally or vertically
+  (exact for pixel objects), and Rotate by an angle, which can grow the canvas to fit.
+
+## Export
+
+Export writes PNG (8 or 16 bits) or JPEG (with quality, and the background that
+transparency is flattened onto), at the canvas's size or a chosen one: pixels or percent,
+aspect ratio locked by default, with a resampling method. Export never changes the
+document.
+
+## Thumbnails
+
+Each layer in the layers panel shows a thumbnail of its content within the canvas
+(size adjustable, or off), and hovering a state in the history panel shows a thumbnail of
+the image at that state. Thumbnails are computed in the background, so a large document
+never makes the panels wait.
 
 ## Text
 
@@ -722,13 +833,16 @@ server. Both rest on one language-neutral API.
 
 ## Native file format
 
-`.opal`, version 0: a zip archive holding `mimetype` (stored first, uncompressed:
-`application/x-opal-studio`), `document.json` (the canvas, the layer tree and the next free
-identifier) and `tiles/<n>.bin`, one tile each. A tile shared by several layers is stored
-once. A tile file is the tile's half floats byte-shuffled (all low bytes, then all high
-bytes), which lets deflate compress photos far better. A newer format version is refused
-with a message rather than misread. Later versions add objects, text, selection recipes
-and optionally the history tree.
+`.opal`, version 1: a zip archive holding `mimetype` (stored first, uncompressed:
+`application/x-opal-studio`), `document.json` (the canvas rectangle, the layer tree and the
+next free identifier) and `tiles/<n>.bin`, one tile each. Objects are pixel objects (their
+tiles and whole-pixel offset) or image objects (their tiles, frame, transform and
+sampling). A tile shared by several layers is stored once. A tile file is the tile's half
+floats byte-shuffled (all low bytes, then all high bytes), which lets deflate compress
+photos far better. Numbers are written so they read back exactly. Version 0 (pixel objects
+only, a canvas at the origin) is still read; a newer version is refused with a message
+rather than misread, and so are values out of range (a transform that cannot be inverted,
+say). Later versions add text, selection recipes and optionally the history tree.
 
 Every write, `.opal` and exports alike, goes to a temporary file beside the target that
 replaces it only when complete, so a failed save never damages the existing file.

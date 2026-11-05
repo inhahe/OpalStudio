@@ -6,7 +6,7 @@ use crate::prefs::PREFS;
 use crate::settings::{Settings, Value};
 use crate::theme::{self, Palette, Scheme};
 use crate::tools::{self, ToolId};
-use eframe::egui::{self, Vec2};
+use eframe::egui;
 use opal_core::composite::composite_all;
 use opal_core::document::{Document, IdGen, Layer, LayerContent, LayerId, Position};
 use opal_core::geom::IRect;
@@ -333,9 +333,9 @@ impl AppState {
             Cmd::ZoomFit => {
                 let fit_max = (self.prefs.f64("nav.fit_max") / 100.0) as f32;
                 let d = self.active_mut().expect("available");
-                let size = Vec2::new(d.doc().canvas.width as f32, d.doc().canvas.height as f32);
+                let canvas = crate::doc::canvas_rect(&d.doc().canvas);
                 let vp = d.view.viewport;
-                d.view.fit(size, vp, fit_max);
+                d.view.fit(canvas, vp, fit_max);
             }
             Cmd::Zoom100 => {
                 let v = &mut self.active_mut().expect("available").view;
@@ -533,7 +533,7 @@ impl AppState {
             }
         };
         let doc = d.doc().clone();
-        if let Err(e) = image_files::export(&doc, &path, &format) {
+        if let Err(e) = image_files::export(&doc, &path, &format, None) {
             self.message(MessageKind::Error, "Could not export", e.to_string());
         }
     }
@@ -800,7 +800,7 @@ mod tests {
     fn a_new_white_image_is_white_inside_and_empty_outside() {
         let st = app_with_image();
         let d = st.active().unwrap();
-        let img = d.doc().layers[0].rasters().next().unwrap().clone();
+        let img = d.doc().layers[0].objects()[0].image().clone();
         assert_eq!(img.pixel(299, 199), pixel_from_f32([1.0; 4]));
         assert_eq!(img.pixel(300, 0)[3].to_f32(), 0.0, "nothing beyond the canvas");
         assert!(!d.history.can_undo());
@@ -844,7 +844,7 @@ mod tests {
         assert_eq!(d.doc().layers.len(), 1);
         assert_eq!(d.doc().layers[0].id, bottom);
         assert_eq!(d.active_layer, Some(bottom));
-        let px = d.doc().layers[0].rasters().next().unwrap().pixel(0, 0);
+        let px = d.doc().layers[0].objects()[0].image().pixel(0, 0);
         // Half-transparent blue over white.
         let px = opal_core::tile::pixel_to_f32(px);
         let want = [0.5, 0.5, 1.0, 1.0];

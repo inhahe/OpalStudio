@@ -27,6 +27,12 @@ mod widgets;
 
 use eframe::egui;
 
+// Tiles are 512 KiB, just past the size from which Windows' heap hands each allocation
+// back to the system when freed, so with it every new tile costs fresh pages (and the page
+// faults serialize the threads compositing in parallel). mimalloc keeps memory for reuse.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> eframe::Result {
     let files: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
     let options = eframe::NativeOptions {

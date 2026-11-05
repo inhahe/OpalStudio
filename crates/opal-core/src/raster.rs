@@ -1,21 +1,49 @@
 //! Sparse, unbounded bitmaps.
 
 use crate::geom::IRect;
-use crate::tile::{Pixel, TILE_SIZE, Tile, TileCoord};
+use crate::tile::{Pixel, TILE_SIZE, Tile, TileCoord, downsample};
 use half::f16;
-use std::collections::HashMap;
-use std::sync::Arc;
+use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, OnceLock};
+
+/// How many times an image can be halved in its pyramid (see [`RasterImage::reduced`]).
+pub const MAX_REDUCTION: u32 = 24;
 
 /// A bitmap with no edges: only tiles with content exist, at any coordinates, negative
 /// included. Cloning copies the tile map (pointers), not the pixels.
-#[derive(Clone, Default, Debug)]
+///
+/// An image also keeps, built when first asked for, its content bounds and a pyramid of
+/// half-size copies (for drawing it shrunk); changing a pixel discards both.
+#[derive(Default)]
 pub struct RasterImage {
     tiles: HashMap<TileCoord, Arc<Tile>>,
+    /// `pyramid[k - 1]` is the image halved `k` times.
+    pyramid: [OnceLock<Box<RasterImage>>; MAX_REDUCTION as usize],
+    bounds: OnceLock<Option<IRect>>,
+}
+
+impl Clone for RasterImage {
+    fn clone(&self) -> RasterImage {
+        RasterImage { tiles: self.tiles.clone(), pyramid: self.pyramid.clone(), bounds: self.bounds.clone() }
+    }
+}
+
+impl std::fmt::Debug for RasterImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RasterImage({} tiles)", self.tiles.len())
+    }
 }
 
 impl RasterImage {
     pub fn new() -> RasterImage {
         RasterImage::default()
+    }
+
+    /// Forgets what was derived from the pixels, which are about to change.
+    fn changed(&mut self) {
+        self.pyramid = Default::default();
+        self.bounds = OnceLock::new();
     }
 
     /// The tile at `c`, if it exists.
@@ -26,11 +54,13 @@ impl RasterImage {
     /// The tile at `c` for changing, created transparent if absent and copied first if it is
     /// shared with another image or history state.
     pub fn tile_mut(&mut self, c: TileCoord) -> &mut Tile {
+        self.changed();
         Arc::make_mut(self.tiles.entry(c).or_insert_with(|| Arc::new(Tile::transparent())))
     }
 
     /// Sets or removes the tile at `c`.
     pub fn set_tile(&mut self, c: TileCoord, tile: Option<Arc<Tile>>) {
+        self.changed();
         match tile {
             Some(t) => {
                 self.tiles.insert(c, t);
@@ -126,6 +156,66 @@ impl RasterImage {
         }
         out
     }
+
+    /// The smallest rectangle holding every pixel that is not fully transparent, or `None`
+    /// for an image with no content. Computed on first use and kept until a pixel changes.
+    pub fn content_bounds(&self) -> Option<IRect> {
+        // Computed first and then stored, rather than inside `get_or_init`: the computation
+        // runs on rayon, whose work stealing could otherwise run a job that waits on this
+        // same cell on the thread initializing it.
+        if let Some(b) = self.bounds.get() {
+            return *b;
+        }
+        let b = self
+            .tiles
+            .par_iter()
+            .filter_map(|(c, t)| {
+                let [x0, y0, x1, y1] = t.content_rect()?;
+                let o = c.rect(0);
+                Some(IRect::new(o.x0 + i64::from(x0), o.y0 + i64::from(y0), o.x0 + i64::from(x1), o.y0 + i64::from(y1)))
+            })
+            .reduce_with(|a, b| a.union(&b));
+        let _ = self.bounds.set(b);
+        b
+    }
+
+    /// The image halved `k` times: each pixel the average of a 2^k × 2^k block, so pixel
+    /// `(x, y)` covers this image's pixels from `(x·2^k, y·2^k)` on. Built on first use
+    /// (each level from the one below) and kept until a pixel changes.
+    pub fn reduced(&self, k: u32) -> &RasterImage {
+        if k == 0 {
+            return self;
+        }
+        let k = k.min(MAX_REDUCTION);
+        let cell = &self.pyramid[k as usize - 1];
+        if let Some(r) = cell.get() {
+            return r;
+        }
+        // Not `get_or_init`, for the reason given in `content_bounds`.
+        let half = self.reduced(k - 1).halved();
+        let _ = cell.set(Box::new(half));
+        cell.get().expect("the level was just stored")
+    }
+
+    /// Whether level `k` of the pyramid has been built.
+    pub fn has_reduced(&self, k: u32) -> bool {
+        k == 0 || self.pyramid.get(k as usize - 1).is_some_and(|c| c.get().is_some())
+    }
+
+    /// The image at half size, each pixel the average of a 2×2 block.
+    fn halved(&self) -> RasterImage {
+        let parents: HashSet<TileCoord> = self.tiles.keys().map(|c| c.parent()).collect();
+        let tiles: Vec<(TileCoord, Tile)> = parents
+            .into_par_iter()
+            .filter_map(|p| {
+                let kids = p.children().map(|k| self.tiles.get(&k).map(|t| &**t));
+                downsample(kids).map(|t| (p, t))
+            })
+            .collect();
+        let mut out = RasterImage::new();
+        out.tiles = tiles.into_iter().map(|(c, t)| (c, Arc::new(t))).collect();
+        out
+    }
 }
 
 /// The size of one tile's worth of pixels in bytes (for memory accounting).
@@ -176,6 +266,38 @@ mod tests {
         assert_eq!(img.tile_count(), 2);
         let back = img.read_rect(&IRect::from_size(i64::from(w), i64::from(h)));
         assert_eq!(back, px);
+    }
+
+    #[test]
+    fn content_bounds_are_tight_and_follow_changes() {
+        let mut a = RasterImage::new();
+        assert_eq!(a.content_bounds(), None);
+        a.set_pixel(-3, 10, pixel_from_f32([0.0, 0.0, 0.0, 1.0]));
+        a.set_pixel(300, 2, pixel_from_f32([0.0, 0.0, 0.0, 1.0]));
+        assert_eq!(a.content_bounds(), Some(IRect::new(-3, 2, 301, 11)));
+        a.set_pixel(300, 2, [f16::ZERO; 4]);
+        assert_eq!(a.content_bounds(), Some(IRect::new(-3, 10, -2, 11)), "a change discards the stored bounds");
+    }
+
+    #[test]
+    fn the_pyramid_averages_blocks_and_is_rebuilt_after_a_change() {
+        // A 4×4 block of 1s and 0s alternating by column: halved twice, one pixel of 0.5.
+        let mut a = RasterImage::new();
+        for y in 0..4 {
+            for x in 0..4 {
+                let v = (x % 2) as f32;
+                a.set_pixel(x, y, pixel_from_f32([v, v, v, 1.0]));
+            }
+        }
+        let p = a.reduced(2).pixel(0, 0);
+        assert_eq!(p, pixel_from_f32([0.5, 0.5, 0.5, 1.0]));
+        assert!(a.has_reduced(1) && a.has_reduced(2) && !a.has_reduced(3));
+        a.set_pixel(0, 0, pixel_from_f32([1.0; 4]));
+        assert!(!a.has_reduced(1), "a change discards the pyramid");
+        // Negative coordinates halve toward negative infinity, like tile coordinates.
+        let mut b = RasterImage::new();
+        b.set_pixel(-1, -1, pixel_from_f32([1.0; 4]));
+        assert_eq!(b.reduced(1).pixel(-1, -1), pixel_from_f32([0.25; 4]));
     }
 
     #[test]

@@ -141,6 +141,53 @@ impl Tile {
         dst.convert_from_f32_slice(src);
         t
     }
+
+    /// A tile made from `TILE_PIXELS` stored pixels, row by row.
+    pub fn from_pixels(px: Vec<Pixel>) -> Tile {
+        assert_eq!(px.len(), TILE_PIXELS);
+        Tile { px: px.into_boxed_slice() }
+    }
+
+    /// The smallest rectangle (`[x0, y0, x1, y1]` within the tile) holding every pixel that
+    /// is not fully transparent, or `None` if there is none.
+    pub fn content_rect(&self) -> Option<[u32; 4]> {
+        let n = TILE_SIZE as usize;
+        let opaque_row = |y: usize| self.px[y * n..(y + 1) * n].iter().any(|p| p[3] != f16::ZERO);
+        let y0 = (0..n).find(|&y| opaque_row(y))?;
+        let y1 = (y0..n).rev().find(|&y| opaque_row(y)).unwrap_or(y0) + 1;
+        let opaque_col = |x: usize| (y0..y1).any(|y| self.px[y * n + x][3] != f16::ZERO);
+        let x0 = (0..n).find(|&x| opaque_col(x)).unwrap_or(0);
+        let x1 = (x0..n).rev().find(|&x| opaque_col(x)).unwrap_or(x0) + 1;
+        Some([x0 as u32, y0 as u32, x1 as u32, y1 as u32])
+    }
+}
+
+/// Halves four tiles (top-left, top-right, bottom-left, bottom-right) into one, averaging
+/// each 2×2 block of premultiplied linear pixels; `None` where the result is transparent.
+pub fn downsample(children: [Option<&Tile>; 4]) -> Option<Tile> {
+    if children.iter().all(Option::is_none) {
+        return None;
+    }
+    let half = TILE_SIZE / 2;
+    let mut out = vec![[0.0f32; 4]; TILE_PIXELS];
+    let mut buf = vec![[0.0f32; 4]; TILE_PIXELS];
+    for (q, child) in children.iter().enumerate() {
+        let Some(child) = child else { continue };
+        child.to_f32(&mut buf);
+        let (qx, qy) = ((q as u32 % 2) * half, (q as u32 / 2) * half);
+        for y in 0..half {
+            for x in 0..half {
+                let i = |dx: u32, dy: u32| ((2 * y + dy) * TILE_SIZE + 2 * x + dx) as usize;
+                let (a, b, c, d) = (buf[i(0, 0)], buf[i(1, 0)], buf[i(0, 1)], buf[i(1, 1)]);
+                let o = &mut out[((qy + y) * TILE_SIZE + qx + x) as usize];
+                for k in 0..4 {
+                    o[k] = (a[k] + b[k] + c[k] + d[k]) * 0.25;
+                }
+            }
+        }
+    }
+    let t = Tile::from_f32(&out);
+    (!t.is_transparent()).then_some(t)
 }
 
 fn index(x: u32, y: u32) -> usize {
@@ -194,5 +241,15 @@ mod tests {
         assert_eq!(Tile::from_f32(&buf), t);
         assert!(!t.is_transparent());
         assert!(Tile::transparent().is_transparent());
+    }
+
+    #[test]
+    fn content_rect_is_tight() {
+        assert_eq!(Tile::transparent().content_rect(), None);
+        assert_eq!(Tile::filled(pixel_from_f32([1.0; 4])).content_rect(), Some([0, 0, TILE_SIZE, TILE_SIZE]));
+        let mut t = Tile::transparent();
+        t.set(3, 200, pixel_from_f32([0.0, 0.0, 0.0, 0.5]));
+        t.set(17, 9, pixel_from_f32([0.0, 0.0, 0.0, 0.5]));
+        assert_eq!(t.content_rect(), Some([3, 9, 18, 201]));
     }
 }

@@ -16,11 +16,12 @@ opal-io = { path = "crates/opal-io" }
 half = { version = "2.7", features = ["bytemuck"] }
 rayon = "1.12"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 zip = { version = "9.3", default-features = false, features = ["deflate"] }
 bytemuck = { version = "1", features = ["derive"] }
+mimalloc = { version = "0.1", default-features = false }
 
 [profile.dev]
 # Pixel loops are unbearably slow unoptimized; keep the app's own code debuggable.

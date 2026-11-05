@@ -4,7 +4,9 @@
 //! is. Layers are held in `Arc`s so a [`Document`] clone (a history snapshot) copies a list
 //! of pointers; changing a layer copies that layer's small header and the path above it.
 
+use crate::geom::{Affine, FRect, IRect};
 use crate::raster::RasterImage;
+use crate::resample::{self, Sampling};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -69,11 +71,28 @@ impl IdGen {
     }
 }
 
-/// The canvas: what gets exported, and the size of the image.
+/// The canvas: what gets exported, and the size of the image. It is a rectangle in the
+/// document's coordinates, with its top-left corner at `(x, y)`; cropping moves it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Canvas {
+    #[serde(default)]
+    pub x: i64,
+    #[serde(default)]
+    pub y: i64,
     pub width: u32,
     pub height: u32,
+}
+
+impl Canvas {
+    /// A canvas of `width × height` with its corner at the origin.
+    pub fn sized(width: u32, height: u32) -> Canvas {
+        Canvas { x: 0, y: 0, width, height }
+    }
+
+    /// The canvas's pixels in document coordinates.
+    pub fn rect(&self) -> IRect {
+        IRect::new(self.x, self.y, self.x + i64::from(self.width), self.y + i64::from(self.height))
+    }
 }
 
 /// One drawable thing inside a layer.
@@ -85,8 +104,78 @@ pub struct Object {
 
 #[derive(Clone, Debug)]
 pub enum ObjectKind {
-    /// A bitmap, positioned with its tile grid on the canvas's pixel grid.
-    Raster(Arc<RasterImage>),
+    Pixels(PixelObject),
+    Image(ImageObject),
+}
+
+/// A bitmap on the document's pixel grid. It moves only by whole pixels, so moving it never
+/// resamples it.
+#[derive(Clone, Debug)]
+pub struct PixelObject {
+    pub image: Arc<RasterImage>,
+    /// Where the bitmap's pixel `(0, 0)` sits in the document.
+    pub offset: [i64; 2],
+}
+
+/// A bitmap with pixels of its own, drawn through a transform: a pasted image, or pixels
+/// transformed freely. Transforming it again redraws from its own pixels, so nothing is
+/// lost however often it is transformed.
+#[derive(Clone, Debug)]
+pub struct ImageObject {
+    pub image: Arc<RasterImage>,
+    /// The image's extent in its own pixels: the rectangle the transform box frames.
+    pub frame: IRect,
+    /// From the image's pixels to the document's.
+    pub transform: Affine,
+    pub sampling: Sampling,
+}
+
+impl ImageObject {
+    /// The corners of the frame in the document, clockwise from the image's top-left.
+    pub fn corners(&self) -> [[f64; 2]; 4] {
+        self.frame.to_f().corners().map(|p| self.transform.apply(p))
+    }
+}
+
+impl Object {
+    /// The object's own pixels, whatever its kind.
+    pub fn image(&self) -> &Arc<RasterImage> {
+        match &self.kind {
+            ObjectKind::Pixels(p) => &p.image,
+            ObjectKind::Image(i) => &i.image,
+        }
+    }
+
+    /// A pixel object holding `image` at the document's origin.
+    pub fn pixels(id: ObjectId, image: RasterImage) -> Object {
+        Object { id, kind: ObjectKind::Pixels(PixelObject { image: Arc::new(image), offset: [0, 0] }) }
+    }
+
+    /// The document pixels the object can draw into: a bound for compositing (an image
+    /// object's reaches past its frame by its filter's reach).
+    pub fn extent(&self) -> Option<IRect> {
+        match &self.kind {
+            ObjectKind::Pixels(p) => Some(p.image.content_bounds()?.translate(p.offset[0], p.offset[1])),
+            ObjectKind::Image(o) => resample::footprint(&o.image, &o.transform, &o.sampling),
+        }
+    }
+
+    /// The object's outline in the document: its content's bounds for pixels, the
+    /// transformed frame for an image. Clockwise from the top-left.
+    pub fn outline(&self) -> Option<[[f64; 2]; 4]> {
+        match &self.kind {
+            ObjectKind::Pixels(p) => {
+                let r = p.image.content_bounds()?.translate(p.offset[0], p.offset[1]);
+                Some(r.to_f().corners())
+            }
+            ObjectKind::Image(o) => Some(o.corners()),
+        }
+    }
+
+    /// The bounding box of [`outline`](Self::outline).
+    pub fn bounds(&self) -> Option<FRect> {
+        self.outline().map(|c| FRect::bounding(&c))
+    }
 }
 
 /// What a layer holds.
@@ -123,10 +212,15 @@ impl Layer {
         }
     }
 
-    /// A layer holding one bitmap.
+    /// A layer holding one pixel object.
     pub fn new_raster(id: LayerId, object: ObjectId, name: impl Into<String>, image: RasterImage) -> Layer {
+        Layer::with_objects(id, name, vec![Object::pixels(object, image)])
+    }
+
+    /// A layer holding `objects`, bottom to top.
+    pub fn with_objects(id: LayerId, name: impl Into<String>, objects: Vec<Object>) -> Layer {
         let mut l = Layer::new_empty(id, name);
-        l.content = LayerContent::Objects(vec![Object { id: object, kind: ObjectKind::Raster(Arc::new(image)) }]);
+        l.content = LayerContent::Objects(objects);
         l
     }
 
@@ -149,14 +243,32 @@ impl Layer {
         }
     }
 
-    /// The bitmaps this layer holds, bottom to top.
-    pub fn rasters(&self) -> impl Iterator<Item = &Arc<RasterImage>> {
-        let objects: &[Object] = match &self.content {
+    /// The objects this layer holds, bottom to top (none for a group).
+    pub fn objects(&self) -> &[Object] {
+        match &self.content {
             LayerContent::Objects(o) => o,
             LayerContent::Group(_) => &[],
-        };
-        objects.iter().map(|o| match &o.kind {
-            ObjectKind::Raster(r) => r,
+        }
+    }
+
+    /// The objects this layer and, for a group, every layer inside it hold.
+    pub fn all_objects(&self) -> Vec<&Object> {
+        fn walk<'a>(l: &'a Layer, out: &mut Vec<&'a Object>) {
+            match &l.content {
+                LayerContent::Objects(o) => out.extend(o),
+                LayerContent::Group(c) => c.iter().for_each(|c| walk(c, out)),
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, &mut out);
+        out
+    }
+
+    /// The bounding box of the outlines of everything in the layer, or `None` if it is
+    /// empty.
+    pub fn bounds(&self) -> Option<FRect> {
+        self.all_objects().iter().filter_map(|o| o.bounds()).reduce(|a, b| {
+            FRect::new(a.x0.min(b.x0), a.y0.min(b.y0), a.x1.max(b.x1), a.y1.max(b.y1))
         })
     }
 }
@@ -204,7 +316,7 @@ pub struct Document {
 
 impl Document {
     pub fn new(width: u32, height: u32) -> Document {
-        Document { canvas: Canvas { width, height }, layers: Vec::new() }
+        Document { canvas: Canvas::sized(width, height), layers: Vec::new() }
     }
 
     /// Visits every layer depth first, bottom to top, with its depth (0 for top level).

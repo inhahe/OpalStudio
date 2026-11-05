@@ -403,8 +403,9 @@ impl OpalApp {
                 let c = d.doc().canvas;
                 ui.label(RichText::new(format!("{} × {} px", c.width, c.height)).color(weak));
                 ui.separator();
+                // Positions count from the canvas's corner, wherever cropping has put it.
                 if let Some((x, y)) = self.st.cursor_shown {
-                    ui.label(RichText::new(format!("{x}, {y}")).color(weak));
+                    ui.label(RichText::new(format!("{}, {}", x - c.x, y - c.y)).color(weak));
                 }
             });
         });

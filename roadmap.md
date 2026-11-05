@@ -37,16 +37,20 @@ selection core it builds on.
 - Tool settings panel: variant picker, basic settings, Advanced section.
 
 ## 1. Paste and place
+- Pixel objects and image objects; the resampler (methods, anti-ringing, pyramids for
+  shrinking); the canvas as a rectangle; native format version 1.
 - Paste opens the transform box: aspect lock, snapping (Alt and an on-box button), rotate,
-  fit and fill, Enter and Esc; new layer by default, or into the active layer.
-- Move tool; click to select a layer (Ctrl+click with other tools; right-click lists the
-  layers under the cursor); faint outline around the active layer.
-- Crop, resize the image, resize the canvas, rotate.
+  fit and fill, Enter and Esc; new layer by default, or into the active layer. Paste in
+  Place; paste with no document open; Copy and Copy Merged; Transform (Ctrl+T) on the
+  selected layers.
+- Move tool; arrow-key nudging; click to select a layer (Ctrl+click with other tools;
+  right-click lists the layers under the cursor); faint outline around the active layer.
+- Crop tool with straighten; Crop to Content; Resize Image; Resize Canvas; Rotate and Flip.
 - Export PNG and JPEG at a chosen size.
 - Layer thumbnails in the Layers panel; history thumbnails on hover.
 - Selecting several layers in the Layers panel; Merge Selected, Merge Visible, Merge
   Group, Stamp Visible.
-- Rasterize Layer (first for a pasted image's transform).
+- Rasterize Layer.
 
 ## S. Scripting and MCP (right after milestone 1)
 - Parameterized commands: every command callable with parameters as well as from the

@@ -1,11 +1,16 @@
-//! The native `.opal` format, version 0.
+//! The native `.opal` format, version 1.
 //!
 //! A zip archive holding:
 //!
 //! - `mimetype`, stored first and uncompressed: `application/x-opal-studio`.
-//! - `document.json`: the canvas, the layer tree, and the next free identifier.
+//! - `document.json`: the canvas (a rectangle), the layer tree, and the next free
+//!   identifier. Objects are `pixels` (tiles and a whole-pixel offset) or `image` (tiles,
+//!   the frame, the transform as `[a, b, c, d, e, f]`, and the sampling).
 //! - `tiles/<n>.bin`: one tile each, numbered from 0. A tile shared by several layers or
 //!   objects (after duplicating a layer, say) is stored once and referenced from each.
+//!
+//! Version 0 had only pixel objects, called `raster`, without offsets, and a canvas
+//! without a position; it is still read.
 //!
 //! A tile file is the tile's 256×256 pixels × 4 channels of little-endian half floats,
 //! **byte-shuffled**: all the low bytes first, then all the high bytes. The high bytes
@@ -13,8 +18,12 @@
 //! lets deflate compress photos far better.
 
 use crate::{IoError, write_all, write_atomically};
-use opal_core::document::{Canvas, Document, IdGen, Layer, LayerContent, LayerId, Object, ObjectId, ObjectKind};
+use opal_core::document::{
+    Canvas, Document, IdGen, ImageObject, Layer, LayerContent, LayerId, Object, ObjectId, ObjectKind, PixelObject,
+};
+use opal_core::geom::{Affine, IRect};
 use opal_core::raster::RasterImage;
+use opal_core::resample::Sampling;
 use opal_core::tile::{Pixel, TILE_PIXELS, Tile, TileCoord};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -26,7 +35,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 pub const MIME_TYPE: &str = "application/x-opal-studio";
-pub const FORMAT_VERSION: u32 = 0;
+pub const FORMAT_VERSION: u32 = 1;
 const TILE_BYTES: usize = TILE_PIXELS * 4 * 2;
 /// The largest `document.json` accepted.
 const MAX_JSON: usize = 256 << 20;
@@ -65,12 +74,34 @@ struct FileObject {
     kind: FileObjectKind,
 }
 
+/// In both kinds, each entry of `tiles` is `[tile x, tile y, tile file number]`.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum FileObjectKind {
-    /// Each entry is `[tile x, tile y, tile file number]`.
-    Raster { tiles: Vec<[i64; 3]> },
+    /// Version 0 called these `raster`, and had no offset.
+    #[serde(alias = "raster")]
+    Pixels {
+        tiles: Vec<[i64; 3]>,
+        #[serde(default)]
+        offset: [i64; 2],
+    },
+    Image { tiles: Vec<[i64; 3]>, frame: IRect, transform: Affine, sampling: Sampling },
 }
+
+impl FileObjectKind {
+    fn tiles(&self) -> &[[i64; 3]] {
+        match self {
+            FileObjectKind::Pixels { tiles, .. } | FileObjectKind::Image { tiles, .. } => tiles,
+        }
+    }
+}
+
+/// Coordinates beyond this (2^40 pixels, a thousand times past any canvas) mark a damaged
+/// file; they would also overflow arithmetic on rectangles.
+const MAX_COORD: i64 = 1 << 40;
+
+/// The largest stretch or squash a transform may apply, either way.
+const MAX_SCALE: f64 = 1e6;
 
 /// Saves `doc` with the identifier generator's state to `path` (atomically).
 pub fn save(doc: &Document, ids: &IdGen, path: &Path) -> Result<(), IoError> {
@@ -116,7 +147,7 @@ fn file_layer(layer: &Layer, numbers: &mut HashMap<*const Tile, usize>, tiles: &
             objects: objects
                 .iter()
                 .map(|o| {
-                    let ObjectKind::Raster(img) = &o.kind;
+                    let img = o.image();
                     let mut refs: Vec<[i64; 3]> = img
                         .tiles()
                         .map(|(c, t)| {
@@ -128,7 +159,16 @@ fn file_layer(layer: &Layer, numbers: &mut HashMap<*const Tile, usize>, tiles: &
                         })
                         .collect();
                     refs.sort_unstable();
-                    FileObject { id: o.id, kind: FileObjectKind::Raster { tiles: refs } }
+                    let kind = match &o.kind {
+                        ObjectKind::Pixels(p) => FileObjectKind::Pixels { tiles: refs, offset: p.offset },
+                        ObjectKind::Image(i) => FileObjectKind::Image {
+                            tiles: refs,
+                            frame: i.frame,
+                            transform: i.transform,
+                            sampling: i.sampling,
+                        },
+                    };
+                    FileObject { id: o.id, kind }
                 })
                 .collect(),
         },
@@ -180,6 +220,10 @@ pub fn load_from(reader: impl Read + Seek, path: &Path) -> Result<Loaded, IoErro
     }
 
     check_ids(&file.layers, &mut HashSet::new(), path)?;
+    let c = &file.canvas;
+    if c.x.abs() > MAX_COORD || c.y.abs() > MAX_COORD || c.width == 0 || c.height == 0 {
+        return Err(bad(format!("the canvas is {}×{} at ({}, {}), out of range", c.width, c.height, c.x, c.y)));
+    }
     if file.next_id >= MAX_ID {
         return Err(bad(format!("next identifier {} is out of range", file.next_id)));
     }
@@ -264,8 +308,7 @@ fn collect_tile_numbers(layers: &[FileLayer], out: &mut Vec<usize>) {
             FileContent::Group { children } => collect_tile_numbers(children, out),
             FileContent::Objects { objects } => {
                 for o in objects {
-                    let FileObjectKind::Raster { tiles } = &o.kind;
-                    out.extend(tiles.iter().map(|t| t[2] as usize));
+                    out.extend(o.kind.tiles().iter().map(|t| t[2] as usize));
                 }
             }
         }
@@ -285,9 +328,8 @@ fn build_layer(l: FileLayer, tiles: &HashMap<usize, Arc<Tile>>, path: &Path) -> 
         FileContent::Objects { objects } => {
             let mut out = Vec::with_capacity(objects.len());
             for o in objects {
-                let FileObjectKind::Raster { tiles: refs } = o.kind;
                 let mut img = RasterImage::new();
-                for [x, y, n] in refs {
+                for &[x, y, n] in o.kind.tiles() {
                     let coord = TileCoord::new(
                         i32::try_from(x).map_err(|_| bad(format!("tile x {x} out of range")))?,
                         i32::try_from(y).map_err(|_| bad(format!("tile y {y} out of range")))?,
@@ -295,7 +337,20 @@ fn build_layer(l: FileLayer, tiles: &HashMap<usize, Arc<Tile>>, path: &Path) -> 
                     let tile = tiles.get(&(n as usize)).ok_or_else(|| bad(format!("tile {n} missing")))?;
                     img.set_tile(coord, Some(tile.clone()));
                 }
-                out.push(Object { id: o.id, kind: ObjectKind::Raster(Arc::new(img)) });
+                let image = Arc::new(img);
+                let kind = match o.kind {
+                    FileObjectKind::Pixels { offset, .. } => {
+                        if offset.iter().any(|v| v.abs() > MAX_COORD) {
+                            return Err(bad(format!("object {} has offset {offset:?}, out of range", o.id.0)));
+                        }
+                        ObjectKind::Pixels(PixelObject { image, offset })
+                    }
+                    FileObjectKind::Image { frame, transform, sampling, .. } => {
+                        check_image(&frame, &transform, &sampling).map_err(|m| bad(format!("object {}: {m}", o.id.0)))?;
+                        ObjectKind::Image(ImageObject { image, frame, transform, sampling })
+                    }
+                };
+                out.push(Object { id: o.id, kind });
             }
             LayerContent::Objects(out)
         }
@@ -304,6 +359,26 @@ fn build_layer(l: FileLayer, tiles: &HashMap<usize, Arc<Tile>>, path: &Path) -> 
         return Err(bad(format!("layer {:?} has opacity {}", l.name, l.opacity)));
     }
     Ok(Layer { id: l.id, name: l.name, visible: l.visible, locked: l.locked, opacity: l.opacity, content })
+}
+
+/// Why an image object's placement is unusable, if it is.
+fn check_image(frame: &IRect, m: &Affine, sampling: &Sampling) -> Result<(), String> {
+    let coords = [frame.x0, frame.y0, frame.x1, frame.y1];
+    if frame.is_empty() || coords.iter().any(|v| v.abs() > MAX_COORD) {
+        return Err(format!("frame {frame:?} is empty or out of range"));
+    }
+    let linear = [m.a, m.b, m.c, m.d];
+    let moved = [m.e, m.f];
+    let det = m.determinant().abs();
+    let sane = m.is_finite()
+        && linear.iter().all(|v| v.abs() <= MAX_SCALE)
+        && moved.iter().all(|v| v.abs() <= MAX_COORD as f64)
+        && det >= 1.0 / (MAX_SCALE * MAX_SCALE)
+        && m.inverse().is_some();
+    if !sane {
+        return Err(format!("transform {:?} is not usable", m.to_array()));
+    }
+    sampling.check()
 }
 
 /// The tile's half floats as bytes, low bytes first, then high bytes.
@@ -374,16 +449,67 @@ mod tests {
         assert!(!group.visible);
         let copy = &group.children().unwrap()[0];
         assert!(copy.locked);
-        let img = base.rasters().next().unwrap();
+        let img = base.objects()[0].image();
         assert_eq!(img.pixel(5, 5), pixel_from_f32([0.25, 0.5, 0.75, 1.0]));
         assert_eq!(img.pixel(-700, 40), pixel_from_f32([-0.125, 1.5, 0.0, 0.5]));
         // Shared tiles stay shared after loading.
-        let copy_img = copy.rasters().next().unwrap();
+        let copy_img = copy.objects()[0].image();
         let c = TileCoord::containing(5, 5);
         assert!(Arc::ptr_eq(img.tile(c).unwrap(), copy_img.tile(c).unwrap()));
         // New identifiers do not collide with loaded ones.
         let mut ids2 = loaded.ids;
         assert!(!d.layer_ids().contains(&ids2.layer()));
+    }
+
+    #[test]
+    fn image_objects_offsets_and_the_canvas_position_round_trip() {
+        use opal_core::resample::Method;
+        let (mut doc, mut ids) = sample();
+        doc.canvas.x = -12;
+        doc.canvas.y = 34;
+        let LayerContent::Objects(objects) = &mut doc.layer_mut(doc.layers[0].id).unwrap().content else { panic!() };
+        let ObjectKind::Pixels(p) = &mut objects[0].kind else { panic!() };
+        p.offset = [7, -300];
+        let mut pixels = RasterImage::new();
+        pixels.set_pixel(1, 1, pixel_from_f32([1.0; 4]));
+        let image = ImageObject {
+            image: Arc::new(pixels),
+            frame: IRect::from_size(3, 2),
+            transform: Affine::rotate(0.25).then(Affine::scale(2.5, 0.5)).then(Affine::translate(-1.5, 9.0)),
+            sampling: Sampling { method: Method::Lanczos { lobes: 4 }, anti_ringing: false },
+        };
+        let layer = Layer::with_objects(ids.layer(), "Pasted", vec![Object { id: ids.object(), kind: ObjectKind::Image(image.clone()) }]);
+        doc.insert(Position { parent: None, index: 2 }, layer).unwrap();
+
+        let path = std::env::temp_dir().join(format!("opal-native-v1-{}.opal", std::process::id()));
+        save(&doc, &ids, &path).unwrap();
+        let loaded = load(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let d = loaded.doc;
+        assert_eq!(d.canvas, doc.canvas);
+        let ObjectKind::Pixels(p) = &d.layers[0].objects()[0].kind else { panic!("pixels") };
+        assert_eq!(p.offset, [7, -300]);
+        let ObjectKind::Image(i) = &d.layers[2].objects()[0].kind else { panic!("an image") };
+        assert_eq!((i.frame, i.transform, i.sampling), (image.frame, image.transform, image.sampling));
+        assert_eq!(i.image.pixel(1, 1), pixel_from_f32([1.0; 4]));
+    }
+
+    #[test]
+    fn unusable_image_placements_are_refused() {
+        let object = |transform: &str| {
+            format!(
+                r#"{{"id":1,"name":"l","visible":true,"locked":false,"opacity":1.0,"kind":"objects","objects":[{{"id":2,"kind":"image","tiles":[],"frame":{{"x0":0,"y0":0,"x1":4,"y1":4}},"transform":{transform},"sampling":{{"method":{{"kind":"bilinear"}},"anti_ringing":false}}}}]}}"#
+            )
+        };
+        let doc = |layer: String| {
+            format!(r#"{{"format":"opal-studio","version":1,"canvas":{{"width":1,"height":1}},"next_id":10,"layers":[{layer}]}}"#)
+        };
+        let ok = doc(object("[1,0,0,1,5,5]"));
+        assert!(load_from(crafted(&ok, &[]), Path::new("ok.opal")).is_ok());
+        for bad in ["[0,0,0,0,0,0]", "[1e300,0,0,1,0,0]", "[1,0,0,1,1e30,0]", "[1,2,2,4,0,0]"] {
+            let err = load_from(crafted(&doc(object(bad)), &[]), Path::new("bad.opal")).err();
+            assert!(err.is_some_and(|e| e.to_string().contains("transform")), "{bad} accepted");
+        }
     }
 
     #[test]

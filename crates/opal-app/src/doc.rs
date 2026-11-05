@@ -1,8 +1,8 @@
 //! One open document: its history, its view, and what is selected in it.
 
-use eframe::egui::Vec2;
+use eframe::egui::{Pos2, Rect, Vec2};
 use opal_core::composite::Projection;
-use opal_core::document::{Document, IdGen, LayerId};
+use opal_core::document::{Canvas, Document, IdGen, LayerId};
 use opal_core::history::{History, NodeId};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -60,13 +60,14 @@ impl View {
         self.snap();
     }
 
-    /// Fits a canvas of `size` into a viewport of `viewport` device pixels, centered, with a
-    /// margin, never zooming past `max`.
-    pub fn fit(&mut self, size: Vec2, viewport: Vec2, max: f32) {
+    /// Fits `canvas` (in canvas pixels) into a viewport of `viewport` device pixels,
+    /// centered, with a margin, never zooming past `max`.
+    pub fn fit(&mut self, canvas: Rect, viewport: Vec2, max: f32) {
         let margin = 0.92;
+        let size = canvas.size();
         let z = (viewport.x / size.x).min(viewport.y / size.y) * margin;
         self.zoom = z.clamp(MIN_ZOOM, max.max(MIN_ZOOM));
-        self.offset = (viewport - size * self.zoom) * 0.5;
+        self.offset = (viewport - size * self.zoom) * 0.5 - canvas.min.to_vec2() * self.zoom;
         self.placed = true;
         self.snap();
     }
@@ -84,6 +85,11 @@ impl View {
             self.offset = Vec2::new(self.offset.x.round(), self.offset.y.round());
         }
     }
+}
+
+/// The canvas's rectangle in canvas pixels, for the view.
+pub fn canvas_rect(c: &Canvas) -> Rect {
+    Rect::from_min_size(Pos2::new(c.x as f32, c.y as f32), Vec2::new(c.width as f32, c.height as f32))
 }
 
 /// An edit in progress that has not been committed to history yet (a slider being dragged):
@@ -337,7 +343,10 @@ mod tests {
         let before = v.to_canvas(anchor);
         v.zoom_about(2.5, anchor);
         assert!((v.to_canvas(anchor) - before).length() < 1e-3);
-        v.fit(Vec2::new(1000.0, 500.0), Vec2::new(500.0, 500.0), 1.0);
+        let canvas = Rect::from_min_size(Pos2::new(-200.0, 50.0), Vec2::new(1000.0, 500.0));
+        v.fit(canvas, Vec2::new(500.0, 500.0), 1.0);
         assert!(v.zoom < 0.5 && v.zoom > 0.4);
+        let center = v.to_screen(canvas.center().to_vec2());
+        assert!((center - Vec2::new(250.0, 250.0)).length() < 1.0, "the canvas is centered wherever it lies: {center:?}");
     }
 }
