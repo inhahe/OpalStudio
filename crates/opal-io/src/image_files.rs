@@ -84,9 +84,10 @@ pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<u64>) -> Result<Impo
 /// the image at 8 or 16 bits a channel (up to 8 bytes), the working pixels (8) and their
 /// tiles (8).
 fn import_memory(dimensions: (u32, u32), decoded: u64, orientation: image::metadata::Orientation) -> u64 {
+    // Saturating: a header may claim any size, and a wrapped sum would pass the check.
     let pixels = u64::from(dimensions.0) * u64::from(dimensions.1);
     let turned = if orientation == image::metadata::Orientation::NoTransforms { 0 } else { decoded };
-    decoded + turned + pixels * 24
+    decoded.saturating_add(turned).saturating_add(pixels.saturating_mul(24))
 }
 
 /// Whether an ICC profile is (by its description) one of the sRGB profiles, which need no
@@ -918,6 +919,8 @@ mod tests {
         assert_eq!((need, free), (140_000, 100_000));
         assert!(import_bytes(&png, Path::new("big.png"), Some(140_000)).is_ok());
         assert!(import_bytes(&png, Path::new("big.png"), None).is_ok());
+        // A size no sum of which may wrap past the check.
+        assert_eq!(import_memory((u32::MAX, u32::MAX), u64::MAX - 1, image::metadata::Orientation::Rotate90), u64::MAX);
     }
 
     #[test]

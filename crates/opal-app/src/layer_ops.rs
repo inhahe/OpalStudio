@@ -476,7 +476,7 @@ fn fits(layers: &[Arc<Layer>], canvas: &IRect, mut memory: Allowance) -> Result<
         return Err(format!(
             "The result would need about {} of memory, because something reaches far past the canvas. \
              Shrink or crop what reaches that far first.",
-            opal_io::bytes(pixels as u64 * 8)
+            opal_io::bytes((pixels as u64).saturating_mul(8))
         ));
     }
     memory.take(opal_core::composite::composite_cost(layers, None))
@@ -624,6 +624,25 @@ mod tests {
         assert!(drawable(area, &canvas, &mut memory).is_ok());
         let why = drawable(area, &canvas, &mut memory).unwrap_err();
         assert!(why.contains("memory"), "{why}");
+    }
+
+    #[test]
+    fn merging_something_enlarged_as_far_as_it_goes_says_how_much_it_would_need() {
+        use opal_core::document::{ImageObject, Object};
+        let mut ids = IdGen::default();
+        let img = RasterImage::filled(&IRect::from_size(1600, 1600), pixel_from_f32([1.0; 4]));
+        let image = ImageObject {
+            image: Arc::new(img),
+            frame: IRect::from_size(1600, 1600),
+            transform: opal_core::geom::Affine::scale(1e6, 1e6),
+            sampling: Default::default(),
+        };
+        let object = Object { id: ids.object(), kind: ObjectKind::Image(image) };
+        let layer = Arc::new(Layer::with_objects(ids.layer(), "far", vec![object]));
+        let why = fits(&[layer], &IRect::from_size(100, 100), Allowance::of(None)).unwrap_err();
+        assert!(why.contains("reaches far past the canvas"), "{why}");
+        // 2.6e18 pixels: more bytes than a u64 counts, said as the most it can.
+        assert!(why.contains(&opal_io::bytes(u64::MAX)), "{why}");
     }
 
     #[test]
