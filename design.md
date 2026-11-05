@@ -149,8 +149,8 @@ size, and Rasterize Layer, so each gives the same pixels the canvas shows.
 - **Anti-ringing**, on by default: each result is kept within the range of the source
   pixels nearest it, which removes the halos sharp filters draw along hard edges.
 - **Shrinking never aliases.** An image keeps reduced copies (each a power of two
-  smaller), built when first needed and only those needed (a quarter of the image's memory
-  at half size, a sixteenth at a quarter); a shrunk image is sampled from the copy just finer than the result along
+  smaller, made by halving), built when first needed and only those needed (a quarter of
+  the image's memory at half size, a sixteenth at a quarter); a shrunk image is sampled from the copy just finer than the result along
   its less shrunk axis, with the filter widened by the remaining factor along each axis
   (up to 64 times for a drawing that is not turned, so squashing one axis leaves the
   other's detail alone; only a squash past that ratio takes a coarser copy).

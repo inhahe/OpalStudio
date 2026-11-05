@@ -206,9 +206,10 @@ impl RasterImage {
     }
 
     /// The image halved `k` times: each pixel the average of a 2^k × 2^k block, so pixel
-    /// `(x, y)` covers this image's pixels from `(x·2^k, y·2^k)` on. Built on first use,
-    /// from the finest level already built, and kept until a pixel changes; only the levels
-    /// asked for are kept (a quarter of the image for level 1, a sixteenth for level 2).
+    /// `(x, y)` covers this image's pixels from `(x·2^k, y·2^k)` on. Built on first use by
+    /// halving the nearest level below that is built already, and kept until a pixel
+    /// changes. Only the levels asked for are kept (a quarter of the image for level 1, a
+    /// sixteenth for level 2), not the ones passed through on the way.
     pub fn reduced(&self, k: u32) -> &RasterImage {
         if k == 0 {
             return self;
@@ -219,8 +220,11 @@ impl RasterImage {
             return r;
         }
         let from = (1..k).rev().find(|&j| self.has_reduced(j)).unwrap_or(0);
+        let mut level = self.reduced(from).halved();
+        for _ in from + 1..k {
+            level = level.halved();
+        }
         // Not `get_or_init`, for the reason given in `content_bounds`.
-        let level = self.reduced(from).reduced_by(k - from);
         let _ = cell.set(Box::new(level));
         cell.get().expect("the level was just stored")
     }
@@ -228,52 +232,6 @@ impl RasterImage {
     /// Whether level `k` of the pyramid has been built.
     pub fn has_reduced(&self, k: u32) -> bool {
         k == 0 || self.pyramid.get(k as usize - 1).is_some_and(|c| c.get().is_some())
-    }
-
-    /// The image reduced `2^n` times each way, each pixel the average of a `2^n × 2^n`
-    /// block (where tiles are absent, of transparent pixels).
-    fn reduced_by(&self, n: u32) -> RasterImage {
-        if n == 1 {
-            return self.halved();
-        }
-        let side = 1i32 << n.min(30);
-        let parent = |c: TileCoord| TileCoord::new(c.x.div_euclid(side), c.y.div_euclid(side));
-        // The source tiles under each result tile.
-        let mut groups: HashMap<TileCoord, Vec<(TileCoord, &Arc<Tile>)>> = HashMap::new();
-        for (&c, tile) in &self.tiles {
-            groups.entry(parent(c)).or_default().push((c, tile));
-        }
-        let t = TILE_SIZE as i64;
-        let tiles: Vec<(TileCoord, Tile)> = groups
-            .into_par_iter()
-            .filter_map(|(p, sources)| {
-                let mut acc = vec![[0.0f32; 4]; crate::tile::TILE_PIXELS];
-                let mut px = vec![[0.0f32; 4]; crate::tile::TILE_PIXELS];
-                let (x0, y0) = (i64::from(p.x) * i64::from(side), i64::from(p.y) * i64::from(side));
-                for (c, tile) in sources {
-                    tile.to_f32(&mut px);
-                    // Where the source tile's pixels land in the result, in source pixels.
-                    let (ox, oy) = ((i64::from(c.x) - x0) * t, (i64::from(c.y) - y0) * t);
-                    for y in 0..t {
-                        let row = ((oy + y) >> n) as usize * TILE_SIZE as usize;
-                        for x in 0..t {
-                            let a = &mut acc[row + ((ox + x) >> n) as usize];
-                            let s = px[(y * t + x) as usize];
-                            for ch in 0..4 {
-                                a[ch] += s[ch];
-                            }
-                        }
-                    }
-                }
-                let k = 1.0 / (side as f32 * side as f32);
-                acc.iter_mut().for_each(|a| *a = a.map(|v| v * k));
-                let tile = Tile::from_f32(&acc);
-                (!tile.is_transparent()).then_some((p, tile))
-            })
-            .collect();
-        let mut out = RasterImage::new();
-        out.tiles = tiles.into_iter().map(|(c, t)| (c, Arc::new(t))).collect();
-        out
     }
 
     /// The image at half size, each pixel the average of a 2×2 block.
@@ -374,22 +332,15 @@ mod tests {
         let mut b = RasterImage::new();
         b.set_pixel(-1, -1, pixel_from_f32([1.0; 4]));
         assert_eq!(b.reduced(1).pixel(-1, -1), pixel_from_f32([0.25; 4]));
-        // Reduced several levels at once: the same as level by level, negative tiles too.
+        // Reduced many levels at once, a uniform area stays exactly the colour it was.
+        let grey = pixel_from_f32([0.7, 0.7, 0.7, 1.0]);
+        let tile = Arc::new(Tile::filled(grey));
         let mut c = RasterImage::new();
-        for (x, y) in [(-300, -5), (-1, -1), (0, 0), (517, 260), (1023, 1023)] {
-            c.set_pixel(x, y, pixel_from_f32([1.0, 0.5, 0.25, 1.0]));
+        for tc in TileCoord::covering(&IRect::from_size(1024, 1024), 0) {
+            c.set_tile(tc, Some(tile.clone()));
         }
-        let by_steps = c.halved().halved().halved();
-        let direct = c.reduced_by(3);
-        assert_eq!(by_steps.tile_count(), direct.tile_count());
-        for (tc, t) in by_steps.tiles() {
-            let d = direct.tile(tc).expect("the same tiles");
-            for (p, q) in t.pixels().iter().zip(d.pixels()) {
-                for ch in 0..4 {
-                    assert!((p[ch].to_f32() - q[ch].to_f32()).abs() < 1e-3);
-                }
-            }
-        }
+        assert_eq!(c.reduced(10).pixel(0, 0), grey);
+        assert!(!c.has_reduced(9), "the levels passed through are not kept");
     }
 
     #[test]
