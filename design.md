@@ -432,7 +432,11 @@ curve editors.
   exactly the tiles it would make (none for those it shares), resampling the tiles over
   what it draws, summed over everything one command draws. The command is refused with
   how much it needs and how much is free; a paste that cannot be baked stays an image in
-  the layer. (Merging layers that are not adjacent moves the lower ones above whatever lay
+  the layer. Exports and copies are checked the same way: an export takes its bands in
+  flight and, at another size, the image it is drawn from (`export_memory`); a copy takes
+  about 48 bytes a pixel while it goes onto the clipboard (the pixels, the 16-bit PNG,
+  the bitmap, the system's copies of both, and the copy kept for pasting back), and on
+  Windows no more than the 4 GB a clipboard bitmap holds. (Merging layers that are not adjacent moves the lower ones above whatever lay
   between them, which can change the look where those overlap; the status bar says so.)
 
 ### Performance with many layers

@@ -15,6 +15,12 @@ impl AppState {
     /// trimmed to their content. It is put on the clipboard off the interface thread (see
     /// [`AppState::poll_copies`]).
     pub(crate) fn copy(&mut self, merged: bool, ctx: &egui::Context) {
+        self.copy_within(merged, crate::memory::Allowance::now(), ctx);
+    }
+
+    /// [`copy`](Self::copy), or why not if it would need more than `memory` (or more than
+    /// the clipboard holds).
+    pub(crate) fn copy_within(&mut self, merged: bool, mut memory: crate::memory::Allowance, ctx: &egui::Context) {
         let d = self.active().expect("available");
         let doc = d.doc();
         let canvas = doc.canvas.rect();
@@ -28,6 +34,9 @@ impl AppState {
                 .map(|l| Arc::new(Layer { visible: true, ..l.clone() }))
                 .collect()
         };
+        if let Err(why) = memory.take(opal_core::composite::composite_cost(&layers, Some(&canvas))) {
+            return self.message(MessageKind::Info, "Copy", why);
+        }
         let flat = composite_within(&layers, &canvas);
         let Some(bounds) = flat.content_bounds().map(|b| b.intersect(&canvas)).filter(|b| !b.is_empty()) else {
             let what = if merged { "Nothing is visible" } else { "The selected layers show nothing" };
@@ -37,6 +46,12 @@ impl AppState {
                 format!("{what} within the canvas, so there is nothing to copy."),
             );
         };
+        let (w, h) = (bounds.width() as u64, bounds.height() as u64);
+        if let Err(why) =
+            crate::clipboard::check_copy(w, h).and_then(|()| memory.take(w * h * crate::clipboard::COPY_BYTES))
+        {
+            return self.message(MessageKind::Info, "Copy", why);
+        }
         let pixels = flat.read_rect(&bounds);
         let from = bounds.translate(-canvas.x0, -canvas.y0);
         self.clipboard.write_image(Copied { from, pixels }, ctx);

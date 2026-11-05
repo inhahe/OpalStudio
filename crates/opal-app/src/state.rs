@@ -732,21 +732,25 @@ impl AppState {
             height: spec.height,
             sampling: crate::prefs::sampling(&self.prefs, "export"),
         });
-        self.export_to(doc, path, format, size, ctx);
+        self.export_to(doc, path, format, size, crate::memory::Allowance::now(), ctx);
     }
 
     /// Writes `doc`'s canvas to `path` (off the interface thread; a failure inside the
-    /// encoders is reported like any other).
+    /// encoders is reported like any other), or says why not if it would need more than
+    /// `memory`.
     pub fn export_to(
         &mut self,
         doc: Document,
         path: PathBuf,
         format: ExportFormat,
         size: Option<image_files::ExportSize>,
+        memory: crate::memory::Allowance,
         ctx: &egui::Context,
     ) {
         let written = Written::Export { path: path.clone() };
         let job = Box::new(move |p: &_| {
+            let mut memory = memory;
+            memory.take(image_files::export_memory(&doc, size.as_ref()))?;
             let pool = Some(crate::background::pool());
             image_files::export_in(&doc, &path, &format, size.as_ref(), pool, p).map_err(|e| e.to_string())
         });
@@ -864,6 +868,40 @@ mod tests {
 
     fn ctx() -> egui::Context {
         egui::Context::default()
+    }
+
+    #[test]
+    fn an_export_needing_more_memory_than_is_free_is_refused() {
+        let mut st = app_with_image();
+        let doc = st.active().unwrap().doc().clone();
+        let path = std::env::temp_dir().join(format!("opal-refused-{}.png", std::process::id()));
+        let png = ExportFormat::Png { sixteen_bit: false };
+        st.export_to(doc, path.clone(), png, None, crate::memory::Allowance::of(Some(1000)), &ctx());
+        for _ in 0..1000 {
+            st.poll_writes(false);
+            if !st.writer.busy() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let exists = path.exists();
+        let _ = std::fs::remove_file(&path);
+        assert!(!exists, "written all the same");
+        let said = st.messages.back().map(|m| (m.title.as_str(), m.body.as_str()));
+        assert!(said.is_some_and(|(t, b)| t == "Could not export" && b.contains("memory")), "{said:?}");
+    }
+
+    #[test]
+    fn a_copy_needing_more_memory_than_is_free_is_refused() {
+        let mut st = app_with_image();
+        st.copy_within(true, crate::memory::Allowance::of(Some(1000)), &ctx());
+        let said = st.messages.back().map(|m| (m.title.as_str(), m.body.as_str()));
+        assert!(said.is_some_and(|(t, b)| t == "Copy" && b.contains("memory")), "{said:?}");
+        st.poll_copies();
+        assert!(st.notice.is_none(), "copied all the same");
+        st.copy_within(true, crate::memory::Allowance::of(None), &ctx());
+        st.poll_copies();
+        assert!(st.notice.as_ref().is_some_and(|n| n.0.starts_with("Copied")), "{:?}", st.notice);
     }
 
     #[test]

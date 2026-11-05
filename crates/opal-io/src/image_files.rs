@@ -136,6 +136,42 @@ enum Source<'d> {
     Resized { image: Box<RasterImage>, to_size: Affine, sampling: Sampling },
 }
 
+/// The memory exporting `doc` (at `size`, if given) takes beyond the document: the bands
+/// in flight (one being made, one waiting, one being encoded, and its encoding), and at
+/// another size the image the result is drawn from and the canvas rows it is made from.
+pub fn export_memory(doc: &Document, size: Option<&ExportSize>) -> u64 {
+    let canvas = doc.canvas.rect();
+    let row = |w: u32| u64::from(w) * BAND as u64 * 8;
+    match size.filter(|s| resizes(doc, s)) {
+        None => 4 * row(doc.canvas.width),
+        Some(s) => {
+            let source = match shrink_factors(&canvas, s) {
+                (kx, ky) if kx * ky >= 2 => {
+                    let (w, h) = (u64::from(doc.canvas.width), u64::from(doc.canvas.height));
+                    let (sw, sh) = (w.div_ceil(u64::from(kx)), h.div_ceil(u64::from(ky)));
+                    let tiles = |n: u64| n.div_ceil(u64::from(TILE_SIZE));
+                    tiles(sw) * tiles(sh) * opal_core::raster::TILE_BYTES + row(doc.canvas.width)
+                }
+                _ => opal_core::composite::composite_cost(&doc.layers, Some(&canvas)),
+            };
+            4 * row(s.width) + source
+        }
+    }
+}
+
+/// Whether exporting `doc` at `s` draws it at another size.
+fn resizes(doc: &Document, s: &ExportSize) -> bool {
+    let (w, h) = (doc.canvas.width, doc.canvas.height);
+    (s.width, s.height) != (w, h) && w > 0 && h > 0
+}
+
+/// The whole factors `canvas` is averaged down by before resampling to `s` (1 where it is
+/// not shrunk by 2 or more), so that the resampler's factor is under 2 along each axis.
+fn shrink_factors(canvas: &IRect, s: &ExportSize) -> (u32, u32) {
+    let (w, h) = (canvas.width() as u32, canvas.height() as u32);
+    ((w / s.width.max(1)).max(1), (h / s.height.max(1)).max(1))
+}
+
 impl<'d> Exported<'d> {
     /// The canvas of `doc` to export, at `size` if given. `progress` is told the work there
     /// is, in pixels: those of the result, and at another size those of the canvas too,
@@ -146,7 +182,7 @@ impl<'d> Exported<'d> {
         let (w, h) = (doc.canvas.width, doc.canvas.height);
         let pixels = |w: u32, h: u32| u64::from(w) * u64::from(h);
         Some(match size {
-            Some(s) if (s.width, s.height) != (w, h) && w > 0 && h > 0 => {
+            Some(s) if resizes(doc, s) => {
                 progress.begin(pixels(w, h) + pixels(s.width, s.height));
                 let source = resized(&doc.layers, &canvas, s, progress)?;
                 Exported { width: s.width, height: s.height, source, next: 0 }
@@ -191,8 +227,7 @@ impl<'d> Exported<'d> {
 /// the edges, and the edges must not fade out either. The canvas's pixels composited
 /// advance `progress`; `None` if it is cancelled meanwhile.
 fn resized<'d>(layers: &'d [Arc<Layer>], canvas: &IRect, s: &ExportSize, progress: &Progress) -> Option<Source<'d>> {
-    let (w, h) = (canvas.width() as u32, canvas.height() as u32);
-    let (kx, ky) = ((w / s.width.max(1)).max(1), (h / s.height.max(1)).max(1));
+    let (kx, ky) = shrink_factors(canvas, s);
     // The image, and where in it the canvas's pixels are.
     let (mut image, at) = if kx * ky >= 2 {
         let (image, sw, sh) = shrunk(layers, canvas, kx, ky, progress)?;
@@ -848,6 +883,26 @@ mod tests {
         c.notify_all();
         assert_eq!(done, Ok(true), "the export waited for the global pool");
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn an_export_takes_its_bands_and_what_it_is_drawn_from() {
+        use opal_core::raster::TILE_BYTES;
+        let row = |w: u64| w * 256 * 8;
+        let size = |width, height| ExportSize { width, height, sampling: Sampling::default() };
+        let mut ids = IdGen::default();
+        let mut d = Document::new(3000, 2000);
+        assert_eq!(export_memory(&d, None), 4 * row(3000));
+        assert_eq!(export_memory(&d, Some(&size(3000, 2000))), 4 * row(3000), "the canvas's own size");
+        // Halved: averaged into 1500 × 1000 (6 × 4 tiles), from rows of the canvas.
+        assert_eq!(export_memory(&d, Some(&size(1500, 1000))), 4 * row(1500) + 24 * TILE_BYTES + row(3000));
+        // Enlarged: drawn from the canvas composited, here one tile made.
+        let mut img = RasterImage::new();
+        img.set_pixel(5, 5, opal_core::tile::pixel_from_f32([1.0; 4]));
+        let l = ids.layer();
+        d.insert(Position { parent: None, index: 0 }, Layer::new_raster(l, ids.object(), "l", img)).unwrap();
+        d.layer_mut(l).unwrap().opacity = 0.5;
+        assert_eq!(export_memory(&d, Some(&size(4000, 3000))), 4 * row(4000) + TILE_BYTES);
     }
 
     /// The exports to try progress on: at the canvas's size, shrunk (by block averages), and

@@ -47,6 +47,25 @@ impl Copied {
     }
 }
 
+/// The memory a copy takes per pixel while it is put on the clipboard: the pixels (8
+/// bytes), the 16-bit PNG and its encoding (up to 16), the bitmap (4), the system's copies
+/// of both (up to 12), and the copy kept for pasting back here (8).
+pub const COPY_BYTES: u64 = 48;
+
+/// Why `w × h` pixels cannot go on the system clipboard, if they cannot: on Windows, its
+/// bitmaps (the format every program reads) hold at most 4 GB, about a billion pixels.
+pub fn check_copy(w: u64, h: u64) -> Result<(), String> {
+    #[cfg(windows)]
+    if 4 * w * h > u64::from(u32::MAX) {
+        return Err(format!(
+            "{w} × {h} pixels is more than the clipboard can hold: its bitmaps hold at most 4 GB, about a \
+             billion pixels."
+        ));
+    }
+    let _ = (w, h);
+    Ok(())
+}
+
 /// The image on the clipboard, `None` if it holds none, or why it could not be read.
 pub type ReadResult = Result<Option<Pasted>, String>;
 
@@ -318,7 +337,8 @@ fn dib_v5(pixels: &[Pixel], w: u32, h: u32) -> Vec<u8> {
     u32s(&mut out, &[HEADER, w, h]);
     out.extend(1u16.to_le_bytes()); // planes
     out.extend(32u16.to_le_bytes()); // bits per pixel
-    u32s(&mut out, &[BI_BITFIELDS, 4 * w * h, 0, 0, 0, 0]);
+    let size = u32::try_from(4 * u64::from(w) * u64::from(h)).expect("a copy the clipboard can hold (check_copy)");
+    u32s(&mut out, &[BI_BITFIELDS, size, 0, 0, 0, 0]);
     u32s(&mut out, &[0x00ff_0000, 0x0000_ff00, 0x0000_00ff, 0xff00_0000, LCS_SRGB]);
     u32s(&mut out, &[0; 9]); // endpoints, unused with sRGB
     u32s(&mut out, &[0; 3]); // gamma, likewise
@@ -410,6 +430,14 @@ impl Clipboard for TestClipboard {
 mod tests {
     use super::*;
     use opal_core::tile::pixel_from_f32;
+
+    #[test]
+    #[cfg(windows)]
+    fn copies_too_large_for_a_bitmap_are_refused() {
+        assert!(check_copy(32_767, 32_768).is_ok());
+        let why = check_copy(32_768, 32_768).unwrap_err();
+        assert!(why.contains("4 GB"), "{why}");
+    }
 
     #[test]
     fn the_bitmap_is_stored_bottom_up_in_blue_green_red_alpha() {
