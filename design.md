@@ -419,11 +419,13 @@ Editable content does not mean recomputing everything on each change.
   layer, so painting recombines only the active layer and what is above it, over a stored
   picture of the rest.
 - **Previews first:** while something is dragged (the transform box, the Move tool), the
-  tiles it changes are drawn at the resolution on screen, from each layer's reduced copy,
-  so the drag costs what the screen holds rather than what the image does; tiles it
-  leaves alone stay exact, and the full-resolution result follows on release. A 24-megapixel
-  image dragged at 25% takes about 13 ms a frame this way, against about 100 ms. Heavy
-  effects will preview the same way while their settings are dragged.
+  tiles it changes are drawn at the resolution on screen, so the drag costs what the
+  screen holds rather than what the image does. Pixel layers are reduced only under those
+  tiles, for the drag's length; image objects are drawn through their transform with their
+  own resampling. Tiles the drag leaves alone stay exact, and the full-resolution result
+  follows on release. A 24-megapixel image dragged at 25% takes about 13 ms a frame this
+  way, against about 90 ms. Heavy effects will preview the same way while their settings
+  are dragged.
 - **Saying what is slow:** a performance view lists the layers that cost the most time and
   memory, and offers Rasterize Layer or Stamp Visible for them.
 

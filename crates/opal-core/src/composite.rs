@@ -117,34 +117,109 @@ fn touches(image: &RasterImage, transform: &Affine, sampling: &Sampling, c: Tile
 }
 
 /// Object `o` placed at pyramid level `level`: its pixels, carried by the transform into
-/// that level's pixels (a level-`level` tile is then drawn like a level-0 one), and the
-/// sampling a preview draws it with (Bilinear, which is exact on whole level pixels, unless
-/// the object asks for hard pixels).
+/// that level's pixels (a level-`level` tile is then drawn like a level-0 one), and how it
+/// is drawn there: pixel objects with Bilinear (exact on whole level pixels), image objects
+/// as they ask (during a drag, the faster method if the preference says so).
 fn at_level(o: &Object, level: u32) -> (&Arc<RasterImage>, Affine, Sampling) {
     let down = Affine::scale(0.5f64.powi(level as i32), 0.5f64.powi(level as i32));
     match &o.kind {
         ObjectKind::Pixels(p) => {
             (&p.image, Affine::translate(p.offset[0] as f64, p.offset[1] as f64).then(down), Sampling::DRAFT)
         }
-        ObjectKind::Image(i) => {
-            let s = if i.sampling.method == resample::Method::Nearest { i.sampling } else { Sampling::DRAFT };
-            (&i.image, i.transform.then(down), s)
+        ObjectKind::Image(i) => (&i.image, i.transform.then(down), i.sampling),
+    }
+}
+
+/// Reduced copies of pixel objects' tiles, made while previewing (see [`Quality::Preview`])
+/// for the tiles being previewed alone, so their cost and memory follow the screen; cleared
+/// by the next exact update. Keyed by image (its address; `held` keeps the image alive, so
+/// the address cannot be reused), level, and tile at that level.
+#[derive(Default, Debug)]
+struct Reduced {
+    tiles: HashMap<(usize, u32, TileCoord), Option<Arc<Tile>>>,
+    held: HashMap<usize, Arc<RasterImage>>,
+}
+
+impl Reduced {
+    fn get<'a>(&'a self, image: &'a Arc<RasterImage>, level: u32, c: TileCoord) -> Option<&'a Arc<Tile>> {
+        if level == 0 {
+            return image.tile(c);
+        }
+        self.tiles.get(&(Arc::as_ptr(image) as usize, level, c))?.as_ref()
+    }
+
+    fn has(&self, image: &Arc<RasterImage>, level: u32, c: TileCoord) -> bool {
+        level == 0 || self.tiles.contains_key(&(Arc::as_ptr(image) as usize, level, c))
+    }
+
+    /// Makes the level-`level` tiles `need` of `image`, and the finer ones they are made
+    /// from, each from the four below it.
+    fn make(&mut self, image: &Arc<RasterImage>, level: u32, need: HashSet<TileCoord>) {
+        let id = Arc::as_ptr(image) as usize;
+        self.held.entry(id).or_insert_with(|| image.clone());
+        // What each level needs, from the top down.
+        let mut wanted = vec![HashSet::new(); level as usize + 1];
+        wanted[level as usize] = need;
+        for l in (2..=level).rev() {
+            let below: HashSet<TileCoord> =
+                wanted[l as usize].iter().flat_map(|c| c.children()).filter(|&k| !self.has(image, l - 1, k)).collect();
+            wanted[l as usize - 1] = below;
+        }
+        // Made from the bottom up, each level in parallel.
+        for l in 1..=level {
+            let made: Vec<(TileCoord, Option<Arc<Tile>>)> = std::mem::take(&mut wanted[l as usize])
+                .into_par_iter()
+                .map(|c| {
+                    let kids = c.children().map(|k| self.get(image, l - 1, k).map(|t| &**t));
+                    (c, downsample(kids).map(Arc::new))
+                })
+                .collect();
+            self.tiles.extend(made.into_iter().map(|(c, t)| ((id, l, c), t)));
         }
     }
 }
 
-/// What object `o` shows in tile `c` of pyramid level `level`, drawn there directly.
-fn level_tile(o: &Object, c: TileCoord, level: u32) -> Option<Shown<'_>> {
+/// The tiles of pixel object `p`'s image, reduced to level `level`, that tile `c` of that
+/// level shows (with a margin for filtering when `p` lies between whole level pixels).
+fn reduced_area(p: &PixelObject, level: u32, c: TileCoord) -> IRect {
+    let s = 0.5f64.powi(level as i32);
+    let r = c.rect(0).to_f();
+    let shifted = FRect::new(
+        r.x0 - p.offset[0] as f64 * s,
+        r.y0 - p.offset[1] as f64 * s,
+        r.x1 - p.offset[0] as f64 * s,
+        r.y1 - p.offset[1] as f64 * s,
+    );
+    IRect::covering(&shifted).expand(2)
+}
+
+/// What object `o` shows in tile `c` of pyramid level `level`, drawn there directly: a
+/// pixel object from its reduced tiles in `reduced` (made beforehand), an image object
+/// through its transform.
+fn level_tile<'o>(o: &'o Object, c: TileCoord, level: u32, reduced: &Reduced) -> Option<Shown<'o>> {
     let (image, t, s) = at_level(o, level);
     if !touches(image, &t, &s, c) {
         return None;
     }
-    resample::render_tile(image, &t, &s, c).map(Shown::Drawn)
+    match &o.kind {
+        ObjectKind::Pixels(p) => {
+            let mut local = RasterImage::new();
+            for rc in TileCoord::covering(&reduced_area(p, level, c), 0) {
+                if let Some(t) = reduced.get(&p.image, level, rc) {
+                    local.set_tile(rc, Some(t.clone()));
+                }
+            }
+            let k = 0.5f64.powi(level as i32);
+            let shift = Affine::translate(p.offset[0] as f64 * k, p.offset[1] as f64 * k);
+            resample::render_tile(&local, &shift, &s, c).map(Shown::Drawn)
+        }
+        ObjectKind::Image(_) => resample::render_tile(image, &t, &s, c).map(Shown::Drawn),
+    }
 }
 
 /// [`level_tile`] at `level`, as a [`ShowFn`] takes it.
-fn shown_at(level: u32) -> impl for<'o> Fn(&'o Object, TileCoord) -> Option<Shown<'o>> + Sync {
-    move |o, c| level_tile(o, c, level)
+fn shown_at(level: u32, reduced: &Reduced) -> impl for<'o> Fn(&'o Object, TileCoord) -> Option<Shown<'o>> + Sync + '_ {
+    move |o, c| level_tile(o, c, level, reduced)
 }
 
 /// The token for what object `o` shows in tile `c` of pyramid level `level`.
@@ -158,10 +233,9 @@ type ShowFn<'f> = &'f (dyn for<'o> Fn(&'o Object, TileCoord) -> Option<Shown<'o>
 /// The key token of what an object shows in a tile.
 type TokenFn<'f> = &'f (dyn Fn(&Object, TileCoord) -> Option<Token> + Sync);
 
-/// Composites the visible layers' content at tile `c` onto `acc`, each object as `shown`
+/// Composites the visible layers' content at tile `c` onto `acc`, each object as `draw`
 /// draws it. Returns whether anything was drawn.
-fn composite_into(layers: &[Arc<Layer>], c: TileCoord, acc: &mut [PixelF32], shown: ShowFn) -> bool {
-    let draw = shown;
+fn composite_into(layers: &[Arc<Layer>], c: TileCoord, acc: &mut [PixelF32], draw: ShowFn) -> bool {
     let mut any = false;
     let mut scratch: Option<Vec<PixelF32>> = None;
     for layer in layers {
@@ -455,6 +529,13 @@ fn object_token(o: &Object, c: TileCoord) -> Option<Token> {
     }
 }
 
+/// The exact key of level-0 tile `c`.
+fn base_key(layers: &[Arc<Layer>], c: TileCoord) -> Key {
+    let mut tokens = Vec::new();
+    key_into(layers, c, &mut tokens, &object_token);
+    Key::Base(tokens)
+}
+
 /// Appends the key of `layers` at `c` to `out`, each object's token from `token`. Returns
 /// whether anything contributes.
 fn key_into(layers: &[Arc<Layer>], c: TileCoord, out: &mut Vec<Token>, token: TokenFn) -> bool {
@@ -508,12 +589,16 @@ fn lone_source(tokens: &[Token]) -> Option<&Arc<Tile>> {
 enum Key {
     Base(Vec<Token>),
     Pyramid([Option<Arc<Tile>>; 4]),
+    /// A tile drawn at its level directly (see [`Quality::Preview`]): what went into it,
+    /// as for a level-0 tile. It never equals an exact key, so the next exact update
+    /// replaces the tile.
+    Preview(Vec<Token>),
 }
 
 impl PartialEq for Key {
     fn eq(&self, other: &Key) -> bool {
         match (self, other) {
-            (Key::Base(a), Key::Base(b)) => a == b,
+            (Key::Base(a), Key::Base(b)) | (Key::Preview(a), Key::Preview(b)) => a == b,
             (Key::Pyramid(a), Key::Pyramid(b)) => a.iter().zip(b).all(|(x, y)| match (x, y) {
                 (None, None) => true,
                 (Some(x), Some(y)) => Arc::ptr_eq(x, y),
@@ -535,8 +620,7 @@ struct Entry {
 #[derive(Default, Debug)]
 pub struct Projection {
     levels: Vec<HashMap<TileCoord, Entry>>,
-    /// Tiles drawn directly at a pyramid level (see [`Quality::Preview`]), by level.
-    preview: HashMap<(u32, TileCoord), Entry>,
+    reduced: Reduced,
     last: Option<LastUpdate>,
 }
 
@@ -608,16 +692,15 @@ impl Projection {
         let base: HashSet<TileCoord> = occupied_tiles(layers, Some(&outer));
         let result = match quality {
             Quality::Exact => {
-                self.preview.clear();
+                self.reduced = Reduced::default();
                 prepare(layers, Some(&outer));
                 self.update_base(layers, &base, &outer);
                 let mut coords = base;
                 for l in 1..=level {
                     coords = coords.iter().map(|c| c.parent()).collect();
-                    self.update_pyramid(l, &coords, &outer);
+                    self.update_pyramid(l, &coords, &outer, &HashSet::new());
                 }
-                let top = &self.levels[level as usize];
-                coords.iter().filter_map(|c| top.get(c).and_then(|e| e.tile.clone()).map(|t| (*c, t))).collect()
+                self.shown(level, coords.iter())
             }
             Quality::Preview => self.update_preview(layers, level, &outer, base),
         };
@@ -646,9 +729,7 @@ impl Projection {
         let cache = &self.levels[0];
         let mut dirty: HashSet<TileCoord> = HashSet::new();
         for &c in &base {
-            let mut tokens = Vec::new();
-            key_into(layers, c, &mut tokens, &object_token);
-            if cache.get(&c).is_none_or(|e| e.key != Key::Base(tokens)) {
+            if cache.get(&c).is_none_or(|e| e.key != base_key(layers, c)) {
                 dirty.insert(up(c));
             }
         }
@@ -657,31 +738,53 @@ impl Projection {
                 dirty.insert(up(*c));
             }
         }
-        // The exact pyramid for the rest.
+        // The exact pyramid for the rest; previews already drawn at the level are kept.
         let mut coords: HashSet<TileCoord> = base.into_iter().filter(|&c| !dirty.contains(&up(c))).collect();
         for l in 1..=level {
             coords = coords.iter().map(|c| c.parent()).collect();
-            self.update_pyramid(l, &coords, outer);
+            let keep = if l == level { dirty.clone() } else { HashSet::new() };
+            self.update_pyramid(l, &coords, outer, &keep);
         }
-        // The dirty ones, drawn at the level: those whose key changed since last drawn.
-        for_each_visible_object(layers, &mut |o| {
-            if o.extent().is_some_and(|e| !e.intersect(outer).is_empty()) {
-                let (image, t, s) = at_level(o, level);
-                resample::prepare(image, &t, &s);
-            }
-        });
-        self.preview.retain(|(l, c), _| *l == level && dirty.contains(c));
+        // The dirty ones whose key changed since they were last drawn, drawn at the level.
         let token = |o: &Object, c: TileCoord| level_token(o, c, level);
+        let top = &self.levels[level as usize];
         let mut stale = Vec::new();
         for &c in &dirty {
             let mut tokens = Vec::new();
             key_into(layers, c, &mut tokens, &token);
-            let key = Key::Base(tokens);
-            if self.preview.get(&(level, c)).is_none_or(|e| e.key != key) {
+            let key = Key::Preview(tokens);
+            if top.get(&c).is_none_or(|e| e.key != key) {
                 stale.push((c, key));
             }
         }
-        let show = shown_at(level);
+        // What drawing them needs, made first: image objects' pyramids, and the reduced
+        // tiles of pixel objects under them alone.
+        let mut need: Vec<(Arc<RasterImage>, HashSet<TileCoord>)> = Vec::new();
+        for_each_visible_object(layers, &mut |o| {
+            if o.extent().is_none_or(|e| e.intersect(outer).is_empty()) {
+                return;
+            }
+            match &o.kind {
+                ObjectKind::Image(_) => {
+                    let (image, t, s) = at_level(o, level);
+                    resample::prepare(image, &t, &s);
+                }
+                ObjectKind::Pixels(p) => {
+                    let tiles: HashSet<TileCoord> = stale
+                        .iter()
+                        .flat_map(|(c, _)| TileCoord::covering(&reduced_area(p, level, *c), 0))
+                        .filter(|&rc| !self.reduced.has(&p.image, level, rc))
+                        .collect();
+                    if !tiles.is_empty() {
+                        need.push((p.image.clone(), tiles));
+                    }
+                }
+            }
+        });
+        for (image, tiles) in need {
+            self.reduced.make(&image, level, tiles);
+        }
+        let show = shown_at(level, &self.reduced);
         let drawn: Vec<(TileCoord, Entry)> = stale
             .into_par_iter()
             .map(|(c, key)| {
@@ -689,12 +792,14 @@ impl Projection {
                 (c, Entry { key, tile })
             })
             .collect();
-        self.preview.extend(drawn.into_iter().map(|(c, e)| ((level, c), e)));
+        self.levels[level as usize].extend(drawn);
+        self.shown(level, coords.iter().chain(&dirty))
+    }
+
+    /// The tiles of level `level` at `coords` that have content.
+    fn shown<'a>(&self, level: u32, coords: impl Iterator<Item = &'a TileCoord>) -> Vec<(TileCoord, Arc<Tile>)> {
         let top = &self.levels[level as usize];
-        let exact = coords.iter().filter_map(|c| top.get(c).and_then(|e| e.tile.clone()).map(|t| (*c, t)));
-        let previewed =
-            dirty.iter().filter_map(|c| self.preview.get(&(level, *c)).and_then(|e| e.tile.clone()).map(|t| (*c, t)));
-        exact.chain(previewed).collect()
+        coords.filter_map(|c| top.get(c).and_then(|e| e.tile.clone()).map(|t| (*c, t))).collect()
     }
 
     /// The cached tile at `level` and `c` as of the last [`update`](Self::update) that
@@ -709,9 +814,7 @@ impl Projection {
         cache.retain(|c, _| coords.contains(c) || c.rect(0).intersect(outer).is_empty());
         let mut stale = Vec::new();
         for &c in coords {
-            let mut tokens = Vec::new();
-            key_into(layers, c, &mut tokens, &object_token);
-            let key = Key::Base(tokens);
+            let key = base_key(layers, c);
             if cache.get(&c).is_none_or(|e| e.key != key) {
                 stale.push((c, key));
             }
@@ -732,11 +835,13 @@ impl Projection {
         cache.extend(done);
     }
 
-    fn update_pyramid(&mut self, level: u32, coords: &HashSet<TileCoord>, outer: &IRect) {
+    /// Brings the level-`level` tiles at `coords` up to date from the level below, dropping
+    /// other cached tiles within `outer` except those in `keep`.
+    fn update_pyramid(&mut self, level: u32, coords: &HashSet<TileCoord>, outer: &IRect, keep: &HashSet<TileCoord>) {
         let (below, rest) = self.levels.split_at_mut(level as usize);
         let below = &below[level as usize - 1];
         let cache = &mut rest[0];
-        cache.retain(|c, _| coords.contains(c) || c.rect(level).intersect(outer).is_empty());
+        cache.retain(|c, _| coords.contains(c) || keep.contains(c) || c.rect(level).intersect(outer).is_empty());
         let mut stale = Vec::new();
         for &c in coords {
             let kids = c.children().map(|k| below.get(&k).and_then(|e| e.tile.clone()));
@@ -1080,6 +1185,21 @@ mod tests {
             p.update(&d.layers, 2, &view, Quality::Preview).into_iter().collect();
         let far = TileCoord::new(3, 0);
         assert!(Arc::ptr_eq(&preview[&far], &exact[&far]), "an untouched tile stays exact");
+        shows_what_it_returned(&p, 2, &preview);
+        // The next step of the drag redraws the tile the image is in, and keeps the one it
+        // left on the last step, previewed already.
+        let LayerContent::Objects(objects) = &mut d.layer_mut(top).unwrap().content else { panic!() };
+        let ObjectKind::Image(i) = &mut objects[0].kind else { panic!() };
+        i.transform = Affine::translate(2510.5, 2500.25);
+        let changed = TileCoord::new(2, 2);
+        let again: HashMap<TileCoord, Arc<Tile>> =
+            p.update(&d.layers, 2, &view, Quality::Preview).into_iter().collect();
+        assert_eq!(again.len(), preview.len());
+        for (c, t) in &again {
+            assert_eq!(Arc::ptr_eq(t, &preview[c]), *c != changed, "tile {c:?}");
+        }
+        shows_what_it_returned(&p, 2, &again);
+        let preview = again;
         assert!(
             p.tile(0, TileCoord::containing(2600, 2600)).cloned().map(|t| Arc::as_ptr(&t))
                 == before0.map(|t| Arc::as_ptr(&t)),
@@ -1100,6 +1220,95 @@ mod tests {
                 at(&exact_now, x, y)
             );
         }
+    }
+
+    /// Asserts that the tiles an update returned are the ones [`Projection::tile`] gives.
+    fn shows_what_it_returned(p: &Projection, level: u32, returned: &HashMap<TileCoord, Arc<Tile>>) {
+        for (c, t) in returned {
+            let shown = p.tile(level, *c).unwrap_or_else(|| panic!("tile {c:?} is not shown"));
+            assert!(Arc::ptr_eq(shown, t), "tile {c:?} shows something else");
+        }
+    }
+
+    #[test]
+    fn a_previewed_pixel_layer_reduces_only_the_tiles_shown() {
+        let mut ids = IdGen::default();
+        let mut d = Document::new(4096, 4096);
+        add(&mut d, &mut ids, solid(IRect::from_size(4096, 4096), [0.2, 0.4, 0.6, 1.0]));
+        // 64-pixel blocks, each its own colour, so a block drawn in the wrong place shows.
+        let colour = |bx: i64, by: i64| [bx as f32 / 16.0, by as f32 / 16.0, 0.5, 1.0];
+        let px: Vec<Pixel> =
+            (0..1024 * 1024).map(|i| pixel_from_f32(colour((i % 1024) / 64, (i / 1024) / 64))).collect();
+        let pattern = Arc::new(RasterImage::from_pixels(1024, 1024, &px));
+        let top = ids.layer();
+        let object = Object {
+            id: ids.object(),
+            kind: ObjectKind::Pixels(PixelObject { image: pattern.clone(), offset: [0, 0] }),
+        };
+        d.insert(Position { parent: None, index: 1 }, Layer::with_objects(top, "top", vec![object])).unwrap();
+        let view = IRect::from_size(4096, 4096);
+        let mut p = Projection::new();
+        p.update(&d.layers, 2, &view, Quality::Exact);
+
+        // Moved by a distance that is not a whole number of level-2 pixels.
+        let offset = [2501i64, 2499];
+        let LayerContent::Objects(objects) = &mut d.layer_mut(top).unwrap().content else { panic!() };
+        let ObjectKind::Pixels(o) = &mut objects[0].kind else { panic!() };
+        o.offset = offset;
+        let preview: HashMap<TileCoord, Arc<Tile>> =
+            p.update(&d.layers, 2, &view, Quality::Preview).into_iter().collect();
+        shows_what_it_returned(&p, 2, &preview);
+        assert!(!pattern.has_reduced(1) && !pattern.has_reduced(2), "the whole layer was reduced");
+        assert!(!p.reduced.tiles.is_empty());
+
+        let at = |tiles: &HashMap<TileCoord, Arc<Tile>>, x: i64, y: i64| {
+            let c = TileCoord::new((x >> 2).div_euclid(256) as i32, (y >> 2).div_euclid(256) as i32);
+            pixel_to_f32(tiles[&c].get(((x >> 2) % 256) as u32, ((y >> 2) % 256) as u32))
+        };
+        let exact: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 2, &view, Quality::Exact).into_iter().collect();
+        assert!(p.reduced.tiles.is_empty() && p.reduced.held.is_empty(), "the exact update keeps no reduced tiles");
+        for (bx, by) in [(0, 0), (5, 9), (15, 15), (15, 0), (8, 3)] {
+            let (x, y) = (offset[0] + bx * 64 + 32, offset[1] + by * 64 + 32);
+            assert!(close(at(&preview, x, y), colour(bx, by)), "block ({bx}, {by}): {:?}", at(&preview, x, y));
+            assert!(close(at(&preview, x, y), at(&exact, x, y)));
+        }
+        assert!(close(at(&preview, 500, 500), [0.2, 0.4, 0.6, 1.0]), "the old place shows what is under it");
+    }
+
+    #[test]
+    fn a_previewed_image_object_keeps_its_own_sampling() {
+        use crate::document::{ImageObject, Object};
+        use crate::geom::Affine;
+        use crate::resample::{Method, Sampling};
+        let mut ids = IdGen::default();
+        let mut d = Document::new(2048, 2048);
+        // Stripes, which bilinear and cubic filters draw differently when shrunk.
+        let px: Vec<Pixel> = (0..512 * 512)
+            .map(|i| pixel_from_f32(if (i % 512) % 3 == 0 { [1.0; 4] } else { [0.0, 0.0, 0.0, 1.0] }))
+            .collect();
+        let sampling = Sampling { method: Method::Lanczos { lobes: 3 }, anti_ringing: false };
+        let image = ImageObject {
+            image: Arc::new(RasterImage::from_pixels(512, 512, &px)),
+            frame: IRect::from_size(512, 512),
+            transform: Affine::translate(0.0, 0.0),
+            sampling,
+        };
+        let top = ids.layer();
+        let layer =
+            Layer::with_objects(top, "image", vec![Object { id: ids.object(), kind: ObjectKind::Image(image) }]);
+        d.insert(Position { parent: None, index: 0 }, layer).unwrap();
+        let view = IRect::from_size(2048, 2048);
+        let mut p = Projection::new();
+        p.update(&d.layers, 2, &view, Quality::Exact);
+        let LayerContent::Objects(objects) = &mut d.layer_mut(top).unwrap().content else { panic!() };
+        let ObjectKind::Image(i) = &mut objects[0].kind else { panic!() };
+        i.transform = Affine::scale(1.3, 1.3).then(Affine::translate(37.5, 11.25));
+        let (image, transform) = (i.image.clone(), i.transform);
+        let preview: HashMap<TileCoord, Arc<Tile>> =
+            p.update(&d.layers, 2, &view, Quality::Preview).into_iter().collect();
+        let c = TileCoord::new(0, 0);
+        let direct = resample::render_tile(&image, &transform.then(Affine::scale(0.25, 0.25)), &sampling, c).unwrap();
+        assert!(preview[&c].pixels() == direct.pixels(), "the preview did not draw with the object's sampling");
     }
 
     /// Times dragging a 24-megapixel image object over a 24-megapixel layer at 25%, exactly
