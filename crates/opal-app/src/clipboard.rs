@@ -219,23 +219,6 @@ fn from_import(i: image_files::Imported) -> Pasted {
 /// the clipboard still holds this application's last copy.
 #[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
 fn read_system(own: Option<OwnCopy>) -> ReadResult {
-    // Formats are fetched one at a time, each with the clipboard opened for it alone, so the
-    // clipboard can change between them (the user copying again): then everything is read
-    // again, from what it holds now.
-    #[cfg(windows)]
-    for _ in 0..3 {
-        let before = clipboard_win::raw::seq_num();
-        let read = read_system_once(own.clone());
-        if clipboard_win::raw::seq_num() == before {
-            return read;
-        }
-    }
-    read_system_once(own)
-}
-
-/// One reading of the system clipboard (see [`read_system`]).
-#[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
-fn read_system_once(own: Option<OwnCopy>) -> ReadResult {
     #[cfg(windows)]
     {
         if let Some(own) = own.filter(OwnCopy::held) {
@@ -351,48 +334,45 @@ fn dib_v5(pixels: &[Pixel], w: u32, h: u32) -> Vec<u8> {
 }
 
 /// The formats `arboard` does not read, or reads only at 8 bits: PNG and JPEG as files
-/// would hold them, and copied files. Each is fetched only if the ones before it gave no
-/// image, and the clipboard is held only while one is fetched, not while it is decoded.
+/// would hold them, and copied files. All are fetched in one opening of the clipboard, so
+/// they come from one state of it, and decoded once it is closed again (other programs are
+/// not kept from it meanwhile). Only one large one is fetched: the first PNG offered, or,
+/// with neither a PNG nor a bitmap, the JPEG.
 #[cfg(windows)]
 #[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
 fn read_windows_formats() -> Result<Option<Pasted>, String> {
     use clipboard_win::{formats, raw};
-    let named = |name: &str| raw::register_format(name).map(|f| f.get());
-    // The bytes the clipboard holds as `format`, if it offers it and `also` holds.
-    let fetch = |format: Option<u32>, also: &dyn Fn() -> bool| -> Result<Option<Vec<u8>>, String> {
-        let Some(format) = format else { return Ok(None) };
+    let (png, files, jpeg) = {
         let _open = open_clipboard()?;
-        if !raw::is_format_avail(format) || !also() {
-            return Ok(None);
-        }
-        let mut bytes = Vec::new();
-        Ok(raw::get_vec(format, &mut bytes).is_ok().then_some(bytes))
-    };
-    let decoded = |bytes: Vec<u8>, as_file: &str| {
-        image_files::import_bytes(&bytes, std::path::Path::new(as_file)).ok().map(from_import)
-    };
-    for name in ["PNG", "image/png"] {
-        if let Some(p) = fetch(named(name), &|| true)?.and_then(|b| decoded(b, "clipboard.png")) {
-            return Ok(Some(p));
-        }
-    }
-    let files = {
-        let _open = open_clipboard()?;
+        let offered = |name: &str| raw::register_format(name).map(|f| f.get()).filter(|&f| raw::is_format_avail(f));
+        let bytes = |f: u32| {
+            let mut bytes = Vec::new();
+            raw::get_vec(f, &mut bytes).is_ok().then_some(bytes)
+        };
+        let png_format = offered("PNG").or_else(|| offered("image/png"));
+        let png = png_format.and_then(bytes);
         let mut files = Vec::new();
         if raw::is_format_avail(formats::CF_HDROP) {
             let _ = raw::get_file_list_path(&mut files);
         }
-        files
+        // The system bitmap (what most programs put on the clipboard) is read by arboard;
+        // JPEG is the last resort, since a program offering it offers a bitmap too.
+        let bitmap = raw::is_format_avail(formats::CF_DIB) || raw::is_format_avail(formats::CF_DIBV5);
+        let jpeg = if png_format.is_none() && !bitmap { offered("JFIF").and_then(bytes) } else { None };
+        (png, files, jpeg)
     };
+    let decoded = |bytes: Vec<u8>, as_file: &str| {
+        image_files::import_bytes(&bytes, std::path::Path::new(as_file)).ok().map(from_import)
+    };
+    if let Some(p) = png.and_then(|b| decoded(b, "clipboard.png")) {
+        return Ok(Some(p));
+    }
     for f in files {
         if let Ok(i) = image_files::import(&f) {
             return Ok(Some(from_import(i)));
         }
     }
-    // The system bitmap (what most programs put on the clipboard) is read by arboard;
-    // JPEG is the last resort, since a program offering it offers a bitmap too.
-    let no_bitmap = || !raw::is_format_avail(formats::CF_DIB) && !raw::is_format_avail(formats::CF_DIBV5);
-    Ok(fetch(named("JFIF"), &no_bitmap)?.and_then(|b| decoded(b, "clipboard.jpg")))
+    Ok(jpeg.and_then(|b| decoded(b, "clipboard.jpg")))
 }
 
 /// A clipboard for tests: holds what was last written, or what a test put there. With
