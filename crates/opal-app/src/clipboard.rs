@@ -337,7 +337,7 @@ fn dib_v5(pixels: &[Pixel], w: u32, h: u32) -> Vec<u8> {
 /// would hold them, and copied files. All are fetched in one opening of the clipboard, so
 /// they come from one state of it, and decoded once it is closed again (other programs are
 /// not kept from it meanwhile). Only one large one is fetched: the first PNG offered, or,
-/// with neither a PNG nor a bitmap, the JPEG.
+/// with no PNG to be had and no bitmap, the JPEG.
 #[cfg(windows)]
 #[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
 fn read_windows_formats() -> Result<Option<Pasted>, String> {
@@ -349,8 +349,7 @@ fn read_windows_formats() -> Result<Option<Pasted>, String> {
             let mut bytes = Vec::new();
             raw::get_vec(f, &mut bytes).is_ok().then_some(bytes)
         };
-        let png_format = offered("PNG").or_else(|| offered("image/png"));
-        let png = png_format.and_then(bytes);
+        let png = offered("PNG").or_else(|| offered("image/png")).and_then(bytes);
         let mut files = Vec::new();
         if raw::is_format_avail(formats::CF_HDROP) {
             let _ = raw::get_file_list_path(&mut files);
@@ -358,7 +357,7 @@ fn read_windows_formats() -> Result<Option<Pasted>, String> {
         // The system bitmap (what most programs put on the clipboard) is read by arboard;
         // JPEG is the last resort, since a program offering it offers a bitmap too.
         let bitmap = raw::is_format_avail(formats::CF_DIB) || raw::is_format_avail(formats::CF_DIBV5);
-        let jpeg = if png_format.is_none() && !bitmap { offered("JFIF").and_then(bytes) } else { None };
+        let jpeg = if png.is_none() && !bitmap { offered("JFIF").and_then(bytes) } else { None };
         (png, files, jpeg)
     };
     let decoded = |bytes: Vec<u8>, as_file: &str| {
