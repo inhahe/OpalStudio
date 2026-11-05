@@ -519,8 +519,9 @@ fn composite_region(layers: &[Arc<Layer>], range: Option<&IRect>) -> RasterImage
 }
 
 /// [`composite_within`] a batch of tiles at a time, telling `go_on` before each batch how
-/// many of the places the tiles go have one so far, and how many there are in all, and
-/// stopping (`None`) if it says not to go on.
+/// many of the places the tiles go have one so far, and how many there are in all (first
+/// `(0, 0)`, asked before anything is known or done), and stopping (`None`) if it says not
+/// to go on.
 pub fn composite_within_until(
     layers: &[Arc<Layer>],
     range: &IRect,

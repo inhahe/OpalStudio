@@ -600,11 +600,11 @@ fn render_plan(
         return Vec::new();
     }
     let r = reach(transform, sampling);
-    // The stored tiles that may reach the tiles over `bounds` (drawn whole): those under
-    // them, mapped back and grown by the filter's reach, when they are fewer than all (a
-    // band of a larger drawing).
+    // Drawing into an area (a band of a larger drawing), the stored tiles that may reach
+    // the tiles over `bounds` (drawn whole): those under them, mapped back and grown by the
+    // filter's reach, when they are fewer than all. Drawing everything, all of them.
     let all = image.tile_count();
-    let under: Option<Vec<TileCoord>> = transform.inverse().and_then(|inv| {
+    let under: Option<Vec<TileCoord>> = area.and(transform.inverse()).and_then(|inv| {
         let t = i64::from(TILE_SIZE);
         let snap = |a: i64| a.div_euclid(t) * t;
         let whole = IRect::new(snap(bounds.x0), snap(bounds.y0), snap(bounds.x1 - 1) + t, snap(bounds.y1 - 1) + t);
