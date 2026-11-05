@@ -80,7 +80,7 @@ pub mod testing {
     /// Every thread of a pool, kept busy until this is dropped.
     pub struct Held {
         release: Arc<(Mutex<bool>, Condvar)>,
-        /// This test's turn to hold the pool (see [`hold`]); let go after the threads.
+        /// This test's turn to hold a pool (see [`hold`]); let go after the threads.
         _turn: MutexGuard<'static, ()>,
     }
 
@@ -93,13 +93,12 @@ pub mod testing {
     }
 
     /// Holds every thread of `pool` (rayon's global pool if `None`), returning once they
-    /// all are. One test holds a pool at a time: two at once would each take some of its
-    /// threads and wait for the rest forever.
+    /// all are. One test holds a pool at a time, whichever pool: two holding one at once
+    /// would each take some of its threads and wait for the rest forever, and two holding
+    /// different ones may each need the other's to go on. (So no test holds two.)
     pub fn hold(pool: Option<&rayon::ThreadPool>) -> Held {
-        // A turn for rayon's global pool, and one for any other (tests hold only the
-        // background pool besides it).
-        static TURNS: [Mutex<()>; 2] = [Mutex::new(()), Mutex::new(())];
-        let turn = TURNS[usize::from(pool.is_some())].lock().unwrap_or_else(|e| e.into_inner());
+        static TURN: Mutex<()> = Mutex::new(());
+        let turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
         let n = pool.map_or_else(rayon::current_num_threads, |p| p.current_num_threads());
         let (started, all_started) = mpsc::channel();
         let release = Arc::new((Mutex::new(false), Condvar::new()));
