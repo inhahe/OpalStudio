@@ -78,8 +78,9 @@ impl Shared {
 pub struct Projector {
     shared: Arc<Shared>,
     asked: Option<Request>,
-    /// When the last request was made.
-    asked_at: Instant,
+    /// When the view shown last fell behind what was asked for: when a request was made
+    /// while the one before it had been answered.
+    behind_since: Instant,
     /// The request [`shown`](Self::shown) last waited for.
     waited: u64,
     /// How long the canvas waits for what it asked for ([`WAIT`]; tests may wait less).
@@ -91,7 +92,7 @@ impl Projector {
         let shared = Arc::new(Shared::default());
         let s = shared.clone();
         std::thread::Builder::new().name("projection".into()).spawn(move || run(&s)).expect("starting a thread");
-        Projector { shared, asked: None, asked_at: Instant::now(), waited: 0, wait: WAIT }
+        Projector { shared, asked: None, behind_since: Instant::now(), waited: 0, wait: WAIT }
     }
 
     /// Asks for the tiles of pyramid level `level` within `rect` (canvas pixels) to be brought
@@ -112,8 +113,12 @@ impl Projector {
         if self.asked.as_ref().is_some_and(|a| a.same_as(&request)) {
             return;
         }
+        // Requests made while still behind (a drag on a huge image) keep the time it began.
+        let shown = self.shared.lock().shown.as_ref().map_or(0, |s| s.serial);
+        if self.asked.as_ref().is_none_or(|a| shown >= a.serial) {
+            self.behind_since = Instant::now();
+        }
         self.asked = Some(request.clone());
-        self.asked_at = Instant::now();
         self.shared.lock().job = Some((request, ctx.clone()));
         self.shared.job.notify_one();
     }
@@ -140,11 +145,12 @@ impl Projector {
         s.shown.clone()
     }
 
-    /// How long the view shown has been behind the one last asked for, if it is.
+    /// How long the view shown has been behind what is asked for, if it is: since it fell
+    /// behind, however many requests have been made since.
     pub fn behind_for(&self) -> Option<Duration> {
         let asked = self.asked.as_ref()?.serial;
         let shown = self.shared.lock().shown.as_ref().map_or(0, |s| s.serial);
-        (shown < asked).then(|| self.asked_at.elapsed())
+        (shown < asked).then(|| self.behind_since.elapsed())
     }
 
     /// Whether the latest result drew what changed as a preview.
@@ -266,6 +272,22 @@ mod tests {
         let now = p.shown(Duration::ZERO).unwrap();
         assert!(Arc::ptr_eq(&now, &first) || now.serial == 2, "something other than a result");
         assert_eq!(p.shown(WAIT).unwrap().serial, 2);
+    }
+
+    #[test]
+    fn behind_counts_from_when_the_view_fell_behind_not_from_the_latest_request() {
+        // Every background thread held, so nothing asked for is done.
+        let held = crate::background::testing::hold(Some(pool()));
+        let mut p = Projector::new();
+        let ctx = egui::Context::default();
+        let whole = IRect::from_size(4096, 4096);
+        p.ask(&heavy_layers(), 0, &whole, Quality::Exact, None, &ctx);
+        std::thread::sleep(Duration::from_millis(100));
+        // Asked again meanwhile, as every frame of a drag does.
+        p.ask(&heavy_layers(), 1, &whole, Quality::Exact, None, &ctx);
+        let behind = p.behind_for().expect("behind");
+        drop(held);
+        assert!(behind >= Duration::from_millis(100), "{behind:?}");
     }
 
     /// Two 4096 × 4096 layers: 256 tiles to composite at full resolution, enough that the
