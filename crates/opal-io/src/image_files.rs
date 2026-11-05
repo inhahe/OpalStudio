@@ -317,6 +317,19 @@ fn frame_edges(image: &mut RasterImage, rect: &IRect, border: i64) {
 /// while the encoder compresses this one, so a canvas exported at its own size is never
 /// held whole.
 pub fn export(doc: &Document, path: &Path, format: &ExportFormat, size: Option<&ExportSize>) -> Result<(), IoError> {
+    export_in(doc, path, format, size, None)
+}
+
+/// [`export`], compositing in `pool` (rayon's global pool if `None`). The bands are made on
+/// a thread of their own, which gives its parallel work to `pool`; the encoder, which waits
+/// for them, runs on the calling thread (which may be one of `pool`'s, if it has another).
+pub fn export_in(
+    doc: &Document,
+    path: &Path,
+    format: &ExportFormat,
+    size: Option<&ExportSize>,
+    pool: Option<&rayon::ThreadPool>,
+) -> Result<(), IoError> {
     let mut rows = Exported::new(doc, size);
     let (width, height) = (rows.width, rows.height);
     let encode_err = |message: String| IoError::Encode { path: path.to_owned(), message };
@@ -325,10 +338,16 @@ pub fn export(doc: &Document, path: &Path, format: &ExportFormat, size: Option<&
         // the receiver, which stops the bands.
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         scope.spawn(move || {
-            while let Some(band) = rows.band() {
-                if tx.send(band).is_err() {
-                    break;
+            let mut make = move || {
+                while let Some(band) = rows.band() {
+                    if tx.send(band).is_err() {
+                        break;
+                    }
                 }
+            };
+            match pool {
+                Some(pool) => pool.install(make),
+                None => make(),
             }
         });
         write_atomically(path, |out| match format {
@@ -739,5 +758,44 @@ mod tests {
                 assert!((f64::from(got[c]) - sum[c] / n).abs() < 2e-3, "{kx} × {ky}, block ({i}, {j}): {got:?}");
             }
         }
+    }
+
+    #[test]
+    fn an_export_in_a_pool_composites_there() {
+        use std::sync::{Condvar, Mutex, mpsc};
+        use std::time::Duration;
+        // Every thread of rayon's global pool held while exporting in another.
+        let n = rayon::current_num_threads();
+        let (started, all_started) = mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        for _ in 0..n {
+            let (started, release) = (started.clone(), release.clone());
+            rayon::spawn(move || {
+                started.send(()).unwrap();
+                let (m, c) = &*release;
+                let mut go = m.lock().unwrap();
+                while !*go {
+                    go = c.wait(go).unwrap();
+                }
+            });
+        }
+        for _ in 0..n {
+            all_started.recv().unwrap();
+        }
+        let pool = Arc::new(rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap());
+        let path = temp("in-a-pool.png");
+        let (tx, rx) = mpsc::channel();
+        let (p, at) = (pool.clone(), path.clone());
+        std::thread::spawn(move || {
+            let d = tall_document();
+            let r = p.install(|| export_in(&d, &at, &ExportFormat::Png { sixteen_bit: false }, None, Some(&p)));
+            let _ = tx.send(r.is_ok());
+        });
+        let done = rx.recv_timeout(Duration::from_secs(10));
+        let (m, c) = &*release;
+        *m.lock().unwrap() = true;
+        c.notify_all();
+        assert_eq!(done, Ok(true), "the export waited for the global pool");
+        std::fs::remove_file(&path).unwrap();
     }
 }

@@ -5,11 +5,15 @@ use std::sync::{OnceLock, mpsc};
 
 /// The threads background work runs its parallel parts on (projections, saves and exports,
 /// copies): a pool apart from rayon's global one, which the interface thread uses (for a
-/// layer's outline, say), so that a small parallel job there never waits behind them.
+/// layer's outline, say), so that a small parallel job there never waits behind them. At
+/// least two, so that a job waiting for another one's work (an export's encoder waiting for
+/// its bands) never holds the only thread.
 pub fn pool() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
+        let n = std::thread::available_parallelism().map_or(2, |n| n.get().max(2));
         rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
             .thread_name(|i| format!("background {i}"))
             .build()
             .expect("starting the background threads")

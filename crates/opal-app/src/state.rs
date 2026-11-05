@@ -732,7 +732,10 @@ impl AppState {
         ctx: &egui::Context,
     ) {
         let written = Written::Export { path: path.clone() };
-        let job = Box::new(move || image_files::export(&doc, &path, &format, size.as_ref()).map_err(|e| e.to_string()));
+        let job = Box::new(move || {
+            let pool = Some(crate::background::pool());
+            image_files::export_in(&doc, &path, &format, size.as_ref(), pool).map_err(|e| e.to_string())
+        });
         self.writer.write(written, Then::Nothing, job, ctx);
     }
 
