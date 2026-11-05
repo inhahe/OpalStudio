@@ -369,8 +369,8 @@ impl AppState {
             Cmd::Undo => {
                 self.active_mut().expect("available").undo();
             }
-            Cmd::Copy => self.copy(false),
-            Cmd::CopyMerged => self.copy(true),
+            Cmd::Copy => self.copy(false, ctx),
+            Cmd::CopyMerged => self.copy(true, ctx),
             Cmd::Paste => self.paste(false, ctx),
             Cmd::PasteInPlace => self.paste(true, ctx),
             Cmd::Transform => self.transform(),

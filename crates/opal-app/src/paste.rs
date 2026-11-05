@@ -12,8 +12,9 @@ use std::sync::Arc;
 
 impl AppState {
     /// Copies the selected layers (or, `merged`, everything visible) within the canvas,
-    /// trimmed to their content.
-    pub(crate) fn copy(&mut self, merged: bool) {
+    /// trimmed to their content. It is put on the clipboard off the interface thread (see
+    /// [`AppState::poll_copies`]).
+    pub(crate) fn copy(&mut self, merged: bool, ctx: &egui::Context) {
         let d = self.active().expect("available");
         let doc = d.doc();
         let canvas = doc.canvas.rect();
@@ -38,9 +39,16 @@ impl AppState {
         };
         let pixels = flat.read_rect(&bounds);
         let from = bounds.translate(-canvas.x0, -canvas.y0);
-        match self.clipboard.write_image(Copied { from, pixels }) {
-            Ok(()) => self.notify(format!("Copied {} × {} pixels.", bounds.width(), bounds.height())),
-            Err(e) => self.message(MessageKind::Error, "Could not copy", e),
+        self.clipboard.write_image(Copied { from, pixels }, ctx);
+    }
+
+    /// Says how the copies put on the clipboard since the last frame went.
+    pub(crate) fn poll_copies(&mut self) {
+        for result in self.clipboard.written() {
+            match result {
+                Ok(from) => self.notify(format!("Copied {} × {} pixels.", from.width(), from.height())),
+                Err(e) => self.message(MessageKind::Error, "Could not copy", e),
+            }
         }
     }
 

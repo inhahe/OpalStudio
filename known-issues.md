@@ -64,3 +64,12 @@ Vulkan backend (and Metal's `recommendedMaxWorkingSetSize`) on other platforms.
 crashed at startup. On other platforms that setting must be overridden
 (`cargo build --target <host>`). **Fix:** when the first non-Windows build is set up, move
 the override into a Windows-only build script or document per-platform `--config`.
+
+## Copies to other programs are 8-bit on Linux and macOS
+
+`crates/opal-app/src/clipboard.rs` (`write_system`). On Windows a copy goes on the clipboard
+as a 16-bit PNG and a bitmap; elsewhere `arboard` writes only an 8-bit image, so another
+program pasting a copy from Opal Studio gets 8 bits a channel (Opal Studio itself still gets
+its full-precision copy back). Waits on a non-Windows build to test against. **Fix:** offer
+`image/png` at 16 bits through the platform's clipboard directly (X11 and Wayland
+selections, `NSPasteboard`'s `public.png`).

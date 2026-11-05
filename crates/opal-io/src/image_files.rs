@@ -94,11 +94,15 @@ pub enum ExportFormat {
 /// `w × h` pixels as a 16-bit PNG file's bytes (for the clipboard), compressed quickly.
 pub fn encode_png16(pixels: &[Pixel], w: u32, h: u32) -> Vec<u8> {
     use image::codecs::png::{CompressionType, FilterType};
-    let buffer = image::ImageBuffer::from_raw(w, h, pixels_to_rgba16(pixels)).expect("buffer size");
     let mut out = Vec::new();
     let encoder = PngEncoder::new_with_quality(&mut out, CompressionType::Fast, FilterType::Adaptive);
-    DynamicImage::ImageRgba16(buffer).write_with_encoder(encoder).expect("encoding into memory cannot fail");
+    rgba16(pixels, w, h).write_with_encoder(encoder).expect("encoding into memory cannot fail");
     out
+}
+
+/// `w × h` pixels as 16-bit sRGB with straight alpha.
+fn rgba16(pixels: &[Pixel], w: u32, h: u32) -> DynamicImage {
+    DynamicImage::ImageRgba16(image::ImageBuffer::from_raw(w, h, pixels_to_rgba16(pixels)).expect("buffer size"))
 }
 
 /// A size to export at other than the canvas's, and how to resample to it.
@@ -194,9 +198,7 @@ pub fn export(doc: &Document, path: &Path, format: &ExportFormat, size: Option<&
         ExportFormat::Png { sixteen_bit: false } => {
             DynamicImage::ImageRgba8(image::RgbaImage::from_raw(w, h, pixels_to_rgba8(&pixels)).expect("buffer size"))
         }
-        ExportFormat::Png { sixteen_bit: true } => DynamicImage::ImageRgba16(
-            image::ImageBuffer::from_raw(w, h, pixels_to_rgba16(&pixels)).expect("buffer size"),
-        ),
+        ExportFormat::Png { sixteen_bit: true } => rgba16(&pixels, w, h),
         ExportFormat::Jpeg { background, .. } => {
             let bg = from_srgb8([background[0], background[1], background[2], 255]);
             let rgb: Vec<u8> = pixels

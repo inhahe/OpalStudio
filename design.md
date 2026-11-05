@@ -467,10 +467,12 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   is ready, on the image that was active. What the user started in the meantime comes
   first: the paste waits for a dialog to close, a drag to end, or a box opened (or crop
   box changed) on that image to be finished, and is dropped if the image was closed.
-  Copy (Ctrl+C) copies the selected layers within
-  the canvas; Copy Merged (Ctrl+Shift+C) everything visible within the canvas. Copies go
-  on the clipboard as a 16-bit PNG (for programs that read PNG) and an 8-bit bitmap, and
-  a copy made in Opal Studio keeps its full precision for pasting back into Opal Studio.
+  Copy (Ctrl+C) copies the selected layers within the canvas; Copy Merged (Ctrl+Shift+C)
+  everything visible within the canvas. Copies are encoded and written on a worker
+  thread too, in the order made, and a paste waits for one still being written. On
+  Windows a copy goes on the clipboard as a 16-bit PNG (for programs that read PNG) and an
+  8-bit bitmap, in one go; elsewhere as an 8-bit image. A copy made in Opal Studio keeps
+  its full precision for pasting back into Opal Studio.
 
 ## Image size, crop and rotation
 
