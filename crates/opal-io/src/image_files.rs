@@ -468,8 +468,9 @@ mod tests {
         (out, w, h)
     }
 
+    /// A file `name` in a temporary folder the tests share (each test removes its files).
     fn temp(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("opal-io-{}", std::process::id()));
+        let dir = std::env::temp_dir().join("opal-io-tests");
         std::fs::create_dir_all(&dir).unwrap();
         dir.join(name)
     }
