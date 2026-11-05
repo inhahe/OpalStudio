@@ -702,7 +702,12 @@ pub struct Projection {
     occupancy: Occupancy,
     /// How many level-0 keys have been built (for tests).
     keys_built: usize,
+    /// How many bytes of tiles the cache may hold (see [`set_budget`](Self::set_budget)).
+    budget: Option<u64>,
 }
+
+/// The bytes a cached tile's pixels take.
+const TILE_BYTES: u64 = (TILE_PIXELS * std::mem::size_of::<Pixel>()) as u64;
 
 /// How [`Projection::update`] brings tiles up to date.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -734,6 +739,12 @@ pub const MAX_LEVEL: u32 = 16;
 impl Projection {
     pub fn new() -> Projection {
         Projection::default()
+    }
+
+    /// Limits the tiles the cache holds to `bytes`, beyond those the view shown needs: past
+    /// it, an update drops the tiles farthest from the view first. `None` for no limit.
+    pub fn set_budget(&mut self, bytes: Option<u64>) {
+        self.budget = bytes;
     }
 
     /// Whether the last update drew what changed as a preview (see [`Quality::Preview`]).
@@ -794,6 +805,7 @@ impl Projection {
             }
             Quality::Preview => self.update_preview(layers, level, &outer, base),
         };
+        self.trim(level, &outer);
         self.last = Some(LastUpdate { layers: layers.to_vec(), level, rect: *rect, quality, result: result.clone() });
         result
     }
@@ -887,6 +899,44 @@ impl Projection {
             .collect();
         self.levels[level as usize].extend(drawn);
         self.shown(level, coords.iter().chain(&dirty))
+    }
+
+    /// Drops cached tiles while they take more than the budget, farthest from `outer` first,
+    /// keeping every tile up to level `level` within it (what the view drawn needs).
+    fn trim(&mut self, level: u32, outer: &IRect) {
+        let Some(budget) = self.budget else { return };
+        // Cheap to know, and at least what the tiles take.
+        let entries: usize = self.levels.iter().map(HashMap::len).sum();
+        if entries as u64 * TILE_BYTES <= budget {
+            return;
+        }
+        let gap = |r: &IRect| {
+            let dx = (outer.x0 - r.x1).max(r.x0 - outer.x1).max(0);
+            let dy = (outer.y0 - r.y1).max(r.y0 - outer.y1).max(0);
+            dx + dy
+        };
+        let mut bytes = 0;
+        let mut away: Vec<(i64, usize, TileCoord)> = Vec::new();
+        for (l, cache) in self.levels.iter().enumerate() {
+            for (c, e) in cache {
+                if e.tile.is_some() {
+                    bytes += TILE_BYTES;
+                }
+                let r = c.rect(l as u32);
+                if l as u32 > level || r.intersect(outer).is_empty() {
+                    away.push((gap(&r), l, *c));
+                }
+            }
+        }
+        away.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
+        for (_, l, c) in away {
+            if bytes <= budget {
+                break;
+            }
+            if self.levels[l].remove(&c).is_some_and(|e| e.tile.is_some()) {
+                bytes -= TILE_BYTES;
+            }
+        }
     }
 
     /// The tiles of level `level` at `coords` that have content.
@@ -1514,6 +1564,44 @@ mod tests {
             }
             eprintln!("{quality:?}: {:?} a frame", total / 5);
         }
+    }
+
+    #[test]
+    fn past_its_budget_the_cache_drops_what_is_farthest_from_the_view() {
+        let mut ids = IdGen::default();
+        let mut d = Document::new(8192, 1024);
+        let mut img = RasterImage::new();
+        for c in TileCoord::covering(&IRect::from_size(8192, 1024), 0) {
+            let mut t = Tile::transparent();
+            t.set(0, 0, pixel_from_f32([c.x as f32 / 32.0, c.y as f32 / 4.0, 0.0, 1.0]));
+            img.set_tile(c, Some(Arc::new(t)));
+        }
+        add(&mut d, &mut ids, img);
+        add(&mut d, &mut ids, solid(IRect::new(0, 0, 8192, 8), [0.0, 0.0, 1.0, 0.5]));
+        let mut p = Projection::new();
+        p.set_budget(Some(24 * TILE_BYTES));
+        let view = |x: i64| IRect::new(x, 0, x + 1024, 1024);
+        // Sixteen tiles in view, then sixteen more to the right, then sixteen far beyond.
+        p.update(&d.layers, 0, &view(0), Quality::Exact);
+        p.update(&d.layers, 0, &view(1024), Quality::Exact);
+        let cached = |p: &Projection| p.levels[0].values().filter(|e| e.tile.is_some()).count();
+        assert_eq!(cached(&p), 24, "over budget, the farthest tiles go");
+        assert!(p.tile(0, TileCoord::new(1, 0)).is_none() && p.tile(0, TileCoord::new(3, 0)).is_some());
+        p.update(&d.layers, 0, &view(6144), Quality::Exact);
+        assert_eq!(cached(&p), 24);
+        for c in TileCoord::covering(&view(6144), 0) {
+            assert!(p.tile(0, c).is_some(), "a tile in view was dropped");
+        }
+        // A budget smaller than the view itself keeps the view.
+        p.set_budget(Some(4 * TILE_BYTES));
+        p.update(&d.layers, 0, &view(2048), Quality::Exact);
+        for c in TileCoord::covering(&view(2048), 0) {
+            assert!(p.tile(0, c).is_some(), "a tile in view was dropped");
+        }
+        // Without a budget, nothing goes.
+        p.set_budget(None);
+        p.update(&d.layers, 0, &view(0), Quality::Exact);
+        assert_eq!(cached(&p), 32);
     }
 
     /// Times panning a view of four 24-megapixel layers at 25% (run with `--release

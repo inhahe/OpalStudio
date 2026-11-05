@@ -232,6 +232,17 @@ pub static PREFS: &[Def] = &[
         default: Init::Choice("sharper"),
         advanced: true,
     },
+    Def {
+        key: "canvas.cache",
+        label: "Display cache may use",
+        help: "Each image keeps what it has drawn, so panning back and zooming are instant. Past \
+               this much memory, what lies farthest from the view is dropped (and drawn again if \
+               it comes back into view). What the view shows is always kept.",
+        section: "Canvas",
+        kind: Kind::Float { min: 0.25, max: 64.0, decimals: 2, suffix: " GB", log: true },
+        default: Init::Float(2.0),
+        advanced: true,
+    },
     // Navigation
     Def {
         key: "nav.wheel",

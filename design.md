@@ -126,7 +126,10 @@ not a goal.
   A cached tile keeps the list of what produced it: source tiles (as pointers, with the
   offset of pixels moved off the tile grid), each image object's pixels, transform and
   sampling, and opacities. It is recomputed exactly when that list changes, so nothing has
-  to report changes to the cache. Stale tiles are computed in parallel. The GPU only shows projection tiles; a GPU
+  to report changes to the cache. Stale tiles are computed in parallel. The cache keeps
+  every tile the view shown needs; beyond that it may hold a set amount of memory (a
+  preference, 2 GB by default), past which the tiles farthest from the view are dropped
+  first. The GPU only shows projection tiles; a GPU
   compositor matching the reference comes when adjustments need interactive speed
   (milestone 5).
 - **Display.** Each projection tile is uploaded as a 258×258 texture: the tile plus a
@@ -134,7 +137,9 @@ not a goal.
   level just finer (or, by preference, just coarser) than the screen is used; at and above
   a set zoom (200% by default) pixels are sharp squares. The viewport is aligned to device
   pixels, so 100% maps pixels one to one, and the shader composites over the checkerboard
-  inside the canvas and dims what lies beyond it.
+  inside the canvas and dims what lies beyond it. Textures not drawn for 600 frames are
+  freed, and so are the least recently drawn beyond half the GPU memory the system allows
+  the process (1 GB where it does not say); those drawn in the frame always stay.
 - The default perceptual color space, for edge detection, color-range selection and
   vectorization, is **OKLab**.
 

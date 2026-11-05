@@ -20,14 +20,6 @@ rayon, but the frame waits for them, so opening or zooming out of a very large i
 worker threads and show the coarser pyramid level (or the previous result) until they
 arrive.
 
-## The projection cache and GPU textures are never trimmed to a budget
-
-`Projection` keeps every tile it has computed for content still in the document, and the
-GPU texture cache (`crates/opal-app/src/gpu.rs`) frees textures only after 600 frames
-unused. Fine for ordinary images; a huge document panned end to end keeps all of it in
-memory. **Fix:** evict least recently used tiles beyond a memory budget, using the GPU
-memory query for the texture side.
-
 ## GPU memory is only reported on Windows
 
 `crates/opal-app/src/gpu_memory.rs`. **Fix:** query `VK_EXT_memory_budget` through wgpu's

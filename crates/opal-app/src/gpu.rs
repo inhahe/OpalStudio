@@ -187,7 +187,12 @@ pub struct CanvasCallback {
     pub tiles: Vec<TileDraw>,
     /// Sample pixels as sharp squares rather than smoothly.
     pub nearest: bool,
+    /// How many tile textures may be kept, at most (those drawn this frame always are).
+    pub texture_budget: usize,
 }
+
+/// The bytes a tile texture takes: 258 × 258 pixels of four half floats.
+pub const TEXTURE_BYTES: u64 = (TEX as u64) * (TEX as u64) * 8;
 
 type TileKey = (u64, u32, TileCoord);
 
@@ -457,6 +462,9 @@ impl CallbackTrait for CanvasCallback {
             instances.push(t.rect);
         }
         r.tiles.retain(|_, g| g.last_used + EVICT_AFTER > frame);
+        for key in over_budget(r.tiles.iter().map(|(k, g)| (*k, g.last_used)), frame, self.texture_budget) {
+            r.tiles.remove(&key);
+        }
 
         let mut uniforms = self.uniforms;
         uniforms.encode_srgb = u32::from(r.encode_srgb);
@@ -525,6 +533,16 @@ impl CallbackTrait for CanvasCallback {
     }
 }
 
+/// Which of `tiles` (each with the frame it was last drawn) to free so that at most
+/// `budget` remain, least recently drawn first, never one drawn in `frame`.
+fn over_budget(tiles: impl Iterator<Item = (TileKey, u64)>, frame: u64, budget: usize) -> Vec<TileKey> {
+    let tiles: Vec<(TileKey, u64)> = tiles.collect();
+    let excess = tiles.len().saturating_sub(budget);
+    let mut old: Vec<(u64, TileKey)> = tiles.into_iter().filter(|&(_, f)| f != frame).map(|(k, f)| (f, k)).collect();
+    old.sort_unstable_by_key(|&(f, _)| f);
+    old.into_iter().take(excess).map(|(_, k)| k).collect()
+}
+
 fn same_sources(a: &[Option<Arc<Tile>>; 9], b: &[Option<Arc<Tile>>; 9]) -> bool {
     a.iter().zip(b).all(|(x, y)| match (x, y) {
         (None, None) => true,
@@ -537,6 +555,19 @@ fn same_sources(a: &[Option<Arc<Tile>>; 9], b: &[Option<Arc<Tile>>; 9]) -> bool 
 mod tests {
     use super::*;
     use opal_core::tile::pixel_from_f32;
+
+    #[test]
+    fn textures_past_the_budget_go_least_recently_drawn_first() {
+        let key = |x| (1u64, 0u32, TileCoord::new(x, 0));
+        let tiles = [(key(0), 5), (key(1), 9), (key(2), 2), (key(3), 9), (key(4), 7)];
+        // Five held, three allowed: the two drawn longest ago go.
+        let mut gone = over_budget(tiles.into_iter(), 9, 3);
+        gone.sort_unstable();
+        assert_eq!(gone, vec![key(0), key(2)]);
+        // Never one drawn this frame, even past the budget.
+        assert_eq!(over_budget(tiles.into_iter(), 9, 0).len(), 3);
+        assert!(over_budget(tiles.into_iter(), 9, 5).is_empty());
+    }
 
     #[test]
     fn the_border_comes_from_the_neighbors() {

@@ -94,6 +94,10 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     }
 
     let prefs = CanvasPrefs::read(&st.prefs);
+    let cache_budget = (st.prefs.f64("canvas.cache") * 1e9) as u64;
+    // Tile textures may take half the GPU memory the system allows the process (or 1 GB
+    // where it does not say).
+    let texture_budget = (st.gpu.memory.map_or(1 << 30, |(_, budget)| budget / 2) / crate::gpu::TEXTURE_BYTES) as usize;
     let zs = st.tool_settings(ToolId::Zoom).clone();
     let ms = st.tool_settings(ToolId::Move).clone();
     let snapping = st.prefs.bool("transform.snapping");
@@ -303,6 +307,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let held = ctx.input(|i| i.pointer.primary_down());
     let dragging = held && (d.moving.is_some() || d.transform.as_ref().is_some_and(|s| s.drag.is_some()));
     let quality = if dragging { opal_core::composite::Quality::Preview } else { opal_core::composite::Quality::Exact };
+    d.projection.set_budget(Some(cache_budget));
     let tiles = d.projection.update(&layers, level, &wider, quality);
     let mut draws = Vec::new();
     for (coord, _) in tiles {
@@ -337,7 +342,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         smooth: u32::from(!nearest),
         _pad: [0; 2],
     };
-    let callback = CanvasCallback { view_key: doc_key, level, uniforms, tiles: draws, nearest };
+    let callback = CanvasCallback { view_key: doc_key, level, uniforms, tiles: draws, nearest, texture_budget };
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, callback));
     if prefs.border {
         let min = rect.min + view.to_screen(canvas.min.to_vec2()) / ppp;
