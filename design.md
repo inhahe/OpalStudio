@@ -409,7 +409,9 @@ Editable content does not mean recomputing everything on each change.
 
 - **Only what changed is recomputed.** Every cached tile of the projection knows the
   source tiles that produced it (see *Compositing*), so an edit recomputes the tiles it
-  touches and nothing else.
+  touches and nothing else. A tile also remembers the set of layers it was last checked
+  against, and where the layers' content lies is worked out once for each set, so panning
+  an unchanged document checks only the tiles newly in view.
 - **Editable objects are cached as pixels.** Shapes, text, effects and image objects are
   drawn per tile and redrawn only when they or what they are composited with change; for
   display they cost what a pixel layer costs. Editability costs memory more than time.

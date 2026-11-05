@@ -28,14 +28,6 @@ unused. Fine for ordinary images; a huge document panned end to end keeps all of
 memory. **Fix:** evict least recently used tiles beyond a memory budget, using the GPU
 memory query for the texture side.
 
-## Panning a zoomed-out view recomputes the cache keys of every tile in view
-
-`crates/opal-core/src/composite.rs` (`Projection::update`). An unchanged view of an unchanged
-document costs nothing, but each frame of panning walks every tile of every layer and
-rebuilds the key of every level-0 tile under the view, which for a huge canvas shown whole
-is a lot of work per frame. **Fix:** keep the set of occupied tiles per layer up to date
-incrementally, and skip key rebuilding for tiles whose layers did not change.
-
 ## GPU memory is only reported on Windows
 
 `crates/opal-app/src/gpu_memory.rs`. **Fix:** query `VK_EXT_memory_budget` through wgpu's

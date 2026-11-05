@@ -436,7 +436,7 @@ fn prepare(layers: &[Arc<Layer>], range: Option<&IRect>) {
 /// (all of them when `range` is `None`).
 pub fn occupied_tiles(layers: &[Arc<Layer>], range: Option<&IRect>) -> HashSet<TileCoord> {
     let mut out = HashSet::new();
-    let mut add = |r: IRect| {
+    each_occupied_rect(layers, &mut |r, _| {
         let r = match range {
             Some(range) => r.intersect(range),
             None => r,
@@ -444,11 +444,17 @@ pub fn occupied_tiles(layers: &[Arc<Layer>], range: Option<&IRect>) -> HashSet<T
         if !r.is_empty() {
             out.extend(TileCoord::covering(&r, 0));
         }
-    };
+    });
+    out
+}
+
+/// Calls `f` with rectangles (canvas pixels) that together cover what visible content of
+/// `layers` draws, one per tile of each object, and whether it is a pixel object's.
+fn each_occupied_rect(layers: &[Arc<Layer>], f: &mut dyn FnMut(IRect, bool)) {
     for_each_visible_object(layers, &mut |o| match &o.kind {
         ObjectKind::Pixels(p) => {
             for (c, _) in p.image.tiles() {
-                add(c.rect(0).translate(p.offset[0], p.offset[1]));
+                f(c.rect(0).translate(p.offset[0], p.offset[1]), true);
             }
         }
         ObjectKind::Image(i) => {
@@ -456,11 +462,46 @@ pub fn occupied_tiles(layers: &[Arc<Layer>], range: Option<&IRect>) -> HashSet<T
             for (c, _) in i.image.tiles() {
                 let t = c.rect(0);
                 let grown = FRect::new(t.x0 as f64 - r, t.y0 as f64 - r, t.x1 as f64 + r, t.y1 as f64 + r);
-                add(IRect::covering(&i.transform.bounds(&grown)));
+                f(IRect::covering(&i.transform.bounds(&grown)), false);
             }
         }
     });
-    out
+}
+
+/// Where the content of a set of layers lies, worked out once for them and asked of each
+/// area shown: the tiles pixel objects occupy, and the rectangles image objects cover
+/// (which, transformed, may span more tiles than are worth listing).
+#[derive(Debug, Default)]
+struct Occupancy {
+    tiles: HashSet<TileCoord>,
+    rects: Vec<IRect>,
+}
+
+impl Occupancy {
+    fn of(layers: &[Arc<Layer>]) -> Occupancy {
+        let mut o = Occupancy::default();
+        each_occupied_rect(layers, &mut |r, pixels| {
+            if pixels {
+                o.tiles.extend(TileCoord::covering(&r, 0));
+            } else {
+                o.rects.push(r);
+            }
+        });
+        o
+    }
+
+    /// The level-0 tiles occupied within `range`.
+    fn within(&self, range: &IRect) -> HashSet<TileCoord> {
+        let mut out: HashSet<TileCoord> =
+            self.tiles.iter().filter(|c| !c.rect(0).intersect(range).is_empty()).copied().collect();
+        for r in &self.rects {
+            let r = r.intersect(range);
+            if !r.is_empty() {
+                out.extend(TileCoord::covering(&r, 0));
+            }
+        }
+        out
+    }
 }
 
 /// Composites every tile `layers` occupy within `range` (everywhere when `None`) into one
@@ -639,6 +680,9 @@ impl PartialEq for Key {
 struct Entry {
     key: Key,
     tile: Option<Arc<Tile>>,
+    /// For a level-0 tile: the generation of layers its key was last found current for
+    /// (see [`Projection::generation`]).
+    checked: u64,
 }
 
 /// The composited image, cached per tile, with a pyramid of reduced levels: a level-`k`
@@ -648,6 +692,16 @@ pub struct Projection {
     levels: Vec<HashMap<TileCoord, Entry>>,
     reduced: Reduced,
     last: Option<LastUpdate>,
+    /// Counts the sets of layers updated against: it moves on whenever they differ from
+    /// the last ones, so a level-0 entry checked in this generation is current without
+    /// building its key again (panning then costs only the tiles newly in view).
+    generation: u64,
+    /// The layers of this generation, held so that a replaced layer cannot reuse an
+    /// address, and where their content lies.
+    layers: Vec<Arc<Layer>>,
+    occupancy: Occupancy,
+    /// How many level-0 keys have been built (for tests).
+    keys_built: usize,
 }
 
 /// How [`Projection::update`] brings tiles up to date.
@@ -720,7 +774,12 @@ impl Projection {
             (rect.x1 + span - 1).div_euclid(span) * span,
             (rect.y1 + span - 1).div_euclid(span) * span,
         );
-        let base: HashSet<TileCoord> = occupied_tiles(layers, Some(&outer));
+        if self.layers.len() != layers.len() || !self.layers.iter().zip(layers).all(|(a, b)| Arc::ptr_eq(a, b)) {
+            self.generation += 1;
+            self.layers = layers.to_vec();
+            self.occupancy = Occupancy::of(layers);
+        }
+        let base = self.occupancy.within(&outer);
         let result = match quality {
             Quality::Exact => {
                 self.reduced = Reduced::default();
@@ -757,13 +816,14 @@ impl Projection {
             c
         };
         // The level-`level` tiles with a level-0 tile under them out of date, or emptied.
-        let cache = &self.levels[0];
+        let generation = self.generation;
         let mut dirty: HashSet<TileCoord> = HashSet::new();
         for &c in &base {
-            if cache.get(&c).is_none_or(|e| e.key != base_key(layers, c)) {
+            if self.check_base(layers, c).is_some() {
                 dirty.insert(up(c));
             }
         }
+        let cache = &self.levels[0];
         for c in cache.keys() {
             if !base.contains(c) && !c.rect(0).intersect(outer).is_empty() {
                 dirty.insert(up(*c));
@@ -822,7 +882,7 @@ impl Projection {
             .into_par_iter()
             .map(|(c, key)| {
                 let tile = composite_with(layers, c, &show).map(Arc::new);
-                (c, Entry { key, tile })
+                (c, Entry { key, tile, checked: generation })
             })
             .collect();
         self.levels[level as usize].extend(drawn);
@@ -841,17 +901,32 @@ impl Projection {
         self.levels.get(level as usize)?.get(&c)?.tile.as_ref()
     }
 
-    fn update_base(&mut self, layers: &[Arc<Layer>], coords: &HashSet<TileCoord>, outer: &IRect) {
-        let cache = &mut self.levels[0];
-        // Tiles inside the area that nothing occupies any more.
-        cache.retain(|c, _| coords.contains(c) || c.rect(0).intersect(outer).is_empty());
-        let mut stale = Vec::new();
-        for &c in coords {
-            let key = base_key(layers, c);
-            if cache.get(&c).is_none_or(|e| e.key != key) {
-                stale.push((c, key));
-            }
+    /// Checks the cached level-0 tile `c` against `layers` (this generation's): `None` if it
+    /// is current (marked so, if its key had to be built), or the key it needs now.
+    fn check_base(&mut self, layers: &[Arc<Layer>], c: TileCoord) -> Option<Key> {
+        let generation = self.generation;
+        let entry = self.levels[0].get_mut(&c);
+        if entry.as_ref().is_some_and(|e| e.checked == generation) {
+            return None;
         }
+        self.keys_built += 1;
+        let key = base_key(layers, c);
+        match entry {
+            Some(e) if e.key == key => {
+                e.checked = generation;
+                None
+            }
+            _ => Some(key),
+        }
+    }
+
+    fn update_base(&mut self, layers: &[Arc<Layer>], coords: &HashSet<TileCoord>, outer: &IRect) {
+        let generation = self.generation;
+        // Tiles inside the area that nothing occupies any more.
+        self.levels[0].retain(|c, _| coords.contains(c) || c.rect(0).intersect(outer).is_empty());
+        let stale: Vec<(TileCoord, Key)> =
+            coords.iter().filter_map(|&c| self.check_base(layers, c).map(|key| (c, key))).collect();
+        let cache = &mut self.levels[0];
         let done: Vec<(TileCoord, Entry)> = stale
             .into_par_iter()
             .map(|(c, key)| {
@@ -862,7 +937,7 @@ impl Projection {
                     Some(t) => Some(t.clone()),
                     None => composite_tile(layers, c).map(Arc::new),
                 };
-                (c, Entry { key, tile })
+                (c, Entry { key, tile, checked: generation })
             })
             .collect();
         cache.extend(done);
@@ -901,7 +976,7 @@ impl Projection {
         for (c, key) in stale {
             let Key::Pyramid(kids) = &key else { unreachable!() };
             let tile = reduced[&kids.each_ref().map(ptr)].clone();
-            cache.insert(c, Entry { tile, key });
+            cache.insert(c, Entry { tile, key, checked: 0 });
         }
     }
 }
@@ -1344,6 +1419,27 @@ mod tests {
     }
 
     #[test]
+    fn panning_builds_keys_for_the_tiles_newly_in_view_alone() {
+        let mut ids = IdGen::default();
+        let mut d = Document::new(4096, 1024);
+        let bg = add(&mut d, &mut ids, solid(IRect::from_size(4096, 1024), [0.2, 0.4, 0.6, 1.0]));
+        let mut p = Projection::new();
+        // Four tiles by four, then one tile to the right: four new tiles.
+        p.update(&d.layers, 0, &IRect::new(0, 0, 1024, 1024), Quality::Exact);
+        assert_eq!(p.keys_built, 16);
+        p.update(&d.layers, 0, &IRect::new(256, 0, 1280, 1024), Quality::Exact);
+        assert_eq!(p.keys_built, 20, "panning rebuilt the keys of tiles already checked");
+        // Away, a change to a tile left behind, and back: the change shows.
+        p.update(&d.layers, 0, &IRect::new(3072, 0, 4096, 1024), Quality::Exact);
+        let LayerContent::Objects(objects) = &mut d.layer_mut(bg).unwrap().content else { panic!() };
+        let ObjectKind::Pixels(o) = &mut objects[0].kind else { panic!() };
+        Arc::make_mut(&mut o.image).set_pixel(300, 10, pixel_from_f32([1.0, 0.0, 0.0, 1.0]));
+        p.update(&d.layers, 0, &IRect::new(256, 0, 1280, 1024), Quality::Exact);
+        let t = p.tile(0, TileCoord::new(1, 0)).expect("the tile");
+        assert_eq!(pixel_to_f32(t.get(44, 10)), [1.0, 0.0, 0.0, 1.0], "the change made out of view does not show");
+    }
+
+    #[test]
     fn a_previewed_image_object_keeps_its_own_sampling() {
         use crate::document::{ImageObject, Object};
         use crate::geom::Affine;
@@ -1418,6 +1514,33 @@ mod tests {
             }
             eprintln!("{quality:?}: {:?} a frame", total / 5);
         }
+    }
+
+    /// Times panning a view of four 24-megapixel layers at 25% (run with `--release
+    /// --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn time_panning() {
+        let (w, h) = (6000u32, 4000u32);
+        let mut ids = IdGen::default();
+        let mut d = Document::new(w, h);
+        for k in 0..4 {
+            let px: Vec<Pixel> =
+                (0..w * h).map(|i| pixel_from_f32([((i + k) % 251) as f32 / 251.0, 0.5, 0.25, 0.5])).collect();
+            add(&mut d, &mut ids, RasterImage::from_pixels(w, h, &px));
+        }
+        let mut p = Projection::new();
+        let view = |x: i64| IRect::new(x, 0, x + 4000, 4000);
+        p.update(&d.layers, 2, &view(0), Quality::Exact);
+        // Every position once first, so the frames timed composite nothing new.
+        for step in 0..50 {
+            p.update(&d.layers, 2, &view(step * 37), Quality::Exact);
+        }
+        let t = std::time::Instant::now();
+        for step in (0..50).rev() {
+            p.update(&d.layers, 2, &view(step * 37), Quality::Exact);
+        }
+        eprintln!("panning: {:?} a frame", t.elapsed() / 50);
     }
 
     #[test]
