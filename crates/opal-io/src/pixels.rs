@@ -42,6 +42,14 @@ pub fn to_srgb_unit(p: Pixel) -> [f32; 4] {
     [enc(p[0]), enc(p[1]), enc(p[2]), a]
 }
 
+/// `p` over the opaque pixel `bg`, both premultiplied: what shows where transparency is
+/// flattened onto a background.
+pub fn over_opaque(p: Pixel, bg: Pixel) -> Pixel {
+    let a = p[3].to_f32();
+    let mix = |i: usize| f16::from_f32(p[i].to_f32() + bg[i].to_f32() * (1.0 - a));
+    [mix(0), mix(1), mix(2), f16::ONE]
+}
+
 pub fn to_srgb8(p: Pixel) -> [u8; 4] {
     to_srgb_unit(p).map(|v| (v * 255.0).round() as u8)
 }

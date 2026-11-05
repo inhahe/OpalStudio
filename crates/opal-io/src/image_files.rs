@@ -565,7 +565,7 @@ impl<I: Iterator<Item = Vec<Pixel>>> GenericImageView for JpegRows<I> {
             let rgb: Vec<[u8; 3]> = band
                 .par_iter()
                 .map(|p| {
-                    let [r, g, b, _] = crate::pixels::to_srgb8(over_opaque(*p, bg));
+                    let [r, g, b, _] = crate::pixels::to_srgb8(crate::pixels::over_opaque(*p, bg));
                     [r, g, b]
                 })
                 .collect();
@@ -573,13 +573,6 @@ impl<I: Iterator<Item = Vec<Pixel>>> GenericImageView for JpegRows<I> {
         }
         image::Rgb(px[(y - *first) as usize * w + x as usize])
     }
-}
-
-/// `p` over the opaque pixel `bg`, both premultiplied.
-fn over_opaque(p: Pixel, bg: Pixel) -> Pixel {
-    let a = p[3].to_f32();
-    let mix = |i: usize| f16::from_f32(p[i].to_f32() + bg[i].to_f32() * (1.0 - a));
-    [mix(0), mix(1), mix(2), f16::ONE]
 }
 
 #[cfg(test)]
@@ -828,7 +821,7 @@ mod tests {
         let whole: Vec<u8> = flatten(&d.layers, &d.canvas.rect())
             .iter()
             .flat_map(|p| {
-                let [r, g, b, _] = crate::pixels::to_srgb8(over_opaque(*p, bg));
+                let [r, g, b, _] = crate::pixels::to_srgb8(crate::pixels::over_opaque(*p, bg));
                 [r, g, b]
             })
             .collect();
