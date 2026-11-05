@@ -171,7 +171,8 @@ size, and Rasterize Layer, so each gives the same pixels the canvas shows.
   pixels nearest it, which removes the halos sharp filters draw along hard edges.
 - **Shrinking never aliases.** An image keeps reduced copies (each a power of two
   smaller, made by halving), built when first needed and only those needed (a quarter of
-  the image's memory at half size, a sixteenth at a quarter); a shrunk image is sampled from the copy just finer than the result along
+  the image's memory at half size, a sixteenth at a quarter; tiles made from the same four
+  tiles are made once and shared, so a uniform area costs a tile at any level); a shrunk image is sampled from the copy just finer than the result along
   its less shrunk axis, with the filter widened by the remaining factor along each axis
   (up to 64 times for a drawing that is not turned, so squashing one axis leaves the
   other's detail alone; only a squash past that ratio takes a coarser copy).
@@ -416,7 +417,11 @@ curve editors.
   wanted, to make a file smaller, or to make a heavy layer cost nothing; like everything,
   it can be undone.
 - Merging and rasterizing keep the look exactly: the result composites like what it
-  replaces.
+  replaces. Tiles made from the same stored tiles in the same way (the same tiles, phase
+  and opacities, with no image object, whose pixels depend on where the tile is) are
+  composited once and shared, and a tile showing one stored tile unchanged is that tile,
+  uncopied: a uniform background costs a few tiles however large. A new white image is
+  likewise four tiles at most (inside, right edge, bottom edge, corner).
 - **Size limits.** An image object enlarged far past the canvas could ask for more memory
   than the computer has when drawn into pixels. Merging and rasterizing refuse, with the
   reason, a result needing more than 2 GiB beyond four canvases' worth; baking a paste

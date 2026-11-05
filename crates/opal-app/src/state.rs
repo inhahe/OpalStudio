@@ -809,24 +809,29 @@ impl AppState {
     }
 }
 
-/// A bitmap covering `width × height` from the origin with one premultiplied linear color.
+/// A `width × height` image of colour `rgba` from the origin. Tiles alike are one tile:
+/// those inside, those along the right edge, along the bottom, and the corner, so even
+/// the largest canvas costs a few tiles.
 fn filled(width: u32, height: u32, rgba: [f32; 4]) -> RasterImage {
     let area = IRect::from_size(i64::from(width), i64::from(height));
-    let full = Arc::new(Tile::filled(pixel_from_f32(rgba)));
+    let p = pixel_from_f32(rgba);
+    // The tiles made so far, by the part of the tile they fill (from its corner).
+    let mut made: HashMap<(i64, i64), Arc<Tile>> = HashMap::new();
     let mut img = RasterImage::new();
     for c in TileCoord::covering(&area, 0) {
         let r = c.rect(0);
-        if area.intersect(&r) == r {
-            img.set_tile(c, Some(full.clone()));
-        } else {
-            let part = area.intersect(&r);
-            let tile = img.tile_mut(c);
-            for y in part.y0..part.y1 {
-                for x in part.x0..part.x1 {
-                    tile.set((x - r.x0) as u32, (y - r.y0) as u32, pixel_from_f32(rgba));
+        let part = area.intersect(&r);
+        let size = (part.width(), part.height());
+        let tile = made.entry(size).or_insert_with(|| {
+            let mut t = Tile::transparent();
+            for y in 0..size.1 {
+                for x in 0..size.0 {
+                    t.set(x as u32, y as u32, p);
                 }
             }
-        }
+            Arc::new(t)
+        });
+        img.set_tile(c, Some(tile.clone()));
     }
     img
 }
@@ -859,6 +864,17 @@ mod tests {
 
     fn ctx() -> egui::Context {
         egui::Context::default()
+    }
+
+    #[test]
+    fn a_new_white_image_shares_its_tiles_alike() {
+        // Tiles inside, along the right edge, along the bottom, and the corner.
+        let img = filled(1000, 600, [1.0; 4]);
+        let distinct: std::collections::HashSet<*const Tile> = img.tiles().map(|(_, t)| Arc::as_ptr(t)).collect();
+        assert_eq!((img.tile_count(), distinct.len()), (12, 4));
+        assert_eq!(img.pixel(999, 599), pixel_from_f32([1.0; 4]));
+        assert_eq!(img.pixel(1000, 599)[3].to_f32(), 0.0);
+        assert_eq!(img.pixel(999, 600)[3].to_f32(), 0.0);
     }
 
     #[test]

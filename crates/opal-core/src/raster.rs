@@ -244,18 +244,29 @@ impl RasterImage {
         k == 0 || self.pyramid.get(k as usize - 1).is_some_and(|c| c.get().is_some())
     }
 
-    /// The image at half size, each pixel the average of a 2×2 block.
+    /// The image at half size, each pixel the average of a 2×2 block. Tiles whose four
+    /// children are the same tiles (a uniform area is full of them) are made once, and
+    /// shared.
     fn halved(&self) -> RasterImage {
         let parents: HashSet<TileCoord> = self.tiles.keys().map(|c| c.parent()).collect();
-        let tiles: Vec<(TileCoord, Tile)> = parents
+        // The parents by their children (by address, in the order `children` gives them).
+        let mut alike: HashMap<[usize; 4], Vec<TileCoord>> = HashMap::new();
+        for p in parents {
+            let kids = p.children().map(|k| self.tiles.get(&k).map_or(0, |t| Arc::as_ptr(t) as usize));
+            alike.entry(kids).or_default().push(p);
+        }
+        let made: Vec<(Vec<TileCoord>, Tile)> = alike
             .into_par_iter()
-            .filter_map(|p| {
-                let kids = p.children().map(|k| self.tiles.get(&k).map(|t| &**t));
-                downsample(kids).map(|t| (p, t))
+            .filter_map(|(_, at)| {
+                let kids = at[0].children().map(|k| self.tiles.get(&k).map(|t| &**t));
+                downsample(kids).map(|t| (at, t))
             })
             .collect();
         let mut out = RasterImage::new();
-        out.tiles = tiles.into_iter().map(|(c, t)| (c, Arc::new(t))).collect();
+        for (at, t) in made {
+            let t = Arc::new(t);
+            out.tiles.extend(at.into_iter().map(|c| (c, t.clone())));
+        }
         out
     }
 }
@@ -351,6 +362,23 @@ mod tests {
         }
         assert_eq!(c.reduced(10).pixel(0, 0), grey);
         assert!(!c.has_reduced(9), "the levels passed through are not kept");
+    }
+
+    #[test]
+    fn halving_makes_each_tile_alike_once() {
+        let grey = Arc::new(Tile::filled(pixel_from_f32([0.7, 0.7, 0.7, 1.0])));
+        let other = Arc::new(Tile::filled(pixel_from_f32([0.1, 0.2, 0.3, 1.0])));
+        let mut img = RasterImage::new();
+        for tc in TileCoord::covering(&IRect::from_size(2048, 2048), 0) {
+            img.set_tile(tc, Some(grey.clone()));
+        }
+        // One tile different: the parent it falls in is its own.
+        img.set_tile(TileCoord::new(5, 2), Some(other));
+        let half = img.reduced(1);
+        let distinct: HashSet<*const Tile> = half.tiles().map(|(_, t)| Arc::as_ptr(t)).collect();
+        assert_eq!((half.tile_count(), distinct.len()), (16, 2));
+        assert_eq!(half.pixel(0, 0), pixel_from_f32([0.7, 0.7, 0.7, 1.0]));
+        assert_ne!(half.pixel(5 * 128, 2 * 128), half.pixel(0, 0));
     }
 
     #[test]

@@ -509,16 +509,74 @@ impl Occupancy {
 }
 
 /// Composites every tile `layers` occupy within `range` (everywhere when `None`) into one
-/// bitmap, in parallel.
+/// bitmap, in parallel. Tiles made from the same stored tiles in the same way composite
+/// alike, so each such set is composited once and shared; and a tile that shows one stored
+/// tile as it is ([`lone_source`]) is that tile, uncopied. A uniform background thus costs
+/// a few tiles however large it is.
 fn composite_region(layers: &[Arc<Layer>], range: Option<&IRect>) -> RasterImage {
     prepare(layers, range);
     let coords: Vec<TileCoord> = occupied_tiles(layers, range).into_iter().collect();
-    let tiles: Vec<(TileCoord, Option<Tile>)> = coords.par_iter().map(|&c| (c, composite_tile(layers, c))).collect();
+    let keyed: Vec<(TileCoord, Vec<Token>)> = coords
+        .par_iter()
+        .map(|&c| {
+            let mut tokens = Vec::new();
+            key_into(layers, c, &mut tokens, &object_token);
+            (c, tokens)
+        })
+        .collect();
+    // The tiles to make: where each goes, and its key. Those showing an image object are
+    // each their own, as what they show depends on where they are.
+    let mut alike: HashMap<Vec<u64>, (Vec<TileCoord>, Vec<Token>)> = HashMap::new();
+    let mut work: Vec<(Vec<TileCoord>, Vec<Token>)> = Vec::new();
+    for (c, tokens) in keyed {
+        match signature(&tokens) {
+            Some(s) => alike.entry(s).or_insert_with(|| (Vec::new(), tokens)).0.push(c),
+            None => work.push((vec![c], tokens)),
+        }
+    }
+    work.extend(alike.into_values());
+    let made: Vec<(Vec<TileCoord>, Option<Arc<Tile>>)> = work
+        .into_par_iter()
+        .map(|(at, tokens)| {
+            let tile = match lone_source(&tokens).and_then(Weak::upgrade) {
+                Some(t) => Some(t),
+                None => composite_tile(layers, at[0]).map(Arc::new),
+            };
+            (at, tile)
+        })
+        .collect();
     let mut img = RasterImage::new();
-    for (c, t) in tiles {
-        img.set_tile(c, t.map(Arc::new));
+    for (at, tile) in made {
+        if let Some(t) = tile {
+            for c in at {
+                img.set_tile(c, Some(t.clone()));
+            }
+        }
     }
     img
+}
+
+/// `tokens` as numbers, alike exactly when the tiles they are the keys of composite alike
+/// wherever they are; `None` if they name an image object, whose pixels in a tile depend
+/// on where the tile is.
+fn signature(tokens: &[Token]) -> Option<Vec<u64>> {
+    let at = |w: &Weak<Tile>| w.as_ptr() as usize as u64;
+    let mut out = Vec::with_capacity(tokens.len() * 2);
+    // Each kind of token a tag, then as many numbers as that kind always has.
+    for t in tokens {
+        match t {
+            Token::Layer(o) => out.extend([0, u64::from(*o)]),
+            Token::Group(o) => out.extend([1, u64::from(*o)]),
+            Token::Tile(w) => out.extend([2, at(w)]),
+            Token::Shifted { phase, tiles } => {
+                out.extend([3, phase[0] as u64, phase[1] as u64]);
+                out.extend(tiles.iter().map(|t| t.as_ref().map_or(0, at)));
+            }
+            Token::Image { .. } => return None,
+            Token::End => out.push(4),
+        }
+    }
+    Some(out)
 }
 
 /// Composites every tile `layers` occupy into one bitmap (for merging and flattening).
@@ -1372,6 +1430,100 @@ mod tests {
         let src = d.layer(l).unwrap().objects()[0].image().clone();
         for (c, t) in shown {
             assert!(Arc::ptr_eq(&t, src.tile(c).unwrap()), "tile {c:?} was copied");
+        }
+    }
+
+    /// An image of `rect` whose tiles are all one tile of colour `rgba` (`rect` on the tile
+    /// grid), and that tile.
+    fn shared(rect: IRect, rgba: PixelF32) -> (RasterImage, Arc<Tile>) {
+        let t = Arc::new(Tile::filled(pixel_from_f32(rgba)));
+        let mut img = RasterImage::new();
+        for c in TileCoord::covering(&rect, 0) {
+            img.set_tile(c, Some(t.clone()));
+        }
+        (img, t)
+    }
+
+    #[test]
+    fn merging_composites_tiles_alike_once_and_copies_no_lone_tile() {
+        let mut ids = IdGen::default();
+        let mut d = Document::new(1024, 1024);
+        let (bg, bg_tile) = shared(IRect::from_size(1024, 1024), [0.2, 0.4, 0.6, 1.0]);
+        add(&mut d, &mut ids, bg);
+        let top = add(&mut d, &mut ids, shared(IRect::new(0, 0, 512, 1024), [1.0, 0.0, 0.0, 1.0]).0);
+        d.layer_mut(top).unwrap().opacity = 0.5;
+        let out = composite_all(&d.layers);
+        // Under the top layer, one composite for 8 tiles; beside it, the background's tile.
+        let distinct: HashSet<*const Tile> = out.tiles().map(|(_, t)| Arc::as_ptr(t)).collect();
+        assert_eq!((out.tile_count(), distinct.len()), (16, 2));
+        assert!(Arc::ptr_eq(out.tile(TileCoord::new(3, 1)).unwrap(), &bg_tile), "a lone tile was copied");
+        assert!(close(pixel_to_f32(out.pixel(10, 1000)), [0.6, 0.2, 0.3, 1.0]));
+    }
+
+    #[test]
+    fn merging_tiles_alike_once_gives_what_compositing_each_gives() {
+        use crate::document::{ImageObject, Object};
+        use crate::geom::Affine;
+        use crate::resample::Sampling;
+        let mut ids = IdGen::default();
+        let mut d = Document::new(2048, 2048);
+        add(&mut d, &mut ids, shared(IRect::from_size(2048, 2048), [0.2, 0.4, 0.6, 1.0]).0);
+        // Off the tile grid: alike only where the same four tiles show at the same phase.
+        let (mut pattern, _) = shared(IRect::from_size(1024, 1024), [0.0, 1.0, 0.0, 0.5]);
+        pattern.set_tile(TileCoord::new(1, 1), Some(Arc::new(Tile::filled(pixel_from_f32([0.0, 0.0, 1.0, 1.0])))));
+        let shifted = add(&mut d, &mut ids, pattern.clone());
+        pixels_mut(&mut d, shifted).offset = [300, 77];
+        // The same tiles at another phase, apart from the first.
+        let again = add(&mut d, &mut ids, pattern);
+        pixels_mut(&mut d, again).offset = [1300, 1100];
+        // One tile, at two opacities, apart from each other (rows 6 and 7, columns 0 to 3 and 4).
+        let (left, magenta) = shared(IRect::new(0, 1536, 1024, 2048), [1.0, 0.0, 1.0, 1.0]);
+        let mut right = RasterImage::new();
+        for c in TileCoord::covering(&IRect::new(1024, 1536, 1280, 2048), 0) {
+            right.set_tile(c, Some(magenta.clone()));
+        }
+        add(&mut d, &mut ids, left);
+        let right = add(&mut d, &mut ids, right);
+        d.layer_mut(right).unwrap().opacity = 0.4;
+        // In a group, partly transparent.
+        let g = ids.layer();
+        d.insert(Position { parent: None, index: d.layers.len() }, Layer::new_group(g, "g")).unwrap();
+        let (inner, _) = shared(IRect::new(512, 0, 1536, 1536), [1.0, 1.0, 0.0, 1.0]);
+        let child = Layer::new_raster(ids.layer(), ids.object(), "c", inner);
+        d.insert(Position { parent: Some(g), index: 0 }, child).unwrap();
+        d.layer_mut(g).unwrap().opacity = 0.3;
+        // One tile in two groups of different opacities, apart (row 8, below the canvas).
+        let (below, cyan) = shared(IRect::new(0, 2048, 512, 2304), [0.0, 1.0, 1.0, 1.0]);
+        for (x, opacity, image) in [(0, 0.3, Some(below)), (768, 0.7, None)] {
+            let image = image.unwrap_or_else(|| {
+                let mut img = RasterImage::new();
+                for c in TileCoord::covering(&IRect::new(x, 2048, x + 512, 2304), 0) {
+                    img.set_tile(c, Some(cyan.clone()));
+                }
+                img
+            });
+            let group = ids.layer();
+            d.insert(Position { parent: None, index: d.layers.len() }, Layer::new_group(group, "g")).unwrap();
+            let child = Layer::new_raster(ids.layer(), ids.object(), "c", image);
+            d.insert(Position { parent: Some(group), index: 0 }, child).unwrap();
+            d.layer_mut(group).unwrap().opacity = opacity;
+        }
+        // An image object, whose tiles differ with where they are, though its pixels are alike.
+        let image = ImageObject {
+            image: Arc::new(shared(IRect::from_size(256, 256), [1.0, 0.0, 0.0, 1.0]).0),
+            frame: IRect::from_size(256, 256),
+            transform: Affine::rotate(0.3).then(Affine::scale(2.0, 2.0)).then(Affine::translate(900.0, 500.0)),
+            sampling: Sampling::default(),
+        };
+        let object = Object { id: ids.object(), kind: ObjectKind::Image(image) };
+        let index = d.layers.len();
+        d.insert(Position { parent: None, index }, Layer::with_objects(ids.layer(), "image", vec![object])).unwrap();
+        let out = composite_all(&d.layers);
+        let coords = occupied_tiles(&d.layers, None);
+        assert_eq!(out.tile_count(), coords.len());
+        for c in coords {
+            let each = composite_tile(&d.layers, c).expect("an occupied tile shows something");
+            assert!(**out.tile(c).unwrap() == each, "tile {c:?} differs");
         }
     }
 
