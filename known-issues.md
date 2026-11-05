@@ -32,16 +32,6 @@ its full-precision copy back). Waits on a non-Windows build to test against. **F
 `image/png` at 16 bits through the platform's clipboard directly (X11 and Wayland
 selections, `NSPasteboard`'s `public.png`).
 
-## Images needing over 512 MiB once decoded do not open
-
-`crates/opal-io/src/image_files.rs` (`import_bytes`). The `image` crate's readers default to
-refusing to allocate more than 512 MiB, and import keeps that default, so a PNG or JPEG of
-more than about 134 million pixels at 8 bits (an 11,600-pixel square), or half that at 16
-bits, fails to open with "Limits exceeded" (and so does a paste of one copied as a file).
-**Fix:** lift the decoder's limit, and refuse instead, with the reason, an image whose
-decoding (the decoder's buffer, the conversion to the working format, the tiles) would
-need more memory than is free.
-
 ## Zoomed out on a very large canvas, the view keys every tile beneath it
 
 `crates/opal-core/src/composite.rs` (`Projection::update`). A zoomed-out view is built

@@ -234,6 +234,18 @@ fn from_import(i: image_files::Imported) -> Pasted {
     Pasted { width: i.width, height: i.height, image: i.image, from: None, warnings: i.warnings }
 }
 
+/// What reading an image the clipboard offers gave: the image, `None` if it was not one
+/// that can be read (so that what else is offered is tried), or an error if it is one but
+/// would need more memory than is free (so that the paste says why).
+#[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
+fn imported(read: Result<image_files::Imported, opal_io::IoError>) -> Result<Option<Pasted>, String> {
+    match read {
+        Ok(i) => Ok(Some(from_import(i))),
+        Err(e @ opal_io::IoError::TooLarge { .. }) => Err(e.to_string()),
+        Err(_) => Ok(None),
+    }
+}
+
 /// Reads and decodes what the system clipboard holds (any thread may), which is `own` if
 /// the clipboard still holds this application's last copy.
 #[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
@@ -251,8 +263,8 @@ fn read_system(own: Option<OwnCopy>) -> ReadResult {
     #[cfg(not(windows))]
     if let Ok(files) = cb.get().file_list() {
         for f in files {
-            if let Ok(i) = image_files::import(&f) {
-                return Ok(Some(from_import(i)));
+            if let Some(p) = imported(image_files::import(&f, crate::memory::free()))? {
+                return Ok(Some(p));
             }
         }
     }
@@ -381,17 +393,19 @@ fn read_windows_formats() -> Result<Option<Pasted>, String> {
         (png, files, jpeg)
     };
     let decoded = |bytes: Vec<u8>, as_file: &str| {
-        image_files::import_bytes(&bytes, std::path::Path::new(as_file)).ok().map(from_import)
+        imported(image_files::import_bytes(&bytes, std::path::Path::new(as_file), crate::memory::free()))
     };
-    if let Some(p) = png.and_then(|b| decoded(b, "clipboard.png")) {
+    if let Some(b) = png
+        && let Some(p) = decoded(b, "clipboard.png")?
+    {
         return Ok(Some(p));
     }
     for f in files {
-        if let Ok(i) = image_files::import(&f) {
-            return Ok(Some(from_import(i)));
+        if let Some(p) = imported(image_files::import(&f, crate::memory::free()))? {
+            return Ok(Some(p));
         }
     }
-    Ok(jpeg.and_then(|b| decoded(b, "clipboard.jpg")))
+    jpeg.map_or(Ok(None), |b| decoded(b, "clipboard.jpg"))
 }
 
 /// A clipboard for tests: holds what was last written, or what a test put there. With
@@ -430,6 +444,16 @@ impl Clipboard for TestClipboard {
 mod tests {
     use super::*;
     use opal_core::tile::pixel_from_f32;
+
+    #[test]
+    fn a_clipboard_image_too_large_to_open_is_said_not_passed_over() {
+        let path = std::path::PathBuf::from("clipboard.png");
+        let too_large = opal_io::IoError::TooLarge { path: path.clone(), need: 2_000_000_000, free: 1_000_000_000 };
+        let why = imported(Err(too_large)).unwrap_err();
+        assert!(why.contains("2.0 GB") && why.contains("1.0 GB"), "{why}");
+        let unreadable = opal_io::IoError::Decode { path, message: "not an image".into() };
+        assert!(matches!(imported(Err(unreadable)), Ok(None)), "what else is offered is not tried");
+    }
 
     #[test]
     #[cfg(windows)]
@@ -481,7 +505,7 @@ mod system_tests {
         clipboard_win::raw::get_vec(format, &mut bytes).unwrap();
         assert!(clipboard_win::raw::is_format_avail(clipboard_win::formats::CF_DIBV5));
         drop(_open);
-        let back = image_files::import_bytes(&bytes, std::path::Path::new("clip.png")).unwrap();
+        let back = image_files::import_bytes(&bytes, std::path::Path::new("clip.png"), None).unwrap();
         assert_eq!(opal_io::pixels::to_srgb16(back.image.pixel(1, 1)), opal_io::pixels::to_srgb16(px[0]));
         // And, once written, Opal Studio reads back its own full-precision copy at once.
         let Read::Ready(own) = cb.read_image() else { panic!("its own copy is read at once") };

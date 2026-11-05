@@ -476,7 +476,7 @@ fn fits(layers: &[Arc<Layer>], canvas: &IRect, mut memory: Allowance) -> Result<
         return Err(format!(
             "The result would need about {} of memory, because something reaches far past the canvas. \
              Shrink or crop what reaches that far first.",
-            crate::dialogs::bytes(pixels as u64 * 8)
+            opal_io::bytes(pixels as u64 * 8)
         ));
     }
     memory.take(opal_core::composite::composite_cost(layers, None))

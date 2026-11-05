@@ -857,7 +857,7 @@ fn the_history_panel_says_what_history_holds() {
     h.get_by_label(&format!("{}  History", crate::icons::HISTORY)).click();
     h.run();
     // The flip made a copy of every tile: the state before holds them alone.
-    let expected = crate::dialogs::bytes(h.state().state().active().unwrap().history.memory());
+    let expected = opal_io::bytes(h.state().state().active().unwrap().history.memory());
     assert_ne!(expected, "0 KB");
     assert!(h.query_by_label(&expected).is_some(), "the panel does not show {expected}");
     render(&mut h, "history-panel");

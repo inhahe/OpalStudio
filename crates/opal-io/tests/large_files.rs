@@ -215,3 +215,30 @@ fn huge_white_canvas() {
     measure("Opened", || loaded = Some(opal_io::native::load(&path).unwrap()));
     std::fs::remove_file(path).unwrap();
 }
+
+/// Opening a large PNG: more than 512 MiB once decoded.
+#[test]
+#[ignore]
+fn import_large_png() {
+    // 8200 × 8200 at 16 bits a channel: 538 MB decoded. Written a row at a time.
+    let side = 8200u32;
+    let path = temp("large.png");
+    {
+        let file = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+        let mut encoder = png::Encoder::new(file, side, side);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Sixteen);
+        let mut writer = encoder.write_header().unwrap();
+        let mut stream = writer.stream_writer().unwrap();
+        let row = vec![0x80u8; side as usize * 8];
+        for _ in 0..side {
+            std::io::Write::write_all(&mut stream, &row).unwrap();
+        }
+        stream.finish().unwrap();
+    }
+    let mut opened = None;
+    measure("Opened an 8200-pixel square 16-bit PNG", || opened = Some(opal_io::image_files::import(&path, None)));
+    std::fs::remove_file(&path).unwrap();
+    let imported = opened.unwrap().expect("opened");
+    assert_eq!((imported.width, imported.height), (side, side));
+}

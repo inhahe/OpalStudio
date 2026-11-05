@@ -436,7 +436,9 @@ curve editors.
   flight and, at another size, the image it is drawn from (`export_memory`); a copy takes
   about 48 bytes a pixel while it goes onto the clipboard (the pixels, the 16-bit PNG,
   the bitmap, the system's copies of both, and the copy kept for pasting back), and on
-  Windows no more than the 4 GB a clipboard bitmap holds. (Merging layers that are not adjacent moves the lower ones above whatever lay
+  Windows no more than the 4 GB a clipboard bitmap holds. Opening a PNG or JPEG (or
+  pasting one) is checked before it is decoded: the decoder's buffer, a turned copy if
+  its orientation turns it, and 24 bytes a pixel for the conversions and tiles. (Merging layers that are not adjacent moves the lower ones above whatever lay
   between them, which can change the look where those overlap; the status bar says so.)
 
 ### Performance with many layers

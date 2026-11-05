@@ -6,6 +6,7 @@ use crate::prefs::SECTIONS;
 use crate::settings::{self, Show};
 use crate::state::{AppState, Background, Confirm, ExportKind, MessageKind, NewImage};
 use eframe::egui::{self, RichText, ViewportCommand};
+use opal_io::bytes;
 
 /// The largest canvas side (Photoshop's limit, for its large-document format). A layer
 /// filling a canvas this size would hold 720 GB, at 8 bytes a pixel: a canvas this large
@@ -582,18 +583,6 @@ fn gallery(ctx: &egui::Context, st: &mut AppState) {
             egui::ScrollArea::vertical().show(ui, |ui| st.gallery.ui(ui));
         });
     st.gallery_open = open;
-}
-
-/// A byte count as text ("1.5 GB").
-pub fn bytes(n: u64) -> String {
-    let n = n as f64;
-    if n >= 1e9 {
-        format!("{:.1} GB", n / 1e9)
-    } else if n >= 1e6 {
-        format!("{:.0} MB", n / 1e6)
-    } else {
-        format!("{:.0} KB", n / 1e3)
-    }
 }
 
 #[cfg(test)]

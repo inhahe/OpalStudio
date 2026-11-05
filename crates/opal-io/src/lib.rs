@@ -33,11 +33,26 @@ pub enum IoError {
     /// The write was cancelled (through its [`Progress`]); the file was left as it was.
     #[error("{path}: cancelled")]
     Cancelled { path: PathBuf },
+    /// Reading the file would need `need` bytes of memory, more than the `free` allowed.
+    #[error("{path}: opening it would need about {} of memory, but only {} is free", bytes(*.need), bytes(*.free))]
+    TooLarge { path: PathBuf, need: u64, free: u64 },
 }
 
 impl IoError {
     pub(crate) fn io(path: &Path, source: std::io::Error) -> IoError {
         IoError::Io { path: path.to_owned(), source }
+    }
+}
+
+/// A byte count as people read it ("1.5 GB").
+pub fn bytes(n: u64) -> String {
+    let n = n as f64;
+    if n >= 1e9 {
+        format!("{:.1} GB", n / 1e9)
+    } else if n >= 1e6 {
+        format!("{:.0} MB", n / 1e6)
+    } else {
+        format!("{:.0} KB", n / 1e3)
     }
 }
 

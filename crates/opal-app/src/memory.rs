@@ -56,8 +56,8 @@ impl Allowance {
         match self.free {
             Some(free) if need > free => Err(format!(
                 "This would need about {} of memory, but only {} is free.",
-                crate::dialogs::bytes(need),
-                crate::dialogs::bytes(free)
+                opal_io::bytes(need),
+                opal_io::bytes(free)
             )),
             _ => {
                 self.taken = need;

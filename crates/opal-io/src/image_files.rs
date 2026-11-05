@@ -30,13 +30,13 @@ pub struct Imported {
 
 /// Reads a PNG or JPEG (recognized by content, not extension), turned upright according to
 /// its EXIF orientation.
-pub fn import(path: &Path) -> Result<Imported, IoError> {
+pub fn import(path: &Path, free: Option<u64>) -> Result<Imported, IoError> {
     let bytes = std::fs::read(path).map_err(|e| IoError::io(path, e))?;
-    import_bytes(&bytes, path)
+    import_bytes(&bytes, path, free)
 }
 
 /// Like [`import`], from bytes already in memory; `path` is used only in messages.
-pub fn import_bytes(bytes: &[u8], path: &Path) -> Result<Imported, IoError> {
+pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<u64>) -> Result<Imported, IoError> {
     let decode_err = |e: image::ImageError| IoError::Decode { path: path.to_owned(), message: e.to_string() };
     let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(|e| IoError::io(path, e))?;
     if reader.format().is_none() {
@@ -44,6 +44,10 @@ pub fn import_bytes(bytes: &[u8], path: &Path) -> Result<Imported, IoError> {
     }
     let mut decoder = reader.into_decoder().map_err(decode_err)?;
     let orientation = decoder.orientation().map_err(decode_err)?;
+    let need = import_memory(decoder.dimensions(), decoder.total_bytes(), orientation);
+    if let Some(free) = free.filter(|&f| need > f) {
+        return Err(IoError::TooLarge { path: path.to_owned(), need, free });
+    }
     let icc = decoder.icc_profile().map_err(decode_err)?;
     let mut img = DynamicImage::from_decoder(decoder).map_err(decode_err)?;
     img.apply_orientation(orientation);
@@ -73,6 +77,16 @@ pub fn import_bytes(bytes: &[u8], path: &Path) -> Result<Imported, IoError> {
         );
     }
     Ok(Imported { width, height, image: RasterImage::from_pixels(width, height, &pixels), warnings })
+}
+
+/// The memory opening an image of `dimensions` takes at once, given the bytes its decoder
+/// makes (`decoded`): those, a turned copy of them if `orientation` turns it, and per pixel
+/// the image at 8 or 16 bits a channel (up to 8 bytes), the working pixels (8) and their
+/// tiles (8).
+fn import_memory(dimensions: (u32, u32), decoded: u64, orientation: image::metadata::Orientation) -> u64 {
+    let pixels = u64::from(dimensions.0) * u64::from(dimensions.1);
+    let turned = if orientation == image::metadata::Orientation::NoTransforms { 0 } else { decoded };
+    decoded + turned + pixels * 24
 }
 
 /// Whether an ICC profile is (by its description) one of the sRGB profiles, which need no
@@ -589,7 +603,7 @@ mod tests {
         // A value between two 8-bit levels survives.
         let px = vec![pixel_from_f32([0.30001, 0.5, 0.7, 1.0]), pixel_from_f32([0.0, 0.0, 0.0, 0.25])];
         let bytes = encode_png16(&px, 2, 1);
-        let back = import_bytes(&bytes, Path::new("clip.png")).unwrap();
+        let back = import_bytes(&bytes, Path::new("clip.png"), None).unwrap();
         let p = back.image.pixel(0, 0);
         let expect = crate::pixels::to_srgb16(px[0]);
         assert_eq!(crate::pixels::to_srgb16(p), expect);
@@ -599,7 +613,7 @@ mod tests {
     #[test]
     fn png_round_trips_exactly() {
         let src = gradient_png(37, 300);
-        let imported = import_bytes(&src, Path::new("test.png")).unwrap();
+        let imported = import_bytes(&src, Path::new("test.png"), None).unwrap();
         assert_eq!((imported.width, imported.height), (37, 300));
         assert!(imported.warnings.is_empty());
         let path = temp("round.png");
@@ -701,7 +715,7 @@ mod tests {
         let mut jpeg = Vec::new();
         DynamicImage::ImageRgb8(img).write_with_encoder(JpegEncoder::new_with_quality(&mut jpeg, 95)).unwrap();
         let with_exif = insert_exif_orientation(&jpeg, 6);
-        let imported = import_bytes(&with_exif, Path::new("rotated.jpg")).unwrap();
+        let imported = import_bytes(&with_exif, Path::new("rotated.jpg"), None).unwrap();
         assert_eq!((imported.width, imported.height), (8, 16));
         let top = crate::pixels::to_srgb8(imported.image.pixel(4, 2));
         let bottom = crate::pixels::to_srgb8(imported.image.pixel(4, 13));
@@ -733,7 +747,7 @@ mod tests {
 
     #[test]
     fn non_images_are_refused_with_a_message() {
-        let err = import_bytes(b"definitely not an image", Path::new("x.txt")).err().unwrap();
+        let err = import_bytes(b"definitely not an image", Path::new("x.txt"), None).err().unwrap();
         assert!(err.to_string().contains("not a PNG or JPEG"), "{err}");
     }
 
@@ -893,6 +907,17 @@ mod tests {
         c.notify_all();
         assert_eq!(done, Ok(true), "the export waited for the global pool");
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn an_image_needing_more_memory_than_is_free_is_refused_before_decoding() {
+        let png = gradient_png(100, 50);
+        // 5,000 pixels: 20 KB decoded, 120 KB beyond.
+        let r = import_bytes(&png, Path::new("big.png"), Some(100_000));
+        let Err(IoError::TooLarge { need, free, .. }) = r else { panic!("not refused: {:?}", r.map(|i| i.width)) };
+        assert_eq!((need, free), (140_000, 100_000));
+        assert!(import_bytes(&png, Path::new("big.png"), Some(140_000)).is_ok());
+        assert!(import_bytes(&png, Path::new("big.png"), None).is_ok());
     }
 
     #[test]

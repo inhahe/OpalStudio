@@ -3,7 +3,7 @@
 use crate::canvas;
 use crate::commands::Cmd;
 use crate::config;
-use crate::dialogs::{self, bytes};
+use crate::dialogs;
 use crate::doc::DocId;
 use crate::gpu::CanvasRenderer;
 use crate::gpu_memory::GpuMemory;
@@ -16,6 +16,7 @@ use crate::theme;
 use crate::tools::ToolId;
 use eframe::egui::{self, Event, Key, Modifiers, RichText, ViewportCommand};
 use egui_tiles::{SimplificationOptions, TileId, Tiles, UiResponse};
+use opal_io::bytes;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 

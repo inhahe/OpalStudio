@@ -446,12 +446,12 @@ pub fn history_panel(ui: &mut egui::Ui, st: &mut AppState) {
             let mut tip = format!(
                 "What the earlier states hold beyond the image as it is now. History may use up to {} \
                  (Preferences › History).",
-                crate::dialogs::bytes(limit)
+                opal_io::bytes(limit)
             );
             if dropped > 0 {
                 tip.push_str(&format!("\n{dropped} of the oldest states have been dropped to stay within it."));
             }
-            ui.label(RichText::new(crate::dialogs::bytes(memory)).color(weak)).on_hover_text(tip);
+            ui.label(RichText::new(opal_io::bytes(memory)).color(weak)).on_hover_text(tip);
         });
     });
     ui.separator();

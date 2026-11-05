@@ -570,7 +570,7 @@ impl AppState {
                 Err(e) => self.message(MessageKind::Error, "Could not open the file", e.to_string()),
             }
         } else {
-            match image_files::import(path) {
+            match image_files::import(path, crate::memory::free()) {
                 Ok(imported) => {
                     let mut ids = IdGen::default();
                     let mut doc = Document::new(imported.width, imported.height);
