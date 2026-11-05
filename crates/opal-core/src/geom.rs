@@ -101,6 +101,11 @@ impl FRect {
         r
     }
 
+    /// The rectangle grown by `m` on every side.
+    pub fn expand(&self, m: f64) -> FRect {
+        FRect::new(self.x0 - m, self.y0 - m, self.x1 + m, self.y1 + m)
+    }
+
     pub fn width(&self) -> f64 {
         self.x1 - self.x0
     }

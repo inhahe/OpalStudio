@@ -111,8 +111,7 @@ fn touches(image: &RasterImage, transform: &Affine, sampling: &Sampling, c: Tile
     let (Some(content), Some(inv)) = (image.content_bounds(), transform.inverse()) else { return false };
     let back = inv.bounds(&c.rect(0).to_f());
     let r = resample::reach(transform, sampling);
-    let content =
-        FRect::new(content.x0 as f64 - r, content.y0 as f64 - r, content.x1 as f64 + r, content.y1 as f64 + r);
+    let content = content.to_f().expand(r);
     back.x0 < content.x1 && back.x1 > content.x0 && back.y0 < content.y1 && back.y1 > content.y0
 }
 
@@ -465,8 +464,7 @@ fn each_occupied_rect(layers: &[Arc<Layer>], f: &mut dyn FnMut(IRect, bool)) {
             let r = resample::reach(&i.transform, &i.sampling);
             for (c, _) in i.image.tiles() {
                 let t = c.rect(0);
-                let grown = FRect::new(t.x0 as f64 - r, t.y0 as f64 - r, t.x1 as f64 + r, t.y1 as f64 + r);
-                f(IRect::covering(&i.transform.bounds(&grown)), false);
+                f(IRect::covering(&i.transform.bounds(&t.to_f().expand(r))), false);
             }
         }
     });
@@ -530,6 +528,10 @@ pub fn composite_within_until(
 ) -> Option<RasterImage> {
     // Enough sets of tiles to keep every thread busy, few enough to stop soon when asked.
     const BATCH: usize = 1024;
+    // Before the image objects' pyramids are built, which may itself take a while.
+    if !go_on(0, 0) {
+        return None;
+    }
     prepare(layers, Some(range));
     let work = tiles_to_make(layers, Some(range));
     let total = work.iter().map(|(at, _)| at.len()).sum();

@@ -600,11 +600,27 @@ fn render_plan(
         return Vec::new();
     }
     let r = reach(transform, sampling);
+    // The stored tiles that may reach the tiles over `bounds` (drawn whole): those under
+    // them, mapped back and grown by the filter's reach, when they are fewer than all (a
+    // band of a larger drawing).
+    let all = image.tile_count();
+    let under: Option<Vec<TileCoord>> = transform.inverse().and_then(|inv| {
+        let t = i64::from(TILE_SIZE);
+        let snap = |a: i64| a.div_euclid(t) * t;
+        let whole = IRect::new(snap(bounds.x0), snap(bounds.y0), snap(bounds.x1 - 1) + t, snap(bounds.y1 - 1) + t);
+        let back = IRect::covering(&inv.bounds(&whole.to_f()).expand(r));
+        let near: Vec<TileCoord> = TileCoord::covering(&back, 0).take(all + 1).collect();
+        (near.len() <= all).then(|| near.into_iter().filter(|c| image.tile(*c).is_some()).collect())
+    });
+    let sources: Box<dyn Iterator<Item = TileCoord>> = match under {
+        Some(near) => Box::new(near.into_iter()),
+        None => Box::new(image.tiles().map(|(c, _)| c)),
+    };
     let mut reached: HashSet<TileCoord> = HashSet::new();
-    for (c, _) in image.tiles() {
+    for c in sources {
         let t = c.rect(0);
-        let grown = crate::geom::FRect::new(t.x0 as f64 - r, t.y0 as f64 - r, t.x1 as f64 + r, t.y1 as f64 + r);
-        reached.extend(TileCoord::covering(&IRect::covering(&transform.bounds(&grown)).intersect(&bounds), 0));
+        let to = IRect::covering(&transform.bounds(&t.to_f().expand(r)));
+        reached.extend(TileCoord::covering(&to.intersect(&bounds), 0));
     }
     let Some(g) = transform.grid_map() else { return reached.into_iter().map(|c| vec![c]).collect() };
     // Each tile is drawn from the same place within the stored tiles under it (the map's
@@ -626,13 +642,7 @@ fn render_plan(
 pub fn footprint(image: &RasterImage, transform: &Affine, sampling: &Sampling) -> Option<IRect> {
     let content = image.content_bounds()?;
     let r = reach(transform, sampling);
-    let grown = crate::geom::FRect::new(
-        content.x0 as f64 - r,
-        content.y0 as f64 - r,
-        content.x1 as f64 + r,
-        content.y1 as f64 + r,
-    );
-    Some(IRect::covering(&transform.bounds(&grown)))
+    Some(IRect::covering(&transform.bounds(&content.to_f().expand(r))))
 }
 
 /// The pyramid level a filtered drawing through `inv` (document to image pixels) reads:
@@ -706,6 +716,36 @@ mod tests {
                 assert!(planned.tile(*c).is_some_and(|p| **p == *t), "{what}: tile {c:?}");
             }
         }
+    }
+
+    #[test]
+    fn drawing_a_band_gives_the_pixels_of_drawing_it_all_there() {
+        let mut img = RasterImage::filled(&IRect::new(0, 0, 3000, 2000), pixel_from_f32([0.2, 0.4, 0.6, 1.0]));
+        img.set_pixel(1234, 777, pixel_from_f32([1.0, 0.0, 0.0, 1.0]));
+        let s = Sampling::default();
+        for m in
+            [Affine::scale(0.37, 0.41), Affine::rotate(0.3).then(Affine::scale(1.3, 1.3)), Affine::scale(-1.0, 1.0)]
+        {
+            let all = render_image(&img, &m, &s, None);
+            let Some(bounds) = footprint(&img, &m, &s) else { panic!() };
+            // A band of a tile's rows across it, off the band's own grid.
+            let band = IRect::new(bounds.x0, bounds.y0 + 300, bounds.x1, bounds.y0 + 556);
+            let part = render_image(&img, &m, &s, Some(&band));
+            assert!(part.read_rect(&band) == all.read_rect(&band), "{m:?}");
+        }
+        // A band reached only by the filter, from the stored tiles just past it: an image
+        // shrunk to a tenth, the band the rows above its content, which its blur touches
+        // (without anti-ringing, which would keep them as clear as the pixels nearest).
+        let s = Sampling { anti_ringing: false, ..Sampling::default() };
+        // More stored tiles (400) than lie under the band, so only those are looked at.
+        let big = RasterImage::filled(&IRect::from_size(5120, 5120), pixel_from_f32([1.0; 4]));
+        let tenth = Affine::scale(0.1, 0.1);
+        let Some(bounds) = footprint(&big, &tenth, &s) else { panic!() };
+        let above = IRect::new(bounds.x0, bounds.y0, bounds.x1, 0);
+        assert!(!above.is_empty());
+        let all = render_image(&big, &tenth, &s, None).read_rect(&above);
+        assert!(all.iter().any(|p| p[3].to_f32() > 0.0), "the blur does not reach the band");
+        assert!(render_image(&big, &tenth, &s, Some(&above)).read_rect(&above) == all);
     }
 
     #[test]
