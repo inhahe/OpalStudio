@@ -1,6 +1,19 @@
 [package]
 name = "opal-io"
+description = "Opal Studio's file formats: image import and export, and the native .opal format"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+opal-core = { workspace = true }
+opal-color = { workspace = true }
+half = { workspace = true }
+bytemuck = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+image = { workspace = true }
+zip = { workspace = true }
