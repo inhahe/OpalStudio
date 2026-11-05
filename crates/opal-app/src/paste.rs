@@ -50,6 +50,8 @@ impl AppState {
     /// [`AppState::poll_paste`]), on the document active when it was asked for.
     pub(crate) fn paste(&mut self, in_place: bool, ctx: &egui::Context) {
         let target = self.active_doc;
+        // This paste replaces one still being read.
+        self.reading = None;
         match self.clipboard.read_image() {
             Read::Ready(result) => self.paste_read(*result, in_place, target),
             Read::Later(work) => {
@@ -61,27 +63,71 @@ impl AppState {
                     let _ = tx.send(work());
                     ctx.request_repaint();
                 });
-                self.reading = Some(Reading { rx, in_place, target });
-                self.notify("Reading the clipboard…");
+                let d = target.and_then(|t| self.doc(t));
+                let notice = "Reading the clipboard…".to_string();
+                self.reading = Some(Reading {
+                    rx,
+                    result: None,
+                    in_place,
+                    target,
+                    box_then: d.is_some_and(|d| d.transform.is_some()),
+                    crop_then: d.and_then(|d| d.crop),
+                    notice: notice.clone(),
+                });
+                self.notify(notice);
             }
         }
     }
 
-    /// Finishes a paste whose clipboard reading has come back.
-    pub(crate) fn poll_paste(&mut self) {
-        let Some(r) = &self.reading else { return };
-        let result = match r.rx.try_recv() {
-            Ok(result) => result,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("reading the clipboard failed".into()),
-        };
+    /// Places a paste whose clipboard reading has come back, unless the user is in the
+    /// middle of something it would end: a dialog, a drag (`pointer_held`: it is placed
+    /// when the button is let go), or a box opened on its document after it was asked for.
+    pub(crate) fn poll_paste(&mut self, pointer_held: bool) {
+        let Some(r) = &mut self.reading else { return };
+        if r.result.is_none() {
+            r.result = Some(match r.rx.try_recv() {
+                Ok(result) => result,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("reading the clipboard failed".into()),
+            });
+        }
+        if pointer_held {
+            return;
+        }
+        if let Some(until) = self.paste_waits() {
+            let text = format!("The paste will be placed when {until}.");
+            let r = self.reading.as_mut().expect("checked above");
+            if r.notice != text {
+                r.notice = text.clone();
+                self.notify(text);
+            }
+            return;
+        }
         let r = self.reading.take().expect("checked above");
-        self.notice = None;
-        self.paste_read(result, r.in_place, r.target);
+        if self.notice.as_ref().is_some_and(|(text, _)| *text == r.notice) {
+            self.notice = None;
+        }
+        self.paste_read(r.result.expect("received above"), r.in_place, r.target);
     }
 
-    /// Pastes what reading the clipboard gave, into document `target` (or a new image if it
-    /// is gone, or was none).
+    /// What a paste that has been read waits for, if it must wait.
+    fn paste_waits(&self) -> Option<&'static str> {
+        let r = self.reading.as_ref()?;
+        if self.dialog_open() {
+            return Some("the dialog closes");
+        }
+        let d = r.target.and_then(|t| self.doc(t))?;
+        if d.transform.is_some() && !r.box_then {
+            Some("the transform box closes")
+        } else if d.crop.is_some() && d.crop != r.crop_then {
+            Some("you crop or leave the Crop tool")
+        } else {
+            None
+        }
+    }
+
+    /// Pastes what reading the clipboard gave, into document `target` (a new image if it
+    /// was none).
     fn paste_read(&mut self, result: ReadResult, in_place: bool, target: Option<DocId>) {
         let pasted = match result {
             Ok(Some(p)) => p,
@@ -97,10 +143,13 @@ impl AppState {
             }
             Err(e) => return self.message(MessageKind::Error, "Could not paste", e),
         };
+        if target.is_some_and(|id| self.doc(id).is_none()) {
+            return self.notify("The image the paste was for has been closed, so nothing was pasted.");
+        }
         for w in &pasted.warnings {
             self.message(MessageKind::Warning, "Pasted", w.clone());
         }
-        let Some(target) = target.filter(|&id| self.doc(id).is_some()) else {
+        let Some(target) = target else {
             return self.new_image_from(&pasted);
         };
         self.show_doc(target);

@@ -592,7 +592,7 @@ impl eframe::App for OpalApp {
         self.sync_panes();
         self.handle_exit(&ctx);
         self.save_settings_if_due(&ctx);
-        self.st.poll_paste();
+        self.st.poll_paste(ctx.input(|i| i.pointer.any_down()));
         self.st.thumbs.end_frame();
         // What operations on documents asked to say.
         let notices: Vec<String> = self.st.docs.iter_mut().filter_map(|d| d.notice.take()).collect();

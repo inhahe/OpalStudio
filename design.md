@@ -464,7 +464,10 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
 - **The clipboard:** PNG first (keeping 16-bit color and transparency), then the other
   image formats the clipboard offers, then copied image files. Reading and decoding run on
   a worker thread, so a large image never holds up the interface; the box opens when it
-  is ready, on the image that was active. Copy (Ctrl+C) copies the selected layers within
+  is ready, on the image that was active. What the user started in the meantime comes
+  first: the paste waits for a dialog to close, a drag to end, or a box opened (or crop
+  box changed) on that image to be finished, and is dropped if the image was closed.
+  Copy (Ctrl+C) copies the selected layers within
   the canvas; Copy Merged (Ctrl+Shift+C) everything visible within the canvas. Copies go
   on the clipboard as a 16-bit PNG (for programs that read PNG) and an 8-bit bitmap, and
   a copy made in Opal Studio keeps its full precision for pasting back into Opal Studio.

@@ -689,3 +689,160 @@ fn a_move_drag_released_while_space_is_held_ends() {
     assert!(d.pending.is_none());
     assert_eq!(d.history.undo_label(), Some("Move"));
 }
+
+/// Puts a clipboard on `h` that is read on a worker thread, holding a `w × h` image.
+fn slow_clipboard(h: &mut Harness<'static, crate::app::OpalApp>, w: u32, ht: u32) {
+    h.state_mut().state_mut().clipboard = Box::new(crate::clipboard::TestClipboard {
+        image: Some(pasted(w, ht, [1.0; 4])),
+        slow: true,
+        ..Default::default()
+    });
+}
+
+/// Runs frames until the paste being read has come back (or been placed).
+fn until_read(h: &mut Harness<'static, crate::app::OpalApp>) {
+    for _ in 0..500 {
+        if h.state().state().reading.as_ref().is_none_or(|r| r.result.is_some()) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.run();
+    }
+    panic!("the clipboard was never read");
+}
+
+#[test]
+fn a_late_paste_waits_for_a_dialog_opened_meanwhile() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    slow_clipboard(&mut h, 20, 10);
+    let st = h.state_mut().state_mut();
+    st.queue.push(Cmd::Paste);
+    st.queue.push(Cmd::ResizeImage);
+    h.run();
+    until_read(&mut h);
+    h.run();
+    let st = h.state().state();
+    assert!(st.resize_image.is_some());
+    assert!(st.active().unwrap().transform.is_none(), "the paste landed behind the dialog");
+    h.state_mut().state_mut().resize_image = None;
+    h.run();
+    let st = h.state().state();
+    assert!(st.reading.is_none());
+    assert_eq!(st.active().unwrap().pending_label(), Some("Paste"), "placed once the dialog closed");
+}
+
+#[test]
+fn a_late_paste_waits_for_a_box_opened_meanwhile() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    slow_clipboard(&mut h, 20, 10);
+    let st = h.state_mut().state_mut();
+    st.queue.push(Cmd::Paste);
+    st.queue.push(Cmd::Transform);
+    h.run();
+    until_read(&mut h);
+    h.run();
+    let st = h.state().state();
+    assert_eq!(st.active().unwrap().pending_label(), Some("Transform"), "the box opened meanwhile was ended");
+    assert!(st.notice.as_ref().is_some_and(|n| n.0.contains("transform box closes")), "{:?}", st.notice);
+    h.key_press(egui::Key::Escape);
+    h.run();
+    let st = h.state().state();
+    assert!(st.reading.is_none());
+    assert_eq!(st.active().unwrap().pending_label(), Some("Paste"));
+    assert!(st.notice.is_none(), "the waiting notice stayed up");
+}
+
+#[test]
+fn a_late_paste_for_a_closed_image_is_dropped() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    slow_clipboard(&mut h, 20, 10);
+    let st = h.state_mut().state_mut();
+    st.queue.push(Cmd::Paste);
+    st.queue.push(Cmd::Close);
+    h.run();
+    until_read(&mut h);
+    h.run();
+    let st = h.state().state();
+    assert!(st.reading.is_none());
+    assert!(st.docs.is_empty(), "a new image was opened");
+    assert!(st.notice.as_ref().is_some_and(|n| n.0.contains("closed")), "{:?}", st.notice);
+}
+
+#[test]
+fn a_paste_read_at_once_replaces_one_still_being_read() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    slow_clipboard(&mut h, 20, 10);
+    let ctx = h.ctx.clone();
+    let st = h.state_mut().state_mut();
+    st.run(Cmd::Paste, &ctx);
+    st.clipboard =
+        Box::new(crate::clipboard::TestClipboard { image: Some(pasted(7, 5, [1.0; 4])), ..Default::default() });
+    st.run(Cmd::Paste, &ctx);
+    assert!(st.reading.is_none(), "the earlier paste would land later");
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.run();
+    }
+    let s = h.state().state().active().unwrap().transform.as_ref().unwrap();
+    assert_eq!((s.frame.width(), s.frame.height()), (7.0, 5.0));
+}
+
+#[test]
+fn a_late_paste_leaves_other_notices_up() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    slow_clipboard(&mut h, 20, 10);
+    h.state_mut().state_mut().queue.push(Cmd::Paste);
+    h.run();
+    h.state_mut().state_mut().notify("Copied 300 × 200 pixels.");
+    until_read(&mut h);
+    h.run();
+    let st = h.state().state();
+    assert!(st.reading.is_none());
+    assert_eq!(st.notice.as_ref().map(|n| n.0.as_str()), Some("Copied 300 × 200 pixels."));
+}
+
+#[test]
+fn a_late_paste_waits_for_a_crop_box_changed_meanwhile() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    h.key_press(egui::Key::C);
+    h.run();
+    // A paste asked for with the crop box showing, which has come back.
+    let read = |st: &crate::state::AppState| crate::state::Reading {
+        rx: std::sync::mpsc::channel().1,
+        result: Some(Ok(Some(pasted(20, 10, [1.0; 4])))),
+        in_place: false,
+        target: st.active_doc,
+        box_then: false,
+        crop_then: st.active().unwrap().crop,
+        notice: String::new(),
+    };
+    let st = h.state_mut().state_mut();
+    st.reading = Some(read(st));
+    // Left as it was, the crop box goes, as it would for a paste read at once.
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().pending_label(), Some("Paste"));
+    h.key_press(egui::Key::Escape);
+    h.run();
+    // Changed meanwhile, it is the user's work: the paste waits until they are done.
+    let st = h.state_mut().state_mut();
+    assert!(st.active().unwrap().crop.is_some(), "the crop tool is still chosen");
+    st.reading = Some(read(st));
+    st.active_mut().unwrap().crop = Some(crate::crop::CropBox { center: [50.0, 50.0], size: [60.0, 40.0], angle: 0.0 });
+    h.run();
+    assert!(h.state().state().active().unwrap().transform.is_none(), "the crop box was thrown away");
+    h.key_press(egui::Key::V);
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().pending_label(), Some("Paste"), "placed once the tool changed");
+}

@@ -184,9 +184,18 @@ pub struct AppState {
 /// A paste whose clipboard reading runs on a worker thread.
 pub struct Reading {
     pub rx: std::sync::mpsc::Receiver<crate::clipboard::ReadResult>,
+    /// What the reading gave, once it has come back, while the paste waits to be placed.
+    pub result: Option<crate::clipboard::ReadResult>,
     pub in_place: bool,
     /// The document it goes to: the one active when it was asked for.
     pub target: Option<DocId>,
+    /// Whether `target` had the transform box open, and its crop box, when the paste was
+    /// asked for. A box opened (or a crop box changed) after that is the user's newer work,
+    /// which the paste waits for rather than ending it.
+    pub box_then: bool,
+    pub crop_then: Option<crate::crop::CropBox>,
+    /// The status-bar notice this paste put up, taken down when it is placed.
+    pub notice: String,
 }
 
 impl AppState {
