@@ -406,8 +406,9 @@ impl<I: Iterator<Item = Vec<Pixel>>> GenericImageView for JpegRows<I> {
         // `encode_image` promises to read each pixel once, in 8 × 8 blocks from the top.
         assert!(y >= *first, "the JPEG encoder went back to row {y}, which it had gone past");
         while y >= *first + (px.len() / w) as u32 {
-            // The encoder never goes back past the 8-row block it is in.
-            let keep = (y / 8 * 8).max(*first);
+            // The encoder never goes back past the 8-row block it is in; 16 rows are kept, so
+            // that blocks read in pairs of rows (as 4:2:0 subsampling would) work too.
+            let keep = (y / 16 * 16).max(*first);
             px.drain(..(keep - *first) as usize * w);
             *first = keep;
             let band = self.bands.borrow_mut().next().expect("a row within the image");

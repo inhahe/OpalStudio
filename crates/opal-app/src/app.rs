@@ -595,7 +595,7 @@ impl eframe::App for OpalApp {
         self.st.poll_copies();
         self.st.poll_paste(ctx.input(|i| i.pointer.any_down()));
         self.st.thumbs.end_frame();
-        let budget = (self.st.prefs.f64("history.memory") * 1e9) as u64;
+        let budget = crate::prefs::bytes(&self.st.prefs, "history.memory");
         for d in &mut self.st.docs {
             d.set_history_budget(budget);
         }

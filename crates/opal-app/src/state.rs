@@ -642,8 +642,19 @@ impl AppState {
             height: spec.height,
             sampling: crate::prefs::sampling(&self.prefs, "export"),
         });
-        if let Err(e) = image_files::export(&doc, &path, &format, size.as_ref()) {
-            self.message(MessageKind::Error, "Could not export", e.to_string());
+        // A failure inside the encoders is reported like any other rather than ending the
+        // application (the file being written is a temporary one, removed with it).
+        let exported = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            image_files::export(&doc, &path, &format, size.as_ref())
+        }));
+        match exported {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => self.message(MessageKind::Error, "Could not export", e.to_string()),
+            Err(_) => self.message(
+                MessageKind::Error,
+                "Could not export",
+                "Something went wrong inside Opal Studio while writing the file; nothing was written.",
+            ),
         }
     }
 

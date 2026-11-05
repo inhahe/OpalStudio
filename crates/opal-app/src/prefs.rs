@@ -73,6 +73,11 @@ macro_rules! sampling_def {
     };
 }
 
+/// The memory setting `key` (in gigabytes), in bytes.
+pub fn bytes(p: &Settings, key: &str) -> u64 {
+    (p.f64(key) * 1e9) as u64
+}
+
 /// The sampling the five settings under `prefix` describe.
 pub fn sampling(p: &Settings, prefix: &str) -> Sampling {
     let method = match p.choice(&format!("{prefix}.method")).as_str() {

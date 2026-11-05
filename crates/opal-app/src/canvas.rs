@@ -94,7 +94,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     }
 
     let prefs = CanvasPrefs::read(&st.prefs);
-    let cache_budget = (st.prefs.f64("canvas.cache") * 1e9) as u64;
+    let cache_budget = crate::prefs::bytes(&st.prefs, "canvas.cache");
     // Tile textures may take half the GPU memory the system allows the process (or 1 GB
     // where it does not say).
     let texture_budget = (st.gpu.memory.map_or(1 << 30, |(_, budget)| budget / 2) / crate::gpu::TEXTURE_BYTES) as usize;

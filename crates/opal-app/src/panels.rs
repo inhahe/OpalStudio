@@ -438,7 +438,7 @@ pub fn history_panel(ui: &mut egui::Ui, st: &mut AppState) {
     }
     let weak = st.palette.weak_text;
     let (memory, dropped) = st.active().map(|d| (d.history.memory(), d.history.dropped())).expect("checked above");
-    let limit = st.prefs.f64("history.memory") * 1e9;
+    let limit = crate::prefs::bytes(&st.prefs, "history.memory");
     ui.horizontal(|ui| {
         icon_command(ui, st, Cmd::Undo);
         icon_command(ui, st, Cmd::Redo);
@@ -446,7 +446,7 @@ pub fn history_panel(ui: &mut egui::Ui, st: &mut AppState) {
             let mut tip = format!(
                 "What the earlier states hold beyond the image as it is now. History may use up to {} \
                  (Preferences › History).",
-                crate::dialogs::bytes(limit as u64)
+                crate::dialogs::bytes(limit)
             );
             if dropped > 0 {
                 tip.push_str(&format!("\n{dropped} of the oldest states have been dropped to stay within it."));
