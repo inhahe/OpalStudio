@@ -5,6 +5,7 @@
 //! part of the group).
 
 use crate::doc::{DocId, DocState};
+use crate::memory::Allowance;
 use crate::state::{AppState, MessageKind};
 use opal_core::composite::composite_all;
 use opal_core::document::{
@@ -21,14 +22,27 @@ pub(crate) const MAX_PIXELS: i64 = 1 << 28;
 
 /// The area to draw an image object into, given what it reaches (`footprint`): all of it,
 /// or, if that is more than `MAX_PIXELS` and four canvases, only the part within `keep`
-/// (with `true`, to say so).
-pub(crate) fn drawable(footprint: IRect, keep: &IRect) -> (IRect, bool) {
+/// (with `true`, to say so). The tiles over the area are set aside from `memory`; an error
+/// says there is not enough free even for that.
+pub(crate) fn drawable(footprint: IRect, keep: &IRect, memory: &mut Allowance) -> Result<(IRect, bool), String> {
     let limit = MAX_PIXELS.max(4 * keep.width().saturating_mul(keep.height()));
-    if footprint.width().saturating_mul(footprint.height()) <= limit {
+    let (area, cut) = if footprint.width().saturating_mul(footprint.height()) <= limit {
         (footprint, false)
     } else {
         (footprint.intersect(keep), true)
+    };
+    memory.take(tile_bytes(&area))?;
+    Ok((area, cut))
+}
+
+/// The memory the tiles over `area` take, all of them drawn.
+fn tile_bytes(area: &IRect) -> u64 {
+    if area.is_empty() {
+        return 0;
     }
+    let t = i64::from(opal_core::tile::TILE_SIZE);
+    let across = |a: i64, b: i64| ((b - 1).div_euclid(t) - a.div_euclid(t) + 1) as u64;
+    across(area.x0, area.x1).saturating_mul(across(area.y0, area.y1)).saturating_mul(opal_core::raster::TILE_BYTES)
 }
 
 /// What is said when part of an image object reaching far past the canvas was left out.
@@ -434,29 +448,38 @@ fn adjacent_siblings(doc: &Document, layers: &[LayerId]) -> bool {
     positions.windows(2).all(|w| w[0].parent == w[1].parent && w[0].index + 1 == w[1].index)
 }
 
-/// Refuses work whose result would exceed `MAX_PIXELS` beyond four times `canvas`: an
-/// estimate of the result's size from the tiles each pixel object holds and the area each
-/// image object reaches.
+/// Refuses merging `layers` if the result would need more memory than is free.
 fn check_size(layers: &[Arc<Layer>], canvas: &IRect) -> Result<(), String> {
+    fits(layers, canvas, Allowance::now())
+}
+
+/// Whether the result of merging `layers` fits in `memory`, and within `MAX_PIXELS` beyond
+/// four times `canvas` (more means something reaches far past it). The second is judged
+/// first, from the tiles the pixel objects hold (each once, however many share it) and the
+/// area each image object reaches, which bounds the work of finding exactly what merging
+/// would make ([`composite_cost`](opal_core::composite::composite_cost)), set aside next.
+fn fits(layers: &[Arc<Layer>], canvas: &IRect, mut memory: Allowance) -> Result<(), String> {
     let tile = i64::from(opal_core::tile::TILE_SIZE).pow(2);
-    let pixels: i64 = layers
-        .iter()
-        .flat_map(|l| l.all_objects())
-        .map(|o| match &o.kind {
-            ObjectKind::Pixels(p) => p.image.tile_count() as i64 * tile,
-            ObjectKind::Image(_) => o.extent().map_or(0, |e| e.width().saturating_mul(e.height())),
-        })
-        .fold(0i64, i64::saturating_add);
+    let mut stored = std::collections::HashSet::new();
+    let mut reached = 0i64;
+    for o in layers.iter().flat_map(|l| l.all_objects()) {
+        match &o.kind {
+            ObjectKind::Pixels(p) => stored.extend(p.image.tiles().map(|(_, t)| Arc::as_ptr(t))),
+            ObjectKind::Image(_) => {
+                reached = reached.saturating_add(o.extent().map_or(0, |e| e.width().saturating_mul(e.height())))
+            }
+        }
+    }
+    let pixels = (stored.len() as i64).saturating_mul(tile).saturating_add(reached);
     let limit = MAX_PIXELS.max(4 * canvas.width().saturating_mul(canvas.height()));
     if pixels > limit {
-        let gb = pixels as f64 * 8.0 / 1e9;
-        Err(format!(
-            "The result would need about {gb:.0} GB of memory, because something reaches far past the \
-             canvas. Shrink or crop what reaches that far first."
-        ))
-    } else {
-        Ok(())
+        return Err(format!(
+            "The result would need about {} of memory, because something reaches far past the canvas. \
+             Shrink or crop what reaches that far first.",
+            crate::dialogs::bytes(pixels as u64 * 8)
+        ));
     }
+    memory.take(opal_core::composite::composite_cost(layers, None))
 }
 
 /// How many layers the document has, groups included (for naming new ones).
@@ -585,8 +608,42 @@ mod tests {
     #[test]
     fn drawing_far_past_the_canvas_keeps_the_part_around_it() {
         let canvas = IRect::from_size(100, 100);
-        assert_eq!(drawable(IRect::new(-50, -50, 150, 150), &canvas), (IRect::new(-50, -50, 150, 150), false));
+        let mut memory = Allowance::of(None);
+        let near = IRect::new(-50, -50, 150, 150);
+        assert_eq!(drawable(near, &canvas, &mut memory), Ok((near, false)));
         let huge = IRect::new(-1_000_000, 0, 1_000_000, 1_000);
-        assert_eq!(drawable(huge, &canvas), (IRect::new(0, 0, 100, 100), true));
+        assert_eq!(drawable(huge, &canvas, &mut memory), Ok((IRect::new(0, 0, 100, 100), true)));
+    }
+
+    #[test]
+    fn drawing_more_than_is_free_is_refused() {
+        let canvas = IRect::from_size(100, 100);
+        // Nine tiles (an area across tile edges), and room for ten.
+        let mut memory = Allowance::of(Some(10 * opal_core::raster::TILE_BYTES));
+        let area = IRect::new(-50, -50, 300, 300);
+        assert!(drawable(area, &canvas, &mut memory).is_ok());
+        let why = drawable(area, &canvas, &mut memory).unwrap_err();
+        assert!(why.contains("memory"), "{why}");
+    }
+
+    #[test]
+    fn merging_more_than_is_free_is_refused_counting_only_the_tiles_made() {
+        // A large canvas filled with one tile: merging its layer alone makes nothing.
+        let st = app(20_000, 15_000);
+        let layers = &st.active().unwrap().doc().layers;
+        let canvas = IRect::from_size(20_000, 15_000);
+        assert!(fits(layers, &canvas, Allowance::of(Some(0))).is_ok());
+        // A layer of its own over part of it: the tiles it overlaps are made.
+        let mut img = RasterImage::new();
+        for x in 0..300 {
+            img.set_pixel(x * 3, 0, pixel_from_f32([0.0, 0.0, 1.0, 1.0]));
+        }
+        let mut ids = IdGen::default();
+        let top = Arc::new(Layer::new_raster(ids.layer(), ids.object(), "dots", img));
+        let both = [layers[0].clone(), top];
+        let four = 4 * opal_core::raster::TILE_BYTES;
+        assert!(fits(&both, &canvas, Allowance::of(Some(four))).is_ok());
+        let why = fits(&both, &canvas, Allowance::of(Some(four - 1))).unwrap_err();
+        assert!(why.contains("memory"), "{why}");
     }
 }

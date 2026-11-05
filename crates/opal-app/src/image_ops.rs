@@ -5,6 +5,7 @@
 //! quarter turns and flips exactly; any other change makes them image objects (so they keep
 //! their pixels), unless resampling is asked for (see `design.md` › Document model).
 
+use crate::memory::Allowance;
 use crate::state::{AppState, MessageKind};
 use opal_core::document::{Canvas, Document, ImageObject, Layer, LayerContent, ObjectKind, PixelObject};
 use opal_core::geom::{Affine, FRect, IRect};
@@ -100,23 +101,23 @@ impl Turn {
 /// Carries every object of `doc` through `m`. Pixel objects stay pixels where `m` is exact
 /// on the grid; otherwise they are resampled with `resample` if given, else become image
 /// objects drawn with `sampling`. Resampling keeps only the part within `keep` of what
-/// would reach too far (see `layer_ops::drawable`); returns whether it had to.
+/// would reach too far (see `layer_ops::drawable`); returns whether it had to, or why
+/// nothing could be done: the pixels drawn would need more memory than is free.
 pub fn transform_all(
     doc: &mut Document,
     m: &Affine,
     resample: Option<Sampling>,
     sampling: Sampling,
     keep: &IRect,
-) -> bool {
-    let mut clipped = false;
+) -> Result<bool, String> {
+    let mut to = Drawing { keep: *keep, clipped: false, memory: Allowance::now() };
     fn walk(
         layer: &mut Layer,
         m: &Affine,
         resample_with: Option<Sampling>,
         sampling: Sampling,
-        keep: &IRect,
-        clipped: &mut bool,
-    ) {
+        to: &mut Drawing,
+    ) -> Result<(), String> {
         match &mut layer.content {
             LayerContent::Objects(objects) => {
                 for o in objects {
@@ -128,7 +129,7 @@ pub fn transform_all(
                             } else {
                                 // Stretched past what an image object may be (see
                                 // transform_ok), as repeated resizing could do.
-                                drawn(&i.image, &t, &i.sampling, keep, clipped)
+                                drawn(&i.image, &t, &i.sampling, to)?
                             }
                         }
                         ObjectKind::Pixels(p) => {
@@ -138,10 +139,10 @@ pub fn transform_all(
                                     ObjectKind::Pixels(PixelObject { image: p.image.clone(), offset: [g.e, g.f] })
                                 }
                                 // A quarter turn or flip: copied exactly.
-                                (Some(_), _) => drawn(&p.image, &placed, &sampling, keep, clipped),
-                                (None, Some(s)) => drawn(&p.image, &placed, &s, keep, clipped),
+                                (Some(_), _) => drawn(&p.image, &placed, &sampling, to)?,
+                                (None, Some(s)) => drawn(&p.image, &placed, &s, to)?,
                                 (None, None) if !ImageObject::transform_ok(&placed) => {
-                                    drawn(&p.image, &placed, &sampling, keep, clipped)
+                                    drawn(&p.image, &placed, &sampling, to)?
                                 }
                                 (None, None) => match p.image.content_bounds() {
                                     Some(frame) => ObjectKind::Image(ImageObject {
@@ -159,25 +160,35 @@ pub fn transform_all(
             }
             LayerContent::Group(children) => {
                 for c in children {
-                    walk(Arc::make_mut(c), m, resample_with, sampling, keep, clipped);
+                    walk(Arc::make_mut(c), m, resample_with, sampling, to)?;
                 }
             }
         }
+        Ok(())
     }
     for l in &mut doc.layers {
-        walk(Arc::make_mut(l), m, resample, sampling, keep, &mut clipped);
+        walk(Arc::make_mut(l), m, resample, sampling, &mut to)?;
     }
-    clipped
+    Ok(to.clipped)
 }
 
-/// `image` drawn through `t` into a pixel object, keeping only the part within `keep` of
-/// what reaches too far (see `layer_ops::drawable`; `clipped` says if it did).
-fn drawn(image: &RasterImage, t: &Affine, sampling: &Sampling, keep: &IRect, clipped: &mut bool) -> ObjectKind {
+/// What drawing into pixels may take, and what it has done.
+struct Drawing {
+    /// The part to keep of what reaches too far (see `layer_ops::drawable`).
+    keep: IRect,
+    /// Whether part of something drawn was left out.
+    clipped: bool,
+    memory: Allowance,
+}
+
+/// `image` drawn through `t` into a pixel object, keeping only the part within `to.keep` of
+/// what reaches too far, or why it cannot be: more memory than is left.
+fn drawn(image: &RasterImage, t: &Affine, sampling: &Sampling, to: &mut Drawing) -> Result<ObjectKind, String> {
     let reach = resample::footprint(image, t, sampling).unwrap_or(IRect::new(0, 0, 0, 0));
-    let (area, cut) = crate::layer_ops::drawable(reach, keep);
-    *clipped |= cut;
+    let (area, cut) = crate::layer_ops::drawable(reach, &to.keep, &mut to.memory)?;
+    to.clipped |= cut;
     let image = resample::render_image(image, t, sampling, Some(&area));
-    ObjectKind::Pixels(PixelObject { image: Arc::new(image), offset: [0, 0] })
+    Ok(ObjectKind::Pixels(PixelObject { image: Arc::new(image), offset: [0, 0] }))
 }
 
 /// The bounds of what the visible layers hold, in whole pixels.
@@ -221,7 +232,7 @@ impl AppState {
         let result = d.apply(turn.label(), |doc, _| {
             let c = doc.canvas;
             let m = turn.map(&c);
-            transform_all(doc, &m, None, sampling, &c.rect());
+            transform_all(doc, &m, None, sampling, &c.rect())?;
             if matches!(turn, Turn::Clockwise | Turn::Counterclockwise) {
                 doc.canvas = Canvas { x: c.x, y: c.y, width: c.height, height: c.width };
             }
@@ -242,7 +253,7 @@ impl AppState {
             let sy = f64::from(spec.height) / f64::from(c.height);
             let m = Affine::scale(sx, sy).about(x, y);
             let canvas = Canvas { width: spec.width, height: spec.height, ..c };
-            clipped = transform_all(doc, &m, resample.then_some(sampling), sampling, &canvas.rect());
+            clipped = transform_all(doc, &m, resample.then_some(sampling), sampling, &canvas.rect())?;
             doc.canvas = canvas;
             Ok::<(), String>(())
         });
@@ -295,7 +306,7 @@ impl AppState {
             let r = c.rect().to_f();
             let [cx, cy] = r.center();
             let m = Affine::rotate(spec.degrees.to_radians()).about(cx, cy);
-            transform_all(doc, &m, None, sampling, &c.rect());
+            transform_all(doc, &m, None, sampling, &c.rect())?;
             if spec.grow {
                 let b = m.bounds(&r);
                 let (w, h) =
@@ -345,21 +356,25 @@ mod tests {
         // Clockwise, the bottom-left corner comes to the top-left.
         let mut d = corners();
         let c = d.canvas;
-        transform_all(&mut d, &Turn::Clockwise.map(&c), None, Sampling::default(), &IRect::from_size(100, 100));
+        transform_all(&mut d, &Turn::Clockwise.map(&c), None, Sampling::default(), &IRect::from_size(100, 100))
+            .unwrap();
         assert!(
             close(pixel_at(&d, 10, 20), 0.4) && close(pixel_at(&d, 11, 20), 0.1) && close(pixel_at(&d, 11, 22), 0.2)
         );
         let mut d = corners();
-        transform_all(&mut d, &Turn::Counterclockwise.map(&c), None, Sampling::default(), &IRect::from_size(100, 100));
+        transform_all(&mut d, &Turn::Counterclockwise.map(&c), None, Sampling::default(), &IRect::from_size(100, 100))
+            .unwrap();
         assert!(close(pixel_at(&d, 10, 20), 0.2) && close(pixel_at(&d, 10, 22), 0.1));
         let mut d = corners();
-        transform_all(&mut d, &Turn::Half.map(&c), None, Sampling::default(), &IRect::from_size(100, 100));
+        transform_all(&mut d, &Turn::Half.map(&c), None, Sampling::default(), &IRect::from_size(100, 100)).unwrap();
         assert!(close(pixel_at(&d, 10, 20), 0.3) && close(pixel_at(&d, 12, 21), 0.1));
         let mut d = corners();
-        transform_all(&mut d, &Turn::FlipHorizontal.map(&c), None, Sampling::default(), &IRect::from_size(100, 100));
+        transform_all(&mut d, &Turn::FlipHorizontal.map(&c), None, Sampling::default(), &IRect::from_size(100, 100))
+            .unwrap();
         assert!(close(pixel_at(&d, 10, 20), 0.2) && close(pixel_at(&d, 12, 21), 0.4));
         let mut d = corners();
-        transform_all(&mut d, &Turn::FlipVertical.map(&c), None, Sampling::default(), &IRect::from_size(100, 100));
+        transform_all(&mut d, &Turn::FlipVertical.map(&c), None, Sampling::default(), &IRect::from_size(100, 100))
+            .unwrap();
         assert!(close(pixel_at(&d, 10, 20), 0.4) && close(pixel_at(&d, 12, 21), 0.2));
     }
 
@@ -367,11 +382,28 @@ mod tests {
     fn resizing_keeps_pixels_as_an_image_unless_resampling() {
         let mut d = corners();
         let m = Affine::scale(2.0, 2.0).about(10.0, 20.0);
-        transform_all(&mut d, &m, None, Sampling::default(), &IRect::from_size(100, 100));
+        transform_all(&mut d, &m, None, Sampling::default(), &IRect::from_size(100, 100)).unwrap();
         assert!(matches!(d.layers[0].objects()[0].kind, ObjectKind::Image(_)), "kept as an image object");
         let mut d = corners();
-        transform_all(&mut d, &m, Some(Sampling::default()), Sampling::default(), &IRect::from_size(100, 100));
+        transform_all(&mut d, &m, Some(Sampling::default()), Sampling::default(), &IRect::from_size(100, 100)).unwrap();
         assert!(matches!(d.layers[0].objects()[0].kind, ObjectKind::Pixels(_)), "resampled into pixels");
+    }
+
+    #[test]
+    fn resampling_into_more_memory_than_is_free_is_refused() {
+        use crate::state::{Background, NewImage};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White });
+        let before = st.active().unwrap().history.current();
+        // 300,000 × 200,000 pixels resampled would take nearly 500 GB.
+        let spec = ResizeImage { width: 300_000, height: 200_000, keep_aspect: true };
+        st.resize_image(&spec, true);
+        assert_eq!(st.active().unwrap().history.current(), before, "resized all the same");
+        let said = st.messages.back().map(|m| m.body.as_str()).unwrap_or_default();
+        assert!(said.contains("memory"), "{said:?}");
+        // Drawn at the new size, the pixels kept: nothing to make.
+        st.resize_image(&spec, false);
+        assert_eq!(st.active().unwrap().doc().canvas.width, 300_000);
     }
 
     #[test]

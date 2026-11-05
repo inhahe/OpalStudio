@@ -19,6 +19,7 @@ mod help;
 mod icons;
 mod image_ops;
 mod layer_ops;
+mod memory;
 mod move_tool;
 mod panels;
 mod paste;

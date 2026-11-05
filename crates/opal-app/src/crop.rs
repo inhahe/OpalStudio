@@ -233,7 +233,7 @@ impl DocState {
                 // resampled into pixels (which the deleting below then crops) rather than kept as
                 // images.
                 let m = Affine::rotate(-b.angle).about(b.center[0], b.center[1]);
-                clipped = transform_all(doc, &m, delete.then_some(sampling), sampling, &canvas.rect());
+                clipped = transform_all(doc, &m, delete.then_some(sampling), sampling, &canvas.rect())?;
             }
             doc.canvas = canvas;
             if delete {

@@ -636,9 +636,15 @@ impl DocState {
         if let Some(paste) = &s.paste
             && paste.into_active
             && let Some(dest) = paste.active
-            && bake_into(&mut p.doc, dest, s.targets[0].object)
         {
-            self.notice = Some(crate::layer_ops::CLIPPED.into());
+            match bake_into(&mut p.doc, dest, s.targets[0].object) {
+                Ok(true) => self.notice = Some(crate::layer_ops::CLIPPED.into()),
+                Ok(false) => {}
+                Err(why) => {
+                    self.notice =
+                        Some(format!("The paste stays an image in the layer, not drawn into its pixels: {why}"))
+                }
+            }
         }
     }
 
@@ -653,14 +659,16 @@ impl DocState {
 /// Draws image object `object` of layer `dest` into the layer's pixels: into its topmost
 /// pixel object if it has one there, else as a new pixel object.
 /// Returns whether part of it, reaching too far past the canvas, was left out (see
-/// `layer_ops::drawable`).
-fn bake_into(doc: &mut Document, dest: LayerId, object: ObjectId) -> bool {
+/// `layer_ops::drawable`), or, leaving it as it is, why it cannot be drawn: more memory than
+/// is free.
+fn bake_into(doc: &mut Document, dest: LayerId, object: ObjectId) -> Result<bool, String> {
     let canvas = doc.canvas.rect();
-    let Some(Layer { content: LayerContent::Objects(objects), .. }) = doc.layer_mut(dest) else { return false };
-    let Some(at) = objects.iter().position(|o| o.id == object) else { return false };
-    let ObjectKind::Image(i) = objects.remove(at).kind else { return false };
-    let Some(footprint) = resample::footprint(&i.image, &i.transform, &i.sampling) else { return false };
-    let (area, clipped) = crate::layer_ops::drawable(footprint, &canvas);
+    let Some(Layer { content: LayerContent::Objects(objects), .. }) = doc.layer_mut(dest) else { return Ok(false) };
+    let Some(at) = objects.iter().position(|o| o.id == object) else { return Ok(false) };
+    let ObjectKind::Image(i) = &objects[at].kind else { return Ok(false) };
+    let Some(footprint) = resample::footprint(&i.image, &i.transform, &i.sampling) else { return Ok(false) };
+    let (area, clipped) = crate::layer_ops::drawable(footprint, &canvas, &mut crate::memory::Allowance::now())?;
+    let ObjectKind::Image(i) = objects.remove(at).kind else { unreachable!("an image object, just seen") };
     match objects.last_mut() {
         Some(Object { kind: ObjectKind::Pixels(p), .. }) => {
             let local = i.transform.then(Affine::translate(-p.offset[0] as f64, -p.offset[1] as f64));
@@ -676,7 +684,7 @@ fn bake_into(doc: &mut Document, dest: LayerId, object: ObjectId) -> bool {
             });
         }
     }
-    clipped
+    Ok(clipped)
 }
 
 #[cfg(test)]
@@ -716,6 +724,31 @@ mod tests {
 
     fn close(a: [f64; 2], b: [f64; 2]) -> bool {
         (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6
+    }
+
+    #[test]
+    fn a_paste_too_large_to_draw_into_the_layer_stays_an_image() {
+        use opal_core::document::IdGen;
+        use opal_core::raster::RasterImage;
+        let mut ids = IdGen::default();
+        let mut doc = Document::new(300_000, 300_000);
+        let mut img = RasterImage::new();
+        img.set_pixel(0, 0, opal_core::tile::pixel_from_f32([1.0; 4]));
+        img.set_pixel(255, 255, opal_core::tile::pixel_from_f32([1.0; 4]));
+        // Enlarged to cover most of the canvas: some 650 GB drawn.
+        let image = ImageObject {
+            image: Arc::new(img),
+            frame: IRect::from_size(256, 256),
+            transform: Affine::scale(1100.0, 1100.0),
+            sampling: Sampling::default(),
+        };
+        let (layer, object) = (ids.layer(), ids.object());
+        let pasted = Object { id: object, kind: ObjectKind::Image(image) };
+        doc.insert(Position { parent: None, index: 0 }, Layer::with_objects(layer, "l", vec![pasted])).unwrap();
+        let why = bake_into(&mut doc, layer, object).unwrap_err();
+        assert!(why.contains("memory"), "{why}");
+        let objects = doc.layer(layer).unwrap().objects();
+        assert!(matches!(objects, [Object { kind: ObjectKind::Image(_), .. }]), "the paste was not kept as it was");
     }
 
     #[test]

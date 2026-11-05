@@ -426,7 +426,13 @@ curve editors.
   than the computer has when drawn into pixels. Merging and rasterizing refuse, with the
   reason, a result needing more than 2 GiB beyond four canvases' worth; baking a paste
   into a layer, or resampling on Resize Image, keeps only the part around the canvas then,
-  and says so. (Merging layers that are not adjacent moves the lower ones above whatever lay
+  and says so. Within those limits, nothing is drawn into pixels that would need more
+  memory than is free when the work begins (the available physical memory, on Windows
+  and Linux; `memory.rs`), since a failed allocation ends the program: merging counts
+  exactly the tiles it would make (none for those it shares), resampling the tiles over
+  what it draws, summed over everything one command draws. The command is refused with
+  how much it needs and how much is free; a paste that cannot be baked stays an image in
+  the layer. (Merging layers that are not adjacent moves the lower ones above whatever lay
   between them, which can change the look where those overlap; the status bar says so.)
 
 ### Performance with many layers
