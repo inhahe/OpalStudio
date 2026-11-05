@@ -961,18 +961,64 @@ impl Projection {
         self.shown(level, coords.iter().chain(&dirty))
     }
 
-    /// Lets go of cached pixels while those the cache made take more than the budget: first
+    /// Keeps the cache within its budget (see [`trim_pixels`](Self::trim_pixels) and
+    /// [`trim_entries`](Self::trim_entries)); `level` and `outer` are the view just drawn.
+    fn trim(&mut self, level: u32, outer: &IRect) {
+        let Some(budget) = self.budget else { return };
+        // Cheap to know: no more entries than tiles the budget holds, nothing to do.
+        let entries: usize = self.levels.iter().map(HashMap::len).sum();
+        let tiles = (budget / TILE_BYTES) as usize;
+        if entries <= tiles {
+            return;
+        }
+        self.trim_pixels(level, outer, budget);
+        // Entries without pixels are far smaller than tiles: four times as many may be kept.
+        self.trim_entries(level, outer, (4 * tiles).max(256));
+    }
+
+    /// How far tile rect `r` lies from `outer`, in canvas pixels.
+    fn gap(r: &IRect, outer: &IRect) -> i64 {
+        let dx = (outer.x0 - r.x1).max(r.x0 - outer.x1).max(0);
+        let dy = (outer.y0 - r.y1).max(r.y0 - outer.y1).max(0);
+        dx + dy
+    }
+
+    /// Whether the entry at `l` and `c` is one the view drawn at `level` over `outer` uses.
+    fn in_view(l: usize, c: TileCoord, level: u32, outer: &IRect) -> bool {
+        l as u32 <= level && !c.rect(l as u32).intersect(outer).is_empty()
+    }
+
+    /// Removes the entries farthest from the view first, of whatever kind, while there are
+    /// more than `cap`; never one the view uses.
+    fn trim_entries(&mut self, level: u32, outer: &IRect, cap: usize) {
+        let mut entries: usize = self.levels.iter().map(HashMap::len).sum();
+        if entries <= cap {
+            return;
+        }
+        let mut away: Vec<(i64, usize, TileCoord)> = Vec::new();
+        for (l, cache) in self.levels.iter().enumerate() {
+            for c in cache.keys() {
+                if !Self::in_view(l, *c, level, outer) {
+                    away.push((Self::gap(&c.rect(l as u32), outer), l, *c));
+                }
+            }
+        }
+        away.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
+        for (_, l, c) in away {
+            if entries <= cap {
+                return;
+            }
+            self.levels[l].remove(&c);
+            entries -= 1;
+        }
+    }
+
+    /// Lets go of cached pixels while those the cache made take more than `budget`: first
     /// the tiles outside `outer` (or above level `level`), farthest from it first, then the
     /// pixels of the finer levels within it, finest first, which keep their keys and versions
     /// (so nothing above them is redrawn) and are made again only when needed. The tiles at
     /// level `level` within `outer`, what the view shows, always stay.
-    fn trim(&mut self, level: u32, outer: &IRect) {
-        let Some(budget) = self.budget else { return };
-        // Cheap to know, and at least what the tiles take.
-        let entries: usize = self.levels.iter().map(HashMap::len).sum();
-        if entries as u64 * TILE_BYTES <= budget {
-            return;
-        }
+    fn trim_pixels(&mut self, level: u32, outer: &IRect, budget: u64) {
         // Each tile the cache made counts once, however many entries share it.
         let ptr = |t: &Arc<Tile>| Arc::as_ptr(t) as usize;
         let mut holders: HashMap<usize, usize> = HashMap::new();
@@ -987,11 +1033,6 @@ impl Projection {
         if bytes <= budget {
             return;
         }
-        let gap = |r: &IRect| {
-            let dx = (outer.x0 - r.x1).max(r.x0 - outer.x1).max(0);
-            let dy = (outer.y0 - r.y1).max(r.y0 - outer.y1).max(0);
-            dx + dy
-        };
         let mut away: Vec<(i64, usize, TileCoord)> = Vec::new();
         let mut under: Vec<(usize, TileCoord)> = Vec::new();
         for (l, cache) in self.levels.iter().enumerate() {
@@ -1006,7 +1047,7 @@ impl Projection {
                 // A preview off the level shown is out of date: the next exact update
                 // replaces it.
                 if l as u32 > level || r.intersect(outer).is_empty() || (below && matches!(e.key, Key::Preview(_))) {
-                    away.push((gap(&r), l, *c));
+                    away.push((Self::gap(&r, outer), l, *c));
                 } else if below {
                     under.push((l, *c));
                 }
@@ -1874,6 +1915,28 @@ mod tests {
         }
         for x in 0..8 {
             assert!(p.levels[0].contains_key(&TileCoord::new(x, 0)), "a tile that cost nothing went");
+        }
+    }
+
+    #[test]
+    fn entries_that_cost_little_are_bounded_too() {
+        // A layer's own tiles, 600 of them in a row, panned across end to end.
+        let mut ids = IdGen::default();
+        let mut d = Document::new(600 * 256, 256);
+        let tile = Arc::new(Tile::filled(pixel_from_f32([0.2, 0.4, 0.6, 1.0])));
+        let mut img = RasterImage::new();
+        for x in 0..600 {
+            img.set_tile(TileCoord::new(x, 0), Some(tile.clone()));
+        }
+        add(&mut d, &mut ids, img);
+        let mut p = Projection::new();
+        p.set_budget(Some(0));
+        for step in 0..150 {
+            p.update(&d.layers, 0, &IRect::new(step * 1024, 0, step * 1024 + 1024, 256), Quality::Exact);
+        }
+        assert!(p.levels[0].len() <= 256, "{} entries kept", p.levels[0].len());
+        for x in 596..600 {
+            assert!(p.levels[0].contains_key(&TileCoord::new(x, 0)), "a tile in view went");
         }
     }
 

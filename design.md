@@ -141,7 +141,9 @@ not a goal.
   memory (a preference, 2 GB by default), counting each tile it made once (a layer's own
   tile shown as it is costs nothing); past it, the tiles farthest from the view go first,
   then the pixels of the finer levels under the view, which are made again, locally, only
-  when an edit or a zoom needs them. The tiles the view shows always stay. The GPU only
+  when an edit or a zoom needs them. Entries without pixels (keys, a layer's own tiles)
+  cost little, but are bounded too, at four times as many as the budget holds in tiles,
+  farthest first. The tiles the view shows always stay. The GPU only
   shows projection tiles; a GPU
   compositor matching the reference comes when adjustments need interactive speed
   (milestone 5).
