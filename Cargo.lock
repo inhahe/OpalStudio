@@ -2421,6 +2421,7 @@ dependencies = [
  "opal-color",
  "opal-core",
  "opal-io",
+ "rayon",
  "rfd",
  "serde",
  "serde_json",

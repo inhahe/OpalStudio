@@ -126,8 +126,9 @@ not a goal.
   A cached tile keeps the list of what produced it: source tiles (as pointers, with the
   offset of pixels moved off the tile grid), each image object's pixels, transform and
   sampling, and opacities. It is recomputed exactly when that list changes, so nothing has
-  to report changes to the cache. Stale tiles are computed in parallel, on a thread each
-  document has for its projection: the canvas asks for the view it shows and waits for it
+  to report changes to the cache. Stale tiles are computed in parallel, from a thread each
+  document has for its projection, on a pool of threads of their own (so a small parallel
+  job of the interface's never waits behind them): the canvas asks for the view it shows and waits for it
   only briefly (20 ms), drawing the last view done meanwhile (the previous zoom, or the
   image before a change), so a huge image never holds up the interface. A pyramid tile is
   keyed on the versions of the four below it (a version names what a tile shows), so the

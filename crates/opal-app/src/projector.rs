@@ -6,7 +6,7 @@ use opal_core::document::Layer;
 use opal_core::geom::IRect;
 use opal_core::tile::{Tile, TileCoord};
 use std::collections::HashMap;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 /// How long the canvas waits for what it asked for before drawing the last result instead.
@@ -147,6 +147,19 @@ impl Drop for Projector {
     }
 }
 
+/// The threads projections are computed on: a pool apart from rayon's global one, which the
+/// interface thread also uses (for a layer's outline, say), so that a small parallel job
+/// there never waits behind a long composite.
+fn pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .thread_name(|i| format!("projection {i}"))
+            .build()
+            .expect("starting the projection threads")
+    })
+}
+
 /// The thread: takes up the latest request, brings the projection up to date with it, and
 /// publishes the result, until told to stop.
 fn run(shared: &Shared) {
@@ -166,7 +179,8 @@ fn run(shared: &Shared) {
         };
         let update = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             projection.set_budget(request.budget);
-            let tiles = projection.update(&request.layers, request.level, &request.rect, request.quality);
+            let tiles =
+                pool().install(|| projection.update(&request.layers, request.level, &request.rect, request.quality));
             Shown {
                 level: request.level,
                 #[cfg(test)]
@@ -246,9 +260,9 @@ mod tests {
         assert_eq!(p.shown(WAIT).unwrap().serial, 2);
     }
 
-    #[test]
-    fn asking_does_not_wait_for_the_work() {
-        // Two 4096 × 4096 layers at full resolution: 256 tiles to composite.
+    /// Two 4096 × 4096 layers: 256 tiles to composite at full resolution, enough that the
+    /// work is split between threads.
+    fn heavy_layers() -> Vec<Arc<Layer>> {
         let mut ids = IdGen::default();
         let mut d = Document::new(4096, 4096);
         for (i, a) in [1.0, 0.5].into_iter().enumerate() {
@@ -260,8 +274,42 @@ mod tests {
             d.insert(Position { parent: None, index: i }, Layer::new_raster(ids.layer(), ids.object(), "l", img))
                 .unwrap();
         }
+        d.layers
+    }
+
+    #[test]
+    fn a_busy_global_pool_does_not_hold_up_the_projection() {
+        // Every thread of rayon's global pool held until the projection is done.
+        let n = rayon::current_num_threads();
+        let (started, all_started) = std::sync::mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        for _ in 0..n {
+            let (started, release) = (started.clone(), release.clone());
+            rayon::spawn(move || {
+                started.send(()).unwrap();
+                let (m, c) = &*release;
+                let mut go = m.lock().unwrap();
+                while !*go {
+                    go = c.wait(go).unwrap();
+                }
+            });
+        }
+        for _ in 0..n {
+            all_started.recv().unwrap();
+        }
         let mut p = Projector::new();
-        p.ask(&d.layers, 0, &IRect::from_size(4096, 4096), Quality::Exact, None, &egui::Context::default());
+        p.ask(&heavy_layers(), 0, &IRect::from_size(4096, 4096), Quality::Exact, None, &egui::Context::default());
+        let shown = p.shown(Duration::from_secs(10));
+        let (m, c) = &*release;
+        *m.lock().unwrap() = true;
+        c.notify_all();
+        assert!(shown.is_some(), "the projection waited for the global pool");
+    }
+
+    #[test]
+    fn asking_does_not_wait_for_the_work() {
+        let mut p = Projector::new();
+        p.ask(&heavy_layers(), 0, &IRect::from_size(4096, 4096), Quality::Exact, None, &egui::Context::default());
         assert!(p.shown(Duration::ZERO).is_none(), "the work was done before asking returned");
         assert_eq!(p.shown(WAIT).expect("done in the end").tiles.len(), 256);
     }
