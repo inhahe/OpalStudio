@@ -75,7 +75,9 @@ milestones.
 - Boolean operations on paths.
 
 ## 5. Adjustments
-- Adjustment layers: levels, curves, hue/saturation, gradient map.
+- Adjustments: levels, curves, hue/saturation, gradient map, channel matrix (3×3 weights
+  plus offsets in a chosen color model, curves in place of weights, presets). Each as an
+  adjustment layer or applied once to the selection.
 - Layer masks; the blend modes from milestone 3 on layers.
 - Blend If: curves over channels of a chosen color model, for this layer and for the pixels
   beneath it.
@@ -89,8 +91,9 @@ milestones.
   PatchMatch).
 - History brush: from any state on any branch, or a named snapshot.
 - Mix: wet paint and smudge; linear, OKLab and pigment (Kubelka–Munk) mixing.
-- Tone: lighten, darken, saturate, desaturate; tonal-range curve; option to paint into an
-  adjustment layer's mask.
+- Adjust brush: lighten, darken, saturate, desaturate, and any adjustment from milestone 5
+  (the channel matrix included); tonal-range curve; option to paint into an adjustment
+  layer's mask.
 - Detail: blur to sharpen; channels it acts on; halo suppression.
 
 ## 7. Text

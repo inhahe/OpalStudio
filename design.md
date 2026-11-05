@@ -47,7 +47,7 @@ graphic design.
 
 ### Channel curve editor
 
-One shared component, used for color-range selection, color matching, the tone brush's
+One shared component, used for color-range selection, color matching, the Adjust brush's
 tonal range, Blend If, the Channels blend mode, and any other setting defined over the
 channels of a color model.
 
@@ -234,6 +234,47 @@ Text objects stay editable permanently, including when placed into an existing l
 **Area text**: dragging the box reflows the text. **Point text**: dragging scales it. Full
 Unicode: shaping, bidirectional text, line breaking, font fallback (emoji, CJK).
 
+## Adjustments
+
+Levels, curves, hue/saturation, gradient map, and the channel matrix. Each adjustment can be
+used three ways:
+
+- as an **adjustment layer**, which changes the layers beneath it and stays editable;
+- **applied once** to the selection, or to the whole layer when nothing is selected;
+- **painted** with the Adjust brush (see *Painting and retouching tools*), optionally limited
+  to matching colors by *Color match*.
+
+### Channel matrix
+
+Each pixel's color, in a color model the user picks, is multiplied by a 3×3 matrix of
+weights, and an offset is added:
+
+```
+out = M · in + k          M: 3×3 weights;  k: one offset per channel
+column j of M: where input channel j goes (into itself and into the other two)
+row i of M:    what output channel i is made of
+```
+
+- **Two views of the same matrix:** by source ("where does this channel go", the columns)
+  and by output ("what is this channel made of", the rows, as in Photoshop's Channel Mixer,
+  which works only in RGB and CMYK).
+- **Channels are normalized** before mixing (to 0..1, or −1..1 for signed channels such as
+  Lab's a and b), so weights mean the same thing for channels whose units differ.
+- **Hue angles cannot be mixed.** In models with a hue angle (HSL, HSB, LCh, OKLCh) a
+  weighted sum of angles means nothing: 359° and 1° are neighbors but far apart as numbers.
+  In those models the hue channel takes only an offset, which rotates hue. To mix hue with
+  other channels, use a rectangular model such as Lab or OKLab (the rectangular forms of LCh
+  and OKLCh), where rotating a and b shifts hue and scaling them changes saturation.
+- The sum of each row is shown, and a *preserve lightness* option keeps lightness unchanged.
+- **Out-of-range results** are clipped per channel, or brought into gamut by reducing chroma
+  while keeping hue and lightness (setting). In RGB models the matrix acts on linear or on
+  encoded values (setting).
+- **Advanced:** any weight can be replaced by a curve, giving `out_i = Σ_j f_ij(in_j) + k_i`.
+  With curves only on the diagonal this is the Curves adjustment.
+- **Presets:** identity, channel swaps, grayscale conversions, sepia, color vision
+  deficiency simulation (Viénot's matrices, which the colorpicker already uses), and the
+  colorpicker's Channel Mix presets.
+
 ## Painting and retouching tools
 
 ### One engine; tools are presets of it
@@ -244,7 +285,7 @@ to. A stroke is defined by:
 
 - **what it paints with:** a color, a gradient, a pattern, a clone source, or an earlier
   history state;
-- **how it combines** with the layer: a blend mode, erasing, replacing channels, a tone
+- **how it combines** with the layer: a blend mode, erasing, replacing channels, an
   adjustment, blur/sharpen, or paint mixing;
 - **where it may act:** always within the selection mask, and optionally only where colors
   match (*Color match*, below);
@@ -264,7 +305,7 @@ B can leave you on the Pencil when you expected the Brush. In Opal Studio:
 |---|---|---|
 | Brush | Paint · Pencil (antialiasing off) · Replace color | Brush, Pencil, Color Replacement; Pattern Stamp, through "paints with: pattern" |
 | Mix | Wet paint · Smudge | Mixer Brush, Smudge |
-| Tone | Lighten · Darken · Saturate · Desaturate | Dodge, Burn, Sponge |
+| Adjust | Lighten · Darken · Saturate · Desaturate · Any adjustment | Dodge, Burn, Sponge |
 | Detail | one amount, from blur to sharpen | Blur, Sharpen |
 | Clone | | Clone Stamp |
 | Heal | Picked source · Automatic | Healing Brush, Spot Healing Brush |
@@ -346,13 +387,16 @@ A limit shared by Replace color, the Background and Click erasers, and the magic
   green; spectral.js, MIT, is a reference implementation); pickup and depletion rates;
   cleaning or reloading the brush after each stroke; for Smudge, how far color is dragged
   and how it fades along the way (a curve).
-- **Tone:** strength and tonal range. Advanced: the tonal range is a curve over the lightness
-  channel of a chosen model, with Photoshop's fixed shadows, midtones and highlights ranges
-  as presets; which channels count as lightness and as saturation; how the adjustment is
-  applied (exposure-style multiplication in linear light, or addition to the channel);
-  protect tones (a soft-clipping curve, and a hue lock); for Saturate, a curve of how
-  strongly already-saturated colors are affected (vibrance). Option: paint into an
-  adjustment layer's mask instead of the pixels, so the effect stays editable.
+- **Adjust:** paints an adjustment where the brush goes. Lighten, Darken, Saturate and
+  Desaturate (Photoshop's Dodge, Burn and Sponge) are presets; *Any adjustment* paints any
+  of the *Adjustments*, the channel matrix included. Settings: strength and tonal range.
+  Advanced: the tonal range is a curve over the lightness channel of a chosen model, with
+  Photoshop's fixed shadows, midtones and highlights ranges as presets; which channels count
+  as lightness and as saturation; how Lighten and Darken apply (exposure-style
+  multiplication in linear light, or addition to the channel); protect tones (a
+  soft-clipping curve, and a hue lock); for Saturate, a curve of how strongly
+  already-saturated colors are affected (vibrance). Option: paint into an adjustment layer's
+  mask instead of the pixels, so the effect stays editable.
 - **Detail:** one amount, from blur to sharpen. Advanced: blur kernel (Gaussian, box, lens)
   and radius; sharpening radius, amount and threshold (unsharp mask); the channels it acts
   on in a chosen model (by default lightness only, which avoids color fringes); halo
