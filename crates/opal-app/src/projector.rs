@@ -1,12 +1,13 @@
 //! A document's projection, computed on a thread of its own.
 
+use crate::background::pool;
 use eframe::egui;
 use opal_core::composite::{Projection, Quality};
 use opal_core::document::Layer;
 use opal_core::geom::IRect;
 use opal_core::tile::{Tile, TileCoord};
 use std::collections::HashMap;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 /// How long the canvas waits for what it asked for before drawing the last result instead.
@@ -153,19 +154,6 @@ impl Drop for Projector {
         self.shared.lock().stop = true;
         self.shared.job.notify_one();
     }
-}
-
-/// The threads projections are computed on: a pool apart from rayon's global one, which the
-/// interface thread also uses (for a layer's outline, say), so that a small parallel job
-/// there never waits behind a long composite.
-fn pool() -> &'static rayon::ThreadPool {
-    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
-    POOL.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .thread_name(|i| format!("projection {i}"))
-            .build()
-            .expect("starting the projection threads")
-    })
 }
 
 /// The thread: takes up the latest request, brings the projection up to date with it, and

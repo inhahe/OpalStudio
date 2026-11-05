@@ -1,5 +1,6 @@
 //! Saving and exporting, off the interface thread.
 
+use crate::background::JobThread;
 use crate::doc::DocId;
 use eframe::egui;
 use opal_core::history::NodeId;
@@ -46,7 +47,7 @@ pub struct Finished {
 /// to one file never overlap), and reports each as it is done. A document is written as it
 /// was when the write was asked for, so it can be edited meanwhile.
 pub struct Writer {
-    jobs: Option<mpsc::Sender<(u64, Job, egui::Context)>>,
+    thread: JobThread,
     done_tx: mpsc::Sender<(u64, Result<(), String>)>,
     done: mpsc::Receiver<(u64, Result<(), String>)>,
     /// The writes asked for and not yet reported, in order.
@@ -57,7 +58,7 @@ pub struct Writer {
 impl Default for Writer {
     fn default() -> Writer {
         let (done_tx, done) = mpsc::channel();
-        Writer { jobs: None, done_tx, done, pending: Vec::new(), next: 0 }
+        Writer { thread: JobThread::new("writer"), done_tx, done, pending: Vec::new(), next: 0 }
     }
 }
 
@@ -69,28 +70,15 @@ impl Writer {
         let id = self.next;
         self.pending.push((id, written, then));
         let done_tx = self.done_tx.clone();
-        let jobs = self.jobs.get_or_insert_with(|| {
-            let (tx, rx) = mpsc::channel::<(u64, Job, egui::Context)>();
-            std::thread::Builder::new()
-                .name("writer".into())
-                .spawn(move || {
-                    for (id, job, ctx) in rx {
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).unwrap_or_else(|_| {
-                            Err("Something went wrong inside Opal Studio while writing the file; the file \
-                                 was left as it was."
-                                .into())
-                        });
-                        let _ = done_tx.send((id, result));
-                        ctx.request_repaint();
-                    }
-                })
-                .expect("starting the writer");
-            tx
-        });
-        if jobs.send((id, job, ctx.clone())).is_err() {
-            self.jobs = None;
-            let _ = self.done_tx.send((id, Err("the writer stopped".into())));
-        }
+        let done = move |result: std::thread::Result<Result<(), String>>| {
+            let result = result.unwrap_or_else(|_| {
+                Err("Something went wrong inside Opal Studio while writing the file; the file was left \
+                     as it was."
+                    .into())
+            });
+            let _ = done_tx.send((id, result));
+        };
+        self.thread.run(job, done, ctx);
     }
 
     /// The writes done since the last call, in the order they were asked for.

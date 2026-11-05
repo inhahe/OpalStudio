@@ -7,6 +7,7 @@
 //! PNG on the clipboard. Both run off the interface thread: encoding or decoding a large
 //! image takes a while.
 
+use crate::background::JobThread;
 use eframe::egui;
 use opal_core::geom::IRect;
 use opal_core::raster::RasterImage;
@@ -15,7 +16,7 @@ use opal_io::image_files;
 use opal_io::pixels::pixels_from_rgba8;
 #[cfg(not(windows))]
 use opal_io::pixels::pixels_to_rgba8;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 /// An image from the clipboard, with its top-left corner at the origin.
@@ -138,45 +139,16 @@ impl Shared {
 }
 
 /// The operating system's clipboard.
-#[derive(Default)]
 #[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
 pub struct SystemClipboard {
     shared: Arc<Shared>,
-    /// The writer thread's queue, once there is one.
-    writer: Option<mpsc::Sender<(Copied, egui::Context)>>,
+    /// Writes copies to the clipboard, one after another.
+    writer: JobThread,
 }
 
-#[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
-impl SystemClipboard {
-    /// The thread that writes copies to the clipboard, one after another.
-    fn start_writer(shared: Arc<Shared>) -> mpsc::Sender<(Copied, egui::Context)> {
-        let (tx, rx) = mpsc::channel::<(Copied, egui::Context)>();
-        std::thread::Builder::new()
-            .name("clipboard writer".into())
-            .spawn(move || {
-                for (copy, ctx) in rx {
-                    // Everything slow happens before the lock is taken (the interface takes
-                    // it every frame). A panic is caught so the copy still counts as done.
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        write_system(&copy).map(|sequence| OwnCopy { sequence, pasted: copy.pasted() })
-                    }))
-                    .unwrap_or_else(|_| Err("copying failed unexpectedly".into()));
-                    let mut s = shared.lock();
-                    match result {
-                        Ok(own) => {
-                            s.own = Some(own);
-                            s.done.push(Ok(copy.from));
-                        }
-                        Err(e) => s.done.push(Err(e)),
-                    }
-                    s.pending -= 1;
-                    drop(s);
-                    shared.finished.notify_all();
-                    ctx.request_repaint();
-                }
-            })
-            .expect("starting the clipboard writer");
-        tx
+impl Default for SystemClipboard {
+    fn default() -> SystemClipboard {
+        SystemClipboard { shared: Arc::default(), writer: JobThread::new("clipboard writer") }
     }
 }
 
@@ -184,7 +156,6 @@ impl Drop for SystemClipboard {
     /// Waits for the copies still being written, so that one made just before quitting is
     /// on the clipboard.
     fn drop(&mut self) {
-        self.writer = None;
         drop(self.shared.when_written());
     }
 }
@@ -210,14 +181,24 @@ impl Clipboard for SystemClipboard {
     fn write_image(&mut self, copy: Copied, ctx: &egui::Context) {
         let from = copy.from;
         self.shared.lock().pending += 1;
-        let shared = &self.shared;
-        let tx = self.writer.get_or_insert_with(|| Self::start_writer(shared.clone()));
-        if tx.send((copy, ctx.clone())).is_err() {
-            self.writer = None;
-            let mut s = self.shared.lock();
+        // Everything slow happens before the lock is taken (the interface takes it every
+        // frame); a panic still counts the copy as done.
+        let work = move || write_system(&copy).map(|sequence| OwnCopy { sequence, pasted: copy.pasted() });
+        let shared = self.shared.clone();
+        let done = move |result: std::thread::Result<Result<OwnCopy, String>>| {
+            let mut s = shared.lock();
+            match result.unwrap_or_else(|_| Err("copying failed unexpectedly".into())) {
+                Ok(own) => {
+                    s.own = Some(own);
+                    s.done.push(Ok(from));
+                }
+                Err(e) => s.done.push(Err(e)),
+            }
             s.pending -= 1;
-            s.done.push(Err(format!("the clipboard writer stopped (copying {} × {})", from.width(), from.height())));
-        }
+            drop(s);
+            shared.finished.notify_all();
+        };
+        self.writer.run(work, done, ctx);
     }
 
     fn written(&mut self) -> Vec<WriteResult> {

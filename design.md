@@ -127,8 +127,9 @@ not a goal.
   offset of pixels moved off the tile grid), each image object's pixels, transform and
   sampling, and opacities. It is recomputed exactly when that list changes, so nothing has
   to report changes to the cache. Stale tiles are computed in parallel, from a thread each
-  document has for its projection, on a pool of threads of their own (so a small parallel
-  job of the interface's never waits behind them): the canvas asks for the view it shows and waits for it
+  document has for its projection, on the pool of background threads (which saves, exports
+  and copies use too, so a small parallel job of the interface's never waits behind any of
+  them): the canvas asks for the view it shows and waits for it
   only briefly (20 ms, on the frame that asks), drawing the last view done meanwhile (the
   previous zoom, or the image before a change), so a huge image never holds up the
   interface. Keys name tiles and
