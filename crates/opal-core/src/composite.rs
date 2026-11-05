@@ -747,7 +747,7 @@ pub struct Projection {
     budget: Option<u64>,
 }
 
-const TILE_BYTES: u64 = crate::raster::TILE_BYTES as u64;
+use crate::raster::TILE_BYTES;
 
 /// How [`Projection::update`] brings tiles up to date.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

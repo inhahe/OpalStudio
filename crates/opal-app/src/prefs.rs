@@ -289,8 +289,8 @@ pub static PREFS: &[Def] = &[
         label: "History may use",
         help: "How much memory each image's undo history may take beyond the image itself. \
                Past it, the oldest states are dropped, and the History panel says so. The \
-               state you are in and the one before it are never dropped, so the last action \
-               can always be undone.",
+               state you are in, the one before it and the one Redo goes to are never \
+               dropped, so one step either way always works.",
         section: "History",
         kind: Kind::Float { min: 0.25, max: 256.0, decimals: 2, suffix: " GB", log: true },
         default: Init::Float(4.0),

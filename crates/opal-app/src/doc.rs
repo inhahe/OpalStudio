@@ -171,8 +171,9 @@ impl DocState {
     }
 
     /// Says, the first time it happens, that the oldest history states are being dropped.
+    /// (If something else is to be said already, it waits for the next change.)
     fn note_dropped(&mut self) {
-        if self.history.dropped() > 0 && !self.told_dropped {
+        if self.history.dropped() > 0 && !self.told_dropped && self.notice.is_none() {
             self.told_dropped = true;
             self.notice = Some(
                 "The oldest history states are being dropped, to keep history within its memory limit \
@@ -354,6 +355,7 @@ impl DocState {
         if moved {
             self.revision += 1;
             self.fix_active_layer(Some(&before));
+            self.note_dropped();
         }
         moved
     }
@@ -365,6 +367,7 @@ impl DocState {
         if moved {
             self.revision += 1;
             self.fix_active_layer(Some(&before));
+            self.note_dropped();
         }
         moved
     }
@@ -373,13 +376,16 @@ impl DocState {
         self.commit_pending();
         // Committing can drop old states to keep history within its budget.
         if !self.history.contains(node) {
-            self.notice = Some("That state was dropped to keep history within its memory limit.".into());
+            self.told_dropped = true;
+            self.notice =
+                Some("That state was dropped to keep history within its memory limit (Preferences › History).".into());
             return;
         }
         let before = self.history.doc().clone();
         self.history.goto(node);
         self.revision += 1;
         self.fix_active_layer(Some(&before));
+        self.note_dropped();
     }
 
     /// After the layers changed from `before`, picks the active layer (see `fix_active`).
@@ -551,7 +557,33 @@ mod tests {
         s.goto(oldest);
         assert!(!s.history.contains(oldest));
         assert_eq!(s.history.undo_label(), Some("Opacity"), "the edit was committed and stays current");
-        assert!(s.notice.is_some(), "nothing says why the click did nothing");
+        assert!(s.notice.as_ref().is_some_and(|n| n.contains("Preferences")), "nothing says why the click did nothing");
+    }
+
+    #[test]
+    fn the_first_drop_waits_rather_than_hide_another_notice() {
+        let mut s = state();
+        let layer = add_layer(&mut s, "paint");
+        let paint = |s: &mut DocState, x: i64| {
+            s.apply::<()>("Paint", |d, ids| {
+                let mut img = opal_core::raster::RasterImage::new();
+                img.set_pixel(x, 0, opal_core::tile::pixel_from_f32([1.0; 4]));
+                d.remove(layer).unwrap();
+                d.insert(Position { parent: None, index: 1 }, Layer::new_raster(layer, ids.object(), "paint", img))
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap();
+        };
+        for x in 0..3 {
+            paint(&mut s, x);
+        }
+        s.notice = Some("Something else".into());
+        s.set_history_budget(0);
+        assert!(s.history.dropped() > 0);
+        assert_eq!(s.notice.take().as_deref(), Some("Something else"));
+        paint(&mut s, 7);
+        assert!(s.notice.is_some_and(|n| n.contains("Preferences")), "the drop was never said");
     }
 
     #[test]

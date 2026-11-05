@@ -6,7 +6,7 @@
 //! (see [`History::set_budget`]), the oldest states are dropped.
 
 use crate::document::{Document, Layer, LayerContent, ObjectKind};
-use crate::raster::RasterImage;
+use crate::raster::{RasterImage, TILE_BYTES};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -37,8 +37,6 @@ impl Node {
         &self.doc
     }
 }
-
-const TILE_BYTES: u64 = crate::raster::TILE_BYTES as u64;
 
 #[derive(Clone, Debug)]
 pub struct History {
@@ -124,14 +122,16 @@ impl History {
         parent.children.push(id);
         parent.last_child = Some(id);
         self.moved_to(id);
-        self.trim();
         id
     }
 
+    /// Makes `id` current. Moving can leave the other states holding more than the budget
+    /// (the state left behind joins them), so it trims too.
     fn moved_to(&mut self, id: NodeId) {
         self.current = id;
         let doc = &self.nodes[id.0].as_ref().expect("a state kept").doc;
         self.usage.visit(doc);
+        self.trim();
     }
 
     pub fn can_undo(&self) -> bool {
@@ -230,15 +230,13 @@ impl History {
 
     /// Drops the oldest states while the others hold more than the budget. A state can be
     /// dropped when it has no children, or is the root with one child (which becomes the
-    /// root), so the history stays one tree; never the current state, nor the one before
-    /// it, so the last action can always be undone, however large.
+    /// root), so the history stays one tree; never the current state, the one before it or
+    /// the one redo goes to, so one step either way always works, however large.
     fn trim(&mut self) {
-        let parent = self.node(self.current).parent;
+        let keep = [Some(self.current), self.node(self.current).parent, self.redo_target()];
         while self.usage.extra() > self.budget {
             let droppable = |(id, n): &(NodeId, &Node)| {
-                *id != self.current
-                    && Some(*id) != parent
-                    && (n.children.is_empty() || (*id == self.root && n.children.len() == 1))
+                !keep.contains(&Some(*id)) && (n.children.is_empty() || (*id == self.root && n.children.len() == 1))
             };
             let Some(oldest) = self.nodes().find(droppable).map(|(id, _)| id) else { break };
             self.remove(oldest);
@@ -274,15 +272,14 @@ impl History {
 struct Usage {
     /// Each distinct layer the states hold: in how many states, its tiles and its images.
     layers: HashMap<usize, Held>,
-    /// Each distinct tile: in how many of those layers.
-    tiles: HashMap<usize, usize>,
-    /// Each distinct image: in how many of those layers.
-    images: HashMap<usize, (usize, Arc<RasterImage>)>,
+    /// Each distinct tile and image: in how many of those layers.
+    tiles: Counted<()>,
+    images: Counted<Arc<RasterImage>>,
     /// The current state's layers, and their tiles and images, each with how many of
     /// those layers hold it.
     current_layers: HashSet<usize>,
-    current: HashMap<usize, usize>,
-    current_images: HashMap<usize, usize>,
+    current: Counted<()>,
+    current_images: Counted<()>,
 }
 
 #[derive(Clone, Debug)]
@@ -292,20 +289,42 @@ struct Held {
     images: Vec<Arc<RasterImage>>,
 }
 
-/// Adds one to the count of each of `keys` in `counts`.
-fn count_in(counts: &mut HashMap<usize, usize>, keys: impl Iterator<Item = usize>) {
-    keys.for_each(|k| *counts.entry(k).or_default() += 1);
+/// Things counted by address, each with how many holders it has, and a value kept with it.
+#[derive(Clone, Debug)]
+struct Counted<V>(HashMap<usize, (usize, V)>);
+
+impl<V> Default for Counted<V> {
+    fn default() -> Counted<V> {
+        Counted(HashMap::new())
+    }
 }
 
-/// Takes one from the count of each of `keys` in `counts`, removing those that reach none.
-fn count_out(counts: &mut HashMap<usize, usize>, keys: impl Iterator<Item = usize>) {
-    for k in keys {
-        let n = counts.get_mut(&k).expect("counted");
-        *n -= 1;
-        if *n == 0 {
-            counts.remove(&k);
+impl<V> Counted<V> {
+    /// One more holder of `key` (with `value`, if it is new).
+    fn add(&mut self, key: usize, value: impl FnOnce() -> V) {
+        self.0.entry(key).or_insert_with(|| (0, value())).0 += 1;
+    }
+
+    /// One holder fewer of `key`, which goes once none is left.
+    fn remove(&mut self, key: usize) {
+        let e = self.0.get_mut(&key).expect("counted");
+        e.0 -= 1;
+        if e.0 == 0 {
+            self.0.remove(&key);
         }
     }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn contains(&self, key: usize) -> bool {
+        self.0.contains_key(&key)
+    }
+}
+
+fn address<T>(a: &Arc<T>) -> usize {
+    Arc::as_ptr(a) as usize
 }
 
 impl Usage {
@@ -313,12 +332,10 @@ impl Usage {
     fn add(&mut self, doc: &Document) {
         for l in layers_of(doc) {
             let (tiles, images) = (&mut self.tiles, &mut self.images);
-            let e = self.layers.entry(Arc::as_ptr(l) as usize).or_insert_with(|| {
+            let e = self.layers.entry(address(l)).or_insert_with(|| {
                 let (t, im) = held_by(l);
-                count_in(tiles, t.iter().copied());
-                for i in &im {
-                    images.entry(Arc::as_ptr(i) as usize).or_insert_with(|| (0, i.clone())).0 += 1;
-                }
+                t.iter().for_each(|&k| tiles.add(k, || ()));
+                im.iter().for_each(|i| images.add(address(i), || i.clone()));
                 Held { states: 0, tiles: t, images: im }
             });
             e.states += 1;
@@ -328,38 +345,31 @@ impl Usage {
     /// Takes away what a dropped state's document alone held.
     fn forget(&mut self, doc: &Document) {
         for l in layers_of(doc) {
-            let key = Arc::as_ptr(l) as usize;
+            let key = address(l);
             let e = self.layers.get_mut(&key).expect("counted");
             e.states -= 1;
             if e.states > 0 {
                 continue;
             }
             let held = self.layers.remove(&key).expect("counted");
-            count_out(&mut self.tiles, held.tiles.into_iter());
-            for i in held.images {
-                let k = Arc::as_ptr(&i) as usize;
-                let e = self.images.get_mut(&k).expect("counted");
-                e.0 -= 1;
-                if e.0 == 0 {
-                    self.images.remove(&k);
-                }
-            }
+            held.tiles.into_iter().for_each(|k| self.tiles.remove(k));
+            held.images.iter().for_each(|i| self.images.remove(address(i)));
         }
     }
 
     /// Makes `doc` (a counted state's) the current one. Only the layers it does not share
     /// with the state current before are walked.
     fn visit(&mut self, doc: &Document) {
-        let now: HashSet<usize> = layers_of(doc).into_iter().map(|l| Arc::as_ptr(l) as usize).collect();
+        let now: HashSet<usize> = layers_of(doc).into_iter().map(address).collect();
         for k in self.current_layers.difference(&now) {
             let h = &self.layers[k];
-            count_out(&mut self.current, h.tiles.iter().copied());
-            count_out(&mut self.current_images, h.images.iter().map(|i| Arc::as_ptr(i) as usize));
+            h.tiles.iter().for_each(|&t| self.current.remove(t));
+            h.images.iter().for_each(|i| self.current_images.remove(address(i)));
         }
         for k in now.difference(&self.current_layers) {
             let h = &self.layers[k];
-            count_in(&mut self.current, h.tiles.iter().copied());
-            count_in(&mut self.current_images, h.images.iter().map(|i| Arc::as_ptr(i) as usize));
+            h.tiles.iter().for_each(|&t| self.current.add(t, || ()));
+            h.images.iter().for_each(|i| self.current_images.add(address(i), || ()));
         }
         self.current_layers = now;
     }
@@ -370,8 +380,9 @@ impl Usage {
         let tiles = (self.tiles.len() - self.current.len()) as u64 * TILE_BYTES;
         let reduced: u64 = self
             .images
+            .0
             .iter()
-            .filter(|(k, _)| !self.current_images.contains_key(k))
+            .filter(|(k, _)| !self.current_images.contains(**k))
             .map(|(_, (_, i))| i.reduced_bytes())
             .sum();
         tiles + reduced
@@ -403,9 +414,9 @@ fn held_by(l: &Layer) -> (Vec<usize>, Vec<Arc<RasterImage>>) {
             ObjectKind::Image(i) => i.image.clone(),
         })
         .collect();
-    images.sort_unstable_by_key(|i| Arc::as_ptr(i) as usize);
-    images.dedup_by_key(|i| Arc::as_ptr(i) as usize);
-    let mut tiles: Vec<usize> = images.iter().flat_map(|i| i.tiles().map(|(_, t)| Arc::as_ptr(t) as usize)).collect();
+    images.sort_unstable_by_key(address);
+    images.dedup_by_key(|i| address(i));
+    let mut tiles: Vec<usize> = images.iter().flat_map(|i| i.tiles().map(|(_, t)| address(t))).collect();
     tiles.sort_unstable();
     tiles.dedup();
     (tiles, images)
@@ -575,6 +586,27 @@ mod tests {
         h.commit(d, "Paint 2");
         assert_eq!(h.nodes().count(), 2, "only the state before is kept past the budget");
         assert!(h.undo());
+    }
+
+    #[test]
+    fn moving_through_history_keeps_to_the_budget_one_step_either_way() {
+        // Three states of one tile each, then one sharing that tile and adding another.
+        let mut h = painted_history(2);
+        let d = painted(h.doc(), 300);
+        let last = h.commit(d, "Paint far");
+        h.set_budget(2 * TILE_BYTES);
+        assert_eq!(h.dropped(), 0);
+        // Back one step: the state left behind holds a tile of its own, which puts the others
+        // over the budget.
+        let root = h.root();
+        assert!(h.undo());
+        assert!(!h.contains(root), "moving back did not trim");
+        assert!(h.memory() <= 2 * TILE_BYTES);
+        // Tighter still: what is left is one step either way, which stays past the budget.
+        h.set_budget(TILE_BYTES);
+        assert!(h.memory() > TILE_BYTES);
+        assert_eq!(h.redo_target(), Some(last), "the state redo goes to was dropped");
+        assert!(h.undo(), "the state before was dropped");
     }
 
     #[test]

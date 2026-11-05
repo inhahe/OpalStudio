@@ -236,7 +236,7 @@ impl RasterImage {
     /// The bytes the reduced copies built so far take.
     pub fn reduced_bytes(&self) -> u64 {
         let tiles: usize = self.pyramid.iter().filter_map(|c| c.get()).map(|r| r.tile_count()).sum();
-        tiles as u64 * TILE_BYTES as u64
+        tiles as u64 * TILE_BYTES
     }
 
     /// Whether level `k` of the pyramid has been built.
@@ -261,7 +261,7 @@ impl RasterImage {
 }
 
 /// The size of one tile's worth of pixels in bytes (for memory accounting).
-pub const TILE_BYTES: usize = (TILE_SIZE * TILE_SIZE) as usize * std::mem::size_of::<Pixel>();
+pub const TILE_BYTES: u64 = (TILE_SIZE * TILE_SIZE) as u64 * std::mem::size_of::<Pixel>() as u64;
 
 #[cfg(test)]
 mod tests {
