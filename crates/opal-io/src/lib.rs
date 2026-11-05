@@ -36,8 +36,8 @@ impl IoError {
 }
 
 /// Writes a file by calling `write` on a temporary file in the same directory, then
-/// renaming it over `path`. On any error the temporary file is removed and `path` is left
-/// as it was.
+/// renaming it over `path`. On any error, or a panic in `write`, the temporary file is
+/// removed and `path` is left as it was.
 pub fn write_atomically(
     path: &Path,
     write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<(), IoError>,
@@ -49,8 +49,16 @@ pub fn write_atomically(
     tmp_name.push(file_name);
     tmp_name.push(format!(".{}.tmp", std::process::id()));
     let tmp = path.with_file_name(tmp_name);
+    // Removes the temporary file however this ends (once renamed, there is none to remove).
+    struct Remove<'a>(&'a Path);
+    impl Drop for Remove<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.0);
+        }
+    }
+    let _remove = Remove(&tmp);
 
-    let result = (|| {
+    (|| {
         let file = std::fs::File::create(&tmp).map_err(|e| IoError::io(&tmp, e))?;
         let mut out = std::io::BufWriter::new(file);
         write(&mut out)?;
@@ -58,11 +66,7 @@ pub fn write_atomically(
         file.sync_all().map_err(|e| IoError::io(&tmp, e))?;
         drop(file);
         std::fs::rename(&tmp, path).map_err(|e| IoError::io(path, e))
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    })()
 }
 
 /// `std::io::Write` errors reported against `path`.
@@ -73,6 +77,23 @@ pub fn write_all(out: &mut impl Write, bytes: &[u8], path: &Path) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panic_while_writing_leaves_no_temporary_file() {
+        let dir = std::env::temp_dir().join(format!("opal-atomic-panic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("y.txt");
+        let r = std::panic::catch_unwind(|| {
+            let _ = write_atomically(&path, |out| {
+                write_all(out, b"partial", &path)?;
+                panic!("an encoder went wrong");
+            });
+        });
+        assert!(r.is_err());
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(left.is_empty(), "left behind: {left:?}");
+    }
 
     #[test]
     fn a_failed_write_leaves_the_existing_file() {
