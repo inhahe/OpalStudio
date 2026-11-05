@@ -184,11 +184,14 @@ struct Drawing {
 /// `image` drawn through `t` into a pixel object, keeping only the part within `to.keep` of
 /// what reaches too far, or why it cannot be: more memory than is left.
 fn drawn(image: &RasterImage, t: &Affine, sampling: &Sampling, to: &mut Drawing) -> Result<ObjectKind, String> {
-    let reach = resample::footprint(image, t, sampling).unwrap_or(IRect::new(0, 0, 0, 0));
-    let (area, cut) = crate::layer_ops::drawable(reach, &to.keep, &mut to.memory)?;
-    to.clipped |= cut;
-    let image = resample::render_image(image, t, sampling, Some(&area));
-    Ok(ObjectKind::Pixels(PixelObject { image: Arc::new(image), offset: [0, 0] }))
+    let drawn = match crate::layer_ops::drawable(image, t, sampling, &to.keep, &mut to.memory)? {
+        Some((area, cut)) => {
+            to.clipped |= cut;
+            resample::render_image(image, t, sampling, Some(&area))
+        }
+        None => RasterImage::new(),
+    };
+    Ok(ObjectKind::Pixels(PixelObject { image: Arc::new(drawn), offset: [0, 0] }))
 }
 
 /// The bounds of what the visible layers hold, in whole pixels.

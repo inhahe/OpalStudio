@@ -11,8 +11,9 @@ use opal_core::composite::composite_all;
 use opal_core::document::{
     Document, IdGen, Layer, LayerContent, LayerId, ObjectKind, PixelObject, Position, TreeError,
 };
-use opal_core::geom::IRect;
-use opal_core::resample;
+use opal_core::geom::{Affine, IRect};
+use opal_core::raster::RasterImage;
+use opal_core::resample::{self, Sampling};
 use std::sync::Arc;
 
 /// The most pixels merging or rasterizing may produce beyond what the canvas itself needs
@@ -20,29 +21,26 @@ use std::sync::Arc;
 /// otherwise ask for more memory than the computer has.
 pub(crate) const MAX_PIXELS: i64 = 1 << 28;
 
-/// The area to draw an image object into, given what it reaches (`footprint`): all of it,
-/// or, if that is more than `MAX_PIXELS` and four canvases, only the part within `keep`
-/// (with `true`, to say so). The tiles over the area are set aside from `memory`; an error
-/// says there is not enough free even for that.
-pub(crate) fn drawable(footprint: IRect, keep: &IRect, memory: &mut Allowance) -> Result<(IRect, bool), String> {
+/// The area to draw `image` through `transform` into: all it reaches, or, if that is more
+/// than `MAX_PIXELS` and four canvases, only the part within `keep` (with `true`, to say
+/// so); `None` if it reaches nothing. What drawing that takes is set aside from `memory`
+/// ([`resample::render_cost`]); an error says there is not enough free even for that.
+pub(crate) fn drawable(
+    image: &RasterImage,
+    transform: &Affine,
+    sampling: &Sampling,
+    keep: &IRect,
+    memory: &mut Allowance,
+) -> Result<Option<(IRect, bool)>, String> {
+    let Some(footprint) = resample::footprint(image, transform, sampling) else { return Ok(None) };
     let limit = MAX_PIXELS.max(4 * keep.width().saturating_mul(keep.height()));
     let (area, cut) = if footprint.width().saturating_mul(footprint.height()) <= limit {
         (footprint, false)
     } else {
         (footprint.intersect(keep), true)
     };
-    memory.take(tile_bytes(&area))?;
-    Ok((area, cut))
-}
-
-/// The memory the tiles over `area` take, all of them drawn.
-fn tile_bytes(area: &IRect) -> u64 {
-    if area.is_empty() {
-        return 0;
-    }
-    let t = i64::from(opal_core::tile::TILE_SIZE);
-    let across = |a: i64, b: i64| ((b - 1).div_euclid(t) - a.div_euclid(t) + 1) as u64;
-    across(area.x0, area.x1).saturating_mul(across(area.y0, area.y1)).saturating_mul(opal_core::raster::TILE_BYTES)
+    memory.take(resample::render_cost(image, transform, sampling, Some(&area)))?;
+    Ok(Some((area, cut)))
 }
 
 /// What is said when part of an image object reaching far past the canvas was left out.
@@ -319,7 +317,7 @@ impl AppState {
         let sel = d.selection();
         let doc = d.doc();
         let targets: Vec<Arc<Layer>> = sel.iter().filter_map(|&l| doc.layer(l)).map(|l| Arc::new(l.clone())).collect();
-        if let Err(why) = check_size(&targets, &d.doc().canvas.rect()) {
+        if let Err(why) = rasterize_fits(&targets, &d.doc().canvas.rect(), Allowance::now()) {
             return self.message(MessageKind::Info, "Rasterize", why);
         }
         let d = self.active_mut().expect("available");
@@ -453,6 +451,39 @@ fn check_size(layers: &[Arc<Layer>], canvas: &IRect) -> Result<(), String> {
     fits(layers, canvas, Allowance::now())
 }
 
+/// Whether rasterizing `layers` fits in `memory`, and within `MAX_PIXELS` beyond four times
+/// `canvas` (see [`fits`]): it draws each image object in them, hidden or not, whole
+/// ([`resample::render_cost`]), and copies no pixel object.
+fn rasterize_fits(layers: &[Arc<Layer>], canvas: &IRect, mut memory: Allowance) -> Result<(), String> {
+    let objects: Vec<&opal_core::document::Object> =
+        layers.iter().flat_map(|l| l.all_objects()).filter(|o| matches!(o.kind, ObjectKind::Image(_))).collect();
+    let reached = objects
+        .iter()
+        .map(|o| o.extent().map_or(0, |e| e.width().saturating_mul(e.height())))
+        .fold(0, i64::saturating_add);
+    within_reach(reached, canvas)?;
+    for o in objects {
+        if let ObjectKind::Image(i) = &o.kind {
+            memory.take(resample::render_cost(&i.image, &i.transform, &i.sampling, None))?;
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a result of `pixels` pixels more than `MAX_PIXELS` beyond four times `canvas`:
+/// something reaches far past the canvas.
+fn within_reach(pixels: i64, canvas: &IRect) -> Result<(), String> {
+    let limit = MAX_PIXELS.max(4 * canvas.width().saturating_mul(canvas.height()));
+    if pixels > limit {
+        return Err(format!(
+            "The result would need about {} of memory, because something reaches far past the canvas. \
+             Shrink or crop what reaches that far first.",
+            opal_io::bytes((pixels as u64).saturating_mul(8))
+        ));
+    }
+    Ok(())
+}
+
 /// Whether the result of merging `layers` fits in `memory`, and within `MAX_PIXELS` beyond
 /// four times `canvas` (more means something reaches far past it). The second is judged
 /// first, from the tiles the pixel objects hold (each once, however many share it) and the
@@ -470,15 +501,7 @@ fn fits(layers: &[Arc<Layer>], canvas: &IRect, mut memory: Allowance) -> Result<
             }
         }
     }
-    let pixels = (stored.len() as i64).saturating_mul(tile).saturating_add(reached);
-    let limit = MAX_PIXELS.max(4 * canvas.width().saturating_mul(canvas.height()));
-    if pixels > limit {
-        return Err(format!(
-            "The result would need about {} of memory, because something reaches far past the canvas. \
-             Shrink or crop what reaches that far first.",
-            opal_io::bytes((pixels as u64).saturating_mul(8))
-        ));
-    }
+    within_reach((stored.len() as i64).saturating_mul(tile).saturating_add(reached), canvas)?;
     memory.take(opal_core::composite::composite_cost(layers, None))
 }
 
@@ -511,7 +534,6 @@ pub(crate) fn copy_with_new_ids(layer: &Layer, ids: &mut IdGen) -> Layer {
 mod tests {
     use super::*;
     use crate::state::{AppState, Background, NewImage};
-    use opal_core::raster::RasterImage;
     use opal_core::tile::pixel_from_f32;
 
     /// An app with a `w × h` white image open.
@@ -609,21 +631,66 @@ mod tests {
     fn drawing_far_past_the_canvas_keeps_the_part_around_it() {
         let canvas = IRect::from_size(100, 100);
         let mut memory = Allowance::of(None);
-        let near = IRect::new(-50, -50, 150, 150);
-        assert_eq!(drawable(near, &canvas, &mut memory), Ok((near, false)));
-        let huge = IRect::new(-1_000_000, 0, 1_000_000, 1_000);
-        assert_eq!(drawable(huge, &canvas, &mut memory), Ok((IRect::new(0, 0, 100, 100), true)));
+        let s = Sampling::default();
+        let img = RasterImage::filled(&IRect::from_size(10, 10), pixel_from_f32([1.0; 4]));
+        let near = Affine::scale(20.0, 20.0).then(Affine::translate(-50.0, -50.0));
+        let reach = resample::footprint(&img, &near, &s);
+        assert_eq!(drawable(&img, &near, &s, &canvas, &mut memory), Ok(reach.map(|r| (r, false))));
+        let huge = Affine::scale(200_000.0, 100.0).then(Affine::translate(-1_000_000.0, 0.0));
+        assert_eq!(drawable(&img, &huge, &s, &canvas, &mut memory), Ok(Some((IRect::new(0, 0, 100, 100), true))));
+        assert_eq!(drawable(&RasterImage::new(), &near, &s, &canvas, &mut memory), Ok(None));
     }
 
     #[test]
     fn drawing_more_than_is_free_is_refused() {
         let canvas = IRect::from_size(100, 100);
-        // Nine tiles (an area across tile edges), and room for ten.
+        let s = Sampling::default();
+        // Nine tiles each unlike the others (an area across tile edges), and room for ten.
+        let img = RasterImage::filled(&IRect::new(-50, -50, 300, 300), pixel_from_f32([1.0; 4]));
+        let same = Affine::translate(0.0, 0.0);
         let mut memory = Allowance::of(Some(10 * opal_core::raster::TILE_BYTES));
-        let area = IRect::new(-50, -50, 300, 300);
-        assert!(drawable(area, &canvas, &mut memory).is_ok());
-        let why = drawable(area, &canvas, &mut memory).unwrap_err();
+        assert!(drawable(&img, &same, &s, &canvas, &mut memory).is_ok());
+        let why = drawable(&img, &same, &s, &canvas, &mut memory).unwrap_err();
         assert!(why.contains("memory"), "{why}");
+    }
+
+    #[test]
+    fn rasterizing_counts_the_image_objects_it_draws_hidden_or_not_and_nothing_else() {
+        use opal_core::document::{ImageObject, Object};
+        let mut ids = IdGen::default();
+        let canvas = IRect::from_size(2000, 2000);
+        let photo = RasterImage::filled(&IRect::from_size(1024, 1024), pixel_from_f32([0.3, 0.5, 0.7, 1.0]));
+        let image = |img: &RasterImage| ImageObject {
+            image: Arc::new(img.clone()),
+            frame: IRect::from_size(1024, 1024),
+            transform: Affine::rotate(0.2),
+            sampling: Sampling::default(),
+        };
+        // A hidden layer's image object is drawn all the same.
+        let mut hidden = Layer::with_objects(
+            ids.layer(),
+            "hidden",
+            vec![Object { id: ids.object(), kind: ObjectKind::Image(image(&photo)) }],
+        );
+        hidden.visible = false;
+        let hidden = [Arc::new(hidden)];
+        let need = resample::render_cost(&photo, &Affine::rotate(0.2), &Sampling::default(), None);
+        assert!(need > 0);
+        assert!(rasterize_fits(&hidden, &canvas, Allowance::of(Some(need))).is_ok());
+        let why = rasterize_fits(&hidden, &canvas, Allowance::of(Some(need - 1))).unwrap_err();
+        assert!(why.contains("memory"), "{why}");
+        // A large pixel object beside it is not copied, so it is not counted.
+        let big = RasterImage::filled(&IRect::from_size(20_000, 20_000), pixel_from_f32([1.0; 4]));
+        let pixels = ObjectKind::Pixels(opal_core::document::PixelObject { image: Arc::new(big), offset: [0, 0] });
+        let both = Layer::with_objects(
+            ids.layer(),
+            "both",
+            vec![
+                Object { id: ids.object(), kind: pixels },
+                Object { id: ids.object(), kind: ObjectKind::Image(image(&photo)) },
+            ],
+        );
+        assert!(rasterize_fits(&[Arc::new(both)], &canvas, Allowance::of(Some(need))).is_ok());
     }
 
     #[test]

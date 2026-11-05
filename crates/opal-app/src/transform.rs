@@ -666,8 +666,11 @@ fn bake_into(doc: &mut Document, dest: LayerId, object: ObjectId) -> Result<bool
     let Some(Layer { content: LayerContent::Objects(objects), .. }) = doc.layer_mut(dest) else { return Ok(false) };
     let Some(at) = objects.iter().position(|o| o.id == object) else { return Ok(false) };
     let ObjectKind::Image(i) = &objects[at].kind else { return Ok(false) };
-    let Some(footprint) = resample::footprint(&i.image, &i.transform, &i.sampling) else { return Ok(false) };
-    let (area, clipped) = crate::layer_ops::drawable(footprint, &canvas, &mut crate::memory::Allowance::now())?;
+    let mut memory = crate::memory::Allowance::now();
+    let Some((area, clipped)) = crate::layer_ops::drawable(&i.image, &i.transform, &i.sampling, &canvas, &mut memory)?
+    else {
+        return Ok(false);
+    };
     let ObjectKind::Image(i) = objects.remove(at).kind else { unreachable!("an image object, just seen") };
     match objects.last_mut() {
         Some(Object { kind: ObjectKind::Pixels(p), .. }) => {

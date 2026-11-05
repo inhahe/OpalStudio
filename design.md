@@ -177,7 +177,9 @@ size, and Rasterize Layer, so each gives the same pixels the canvas shows.
   (up to 64 times for a drawing that is not turned, so squashing one axis leaves the
   other's detail alone; only a squash past that ratio takes a coarser copy).
 - **Exact cases are exact:** moves by whole pixels, quarter turns and flips copy pixels
-  without filtering.
+  without filtering; tiles copied from the same stored tiles come out alike and are made
+  once (a flipped white canvas is still a few tiles). Drawing visits only the tiles some
+  stored tile reaches, not every tile of the bounding box.
 - While a transform is being dragged, Bilinear is used so the drag keeps up (a setting);
   the object's own method takes over on release.
 
@@ -429,8 +431,9 @@ curve editors.
   and says so. Within those limits, nothing is drawn into pixels that would need more
   memory than is free when the work begins (the available physical memory, on Windows
   and Linux; `memory.rs`), since a failed allocation ends the program: merging counts
-  exactly the tiles it would make (none for those it shares), resampling the tiles over
-  what it draws, summed over everything one command draws. The command is refused with
+  exactly the tiles it would make (none for those it shares), drawing into pixels exactly
+  the tiles it draws (`render_cost`), summed over everything one command draws; Rasterize
+  counts every image object it draws, hidden or not, and no pixel object. The command is refused with
   how much it needs and how much is free; a paste that cannot be baked stays an image in
   the layer. Exports and copies are checked the same way: an export takes its bands in
   flight and, at another size, the image it is drawn from (`export_memory`); a copy takes

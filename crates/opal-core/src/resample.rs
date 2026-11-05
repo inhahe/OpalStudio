@@ -21,6 +21,7 @@ use crate::tile::{Pixel, PixelF32, TILE_PIXELS, TILE_SIZE, Tile, TileCoord};
 use half::f16;
 use half::slice::HalfFloatSliceExt;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// How pixels are computed when an image is drawn at another size or angle.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -197,17 +198,20 @@ pub fn render_tile(image: &RasterImage, transform: &Affine, sampling: &Sampling,
     }
 }
 
+/// The image pixels that `dest` (document pixels) is drawn from through a transform that
+/// maps the grid onto itself, given its inverse `gi`.
+fn source_rect(gi: &GridMap, dest: &IRect) -> IRect {
+    let corners = [(dest.x0, dest.y0), (dest.x1 - 1, dest.y0), (dest.x0, dest.y1 - 1), (dest.x1 - 1, dest.y1 - 1)]
+        .map(|(x, y)| gi.pixel(x, y));
+    let (xs, ys) = (corners.map(|p| p.0), corners.map(|p| p.1));
+    let (min, max) = (|v: [i64; 4]| v.into_iter().min().unwrap_or(0), |v: [i64; 4]| v.into_iter().max().unwrap_or(0));
+    IRect::new(min(xs), min(ys), max(xs) + 1, max(ys) + 1)
+}
+
 /// Copies pixels for a transform that maps the grid onto itself.
 fn render_exact(image: &RasterImage, g: &GridMap, dest: &IRect) -> Option<Tile> {
     let gi = g.inverse();
-    let corners = [(dest.x0, dest.y0), (dest.x1 - 1, dest.y0), (dest.x0, dest.y1 - 1), (dest.x1 - 1, dest.y1 - 1)]
-        .map(|(x, y)| gi.pixel(x, y));
-    let src = IRect::new(
-        corners.iter().map(|p| p.0).min()?,
-        corners.iter().map(|p| p.1).min()?,
-        corners.iter().map(|p| p.0).max()? + 1,
-        corners.iter().map(|p| p.1).max()? + 1,
-    );
+    let src = source_rect(&gi, dest);
     if src.intersect(&image.tile_bounds()).is_empty() {
         return None;
     }
@@ -554,25 +558,68 @@ fn finish(mut p: PixelF32, anti_ringing: bool, region: &Region, u: f64, v: f64) 
 }
 
 /// Draws `image` through `transform` into a new image covering `area` of the document (all
-/// of the result when `area` is `None`), tile by tile in parallel.
+/// of the result when `area` is `None`), tile by tile in parallel (see [`render_plan`]).
 pub fn render_image(image: &RasterImage, transform: &Affine, sampling: &Sampling, area: Option<&IRect>) -> RasterImage {
     use rayon::prelude::*;
-    let mut out = RasterImage::new();
-    let Some(bounds) = footprint(image, transform, sampling) else { return out };
-    let bounds = match area {
-        Some(a) => bounds.intersect(a),
-        None => bounds,
-    };
-    let coords: Vec<TileCoord> = TileCoord::covering(&bounds, 0).collect();
+    let plan = render_plan(image, transform, sampling, area);
     // Build the pyramid levels the tiles need before drawing them in parallel, so the tiles
     // do not each build them.
     prepare(image, transform, sampling);
-    let tiles: Vec<(TileCoord, Tile)> =
-        coords.into_par_iter().filter_map(|c| render_tile(image, transform, sampling, c).map(|t| (c, t))).collect();
-    for (c, t) in tiles {
-        out.set_tile(c, Some(std::sync::Arc::new(t)));
+    let made: Vec<(Vec<TileCoord>, Tile)> =
+        plan.into_par_iter().filter_map(|at| render_tile(image, transform, sampling, at[0]).map(|t| (at, t))).collect();
+    let mut out = RasterImage::new();
+    for (at, t) in made {
+        let t = Arc::new(t);
+        for c in at {
+            out.set_tile(c, Some(t.clone()));
+        }
     }
     out
+}
+
+/// The memory, in bytes, drawing `image` through `transform` into `area` would take
+/// ([`render_image`]): a tile for each it draws, at most.
+pub fn render_cost(image: &RasterImage, transform: &Affine, sampling: &Sampling, area: Option<&IRect>) -> u64 {
+    render_plan(image, transform, sampling, area).len() as u64 * crate::raster::TILE_BYTES
+}
+
+/// The tiles drawing `image` through `transform` into `area` (everywhere when `None`)
+/// draws, each set of tiles alike once: only the tiles some stored tile of `image` reaches,
+/// and through a transform that maps the grid onto itself (a move, quarter turn or flip),
+/// where tiles drawn from the same stored tiles come out alike, each such set together.
+fn render_plan(
+    image: &RasterImage,
+    transform: &Affine,
+    sampling: &Sampling,
+    area: Option<&IRect>,
+) -> Vec<Vec<TileCoord>> {
+    use std::collections::{HashMap, HashSet};
+    let Some(bounds) = footprint(image, transform, sampling) else { return Vec::new() };
+    let bounds = area.map_or(bounds, |a| bounds.intersect(a));
+    if bounds.is_empty() {
+        return Vec::new();
+    }
+    let r = reach(transform, sampling);
+    let mut reached: HashSet<TileCoord> = HashSet::new();
+    for (c, _) in image.tiles() {
+        let t = c.rect(0);
+        let grown = crate::geom::FRect::new(t.x0 as f64 - r, t.y0 as f64 - r, t.x1 as f64 + r, t.y1 as f64 + r);
+        reached.extend(TileCoord::covering(&IRect::covering(&transform.bounds(&grown)).intersect(&bounds), 0));
+    }
+    let Some(g) = transform.grid_map() else { return reached.into_iter().map(|c| vec![c]).collect() };
+    // Each tile is drawn from the same place within the stored tiles under it (the map's
+    // offset modulo a tile), so the tiles under it, in order, say what it shows.
+    let gi = g.inverse();
+    let mut alike: HashMap<Vec<usize>, Vec<TileCoord>> = HashMap::new();
+    for c in reached {
+        let under = TileCoord::covering(&source_rect(&gi, &c.rect(0)), 0);
+        let key: Vec<usize> = under.map(|s| image.tile(s).map_or(0, |t| Arc::as_ptr(t) as usize)).collect();
+        // With no stored tile under it, nothing is drawn there.
+        if key.iter().any(|&k| k != 0) {
+            alike.entry(key).or_default().push(c);
+        }
+    }
+    alike.into_values().collect()
 }
 
 /// The document pixels `image` can reach when drawn through `transform`.
@@ -624,6 +671,58 @@ mod tests {
 
     fn render(image: &RasterImage, m: &Affine, s: &Sampling) -> RasterImage {
         render_image(image, m, s, None)
+    }
+
+    /// `image` drawn through `m` one tile at a time over all its footprint, as a map.
+    fn every_tile(image: &RasterImage, m: &Affine, s: &Sampling) -> std::collections::HashMap<TileCoord, Tile> {
+        let Some(bounds) = footprint(image, m, s) else { return Default::default() };
+        TileCoord::covering(&bounds, 0).filter_map(|c| render_tile(image, m, s, c).map(|t| (c, t))).collect()
+    }
+
+    #[test]
+    fn drawing_only_the_tiles_reached_and_alike_ones_once_gives_what_drawing_every_tile_gives() {
+        let grey = Arc::new(Tile::filled(pixel_from_f32([0.5, 0.5, 0.5, 1.0])));
+        let mut mixed = RasterImage::filled(&IRect::new(0, 0, 2000, 1500), pixel_from_f32([0.2, 0.4, 0.6, 1.0]));
+        mixed.set_tile(TileCoord::new(2, 2), Some(grey.clone()));
+        mixed.set_pixel(1999, 0, pixel_from_f32([1.0, 0.0, 0.0, 1.0]));
+        // Two marks far apart: the box between them is empty.
+        let mut sparse = RasterImage::new();
+        sparse.set_pixel(0, 0, pixel_from_f32([1.0; 4]));
+        sparse.set_pixel(9000, 7000, pixel_from_f32([1.0; 4]));
+        let flip = Affine::scale(-1.0, 1.0).then(Affine::translate(2048.0, 0.0));
+        let quarter = Affine::rotate(std::f64::consts::FRAC_PI_2).then(Affine::translate(1537.0, 13.0));
+        let cases = [
+            (&mixed, flip, "a flip"),
+            (&mixed, quarter, "a quarter turn off the grid"),
+            (&sparse, Affine::rotate(0.3), "a sparse image turned"),
+            (&mixed, Affine::scale(0.3, 0.45), "shrunk"),
+        ];
+        for (image, m, what) in cases {
+            let s = Sampling::default();
+            let planned = render_image(image, &m, &s, None);
+            let every = every_tile(image, &m, &s);
+            assert_eq!(planned.tile_count(), every.len(), "{what}");
+            for (c, t) in &every {
+                assert!(planned.tile(*c).is_some_and(|p| **p == *t), "{what}: tile {c:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_flip_of_a_uniform_image_is_a_few_tiles_and_a_sparse_one_costs_what_it_reaches() {
+        let s = Sampling::default();
+        let white = RasterImage::filled(&IRect::from_size(4096, 4096), pixel_from_f32([1.0; 4]));
+        let flip = Affine::scale(-1.0, 1.0).then(Affine::translate(4096.0, 0.0));
+        let flipped = render_image(&white, &flip, &s, None);
+        let distinct: std::collections::HashSet<*const Tile> = flipped.tiles().map(|(_, t)| Arc::as_ptr(t)).collect();
+        assert_eq!((flipped.tile_count(), distinct.len()), (256, 1));
+        assert_eq!(render_cost(&white, &flip, &s, None), crate::raster::TILE_BYTES);
+        // Two marks far apart, turned: the tiles around each, not the box between them.
+        let mut sparse = RasterImage::new();
+        sparse.set_pixel(0, 0, pixel_from_f32([1.0; 4]));
+        sparse.set_pixel(20_000, 20_000, pixel_from_f32([1.0; 4]));
+        let cost = render_cost(&sparse, &Affine::rotate(0.3), &s, None);
+        assert!(cost <= 16 * crate::raster::TILE_BYTES, "{} tiles", cost / crate::raster::TILE_BYTES);
     }
 
     fn methods() -> [Sampling; 5] {
