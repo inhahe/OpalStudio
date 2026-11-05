@@ -84,6 +84,9 @@ pub fn apply(ctx: &egui::Context, choice: egui::ThemePreference) {
         style.spacing.item_spacing = egui::vec2(6.0, 5.0);
         style.spacing.button_padding = egui::vec2(7.0, 3.0);
         style.spacing.interact_size.y = 22.0;
+        // Text is for reading here, not for selecting: a selectable label inside a clickable
+        // row (a layer's name) would take the row's clicks and drags.
+        style.interaction.selectable_labels = false;
     });
 }
 

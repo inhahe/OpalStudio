@@ -49,7 +49,11 @@ impl CanvasPrefs {
             wheel_step: (p.f64("nav.wheel_step") / 100.0) as f32,
             sharper: p.choice("canvas.zoomed_out") == "sharper",
             sharp_from: (p.f64("canvas.sharp_from") / 100.0) as f32,
-            off_canvas: (p.f64("canvas.off_canvas") / 100.0) as f32,
+            off_canvas: if p.bool("canvas.off_canvas_shown") {
+                (p.f64("canvas.off_canvas") / 100.0) as f32
+            } else {
+                0.0
+            },
             checker_size: p.f64("canvas.checker_size") as f32,
             checker_a: p.color("canvas.checker_a"),
             checker_b: p.color("canvas.checker_b"),

@@ -55,7 +55,7 @@ impl IdGen {
                 }
             }
         });
-        self.next = self.next.max(max + 1);
+        self.next = self.next.max(max.saturating_add(1));
     }
 
     /// The next identifier that will be handed out (for saving).
@@ -103,7 +103,7 @@ pub struct Layer {
     pub id: LayerId,
     pub name: String,
     pub visible: bool,
-    /// A locked layer cannot be painted on, moved or deleted.
+    /// A locked layer cannot be changed, merged or deleted (it can still be reordered).
     pub locked: bool,
     /// 0–1.
     pub opacity: f32,

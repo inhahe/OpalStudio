@@ -36,6 +36,23 @@ edits grows without limit. The design's history memory budget is not implemented
 bytes each state alone holds and drop the oldest states beyond the budget set in the
 preferences.
 
+## Exporting and saving hold whole copies of the image in memory
+
+`crates/opal-io/src/image_files.rs` (`export`) flattens the canvas into one buffer, converts
+it to another, and hands that to the encoder; `native.rs` (`save`) shuffles every tile into
+memory before writing, and compresses them one at a time. A very large canvas therefore
+needs several times its size in memory to export, which is why the New Image dialog stops at
+30,000 pixels a side. **Fix:** stream exports row by row into the PNG and JPEG encoders, and
+compress tiles in parallel while writing them as they are produced.
+
+## Panning a zoomed-out view recomputes the cache keys of every tile in view
+
+`crates/opal-core/src/composite.rs` (`Projection::update`). An unchanged view of an unchanged
+document costs nothing, but each frame of panning walks every tile of every layer and
+rebuilds the key of every level-0 tile under the view, which for a huge canvas shown whole
+is a lot of work per frame. **Fix:** keep the set of occupied tiles per layer up to date
+incrementally, and skip key rebuilding for tiles whose layers did not change.
+
 ## GPU memory is only reported on Windows
 
 `crates/opal-app/src/gpu_memory.rs`. **Fix:** query `VK_EXT_memory_budget` through wgpu's

@@ -113,9 +113,10 @@ pub fn occupied_tiles(layers: &[Arc<Layer>], range: Option<&IRect>) -> HashSet<T
     out
 }
 
-/// Composites every tile `layers` occupy into one bitmap (for merging and flattening).
-pub fn composite_all(layers: &[Arc<Layer>]) -> RasterImage {
-    let coords: Vec<TileCoord> = occupied_tiles(layers, None).into_iter().collect();
+/// Composites every tile `layers` occupy within `range` (everywhere when `None`) into one
+/// bitmap, in parallel.
+fn composite_region(layers: &[Arc<Layer>], range: Option<&IRect>) -> RasterImage {
+    let coords: Vec<TileCoord> = occupied_tiles(layers, range).into_iter().collect();
     let tiles: Vec<(TileCoord, Option<Tile>)> = coords.par_iter().map(|&c| (c, composite_tile(layers, c))).collect();
     let mut img = RasterImage::new();
     for (c, t) in tiles {
@@ -124,15 +125,14 @@ pub fn composite_all(layers: &[Arc<Layer>]) -> RasterImage {
     img
 }
 
+/// Composites every tile `layers` occupy into one bitmap (for merging and flattening).
+pub fn composite_all(layers: &[Arc<Layer>]) -> RasterImage {
+    composite_region(layers, None)
+}
+
 /// The composite of `layers` over `rect`, as a row-major buffer (for exporting).
 pub fn flatten(layers: &[Arc<Layer>], rect: &IRect) -> Vec<Pixel> {
-    let coords: Vec<TileCoord> = occupied_tiles(layers, Some(rect)).into_iter().collect();
-    let tiles: Vec<(TileCoord, Option<Tile>)> = coords.par_iter().map(|&c| (c, composite_tile(layers, c))).collect();
-    let mut img = RasterImage::new();
-    for (c, t) in tiles {
-        img.set_tile(c, t.map(Arc::new));
-    }
-    img.read_rect(rect)
+    composite_region(layers, Some(rect)).read_rect(rect)
 }
 
 /// Halves four tiles (top-left, top-right, bottom-left, bottom-right) into one, averaging
@@ -217,6 +217,22 @@ fn key_into(layers: &[Arc<Layer>], c: TileCoord, out: &mut Vec<Token>) -> bool {
     any
 }
 
+/// The source tile, if `tokens` describe exactly one tile from one layer at full opacity
+/// (perhaps inside groups at full opacity): the composite is then that tile unchanged.
+fn lone_source(tokens: &[Token]) -> Option<&Arc<Tile>> {
+    let full = 1.0f32.to_bits();
+    let mut tile = None;
+    for t in tokens {
+        match t {
+            Token::Layer(o) | Token::Group(o) if *o != full => return None,
+            Token::Tile(_) if tile.is_some() => return None,
+            Token::Tile(t) => tile = Some(t),
+            _ => {}
+        }
+    }
+    tile
+}
+
 #[derive(Clone, Debug)]
 enum Key {
     Base(Vec<Token>),
@@ -248,6 +264,18 @@ struct Entry {
 #[derive(Default, Debug)]
 pub struct Projection {
     levels: Vec<HashMap<TileCoord, Entry>>,
+    last: Option<LastUpdate>,
+}
+
+/// What the last [`Projection::update`] was asked and answered, so that asking the same again
+/// (an unchanged document in an unchanged view) costs nothing.
+#[derive(Debug)]
+struct LastUpdate {
+    /// The top-level layers, held so a replaced layer cannot reuse an old address.
+    layers: Vec<Arc<Layer>>,
+    level: u32,
+    rect: IRect,
+    result: Vec<(TileCoord, Arc<Tile>)>,
 }
 
 /// The highest pyramid level kept (a tile then covers 256 × 2^16 pixels).
@@ -263,6 +291,15 @@ impl Projection {
     /// have content.
     pub fn update(&mut self, layers: &[Arc<Layer>], level: u32, rect: &IRect) -> Vec<(TileCoord, Arc<Tile>)> {
         let level = level.min(MAX_LEVEL);
+        // Any change below the top level replaces the top-level layer holding it.
+        if let Some(last) = &self.last
+            && last.level == level
+            && last.rect == *rect
+            && last.layers.len() == layers.len()
+            && last.layers.iter().zip(layers).all(|(a, b)| Arc::ptr_eq(a, b))
+        {
+            return last.result.clone();
+        }
         while self.levels.len() <= level as usize {
             self.levels.push(HashMap::new());
         }
@@ -281,7 +318,10 @@ impl Projection {
             self.update_pyramid(l, &coords, &outer);
         }
         let top = &self.levels[level as usize];
-        coords.iter().filter_map(|c| top.get(c).and_then(|e| e.tile.clone()).map(|t| (*c, t))).collect()
+        let result: Vec<(TileCoord, Arc<Tile>)> =
+            coords.iter().filter_map(|c| top.get(c).and_then(|e| e.tile.clone()).map(|t| (*c, t))).collect();
+        self.last = Some(LastUpdate { layers: layers.to_vec(), level, rect: *rect, result: result.clone() });
+        result
     }
 
     /// The cached tile at `level` and `c` as of the last [`update`](Self::update) that
@@ -305,7 +345,16 @@ impl Projection {
         }
         let done: Vec<(TileCoord, Entry)> = stale
             .into_par_iter()
-            .map(|(c, key)| (c, Entry { key, tile: composite_tile(layers, c).map(Arc::new) }))
+            .map(|(c, key)| {
+                let Key::Base(tokens) = &key else { unreachable!() };
+                // A tile that one layer at full opacity supplies alone is shown as it is,
+                // without a copy.
+                let tile = match lone_source(tokens) {
+                    Some(t) => Some(t.clone()),
+                    None => composite_tile(layers, c).map(Arc::new),
+                };
+                (c, Entry { key, tile })
+            })
             .collect();
         cache.extend(done);
     }
@@ -323,15 +372,26 @@ impl Projection {
                 stale.push((c, key));
             }
         }
-        let done: Vec<(TileCoord, Entry)> = stale
+        // Tiles with the same four children (a uniform image is full of them) are reduced
+        // once and share the result.
+        let ptr = |t: &Option<Arc<Tile>>| t.as_ref().map_or(0, |t| Arc::as_ptr(t) as usize);
+        let mut unique: HashMap<[usize; 4], [Option<Arc<Tile>>; 4]> = HashMap::new();
+        for (_, key) in &stale {
+            let Key::Pyramid(kids) = key else { unreachable!() };
+            unique.entry(kids.each_ref().map(ptr)).or_insert_with(|| kids.clone());
+        }
+        let reduced: HashMap<[usize; 4], Option<Arc<Tile>>> = unique
             .into_par_iter()
-            .map(|(c, key)| {
-                let Key::Pyramid(kids) = &key else { unreachable!() };
+            .map(|(k, kids)| {
                 let tile = downsample([kids[0].as_ref(), kids[1].as_ref(), kids[2].as_ref(), kids[3].as_ref()]);
-                (c, Entry { tile: tile.map(Arc::new), key })
+                (k, tile.map(Arc::new))
             })
             .collect();
-        cache.extend(done);
+        for (c, key) in stale {
+            let Key::Pyramid(kids) = &key else { unreachable!() };
+            let tile = reduced[&kids.each_ref().map(ptr)].clone();
+            cache.insert(c, Entry { tile, key });
+        }
     }
 }
 
@@ -462,5 +522,35 @@ mod tests {
         assert_eq!(*c, TileCoord::new(0, 0));
         assert!(close(pixel_to_f32(t.get(0, 0)), [0.5; 4]));
         assert!(close(pixel_to_f32(t.get(255, 255)), [0.5; 4]));
+    }
+
+    #[test]
+    fn a_lone_opaque_layer_s_tiles_are_shown_without_copies() {
+        let mut ids = IdGen::default();
+        let mut d = Document::new(600, 300);
+        let l = add(&mut d, &mut ids, solid(IRect::from_size(600, 300), [0.2, 0.4, 0.6, 1.0]));
+        let mut p = Projection::new();
+        let shown = p.update(&d.layers, 0, &IRect::from_size(600, 300));
+        let src = d.layer(l).unwrap().rasters().next().unwrap().clone();
+        for (c, t) in shown {
+            assert!(Arc::ptr_eq(&t, src.tile(c).unwrap()), "tile {c:?} was copied");
+        }
+    }
+
+    #[test]
+    fn identical_children_share_one_reduced_tile() {
+        // A uniform image: every full tile is the same Arc, and so is every reduction of it.
+        let mut ids = IdGen::default();
+        let mut d = Document::new(2048, 2048);
+        let full = Arc::new(Tile::filled(pixel_from_f32([1.0; 4])));
+        let mut img = RasterImage::new();
+        for c in TileCoord::covering(&IRect::from_size(2048, 2048), 0) {
+            img.set_tile(c, Some(full.clone()));
+        }
+        add(&mut d, &mut ids, img);
+        let mut p = Projection::new();
+        let shown = p.update(&d.layers, 1, &IRect::from_size(2048, 2048));
+        assert_eq!(shown.len(), 16);
+        assert!(shown.iter().all(|(_, t)| Arc::ptr_eq(t, &shown[0].1)), "each reduced tile was computed separately");
     }
 }

@@ -80,6 +80,7 @@ fn single_line(st: &AppState) -> bool {
 /// Draws the ribbon.
 pub fn ribbon_ui(ui: &mut egui::Ui, st: &mut AppState) {
     st.ribbon.hovered = None;
+    st.ribbon.hovered_tool = None;
     st.ribbon.hovered_group = None;
     let tabs = tab_keytips();
     tab_row(ui, st, &tabs);
@@ -171,20 +172,30 @@ fn tab_row(ui: &mut egui::Ui, st: &mut AppState, keys: &[char]) {
 }
 
 /// The width a group needs at a stage.
-fn group_width(ui: &egui::Ui, g: &Group, stage: Stage) -> f32 {
+/// The width a group needs at a stage. `single` is the single-line ribbon, where small
+/// buttons sit in one row and groups have no label underneath.
+fn group_width(ui: &egui::Ui, g: &Group, stage: Stage, single: bool) -> f32 {
     let font = FontId::proportional(13.0);
     let text_w = |s: &str| ui.painter().layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE).size().x;
-    let label_w = text_w(g.name) + 26.0;
-    let content = match stage {
-        Stage::Large => {
+    let content = match (stage, single) {
+        (Stage::Large, _) => {
             let large: f32 = g.cmds[..g.large].iter().map(|c| large_width(ui, c.info().name)).sum();
             large + small_columns(ui, &g.cmds[g.large..])
         }
-        Stage::Small => small_columns(ui, g.cmds),
-        Stage::IconsOnly => g.cmds.len() as f32 * (SMALL_H + 6.0),
-        Stage::Collapsed => large_width(ui, g.name),
+        (Stage::Small, true) => g.cmds.iter().map(|c| small_width(ui, c.info().name)).sum(),
+        (Stage::Small, false) => small_columns(ui, g.cmds),
+        (Stage::IconsOnly, _) => g.cmds.len() as f32 * (SMALL_H + 6.0),
+        (Stage::Collapsed, true) => collapsed_single_width(ui, g),
+        (Stage::Collapsed, false) => large_width(ui, g.name),
     };
-    content.max(if stage == Stage::IconsOnly { 0.0 } else { label_w }) + GROUP_PAD * 2.0
+    let label_w = if single { 0.0 } else { text_w(g.name) + 26.0 };
+    content.max(label_w) + GROUP_PAD * 2.0
+}
+
+/// The width of a collapsed group's button in the single-line ribbon: icon, name and arrow.
+fn collapsed_single_width(ui: &egui::Ui, g: &Group) -> f32 {
+    let font = FontId::proportional(13.0);
+    ui.painter().layout_no_wrap(g.name.to_owned(), font, Color32::WHITE).size().x + 56.0
 }
 
 fn large_width(ui: &egui::Ui, name: &str) -> f32 {
@@ -226,8 +237,9 @@ fn stages(ui: &egui::Ui, groups: &[Group], width: f32, single: bool) -> Vec<Stag
         &[Stage::Large, Stage::Small, Stage::Collapsed]
     };
     let mut level = vec![0usize; groups.len()];
-    let total =
-        |level: &[usize]| -> f32 { groups.iter().zip(level).map(|(g, &l)| group_width(ui, g, ladder[l]) + 4.0).sum() };
+    let total = |level: &[usize]| -> f32 {
+        groups.iter().zip(level).map(|(g, &l)| group_width(ui, g, ladder[l], single) + 4.0).sum()
+    };
     'shrink: while total(&level) > width {
         for i in (0..groups.len()).rev() {
             if level[i] + 1 < ladder.len() {
@@ -247,7 +259,7 @@ fn groups(ui: &mut egui::Ui, st: &mut AppState, tab: usize, area: Rect, single: 
     let key_of = |cmd: Cmd| keys.iter().find(|(c, _)| *c == cmd).map(|(_, k)| *k);
     let mut x = area.left();
     for (gi, (g, stage)) in gs.iter().zip(stages).enumerate() {
-        let w = group_width(ui, g, stage);
+        let w = group_width(ui, g, stage, single);
         let rect = Rect::from_min_max(Pos2::new(x, area.top()), Pos2::new((x + w).min(area.right()), area.bottom()));
         if ui.rect_contains_pointer(rect) {
             st.ribbon.hovered_group = Some((tab, gi));
@@ -263,10 +275,8 @@ fn groups(ui: &mut egui::Ui, st: &mut AppState, tab: usize, area: Rect, single: 
         let mut cx = content.left();
         match stage {
             Stage::Collapsed => {
-                let b = Rect::from_min_size(
-                    Pos2::new(cx, content.top()),
-                    Vec2::new(large_width(ui, g.name), content.height()),
-                );
+                let bw = if single { collapsed_single_width(ui, g) } else { large_width(ui, g.name) };
+                let b = Rect::from_min_size(Pos2::new(cx, content.top()), Vec2::new(bw, content.height()));
                 collapsed_group(ui, st, tab, gi, g, b, single);
             }
             Stage::Large | Stage::Small => {
@@ -528,9 +538,6 @@ pub fn tool_button(ui: &mut egui::Ui, st: &mut AppState, t: ToolId, rect: Rect) 
         FontId::new(19.0, icon_family()),
         st.palette.strong_text,
     );
-    if st.ribbon.keytips == Keytips::Tabs {
-        keytip(ui, st, rect.center_bottom(), key_char(info.key));
-    }
     let r = r.on_hover_ui(|ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(info.name).strong());
@@ -539,8 +546,8 @@ pub fn tool_button(ui: &mut egui::Ui, st: &mut AppState, t: ToolId, rect: Rect) 
         ui.label(info.description);
         ui.label(RichText::new("F1: more help").small().color(st.palette.weak_text));
     });
-    if r.hovered() && ui.input(|i| i.key_pressed(egui::Key::F1)) {
-        st.help = Some(HelpTopic::Tools);
+    if r.hovered() {
+        st.ribbon.hovered_tool = Some(t);
     }
     if r.clicked() {
         st.tool = t;

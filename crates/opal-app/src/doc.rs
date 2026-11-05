@@ -112,6 +112,8 @@ pub struct DocState {
     pub expanded: HashSet<LayerId>,
     pub view: View,
     pub projection: Projection,
+    /// Counts every change to what the document shows (for repainting).
+    pub revision: u64,
 }
 
 impl DocState {
@@ -130,7 +132,16 @@ impl DocState {
             expanded: HashSet::new(),
             view: View::default(),
             projection: Projection::new(),
+            revision: 0,
         }
+    }
+
+    /// The name to suggest for files made from this document: the title without any
+    /// extension ("photo" for an imported photo.jpg).
+    pub fn stem(&self) -> String {
+        std::path::Path::new(&self.title)
+            .file_stem()
+            .map_or_else(|| self.title.clone(), |s| s.to_string_lossy().into_owned())
     }
 
     /// The document as shown: the pending edit if there is one, else the current state.
@@ -159,6 +170,7 @@ impl DocState {
         let mut d = before.clone();
         f(&mut d, &mut self.ids)?;
         self.history.commit(d, label);
+        self.revision += 1;
         self.fix_active_layer(Some(&before));
         Ok(())
     }
@@ -169,12 +181,14 @@ impl DocState {
         let p =
             self.pending.get_or_insert_with(|| Pending { doc: self.history.doc().clone(), label: label.to_owned() });
         f(&mut p.doc);
+        self.revision += 1;
     }
 
     /// Commits the pending edit, if any, as one history state.
     pub fn commit_pending(&mut self) {
         if let Some(p) = self.pending.take() {
             self.history.commit(p.doc, p.label);
+            self.revision += 1;
         }
     }
 
@@ -183,6 +197,7 @@ impl DocState {
         let before = self.history.doc().clone();
         let moved = self.history.undo();
         if moved {
+            self.revision += 1;
             self.fix_active_layer(Some(&before));
         }
         moved
@@ -193,6 +208,7 @@ impl DocState {
         let before = self.history.doc().clone();
         let moved = self.history.redo();
         if moved {
+            self.revision += 1;
             self.fix_active_layer(Some(&before));
         }
         moved
@@ -202,6 +218,7 @@ impl DocState {
         self.commit_pending();
         let before = self.history.doc().clone();
         self.history.goto(node);
+        self.revision += 1;
         self.fix_active_layer(Some(&before));
     }
 

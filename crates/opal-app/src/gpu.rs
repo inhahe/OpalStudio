@@ -186,7 +186,7 @@ pub struct CanvasCallback {
 type TileKey = (u64, u32, TileCoord);
 
 struct GpuTile {
-    _texture: wgpu::Texture,
+    texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     sources: [Option<Arc<Tile>>; 9],
     last_used: u64,
@@ -198,6 +198,7 @@ struct ViewGpu {
     instances: wgpu::Buffer,
     capacity: usize,
     drawn: Vec<TileKey>,
+    last_used: u64,
 }
 
 /// The renderer's GPU objects, kept in egui-wgpu's callback resources.
@@ -350,31 +351,36 @@ impl CanvasRenderer {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let data = with_border(sources);
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&data),
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(TEX * 8), rows_per_image: Some(TEX) },
-            wgpu::Extent3d { width: TEX, height: TEX, depth_or_array_layers: 1 },
-        );
+        write_tile(queue, &texture, sources);
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("canvas tile"),
             layout: &self.tex_bgl,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }],
         });
-        GpuTile { _texture: texture, bind_group, sources: sources.clone(), last_used: self.frame }
+        GpuTile { texture, bind_group, sources: sources.clone(), last_used: self.frame }
     }
 
     /// How many tile textures are held (for diagnostics).
     pub fn texture_count(&self) -> usize {
         self.tiles.len()
     }
+}
+
+/// Writes the tile `sources[4]`, with its border, into `texture`.
+fn write_tile(queue: &wgpu::Queue, texture: &wgpu::Texture, sources: &[Option<Arc<Tile>>; 9]) {
+    let data = with_border(sources);
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::cast_slice(&data),
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(TEX * 8), rows_per_image: Some(TEX) },
+        wgpu::Extent3d { width: TEX, height: TEX, depth_or_array_layers: 1 },
+    );
 }
 
 /// The tile `sources[4]` with a one-pixel border from its neighbors (transparent where a
@@ -427,13 +433,19 @@ impl CallbackTrait for CanvasCallback {
         let mut instances: Vec<[f32; 4]> = Vec::with_capacity(self.tiles.len());
         for t in &self.tiles {
             let key = (self.view_key, self.level, t.coord);
-            let fresh = r.tiles.get(&key).is_some_and(|g| same_sources(&g.sources, &t.sources));
-            if !fresh {
-                let g = r.upload(device, queue, &t.sources);
-                r.tiles.insert(key, g);
-            }
-            if let Some(g) = r.tiles.get_mut(&key) {
-                g.last_used = frame;
+            match r.tiles.get_mut(&key) {
+                Some(g) => {
+                    // A changed tile is rewritten into the texture it already has.
+                    if !same_sources(&g.sources, &t.sources) {
+                        write_tile(queue, &g.texture, &t.sources);
+                        g.sources = t.sources.clone();
+                    }
+                    g.last_used = frame;
+                }
+                None => {
+                    let g = r.upload(device, queue, &t.sources);
+                    r.tiles.insert(key, g);
+                }
             }
             drawn.push(key);
             instances.push(t.rect);
@@ -461,7 +473,7 @@ impl CallbackTrait for CanvasCallback {
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            ViewGpu { uniform, uniform_bg, instances, capacity, drawn: Vec::new() }
+            ViewGpu { uniform, uniform_bg, instances, capacity, drawn: Vec::new(), last_used: frame }
         };
         let too_small = r.views.get(&self.view_key).is_none_or(|v| v.capacity < needed);
         if too_small {
@@ -474,6 +486,9 @@ impl CallbackTrait for CanvasCallback {
             queue.write_buffer(&v.instances, 0, bytemuck::cast_slice(&instances));
         }
         v.drawn = drawn;
+        v.last_used = frame;
+        // A closed document's view is drawn no more; let its buffers go.
+        r.views.retain(|_, v| v.last_used + EVICT_AFTER > frame);
         Vec::new()
     }
 

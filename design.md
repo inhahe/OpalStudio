@@ -271,11 +271,12 @@ pages are all generated from it, so a command looks and behaves the same everywh
 - **Tooltips**, not text on the ribbon, carry the details: name, shortcut, the one-line
   description, and for a disabled command the reason. The hover delay is adjustable, and
   tooltips can be turned off.
-- **Help:** F1 while hovering a button opens the built-in help page for its group, at that
-  button. A small ? appears while the pointer is over a group's label and opens the same
+- **Help:** F1 while hovering a command anywhere (ribbon, panel, menu) opens the built-in
+  help page for its group, at that button; over a tool, the Tools page. A small ? appears while the pointer is over a group's label and opens the same
   page. Help pages ship with the application and work offline.
 - **Keytips:** pressing Alt shows a letter on every tab and button, so everything can be
-  reached from the keyboard without memorized shortcuts.
+  reached from the keyboard without memorized shortcuts. Tools get none: their own single
+  keys (H, Z) already work without Alt.
 - **Command search:** a search box at the ribbon's right end finds any command by name.
 - **Sizes:** full (icons and labels) or a single line. As the window narrows, groups shrink
   in steps: large buttons become small ones, then a whole group collapses into a dropdown.
@@ -325,6 +326,8 @@ curve editors.
 ### Merging and rasterizing
 
 - **Merge Down** and **Flatten Image** bake layers into one pixel layer (built).
+- **Locks:** a locked layer cannot be changed, merged or deleted, and neither can a group
+  with a locked layer inside; locked layers can still be moved up and down the stack.
 - **Merge Selected**, **Merge Visible**, **Merge Group**, and **Stamp Visible**: a new layer
   holding everything visible merged, the originals kept, for retouching on a flat copy.
 - **Rasterize Layer** turns a layer's editable content (a transformed pasted image, shapes,
@@ -728,8 +731,11 @@ replaces it only when complete, so a failed save never damages the existing file
 Preferences, tool settings and tool presets are kept in `settings.json` in the per-user
 configuration folder (`%APPDATA%\Opal Studio\config` on Windows). Only values changed from
 their defaults are written, so a default changed in a later version reaches everyone who
-never changed it; unknown or invalid entries are skipped when loading. Changes are written
-a second after the last one, and on exit.
+never changed it. Loading reads entry by entry: an unknown or unreadable entry (one written
+by a newer version, say) is skipped and the rest still load. A file that cannot be read at
+all is kept aside as `settings.json.unreadable` rather than overwritten. Changes are written
+a second after the last one, and on exit if any are still unwritten, by the same
+replace-when-complete write as documents.
 
 ## Out of scope
 

@@ -254,7 +254,9 @@ impl Cmd {
                 "Lock/Unlock Layer",
                 icons::LOCK,
                 "Protect the active layer from changes.",
-                "A locked layer cannot be painted on, moved, merged or deleted until unlocked.",
+                "A locked layer cannot be painted on, changed, merged or deleted until it is \
+                 unlocked, and neither can a group with a locked layer inside. It can still be \
+                 moved up and down the stack.",
                 &[],
             ),
             Cmd::Rename => i(
@@ -505,8 +507,13 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
     match cmd {
         New | Open | Preferences | Exit | ToggleOffCanvas | ToggleTheme | ToggleRibbon | CycleToolsPlace
         | ResetPanels | Search | Help | Shortcuts | About | WidgetGallery => Ok(()),
-        Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup | Flatten => {
-            needs_doc()
+        Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup => needs_doc(),
+        Flatten => {
+            let d = st.active().ok_or("Open or create an image first.")?;
+            match d.doc().layers.iter().find_map(|l| first_locked(l)) {
+                Some(l) => Err(format!("\"{}\" is locked. Unlock it first.", l.name)),
+                None => Ok(()),
+            }
         }
         Undo => {
             let d = st.active().ok_or("Open or create an image first.")?;
@@ -521,10 +528,10 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             }
         }
         Duplicate | ToggleVisible | ToggleLock | Rename => active_layer(st).map(|_| ()),
-        DeleteLayer => {
-            let l = active_layer(st)?;
-            if l.locked { Err(format!("\"{}\" is locked. Unlock it first.", l.name)) } else { Ok(()) }
-        }
+        DeleteLayer => match first_locked(active_layer(st)?) {
+            Some(l) => Err(format!("\"{}\" is locked. Unlock it first.", l.name)),
+            None => Ok(()),
+        },
         MoveUp | MoveDown => {
             let d = st.active().ok_or("Open or create an image first.")?;
             let l = active_layer(st)?;
@@ -551,13 +558,21 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
                 ))
             } else if !l.visible || !below.visible {
                 Err("Both layers must be visible to merge them.".into())
-            } else if l.locked || below.locked {
-                Err("One of the layers is locked. Unlock it first.".into())
+            } else if let Some(locked) = first_locked(l).or(first_locked(below)) {
+                Err(format!("\"{}\" is locked. Unlock it first.", locked.name))
             } else {
                 Ok(())
             }
         }
     }
+}
+
+/// The layer itself if it is locked, or else the first locked layer inside it.
+fn first_locked(layer: &opal_core::document::Layer) -> Option<&opal_core::document::Layer> {
+    if layer.locked {
+        return Some(layer);
+    }
+    layer.children()?.iter().find_map(|c| first_locked(c))
 }
 
 fn active_layer(st: &AppState) -> Result<&opal_core::document::Layer, String> {
@@ -569,7 +584,7 @@ fn active_layer(st: &AppState) -> Result<&opal_core::document::Layer, String> {
 /// For toggle commands, whether the toggle is on.
 pub fn checked(st: &AppState, cmd: Cmd) -> Option<bool> {
     match cmd {
-        Cmd::ToggleOffCanvas => Some(st.prefs.f64("canvas.off_canvas") > 0.0),
+        Cmd::ToggleOffCanvas => Some(st.prefs.bool("canvas.off_canvas_shown")),
         Cmd::ToggleTheme => Some(!st.palette.dark),
         Cmd::ToggleRibbon => Some(st.prefs.choice("ui.ribbon") == "single"),
         Cmd::ToggleVisible => active_layer(st).ok().map(|l| !l.visible),

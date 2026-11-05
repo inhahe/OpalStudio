@@ -45,6 +45,9 @@ pub fn menu_command(ui: &mut egui::Ui, st: &mut AppState, cmd: Cmd) {
     } else {
         r.on_disabled_hover_ui(|ui| command_tooltip(ui, st, cmd))
     };
+    if r.hovered() {
+        st.ribbon.hovered = Some(cmd);
+    }
     if r.clicked() {
         st.queue.push(cmd);
         ui.close();

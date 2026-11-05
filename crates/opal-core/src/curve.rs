@@ -24,12 +24,36 @@ pub enum Interpolation {
 pub const MIN_GAP: f64 = 1e-3;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "CurveData")]
 pub struct Curve {
     /// Sorted by `x`, at least [`MIN_GAP`] apart; both coordinates in 0–1 (for a periodic
     /// curve, `x` in 0–1 exclusive of 1). Never empty.
     points: Vec<[f64; 2]>,
     pub interpolation: Interpolation,
     periodic: bool,
+}
+
+/// A curve as stored, checked before it becomes a [`Curve`].
+#[derive(Deserialize)]
+struct CurveData {
+    points: Vec<[f64; 2]>,
+    interpolation: Interpolation,
+    periodic: bool,
+}
+
+impl TryFrom<CurveData> for Curve {
+    type Error = String;
+
+    fn try_from(d: CurveData) -> Result<Curve, String> {
+        if d.points.is_empty() {
+            return Err("a curve needs at least one point".into());
+        }
+        if d.points.iter().flatten().any(|v| !v.is_finite()) {
+            return Err("a curve's points must be finite numbers".into());
+        }
+        // Sorts, spaces and clamps the points as any new curve's are.
+        Ok(Curve::new(&d.points, d.interpolation, d.periodic))
+    }
 }
 
 impl Curve {
@@ -106,8 +130,9 @@ impl Curve {
         true
     }
 
-    /// The curve's value at `x`.
+    /// The curve's value at `x` (at 0 when `x` is not a number).
     pub fn eval(&self, x: f64) -> f64 {
+        let x = if x.is_nan() { 0.0 } else { x };
         let pts = self.extended();
         let x = if self.periodic { x.rem_euclid(1.0) } else { x };
         let n = pts.len();
@@ -258,5 +283,15 @@ mod tests {
         assert!(c.remove(0) && c.remove(0));
         assert!(!c.remove(0), "the last point stays");
         assert_eq!(c.eval(0.3), 1.0);
+    }
+
+    #[test]
+    fn evaluating_at_nan_does_not_panic() {
+        for interp in [Interpolation::Linear, Interpolation::Smooth, Interpolation::Spline] {
+            let c = Curve::new(&[[0.2, 0.3], [0.8, 0.9]], interp, false);
+            assert!((0.0..=1.0).contains(&c.eval(f64::NAN)));
+        }
+        let periodic = Curve::new(&[[0.2, 0.3], [0.8, 0.9]], Interpolation::Smooth, true);
+        assert!((0.0..=1.0).contains(&periodic.eval(f64::NAN)));
     }
 }

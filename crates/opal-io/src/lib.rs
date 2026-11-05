@@ -38,7 +38,7 @@ impl IoError {
 /// Writes a file by calling `write` on a temporary file in the same directory, then
 /// renaming it over `path`. On any error the temporary file is removed and `path` is left
 /// as it was.
-pub(crate) fn write_atomically(
+pub fn write_atomically(
     path: &Path,
     write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<(), IoError>,
 ) -> Result<(), IoError> {
@@ -66,7 +66,7 @@ pub(crate) fn write_atomically(
 }
 
 /// `std::io::Write` errors reported against `path`.
-pub(crate) fn write_all(out: &mut impl Write, bytes: &[u8], path: &Path) -> Result<(), IoError> {
+pub fn write_all(out: &mut impl Write, bytes: &[u8], path: &Path) -> Result<(), IoError> {
     out.write_all(bytes).map_err(|e| IoError::io(path, e))
 }
 

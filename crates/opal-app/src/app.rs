@@ -56,6 +56,8 @@ impl OpalApp {
 
     fn create(cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>, persist: bool) -> OpalApp {
         theme::install_fonts(&cc.egui_ctx);
+        // Ctrl+Plus and Ctrl+Minus zoom the canvas; the interface's size is a preference.
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let mut st = AppState::new();
         if persist {
             config::load(&mut st);
@@ -86,6 +88,41 @@ impl OpalApp {
     #[cfg(test)]
     pub fn state_mut(&mut self) -> &mut AppState {
         &mut self.st
+    }
+
+    /// The documents whose tabs are showing, for tests.
+    #[cfg(test)]
+    pub fn shown_docs(&self) -> Vec<DocId> {
+        shown_docs(&self.tree.tiles)
+    }
+
+    /// Sets the share of the root container's first child (the documents), for tests;
+    /// returns it.
+    #[cfg(test)]
+    pub fn set_root_share(&mut self, share: f32) -> f32 {
+        let root = self.tree.root().expect("the tree has a root");
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(l))) = self.tree.tiles.get_mut(root) else {
+            panic!("the root is a row")
+        };
+        let first = l.children[0];
+        l.shares.set_share(first, share);
+        share
+    }
+
+    /// The share of the root container's first child, for tests.
+    #[cfg(test)]
+    pub fn root_share(&self) -> f32 {
+        let root = self.tree.root().expect("the tree has a root");
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(l))) = self.tree.tiles.get(root) else {
+            panic!("the root is a row")
+        };
+        l.shares[l.children[0]]
+    }
+
+    /// Whether the start page is in the panel tree, for tests.
+    #[cfg(test)]
+    pub fn shows_welcome(&self) -> bool {
+        self.tree.tiles.find_pane(&Pane::Welcome).is_some()
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
@@ -119,11 +156,9 @@ impl OpalApp {
         if typing {
             return;
         }
-        for cmd in Cmd::ALL {
-            for s in cmd.info().shortcuts {
-                if ctx.input_mut(|i| i.consume_shortcut(s)) {
-                    self.st.queue.push(cmd);
-                }
+        for (s, cmd) in shortcuts_most_specific_first() {
+            if ctx.input_mut(|i| i.consume_shortcut(&s)) {
+                self.st.queue.push(cmd);
             }
         }
         for t in ToolId::ALL {
@@ -170,9 +205,6 @@ impl OpalApp {
                     if let Some(t) = tab_keytips().iter().position(|&k| k == c) {
                         self.st.ribbon.tab = t;
                         self.st.ribbon.keytips = Keytips::Buttons(t);
-                    } else if let Some(tool) = ToolId::ALL.into_iter().find(|t| ribbon::key_char(t.info().key) == c) {
-                        self.st.tool = tool;
-                        self.st.ribbon.keytips = Keytips::Off;
                     } else {
                         self.st.ribbon.keytips = Keytips::Off;
                     }
@@ -238,47 +270,60 @@ impl OpalApp {
 
     /// Adds tabs for newly opened documents and shows the start page when none is open.
     fn sync_panes(&mut self) {
+        // A closed document's pane is still in the tree until the next frame drops it (see
+        // `retain_pane`), so the documents' container can still be found through it now.
+        let anchor = find_docs_container(&self.tree.tiles);
         let tiles = &mut self.tree.tiles;
-        let anchor = find_docs_container(tiles);
         for id in std::mem::take(&mut self.st.opened) {
             let pane = tiles.insert_pane(Pane::Document(id));
             match anchor.and_then(|a| tiles.get_mut(a)) {
-                Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) => {
-                    tabs.add_child(pane);
-                    tabs.set_active(pane);
-                }
+                Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) => tabs.add_child(pane),
                 _ => {
                     self.tree = default_tree(&self.st);
                     return;
                 }
             }
         }
-        self.st.closed.clear();
-        let has_doc = tiles.iter().any(|(_, t)| matches!(t, egui_tiles::Tile::Pane(Pane::Document(_))));
+        // The start page is shown exactly when no image is open.
         let welcome = tiles.find_pane(&Pane::Welcome);
-        match (has_doc, welcome) {
-            (true, Some(w)) => {
-                tiles.remove(w);
+        match (self.st.docs.is_empty(), welcome) {
+            (false, Some(w)) => {
                 if let Some(parent) = tiles.parent_of(w)
                     && let Some(egui_tiles::Tile::Container(c)) = tiles.get_mut(parent)
                 {
                     c.remove_child(w);
                 }
+                tiles.remove(w);
             }
-            (false, None) => {
+            (true, None) => {
                 let pane = tiles.insert_pane(Pane::Welcome);
                 match anchor.and_then(|a| tiles.get_mut(a)) {
-                    Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) => tabs.add_child(pane),
+                    Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) => {
+                        tabs.add_child(pane);
+                        tabs.set_active(pane);
+                    }
                     _ => self.tree = default_tree(&self.st),
                 }
             }
             _ => {}
         }
+        // The active document is the one on screen: a document a command made active has
+        // its tab brought to the front; otherwise, if the tab shown changed some other way,
+        // the active document follows it.
+        let reveal = std::mem::take(&mut self.st.reveal);
+        let shown = shown_docs(&self.tree.tiles);
+        if let Some(id) = reveal.filter(|id| self.st.doc(*id).is_some()) {
+            show_pane(&mut self.tree.tiles, Pane::Document(id));
+        } else if self.st.active_doc.is_none_or(|a| !shown.contains(&a))
+            && let Some(&first) = shown.iter().find(|id| self.st.doc(**id).is_some())
+        {
+            self.st.active_doc = Some(first);
+        }
     }
 
     /// A digest of everything the window shows that can change without input: the
     /// documents and their views, the settings, the tool, the open windows.
-    fn signature(&self) -> u64 {
+    pub(crate) fn signature(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let st = &self.st;
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -296,6 +341,7 @@ impl OpalApp {
             d.view.offset.y.to_bits().hash(&mut h);
             d.title.hash(&mut h);
             d.saved_at.hash(&mut h);
+            d.revision.hash(&mut h);
         }
         st.active_doc.hash(&mut h);
         st.prefs.revision().hash(&mut h);
@@ -357,6 +403,11 @@ impl eframe::App for OpalApp {
         // The scheme can change under us when following the system's.
         self.st.palette = theme::palette(self.st.scheme(&ctx));
         self.st.cursor_canvas = None;
+        // A rename left open when another document became active is finished, in its own
+        // document, as clicking elsewhere would finish it.
+        if self.st.renaming.as_ref().is_some_and(|r| Some(r.0) != self.st.active_doc) {
+            self.st.finish_rename(true);
+        }
         self.handle_keys(&ctx);
         self.handle_dropped_files(&ctx);
         self.poll_gpu();
@@ -413,12 +464,47 @@ impl eframe::App for OpalApp {
     }
 
     fn on_exit(&mut self) {
-        if !self.persist {
+        if !self.persist || self.st.settings_changed.is_none() {
             return;
         }
         if let Err(e) = config::save(&self.st) {
             eprintln!("Opal Studio: could not save settings: {e}");
         }
+    }
+}
+
+/// Every command shortcut with its command, those with more modifiers first. egui matches a
+/// shortcut ignoring extra Shift and Alt, so Ctrl+S, tried first, would take Ctrl+Shift+S.
+fn shortcuts_most_specific_first() -> Vec<(egui::KeyboardShortcut, Cmd)> {
+    let mut all: Vec<(egui::KeyboardShortcut, Cmd)> =
+        Cmd::ALL.iter().flat_map(|&c| c.info().shortcuts.iter().map(move |s| (*s, c))).collect();
+    let count = |m: Modifiers| u8::from(m.alt) + u8::from(m.shift) + u8::from(m.command || m.ctrl);
+    all.sort_by_key(|(s, _)| std::cmp::Reverse(count(s.modifiers)));
+    all
+}
+
+/// The documents whose tabs are in front, in their containers.
+fn shown_docs(tiles: &Tiles<Pane>) -> Vec<DocId> {
+    tiles
+        .iter()
+        .filter_map(|(_, t)| match t {
+            egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs)) => tabs.active,
+            _ => None,
+        })
+        .filter_map(|id| match tiles.get_pane(&id) {
+            Some(Pane::Document(d)) => Some(*d),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Brings `pane`'s tab to the front of its container.
+fn show_pane(tiles: &mut Tiles<Pane>, pane: Pane) {
+    if let Some(tile) = tiles.find_pane(&pane)
+        && let Some(parent) = tiles.parent_of(tile)
+        && let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) = tiles.get_mut(parent)
+    {
+        tabs.set_active(tile);
     }
 }
 

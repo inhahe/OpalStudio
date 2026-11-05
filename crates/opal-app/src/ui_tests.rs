@@ -228,3 +228,127 @@ fn keytips_open_a_tab_and_run_a_command() {
     assert_eq!(h.state().state().ribbon.keytips, crate::state::Keytips::Off);
     assert_eq!(h.state().state().active().unwrap().doc().layers.len(), 2);
 }
+
+// ---- Regression tests for the milestone 0 review ----------------------------------------
+
+fn with_image(h: &mut Harness<'static, OpalApp>, background: crate::state::Background) {
+    h.state_mut().state_mut().create_image(&crate::state::NewImage { width: 64, height: 64, background });
+    h.run();
+}
+
+#[test]
+fn shift_shortcuts_run_their_own_command_not_their_ctrl_twin() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    with_image(&mut h, crate::state::Background::White);
+    // Ctrl+Shift+N is New Layer; Ctrl+N (New image) must not take it.
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::N);
+    h.run();
+    assert!(h.state().state().new_image.is_none(), "Ctrl+Shift+N opened the New Image dialog");
+    assert_eq!(h.state().state().active().unwrap().doc().layers.len(), 2);
+    // Ctrl+Shift+Z is Redo; Ctrl+Z (Undo) must not take it.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().doc().layers.len(), 2, "Ctrl+Shift+Z did not redo");
+}
+
+#[test]
+fn clicking_a_layer_name_selects_the_layer() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    with_image(&mut h, crate::state::Background::White);
+    h.state_mut().state_mut().queue.push(Cmd::NewLayer);
+    h.run();
+    let bottom = h.state().state().active().unwrap().doc().layers[0].id;
+    assert_ne!(h.state().state().active().unwrap().active_layer, Some(bottom));
+    h.get_by_label("Background").click();
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().active_layer, Some(bottom));
+}
+
+#[test]
+fn single_line_ribbon_buttons_do_not_overlap() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    h.state_mut().state_mut().queue.push(Cmd::ToggleRibbon);
+    h.state_mut().state_mut().ribbon.tab = 0;
+    h.run();
+    let names = ["New", "Open", "Save", "Save As", "Export", "Close", "Preferences", "Exit"];
+    let rects: Vec<egui::Rect> = names.iter().map(|n| h.get_by_label(n).rect()).collect();
+    for i in 0..names.len() {
+        for j in i + 1..names.len() {
+            // Touching edges are fine; sharing area is not.
+            let overlap = rects[i].intersect(rects[j]);
+            assert!(overlap.width() <= 0.5 || overlap.height() <= 0.5, "{} and {} overlap", names[i], names[j]);
+        }
+    }
+}
+
+#[test]
+fn the_shown_tab_is_the_active_document_after_closing_one() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    for _ in 0..3 {
+        with_image(&mut h, crate::state::Background::White);
+    }
+    h.state_mut().state_mut().queue.push(Cmd::Close);
+    h.run();
+    let active = h.state().state().active_doc.expect("a document is still open");
+    assert_eq!(h.state().shown_docs(), vec![active], "the panels act on a document that is not on screen");
+}
+
+#[test]
+fn closing_the_last_image_keeps_the_panel_layout() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    with_image(&mut h, crate::state::Background::White);
+    // Make the layout differ from the default: widen the documents' share.
+    let shares_before = h.state_mut().set_root_share(0.6);
+    h.state_mut().state_mut().queue.push(Cmd::Close);
+    h.run();
+    assert_eq!(h.state().root_share(), shares_before, "closing the last image reset the panels");
+    assert!(h.state().shows_welcome());
+}
+
+#[test]
+fn a_typed_opacity_is_one_history_step() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    with_image(&mut h, crate::state::Background::White);
+    let states_before = h.state().state().active().unwrap().history.nodes().count();
+    let opacity_field = |n: &egui_kittest::kittest::AccessKitNode<'_>| {
+        n.role() == egui::accesskit::Role::SpinButton && n.label().as_deref() == Some("Opacity")
+    };
+    h.get_by(opacity_field).click();
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    // One key at a time, with frames between, as typing happens.
+    h.get_by(opacity_field).type_text("7");
+    h.run();
+    h.get_by(opacity_field).type_text("5");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let d = h.state().state().active().unwrap();
+    assert_eq!(d.history.nodes().count(), states_before + 1, "typing 75 made more than one history state");
+    assert!((d.doc().layers[0].opacity - 0.75).abs() < 1e-6, "{}", d.doc().layers[0].opacity);
+}
+
+#[test]
+fn a_changing_pending_edit_asks_for_a_repaint() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    with_image(&mut h, crate::state::Background::White);
+    let layer = h.state().state().active().unwrap().active_layer.unwrap();
+    let set = |h: &mut Harness<'static, OpalApp>, op: f32| {
+        h.state_mut().state_mut().active_mut().unwrap().edit_pending("Change opacity", |d| {
+            d.layer_mut(layer).unwrap().opacity = op;
+        });
+    };
+    set(&mut h, 0.9);
+    let first = h.state().signature();
+    set(&mut h, 0.5);
+    assert_ne!(h.state().signature(), first, "the second step of a drag would not be shown");
+}

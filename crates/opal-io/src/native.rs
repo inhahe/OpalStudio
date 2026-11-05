@@ -18,7 +18,7 @@ use opal_core::raster::RasterImage;
 use opal_core::tile::{Pixel, TILE_PIXELS, Tile, TileCoord};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
@@ -28,6 +28,8 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 pub const MIME_TYPE: &str = "application/x-opal-studio";
 pub const FORMAT_VERSION: u32 = 0;
 const TILE_BYTES: usize = TILE_PIXELS * 4 * 2;
+/// The largest `document.json` accepted.
+const MAX_JSON: usize = 256 << 20;
 
 #[derive(Serialize, Deserialize)]
 struct FileDoc {
@@ -158,11 +160,11 @@ pub fn load_from(reader: impl Read + Seek, path: &Path) -> Result<Loaded, IoErro
     let bad = |message: String| IoError::Format { path: path.to_owned(), message };
     let mut zip = ZipArchive::new(reader).map_err(|e| bad(format!("not a zip archive ({e})")))?;
 
-    let mime = read_entry(&mut zip, "mimetype", path)?;
+    let mime = read_entry(&mut zip, "mimetype", 256, path)?;
     if mime != MIME_TYPE.as_bytes() {
         return Err(bad("wrong mimetype".into()));
     }
-    let json = read_entry(&mut zip, "document.json", path)?;
+    let json = read_entry(&mut zip, "document.json", MAX_JSON, path)?;
     let file: FileDoc = serde_json::from_slice(&json).map_err(|e| bad(format!("document.json: {e}")))?;
     if file.format != "opal-studio" {
         return Err(bad(format!("unknown format {:?}", file.format)));
@@ -177,6 +179,11 @@ pub fn load_from(reader: impl Read + Seek, path: &Path) -> Result<Loaded, IoErro
         });
     }
 
+    check_ids(&file.layers, &mut HashSet::new(), path)?;
+    if file.next_id >= MAX_ID {
+        return Err(bad(format!("next identifier {} is out of range", file.next_id)));
+    }
+
     // Read every tile the document references, once each.
     let mut wanted: Vec<usize> = Vec::new();
     collect_tile_numbers(&file.layers, &mut wanted);
@@ -184,7 +191,7 @@ pub fn load_from(reader: impl Read + Seek, path: &Path) -> Result<Loaded, IoErro
     wanted.dedup();
     let mut raw: Vec<(usize, Vec<u8>)> = Vec::with_capacity(wanted.len());
     for n in wanted {
-        let bytes = read_entry(&mut zip, &format!("tiles/{n}.bin"), path)?;
+        let bytes = read_entry(&mut zip, &format!("tiles/{n}.bin"), TILE_BYTES, path)?;
         if bytes.len() != TILE_BYTES {
             return Err(bad(format!("tiles/{n}.bin has {} bytes, not {TILE_BYTES}", bytes.len())));
         }
@@ -203,13 +210,52 @@ pub fn load_from(reader: impl Read + Seek, path: &Path) -> Result<Loaded, IoErro
     Ok(Loaded { doc, ids })
 }
 
-fn read_entry<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str, path: &Path) -> Result<Vec<u8>, IoError> {
-    let mut entry = zip
+/// Reads an entry of at most `limit` bytes. A larger one is refused after reading one byte
+/// past the limit, so a damaged or hostile file cannot make the loader inflate gigabytes.
+fn read_entry<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    name: &str,
+    limit: usize,
+    path: &Path,
+) -> Result<Vec<u8>, IoError> {
+    let entry = zip
         .by_name(name)
         .map_err(|_| IoError::Format { path: path.to_owned(), message: format!("{name} is missing") })?;
     let mut bytes = Vec::new();
-    entry.read_to_end(&mut bytes).map_err(|e| IoError::io(path, e))?;
+    entry.take(limit as u64 + 1).read_to_end(&mut bytes).map_err(|e| IoError::io(path, e))?;
+    if bytes.len() > limit {
+        return Err(IoError::Format { path: path.to_owned(), message: format!("{name} is larger than {limit} bytes") });
+    }
     Ok(bytes)
+}
+
+/// Identifiers must stay below this, so the next free one can always be counted up to.
+const MAX_ID: u64 = 1 << 53;
+
+/// Checks that every layer and object identifier is in range and used once.
+fn check_ids(layers: &[FileLayer], seen: &mut HashSet<u64>, path: &Path) -> Result<(), IoError> {
+    fn take(id: u64, seen: &mut HashSet<u64>, path: &Path) -> Result<(), IoError> {
+        let bad = |message: String| IoError::Format { path: path.to_owned(), message };
+        if id == 0 || id >= MAX_ID {
+            Err(bad(format!("identifier {id} is out of range")))
+        } else if !seen.insert(id) {
+            Err(bad(format!("identifier {id} is used more than once")))
+        } else {
+            Ok(())
+        }
+    }
+    for l in layers {
+        take(l.id.0, seen, path)?;
+        match &l.content {
+            FileContent::Group { children } => check_ids(children, seen, path)?,
+            FileContent::Objects { objects } => {
+                for o in objects {
+                    take(o.id.0, seen, path)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn collect_tile_numbers(layers: &[FileLayer], out: &mut Vec<usize>) {
@@ -369,5 +415,62 @@ mod tests {
         buf.set_position(0);
         let err = load_from(buf, path).err().unwrap();
         assert!(err.to_string().contains("newer Opal Studio"), "{err}");
+    }
+
+    /// A zip with the given `document.json` and tile files.
+    fn crafted(json: &str, tiles: &[(&str, &[u8])]) -> std::io::Cursor<Vec<u8>> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut buf);
+            let o = SimpleFileOptions::default();
+            zip.start_file("mimetype", o).unwrap();
+            std::io::Write::write_all(&mut zip, MIME_TYPE.as_bytes()).unwrap();
+            zip.start_file("document.json", o).unwrap();
+            std::io::Write::write_all(&mut zip, json.as_bytes()).unwrap();
+            for (name, bytes) in tiles {
+                zip.start_file(*name, o).unwrap();
+                std::io::Write::write_all(&mut zip, bytes).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        buf.set_position(0);
+        buf
+    }
+
+    fn layer_json(id: u64, object: u64) -> String {
+        format!(
+            r#"{{"id":{id},"name":"l","visible":true,"locked":false,"opacity":1.0,"kind":"objects","objects":[{{"id":{object},"kind":"raster","tiles":[]}}]}}"#
+        )
+    }
+
+    fn doc_json(layers: &[String]) -> String {
+        format!(
+            r#"{{"format":"opal-studio","version":0,"canvas":{{"width":1,"height":1}},"next_id":10,"layers":[{}]}}"#,
+            layers.join(",")
+        )
+    }
+
+    #[test]
+    fn duplicate_identifiers_are_refused() {
+        let json = doc_json(&[layer_json(3, 4), layer_json(3, 5)]);
+        let err = load_from(crafted(&json, &[]), Path::new("dup.opal")).err().expect("refused");
+        assert!(err.to_string().contains("more than once"), "{err}");
+        let json = doc_json(&[layer_json(3, 4), layer_json(5, 4)]);
+        assert!(load_from(crafted(&json, &[]), Path::new("dup.opal")).is_err(), "a shared object id");
+    }
+
+    #[test]
+    fn identifiers_too_large_to_continue_from_are_refused() {
+        let json = doc_json(&[layer_json(u64::MAX, 4)]);
+        let err = load_from(crafted(&json, &[]), Path::new("big.opal")).err().expect("refused");
+        assert!(err.to_string().contains("identifier"), "{err}");
+    }
+
+    #[test]
+    fn an_oversized_tile_entry_is_refused() {
+        let json = r#"{"format":"opal-studio","version":0,"canvas":{"width":1,"height":1},"next_id":10,"layers":[{"id":1,"name":"l","visible":true,"locked":false,"opacity":1.0,"kind":"objects","objects":[{"id":2,"kind":"raster","tiles":[[0,0,0]]}]}]}"#;
+        let big = vec![0u8; TILE_BYTES * 3];
+        let err = load_from(crafted(json, &[("tiles/0.bin", &big)]), Path::new("bomb.opal")).err().expect("refused");
+        assert!(err.to_string().contains("tiles/0.bin"), "{err}");
     }
 }

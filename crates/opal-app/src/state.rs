@@ -80,6 +80,8 @@ pub struct RibbonState {
     pub keytips: Keytips,
     /// The command whose button the pointer is over (for F1).
     pub hovered: Option<Cmd>,
+    /// The tool whose button the pointer is over (for F1).
+    pub hovered_tool: Option<ToolId>,
     /// The help topic of the group whose button or label the pointer is over (for F1).
     pub hovered_group: Option<(usize, usize)>,
 }
@@ -133,8 +135,9 @@ pub struct AppState {
     pub queue: Vec<Cmd>,
     /// Documents whose tab must be created.
     pub opened: Vec<DocId>,
-    /// Documents whose tab must be removed.
-    pub closed: Vec<DocId>,
+    /// A document made active by a command (opened, closed onto, shown again) whose tab must
+    /// be brought to the front, so the panels never act on a document that is not on screen.
+    pub reveal: Option<DocId>,
     pub messages: VecDeque<Message>,
     pub confirm: Option<Confirm>,
     pub new_image: Option<NewImage>,
@@ -148,7 +151,8 @@ pub struct AppState {
     pub gallery_open: bool,
     pub gallery: crate::gallery::Gallery,
     pub help: Option<HelpTopic>,
-    pub renaming: Option<(LayerId, String)>,
+    /// A layer being renamed in the Layers panel: its document, the layer, the text so far.
+    pub renaming: Option<(DocId, LayerId, String)>,
     pub reset_panels: bool,
     /// Set when the window may close (unsaved changes were dealt with).
     pub exit_confirmed: bool,
@@ -179,7 +183,7 @@ impl AppState {
             ribbon: RibbonState::default(),
             queue: Vec::new(),
             opened: Vec::new(),
-            closed: Vec::new(),
+            reveal: None,
             messages: VecDeque::new(),
             confirm: None,
             new_image: None,
@@ -261,8 +265,14 @@ impl AppState {
         self.next_doc += 1;
         self.docs.push(DocState::new(id, title, doc, ids, label));
         self.opened.push(id);
-        self.active_doc = Some(id);
+        self.show_doc(id);
         id
+    }
+
+    /// Makes `id` the active document and brings its tab to the front.
+    pub fn show_doc(&mut self, id: DocId) {
+        self.active_doc = Some(id);
+        self.reveal = Some(id);
     }
 
     /// Runs `cmd` if it is available now; otherwise explains why not.
@@ -306,7 +316,7 @@ impl AppState {
                 let d = self.active().expect("available");
                 let id = d.active_layer.expect("available");
                 let name = d.doc().layer(id).map(|l| l.name.clone()).unwrap_or_default();
-                self.renaming = Some((id, name));
+                self.renaming = Some((d.id, id, name));
             }
             Cmd::ZoomIn | Cmd::ZoomOut => {
                 let up = cmd == Cmd::ZoomIn;
@@ -328,9 +338,8 @@ impl AppState {
                 v.actual_pixels(vp);
             }
             Cmd::ToggleOffCanvas => {
-                let shown = self.prefs.f64("canvas.off_canvas") > 0.0;
-                let v = if shown { 0.0 } else { 35.0 };
-                self.prefs.set("canvas.off_canvas", Value::Float(v));
+                let shown = self.prefs.bool("canvas.off_canvas_shown");
+                self.prefs.set("canvas.off_canvas_shown", Value::Bool(!shown));
                 self.settings_touched();
             }
             Cmd::ToggleTheme => {
@@ -362,8 +371,25 @@ impl AppState {
         }
     }
 
-    /// The help topic for what the pointer is over: a ribbon group, or the start page.
+    /// The help topic for what the pointer is over: a tool, a command (wherever its button
+    /// is), a ribbon group, or else the start page.
     fn help_topic_here(&self) -> HelpTopic {
+        if self.ribbon.hovered_tool.is_some() {
+            return HelpTopic::Tools;
+        }
+        if let Some(cmd) = self.ribbon.hovered {
+            // Its group on the tab shown, if it is there; else the first group that has it.
+            let groups: Vec<(usize, usize)> = crate::commands::RIBBON
+                .iter()
+                .enumerate()
+                .flat_map(|(t, tab)| tab.groups.iter().enumerate().map(move |(g, group)| (t, g, group)))
+                .filter(|(_, _, group)| group.cmds.contains(&cmd))
+                .map(|(t, g, _)| (t, g))
+                .collect();
+            if let Some(&(t, g)) = groups.iter().find(|(t, _)| *t == self.ribbon.tab).or(groups.first()) {
+                return HelpTopic::Group(t, g);
+            }
+        }
         match self.ribbon.hovered_group {
             Some((t, g)) => HelpTopic::Group(t, g),
             None => HelpTopic::Start,
@@ -403,8 +429,8 @@ impl AppState {
     /// Opens a file, telling the user if that fails or if anything about it needs saying.
     pub fn open_path(&mut self, path: &Path) {
         // Already open: just show it.
-        if let Some(d) = self.docs.iter().find(|d| d.path.as_deref() == Some(path)) {
-            self.active_doc = Some(d.id);
+        if let Some(id) = self.docs.iter().find(|d| d.path.as_deref() == Some(path)).map(|d| d.id) {
+            self.show_doc(id);
             return;
         }
         let title = file_title(path);
@@ -448,7 +474,7 @@ impl AppState {
             (Some(p), false) => p.clone(),
             _ => {
                 let mut dialog = rfd::FileDialog::new().set_title("Save As").add_filter("Opal Studio file", &["opal"]);
-                dialog = dialog.set_file_name(format!("{}.opal", d.title.trim_end_matches(".opal")));
+                dialog = dialog.set_file_name(format!("{}.opal", d.stem()));
                 match dialog.save_file() {
                     Some(p) => with_extension(p, "opal"),
                     None => return false,
@@ -472,7 +498,7 @@ impl AppState {
     /// Asks where to export, then writes the file.
     pub fn export_to_file(&mut self, spec: &ExportDialog) {
         let Some(d) = self.doc(spec.doc) else { return };
-        let stem = d.title.trim_end_matches(".opal").to_owned();
+        let stem = d.stem();
         let (ext, filter) = match spec.kind {
             ExportKind::Png => ("png", "PNG image"),
             ExportKind::Jpeg => ("jpg", "JPEG image"),
@@ -518,9 +544,14 @@ impl AppState {
 
     pub fn close_now(&mut self, id: DocId) {
         self.docs.retain(|d| d.id != id);
-        self.closed.push(id);
+        if self.renaming.as_ref().is_some_and(|r| r.0 == id) {
+            self.renaming = None;
+        }
         if self.active_doc == Some(id) {
-            self.active_doc = self.docs.last().map(|d| d.id);
+            self.active_doc = None;
+            if let Some(next) = self.docs.last().map(|d| d.id) {
+                self.show_doc(next);
+            }
         }
     }
 
@@ -588,6 +619,9 @@ impl AppState {
     /// Moves a layer to `to` (from dragging in the Layers panel).
     pub fn move_layer_to(&mut self, id: LayerId, to: Position) {
         let Some(d) = self.active_mut() else { return };
+        if d.doc().position(id) == Some(to) {
+            return;
+        }
         let result = d.apply("Move layer", |doc, _| doc.move_layer(id, to));
         self.report(result);
     }
@@ -651,8 +685,18 @@ impl AppState {
         self.report(result);
     }
 
-    pub fn rename_layer(&mut self, id: LayerId, name: String) {
-        let Some(d) = self.active_mut() else { return };
+    /// Ends a rename in progress: with `true`, gives the layer the text typed (in the
+    /// document it was started in, whichever is active now); with `false`, drops it.
+    pub fn finish_rename(&mut self, keep: bool) {
+        if let Some((doc, id, name)) = self.renaming.take()
+            && keep
+        {
+            self.rename_layer(doc, id, name);
+        }
+    }
+
+    pub fn rename_layer(&mut self, doc: DocId, id: LayerId, name: String) {
+        let Some(d) = self.doc_mut(doc) else { return };
         if d.doc().layer(id).is_none_or(|l| l.name == name) || name.trim().is_empty() {
             return;
         }
@@ -835,5 +879,73 @@ mod tests {
         assert_eq!(with_extension(PathBuf::from("a/b"), "opal"), PathBuf::from("a/b.opal"));
         assert_eq!(with_extension(PathBuf::from("a/b.OPAL"), "opal"), PathBuf::from("a/b.OPAL"));
         assert_eq!(with_extension(PathBuf::from("a/b.png"), "opal"), PathBuf::from("a/b.png.opal"));
+    }
+
+    #[test]
+    fn f1_over_a_command_opens_its_group_s_help() {
+        let mut st = app_with_image();
+        st.ribbon.hovered = Some(Cmd::MergeDown);
+        st.run(Cmd::Help, &ctx());
+        let (t, g) = crate::commands::RIBBON
+            .iter()
+            .enumerate()
+            .find_map(|(t, tab)| tab.groups.iter().position(|g| g.cmds.contains(&Cmd::MergeDown)).map(|g| (t, g)))
+            .unwrap();
+        assert_eq!(st.help, Some(HelpTopic::Group(t, g)));
+    }
+
+    #[test]
+    fn locked_layers_stop_flatten_and_deleting_their_group() {
+        let mut st = app_with_image();
+        let c = ctx();
+        st.run(Cmd::ToggleLock, &c);
+        assert!(availability(&st, Cmd::Flatten).unwrap_err().contains("locked"));
+        st.run(Cmd::ToggleLock, &c);
+        // A locked layer inside an unlocked group.
+        st.run(Cmd::NewGroup, &c);
+        let group = st.active().unwrap().active_layer.unwrap();
+        let bg = st.active().unwrap().doc().layers[0].id;
+        st.move_layer_to(bg, Position { parent: Some(group), index: 0 });
+        st.active_mut().unwrap().active_layer = Some(bg);
+        st.run(Cmd::ToggleLock, &c);
+        st.active_mut().unwrap().active_layer = Some(group);
+        assert!(availability(&st, Cmd::DeleteLayer).unwrap_err().contains("locked"));
+    }
+
+    #[test]
+    fn a_rename_finishes_in_the_document_it_began_in() {
+        let mut st = app_with_image();
+        let a = st.active_doc.unwrap();
+        let layer = st.active().unwrap().active_layer.unwrap();
+        st.run(Cmd::Rename, &ctx());
+        st.renaming.as_mut().unwrap().2 = "Sky".into();
+        // Another image opens, with a layer of the same identifier, before Enter.
+        st.create_image(&NewImage { width: 10, height: 10, background: Background::White });
+        let b = st.active_doc.unwrap();
+        assert_ne!(a, b);
+        st.finish_rename(true);
+        assert_eq!(st.doc(a).unwrap().doc().layer(layer).unwrap().name, "Sky");
+        assert_eq!(st.doc(b).unwrap().doc().layers[0].name, "Background");
+    }
+
+    #[test]
+    fn suggested_names_drop_the_old_extension() {
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 10, height: 10, background: Background::White });
+        let d = st.active_mut().unwrap();
+        d.title = "photo.jpg".into();
+        assert_eq!(d.stem(), "photo");
+        d.title = "Untitled 3".into();
+        assert_eq!(d.stem(), "Untitled 3");
+    }
+
+    #[test]
+    fn hiding_content_beyond_the_canvas_keeps_its_strength() {
+        let mut st = AppState::new();
+        st.prefs.set("canvas.off_canvas", Value::Float(60.0));
+        st.run(Cmd::ToggleOffCanvas, &ctx());
+        st.run(Cmd::ToggleOffCanvas, &ctx());
+        assert_eq!(st.prefs.f64("canvas.off_canvas"), 60.0);
+        assert_eq!(crate::commands::checked(&st, Cmd::ToggleOffCanvas), Some(true));
     }
 }

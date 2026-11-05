@@ -92,10 +92,20 @@ pub static PREFS: &[Def] = &[
         advanced: false,
     },
     Def {
+        key: "canvas.off_canvas_shown",
+        label: "Show content beyond the canvas",
+        help: "Whether the parts of layers that lie outside the canvas are shown. They are kept \
+               either way, and never exported.",
+        section: "Canvas",
+        kind: Kind::Bool,
+        default: Init::Bool(true),
+        advanced: false,
+    },
+    Def {
         key: "canvas.off_canvas",
         label: "Content beyond the canvas",
-        help: "How visible the parts of layers that lie outside the canvas are. They are kept, \
-               but not exported. 0% hides them.",
+        help: "How visible the parts of layers that lie outside the canvas are, when they are \
+               shown.",
         section: "Canvas",
         kind: Kind::Float { min: 0.0, max: 100.0, decimals: 0, suffix: "%", log: false },
         default: Init::Float(35.0),

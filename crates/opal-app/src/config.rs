@@ -46,34 +46,57 @@ pub fn load(st: &mut AppState) {
             return;
         }
     };
-    let saved: Saved = match serde_json::from_str(&text) {
-        Ok(s) => s,
-        Err(e) => {
-            st.message(
-                crate::state::MessageKind::Warning,
-                "Settings not loaded",
-                format!("{} could not be read ({e}); the defaults are used, and the file will be replaced when settings change.", path.display()),
-            );
-            return;
-        }
+    if let Err(e) = apply_json(st, &text) {
+        // Keep the unreadable file, so nothing in it is lost when settings are next saved.
+        let kept = path.with_extension("json.unreadable");
+        let note = match std::fs::rename(&path, &kept) {
+            Ok(()) => format!("It was kept as {}.", kept.display()),
+            Err(_) => String::new(),
+        };
+        st.message(
+            crate::state::MessageKind::Warning,
+            "Settings not loaded",
+            format!("{} could not be read ({e}); the defaults are used. {note}", path.display()),
+        );
+    }
+}
+
+/// Takes the settings stored in `text` into `st`. Entries that cannot be read (from a newer
+/// version, say) are skipped one by one; only a file that is not JSON at all is an error.
+fn apply_json(st: &mut AppState, text: &str) -> Result<(), String> {
+    let root: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let obj = root.as_object().ok_or("the file does not hold an object")?;
+    let map_of = |v: Option<&serde_json::Value>| -> Map {
+        v.and_then(serde_json::Value::as_object)
+            .map(|m| {
+                m.iter().filter_map(|(k, v)| serde_json::from_value(v.clone()).ok().map(|v| (k.clone(), v))).collect()
+            })
+            .unwrap_or_default()
     };
-    st.prefs.load_map(&saved.prefs);
-    for (id, map) in &saved.tools {
+    st.prefs.load_map(&map_of(obj.get("prefs")));
+    for (id, map) in obj.get("tools").and_then(serde_json::Value::as_object).into_iter().flatten() {
         if let Some(t) = tool_by_id(id)
             && let Some(s) = st.tool_settings.get_mut(&t)
         {
-            s.load_map(map);
+            s.load_map(&map_of(Some(map)));
         }
     }
-    for (id, presets) in saved.presets {
-        if let Some(t) = tool_by_id(&id) {
-            st.presets.insert(t, presets);
+    for (id, presets) in obj.get("presets").and_then(serde_json::Value::as_object).into_iter().flatten() {
+        if let Some(t) = tool_by_id(id) {
+            let named: BTreeMap<String, Map> = presets
+                .as_object()
+                .map(|p| p.iter().map(|(name, m)| (name.clone(), map_of(Some(m)))).collect())
+                .unwrap_or_default();
+            st.presets.insert(t, named);
         }
     }
-    if let Some((width, height, white)) = saved.last_new {
+    if let Some(Ok((width, height, white))) =
+        obj.get("last_new").map(|v| serde_json::from_value::<(u32, u32, bool)>(v.clone()))
+    {
         let background = if white { Background::White } else { Background::Transparent };
         st.last_new = NewImage { width, height, background };
     }
+    Ok(())
 }
 
 /// Writes the settings, replacing the file only once the new one is complete.
@@ -94,11 +117,8 @@ pub fn save(st: &AppState) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })
+    opal_io::write_atomically(&path, |out| opal_io::write_all(out, json.as_bytes(), &path))
+        .map_err(std::io::Error::other)
 }
 
 #[cfg(test)]
@@ -125,5 +145,21 @@ mod tests {
         // An empty or partial file still loads.
         let partial: Saved = serde_json::from_str("{}").unwrap();
         assert!(partial.prefs.is_empty());
+    }
+
+    #[test]
+    fn one_unreadable_value_does_not_lose_the_others() {
+        let mut st = AppState::new();
+        let text = r#"{
+            "prefs": {"ui.theme": {"Choice": "light"}, "ui.scale": {"Gradient": [1, 2]}},
+            "tools": {"zoom": {"zoom.drag": {"Bool": false}, "zoom.factor": "nonsense"}},
+            "last_new": [640, 480, false]
+        }"#;
+        apply_json(&mut st, text).unwrap();
+        assert_eq!(st.prefs.choice("ui.theme"), "light");
+        assert_eq!(st.prefs.f64("ui.scale"), 100.0, "the unreadable value keeps its default");
+        assert!(!st.tool_settings[&ToolId::Zoom].bool("zoom.drag"));
+        assert_eq!((st.last_new.width, st.last_new.height), (640, 480));
+        assert!(apply_json(&mut st, "not json").is_err());
     }
 }

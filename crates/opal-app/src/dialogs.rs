@@ -7,8 +7,9 @@ use crate::settings::{self, Show};
 use crate::state::{AppState, Background, Confirm, ExportKind, MessageKind, NewImage};
 use eframe::egui::{self, RichText, ViewportCommand};
 
-/// The largest canvas side the New Image dialog accepts.
-pub const MAX_SIDE: u32 = 100_000;
+/// The largest canvas side the New Image dialog accepts (Photoshop's limit for PSD files).
+/// Exporting holds the whole canvas in memory, at 8 bytes a pixel and more.
+pub const MAX_SIDE: u32 = 30_000;
 
 pub fn show_all(ctx: &egui::Context, st: &mut AppState) {
     // Only one modal at a time: the first that has something to show.
@@ -162,8 +163,16 @@ fn new_image(ctx: &egui::Context, st: &mut AppState) {
             });
             ui.end_row();
         });
-        let mp = f64::from(spec.width) * f64::from(spec.height) / 1e6;
-        ui.label(RichText::new(format!("{mp:.1} megapixels")).small().color(st.palette.weak_text));
+        let pixels = f64::from(spec.width) * f64::from(spec.height);
+        ui.label(
+            RichText::new(format!(
+                "{:.1} megapixels; a layer covering it all takes about {} of memory",
+                pixels / 1e6,
+                bytes((pixels * 8.0) as u64)
+            ))
+            .small()
+            .color(st.palette.weak_text),
+        );
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.button("Create").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {

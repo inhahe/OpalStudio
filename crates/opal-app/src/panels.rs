@@ -68,6 +68,9 @@ pub fn layers_panel(ui: &mut egui::Ui, st: &mut AppState) {
     let last_key = ui.scope_id().with("last-active-layer");
     let scroll_to = ui.ctx().data(|m| m.get_temp::<Option<LayerId>>(last_key)) != Some(active);
     ui.ctx().data_mut(|m| m.insert_temp(last_key, active));
+    // Only a rename begun in this document shows here.
+    let renaming =
+        st.renaming.as_ref().filter(|r| Some(r.0) == st.active_doc).map(|(_, layer, text)| (*layer, text.clone()));
     let dragging: Option<LayerId> = egui::DragAndDrop::payload::<LayerId>(ui.ctx()).map(|p| *p);
     let released = ui.input(|i| i.pointer.any_released());
     let mut actions = Vec::new();
@@ -78,7 +81,7 @@ pub fn layers_panel(ui: &mut egui::Ui, st: &mut AppState) {
             active,
             scroll_to,
             expanded: &expanded,
-            renaming: &st.renaming,
+            renaming: &renaming,
             dragging,
             menu: &menu,
             actions: &mut actions,
@@ -233,7 +236,11 @@ fn layer_row(ui: &mut egui::Ui, cx: &mut RowCtx<'_>, layer: &Layer, pos: Positio
     {
         let t = (p.y - rect.top()) / rect.height();
         let edge = |y: f32| Rect::from_center_size(egui::pos2(rect.center().x, y), Vec2::new(rect.width(), 0.0));
-        let (mut target, line, into) = if layer.is_group() && (0.3..0.7).contains(&t) {
+        // On a group's row, the middle means "into the group, on top"; so does the bottom
+        // of an expanded group's row, since its top child is drawn just below it.
+        let open = cx.expanded.contains(&layer.id);
+        let into_group = layer.is_group() && ((0.3..0.7).contains(&t) || (open && t >= 0.7));
+        let (mut target, line, into) = if into_group {
             let n = layer.children().map_or(0, <[_]>::len);
             (Position { parent: Some(layer.id), index: n }, rect, true)
         } else if t < 0.5 {
@@ -294,7 +301,9 @@ fn opacity_row(ui: &mut egui::Ui, st: &mut AppState) {
                 }
             });
         }
-        if r.drag_stopped() || (r.changed() && !r.dragged()) {
+        // One history step per change: commit once the slider is let go, or the typed value
+        // is finished (the field loses focus), not on every keystroke.
+        if d.pending.is_some() && !r.dragged() && !r.has_focus() {
             d.commit_pending();
         }
     });
@@ -319,15 +328,26 @@ fn apply(st: &mut AppState, actions: Vec<Action>) {
                 }
             }
             Action::StartRename(id) => {
-                let name = st.active().and_then(|d| d.doc().layer(id)).map(|l| l.name.clone()).unwrap_or_default();
-                st.renaming = Some((id, name));
-            }
-            Action::RenameText(id, text) => st.renaming = Some((id, text)),
-            Action::FinishRename(id, text) => {
-                st.renaming = None;
-                if let Some(text) = text {
-                    st.rename_layer(id, text);
+                if let Some(d) = st.active() {
+                    let name = d.doc().layer(id).map(|l| l.name.clone()).unwrap_or_default();
+                    st.renaming = Some((d.id, id, name));
                 }
+            }
+            Action::RenameText(id, text) => {
+                if let Some(r) = st.renaming.as_mut()
+                    && r.1 == id
+                {
+                    r.2 = text;
+                }
+            }
+            Action::FinishRename(id, text) => {
+                let keep = text.is_some();
+                if let (Some(r), Some(text)) = (st.renaming.as_mut(), text)
+                    && r.1 == id
+                {
+                    r.2 = text;
+                }
+                st.finish_rename(keep);
             }
             Action::Move(id, pos) => st.move_layer_to(id, pos),
             Action::Command(cmd) => st.queue.push(cmd),
