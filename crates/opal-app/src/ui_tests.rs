@@ -651,3 +651,41 @@ fn a_slow_clipboard_is_read_off_the_interface_thread_and_pasted_when_ready() {
     assert_eq!(st.active_doc, doc);
     assert!(st.active().unwrap().transform.is_some(), "the box opened on the document pasted into");
 }
+
+#[test]
+fn a_move_drag_released_while_space_is_held_ends() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    h.key_press(egui::Key::V);
+    h.run();
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let at = |x: f32, y: f32| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    h.hover_at(at(200.0, 150.0));
+    h.run();
+    h.drag_at(at(200.0, 150.0));
+    h.run();
+    for x in [210.0, 230.0] {
+        h.hover_at(at(x, 150.0));
+        h.run();
+    }
+    assert!(h.state().state().active().unwrap().moving.is_some(), "the drag began");
+    let space = |pressed| egui::Event::Key {
+        key: egui::Key::Space,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.event(space(true));
+    h.run();
+    h.drop_at(at(230.0, 150.0));
+    h.run();
+    h.event(space(false));
+    h.run();
+    let d = h.state().state().active().unwrap();
+    assert!(d.moving.is_none(), "the drag never ended, so the view stays a preview");
+    assert!(d.pending.is_none());
+    assert_eq!(d.history.undo_label(), Some("Move"));
+}

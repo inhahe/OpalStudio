@@ -221,7 +221,12 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
                 m.shown = Some(delta);
             }
         }
-        if response.drag_stopped() && d.moving.take().is_some() && d.pending_label() == Some("Move") {
+    }
+    // A Move drag ends with the button, whatever the pointer is doing by then: Space may
+    // have made it the hand, or a key another tool.
+    if d.moving.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
+        d.moving = None;
+        if d.pending_label() == Some("Move") {
             d.commit_pending();
         }
     }
