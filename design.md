@@ -901,7 +901,14 @@ say). The editor never makes a transform a file could not hold: the transform bo
 at those limits, and a resize that would pass them draws the image into pixels. Later versions add text, selection recipes and optionally the history tree.
 
 Every write, `.opal` and exports alike, goes to a temporary file beside the target that
-replaces it only when complete, so a failed save never damages the existing file.
+replaces it only when complete, so a failed save never damages the existing file. Writes
+run on a thread of their own, one after another in the order asked (so two writes to one
+file never overlap), with the document as it was when the write was asked for: the
+interface stays live, and the status bar says what is being written. Saving the image
+marks it saved at the history state that was written, so an edit made meanwhile leaves
+it unsaved. "Save" in the close and quit questions closes or quits once the writes are
+done (asking again about an image changed meanwhile, and stopping at a failure), and
+quitting otherwise waits for writes still under way.
 
 ## Settings storage
 

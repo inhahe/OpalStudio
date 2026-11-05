@@ -8,6 +8,7 @@ use crate::prefs::PREFS;
 use crate::settings::{Settings, Value};
 use crate::theme::{self, Palette, Scheme};
 use crate::tools::{self, ToolId};
+use crate::writer::{Then, Written};
 use eframe::egui;
 use opal_core::document::{Document, IdGen, Layer, LayerId, Position};
 use opal_core::geom::IRect;
@@ -162,6 +163,10 @@ pub struct AppState {
     /// Set when the window may close (unsaved changes were dealt with).
     pub exit_confirmed: bool,
     pub exit_requested: bool,
+    /// Saves and exports, written off the interface thread.
+    pub writer: crate::writer::Writer,
+    /// Quitting was asked for while files were being written: it goes ahead when they are.
+    pub exit_after_writes: bool,
     /// When settings last changed and have not been written to disk yet.
     pub settings_changed: Option<Instant>,
     /// The canvas pixel under the pointer, set by the canvas during the frame.
@@ -235,6 +240,8 @@ impl AppState {
             reset_panels: false,
             exit_confirmed: false,
             exit_requested: false,
+            writer: crate::writer::Writer::default(),
+            exit_after_writes: false,
             settings_changed: None,
             cursor_canvas: None,
             cursor_shown: None,
@@ -347,8 +354,8 @@ impl AppState {
         match cmd {
             Cmd::New => self.new_image = Some(self.last_new.clone()),
             Cmd::Open => self.open_dialog(),
-            Cmd::Save => self.save_active(false),
-            Cmd::SaveAs => self.save_active(true),
+            Cmd::Save => self.save_active(false, ctx),
+            Cmd::SaveAs => self.save_active(true, ctx),
             Cmd::Export => {
                 let doc = self.active_doc.expect("available");
                 let c = self.active().expect("available").doc().canvas;
@@ -567,14 +574,15 @@ impl AppState {
         }
     }
 
-    fn save_active(&mut self, choose: bool) {
+    fn save_active(&mut self, choose: bool, ctx: &egui::Context) {
         let id = self.active_doc.expect("available");
-        self.save(id, choose);
+        self.save(id, choose, Then::Nothing, ctx);
     }
 
-    /// Saves a document to its file, asking for one if it has none or `choose` is set.
-    /// Returns whether it was saved.
-    pub fn save(&mut self, id: DocId, choose: bool) -> bool {
+    /// Saves a document to its file, asking for one if it has none or `choose` is set; once
+    /// it is written (off the interface thread), `then` is done. Returns whether the write
+    /// was started (not if no file was chosen).
+    pub fn save(&mut self, id: DocId, choose: bool, then: Then, ctx: &egui::Context) -> bool {
         let Some(d) = self.doc_mut(id) else { return false };
         d.commit_pending();
         let path = match (&d.path, choose) {
@@ -588,22 +596,51 @@ impl AppState {
                 }
             }
         };
-        match native::save(d.history.doc(), &d.ids, &path) {
-            Ok(()) => {
-                d.saved_at = Some(d.history.current());
-                d.title = file_title(&path);
-                d.path = Some(path);
-                true
+        // The document as it is now: it can be edited while this is written.
+        let (doc, ids, at) = (d.history.doc().clone(), d.ids.clone(), d.history.current());
+        let written = Written::Save { doc: id, at, path: path.clone() };
+        let job = Box::new(move || native::save(&doc, &ids, &path).map_err(|e| e.to_string()));
+        self.writer.write(written, then, job, ctx);
+        true
+    }
+
+    /// Reports the saves and exports done since the last frame, and does what was to follow
+    /// them.
+    pub fn poll_writes(&mut self) {
+        for f in self.writer.finished() {
+            match (f.written, f.result) {
+                (Written::Save { doc, at, path }, Ok(())) => {
+                    // The image may have been closed meanwhile; what was to follow still is.
+                    let title = file_title(&path);
+                    if let Some(d) = self.doc_mut(doc) {
+                        d.saved_at = Some(at);
+                        d.title = title.clone();
+                        d.path = Some(path);
+                    }
+                    match f.then {
+                        // Changed while it was written: asked about again.
+                        Then::Close(id) => self.request_close(id),
+                        Then::Exit if !self.writer.exit_pending() => self.exit_requested = true,
+                        Then::Exit => {}
+                        Then::Nothing => self.notify(format!("Saved \"{title}\".")),
+                    }
+                }
+                (Written::Save { .. }, Err(e)) => {
+                    self.writer.cancel_exit();
+                    self.message(MessageKind::Error, "Could not save", e);
+                }
+                (Written::Export { path }, Ok(())) => self.notify(format!("Exported \"{}\".", file_title(&path))),
+                (Written::Export { .. }, Err(e)) => self.message(MessageKind::Error, "Could not export", e),
             }
-            Err(e) => {
-                self.message(MessageKind::Error, "Could not save", e.to_string());
-                false
-            }
+        }
+        if self.exit_after_writes && !self.writer.busy() {
+            self.exit_after_writes = false;
+            self.exit_requested = true;
         }
     }
 
-    /// Asks where to export, then writes the file.
-    pub fn export_to_file(&mut self, spec: &ExportDialog) {
+    /// Asks where to export, then writes the file (off the interface thread).
+    pub fn export_to_file(&mut self, spec: &ExportDialog, ctx: &egui::Context) {
         let Some(d) = self.doc(spec.doc) else { return };
         let stem = d.stem();
         let (ext, filter) = match spec.kind {
@@ -642,20 +679,22 @@ impl AppState {
             height: spec.height,
             sampling: crate::prefs::sampling(&self.prefs, "export"),
         });
-        // A failure inside the encoders is reported like any other rather than ending the
-        // application (the file being written is a temporary one, removed with it).
-        let exported = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            image_files::export(&doc, &path, &format, size.as_ref())
-        }));
-        match exported {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => self.message(MessageKind::Error, "Could not export", e.to_string()),
-            Err(_) => self.message(
-                MessageKind::Error,
-                "Could not export",
-                "Something went wrong inside Opal Studio while writing the file; nothing was written.",
-            ),
-        }
+        self.export_to(doc, path, format, size, ctx);
+    }
+
+    /// Writes `doc`'s canvas to `path` (off the interface thread; a failure inside the
+    /// encoders is reported like any other).
+    pub fn export_to(
+        &mut self,
+        doc: Document,
+        path: PathBuf,
+        format: ExportFormat,
+        size: Option<image_files::ExportSize>,
+        ctx: &egui::Context,
+    ) {
+        let written = Written::Export { path: path.clone() };
+        let job = Box::new(move || image_files::export(&doc, &path, &format, size.as_ref()).map_err(|e| e.to_string()));
+        self.writer.write(written, Then::Nothing, job, ctx);
     }
 
     /// Closes a document, first asking about unsaved changes.

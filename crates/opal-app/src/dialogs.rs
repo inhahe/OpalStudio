@@ -108,15 +108,21 @@ fn confirm(ctx: &egui::Context, st: &mut AppState) {
     });
     let Some(choice) = choice else { return };
     st.confirm = None;
-    // A save that is cancelled or fails stops the close (for several documents, at the first
-    // one not saved).
-    let saved = |st: &mut AppState, ids: &[crate::doc::DocId]| ids.iter().all(|&id| st.save(id, false));
+    // Saving closes (or quits) once written; a save that is cancelled or fails stops it (for
+    // several documents, at the first one not saved).
+    use crate::writer::Then;
     match (c, choice) {
-        (Confirm::Close(id), Answer::Save) if saved(st, &[id]) => st.close_now(id),
+        (Confirm::Close(id), Answer::Save) => {
+            st.save(id, false, Then::Close(id), ctx);
+        }
         (Confirm::Close(id), Answer::Discard) => st.close_now(id),
-        (Confirm::Exit(ids), Answer::Save) if saved(st, &ids) => {
-            st.exit_confirmed = true;
-            ctx.send_viewport_cmd(ViewportCommand::Close);
+        (Confirm::Exit(ids), Answer::Save) => {
+            for id in ids {
+                if !st.save(id, false, Then::Exit, ctx) {
+                    st.writer.cancel_exit();
+                    break;
+                }
+            }
         }
         (Confirm::Exit(_), Answer::Discard) => {
             st.exit_confirmed = true;
@@ -250,7 +256,7 @@ fn export(ctx: &egui::Context, st: &mut AppState) {
     match done {
         Some(true) => {
             st.export = None;
-            st.export_to_file(&spec);
+            st.export_to_file(&spec, ctx);
             // Remember the format for next time.
             st.last_export = spec.kind;
         }

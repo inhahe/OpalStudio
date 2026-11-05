@@ -1,0 +1,128 @@
+//! Saving and exporting, off the interface thread.
+
+use crate::doc::DocId;
+use eframe::egui;
+use opal_core::history::NodeId;
+use std::path::PathBuf;
+use std::sync::mpsc;
+
+/// What a write puts where.
+#[derive(Clone, Debug)]
+pub enum Written {
+    /// Document `doc`, as it was at history state `at`, saved to `path`.
+    Save {
+        doc: DocId,
+        at: NodeId,
+        path: PathBuf,
+    },
+    Export {
+        path: PathBuf,
+    },
+}
+
+/// What to do once a write has succeeded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Then {
+    Nothing,
+    /// Close the document (asking again if it changed meanwhile).
+    Close(DocId),
+    /// Quit, once every write marked so is done.
+    Exit,
+}
+
+/// The work of a write: writes the file, or says why it could not.
+pub type Job = Box<dyn FnOnce() -> Result<(), String> + Send>;
+
+/// A write done.
+pub struct Finished {
+    pub written: Written,
+    pub then: Then,
+    pub result: Result<(), String>,
+}
+
+/// Writes files one after another on a thread of its own, in the order asked (so two writes
+/// to one file never overlap), and reports each as it is done. A document is written as it
+/// was when the write was asked for, so it can be edited meanwhile.
+pub struct Writer {
+    jobs: Option<mpsc::Sender<(u64, Job, egui::Context)>>,
+    done_tx: mpsc::Sender<(u64, Result<(), String>)>,
+    done: mpsc::Receiver<(u64, Result<(), String>)>,
+    /// The writes asked for and not yet reported, in order.
+    pending: Vec<(u64, Written, Then)>,
+    next: u64,
+}
+
+impl Default for Writer {
+    fn default() -> Writer {
+        let (done_tx, done) = mpsc::channel();
+        Writer { jobs: None, done_tx, done, pending: Vec::new(), next: 0 }
+    }
+}
+
+impl Writer {
+    /// Starts writing `written` with `job`; `then` is done once it succeeds, and `ctx` is
+    /// asked to repaint when it is done (see [`finished`](Self::finished)).
+    pub fn write(&mut self, written: Written, then: Then, job: Job, ctx: &egui::Context) {
+        self.next += 1;
+        let id = self.next;
+        self.pending.push((id, written, then));
+        let done_tx = self.done_tx.clone();
+        let jobs = self.jobs.get_or_insert_with(|| {
+            let (tx, rx) = mpsc::channel::<(u64, Job, egui::Context)>();
+            std::thread::Builder::new()
+                .name("writer".into())
+                .spawn(move || {
+                    for (id, job, ctx) in rx {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).unwrap_or_else(|_| {
+                            Err("Something went wrong inside Opal Studio while writing the file; the file \
+                                 was left as it was."
+                                .into())
+                        });
+                        let _ = done_tx.send((id, result));
+                        ctx.request_repaint();
+                    }
+                })
+                .expect("starting the writer");
+            tx
+        });
+        if jobs.send((id, job, ctx.clone())).is_err() {
+            self.jobs = None;
+            let _ = self.done_tx.send((id, Err("the writer stopped".into())));
+        }
+    }
+
+    /// The writes done since the last call, in the order they were asked for.
+    pub fn finished(&mut self) -> Vec<Finished> {
+        let mut out = Vec::new();
+        while let Ok((id, result)) = self.done.try_recv() {
+            let at = self.pending.iter().position(|p| p.0 == id).expect("a write asked for");
+            let (_, written, then) = self.pending.remove(at);
+            out.push(Finished { written, then, result });
+        }
+        out
+    }
+
+    /// What is being written now, if anything.
+    pub fn current(&self) -> Option<&Written> {
+        self.pending.first().map(|p| &p.1)
+    }
+
+    pub fn busy(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Whether a write marked to quit after is still to be done.
+    pub fn exit_pending(&self) -> bool {
+        self.pending.iter().any(|p| p.2 == Then::Exit)
+    }
+
+    /// Forgets that the writes still to be done were to quit after (one failed, or was not
+    /// started).
+    pub fn cancel_exit(&mut self) {
+        for p in &mut self.pending {
+            if p.2 == Then::Exit {
+                p.2 = Then::Nothing;
+            }
+        }
+    }
+}

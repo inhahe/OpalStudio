@@ -355,6 +355,15 @@ impl OpalApp {
         if !wants || self.st.exit_confirmed {
             return;
         }
+        // Files still being written are finished first.
+        if self.st.writer.busy() {
+            if window_close {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            }
+            self.st.exit_after_writes = true;
+            self.st.notify("Quitting once the files being written are done.");
+            return;
+        }
         let dirty = self.st.dirty_docs();
         if dirty.is_empty() {
             self.st.exit_confirmed = true;
@@ -481,6 +490,7 @@ impl OpalApp {
             .hash(&mut h);
         (st.resize_image.is_some(), st.resize_canvas.is_some(), st.rotate_by.is_some()).hash(&mut h);
         st.reading.is_some().hash(&mut h);
+        st.writer.busy().hash(&mut h);
         st.notice.as_ref().map(|n| &n.0).hash(&mut h);
         h.finish()
     }
@@ -503,6 +513,15 @@ impl OpalApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(w) = self.st.writer.current() {
+                    let (doing, path) = match w {
+                        crate::writer::Written::Save { path, .. } => ("Saving", path),
+                        crate::writer::Written::Export { path } => ("Exporting", path),
+                    };
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    ui.label(RichText::new(format!("{}  {doing} {name}…", crate::icons::SAVE)).color(weak));
+                    ui.separator();
+                }
                 if let Some((used, budget)) = self.st.gpu.memory {
                     ui.label(RichText::new(format!("GPU {} / {}", bytes(used), bytes(budget))).color(weak))
                         .on_hover_text(format!(
@@ -593,6 +612,7 @@ impl eframe::App for OpalApp {
         self.handle_exit(&ctx);
         self.save_settings_if_due(&ctx);
         self.st.poll_copies();
+        self.st.poll_writes();
         self.st.poll_paste(ctx.input(|i| i.pointer.any_down()));
         self.st.thumbs.end_frame();
         let budget = crate::prefs::bytes(&self.st.prefs, "history.memory");

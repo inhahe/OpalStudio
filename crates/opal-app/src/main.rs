@@ -35,6 +35,7 @@ mod transform_ui;
 #[cfg(test)]
 mod ui_tests;
 mod widgets;
+mod writer;
 
 use eframe::egui;
 
