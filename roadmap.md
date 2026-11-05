@@ -108,7 +108,11 @@ selection core it builds on.
 - SVG import and export.
 - Boolean operations on paths.
 - The Calligraphy tool: broad-edge, pointed and brush variants; strokes as editable vector
-  objects (centerline plus nib); pressure, tilt and rotation; the guide sheet.
+  objects (centerline plus nib); pressure, tilt and rotation; the guide sheet, with the
+  Chinese practice grids.
+- The ink brush for Chinese calligraphy: bristles that spread and splay, ink that runs dry
+  into flying white, dipping to add ink, density and wetness, rice-paper bleeding; strokes
+  re-renderable with other ink settings.
 
 ## 5. Adjustments
 - Adjustments: levels, curves, hue/saturation, gradient map, channel matrix (3×3 weights

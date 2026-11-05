@@ -585,6 +585,7 @@ nib's shape and angle relative to the direction of travel, and from pressure.
     thin strokes come from direction alone, so it works fully with a mouse.
   - *Pointed*: width from pressure (copperplate, Spencerian), from speed with a mouse.
   - *Brush*: a round, soft tip that spreads with pressure (brush lettering).
+  - *Ink brush*: a Chinese calligraphy brush (see below).
 - **Settings:** nib width; nib angle; *fixation* (how firmly the nib keeps its angle rather
   than turning with the stroke, from 1, fixed, to 0, always across it); thinning by speed;
   pressure-to-width curve; mass (inertia that steadies the hand) and smoothing; tremor;
@@ -594,7 +595,36 @@ nib's shape and angle relative to the direction of travel, and from pressure.
 - **Guide sheet:** a non-printing overlay of the lines calligraphers rule: baseline, x-height,
   ascender and descender lines and slant lines, sized in nib widths (italic's x-height is
   about five nib widths), with the nib-width ladder drawn at the margin. The slant angle, the
-  proportions and the spacing are settings, with presets for common hands.
+  proportions and the spacing are settings, with presets for common hands. For Chinese
+  calligraphy, the practice grids: 田字格 (four squares), 米字格 (with diagonals) and 九宫格
+  (nine squares), in columns for vertical writing.
+
+### The ink brush
+
+Chinese calligraphy depends on the ink in the brush as much as on the stroke. Its four
+qualities of ink, 浓淡干湿 (dense, light, dry, wet), are each part of the brush:
+
+- **Bristles.** The brush is a bundle of bristles: pressing spreads the tip from a point to
+  the full belly, tilt moves between center-tip (中锋) and side-tip (侧锋) strokes, and the
+  bristles splay and gather as the stroke turns. Without pressure (a mouse), speed stands in.
+- **Ink load and running dry.** Each bristle carries ink that the stroke uses up, faster
+  under pressure and at speed. As bristles run dry they leave paper showing through in
+  streaks: 飞白, "flying white", the dry-brush texture prized in calligraphy.
+- **Adding ink.** The brush is reloaded by dipping (a key or button), or automatically at
+  the start of each stroke, or every few strokes (setting); how much it takes up is a
+  setting.
+- **Density and wetness.** Ink density (浓/淡, from thick black to pale gray) and wetness
+  (湿/干) are separate settings: wetness is how much water the brush holds, which governs
+  how far ink spreads into the paper.
+- **Paper.** Absorbent raw rice paper (生宣) lets wet ink bleed into the fibers with soft,
+  feathered edges; sized paper (熟宣) keeps strokes crisp. The paper's absorbency and
+  grain texture are settings (bleeding follows a diffusion model in the spirit of MoXi,
+  Chu and Tai's ink dispersion in absorbent paper).
+- **Still editable.** A stroke is recorded as its centerline with the pressure, tilt and
+  speed at each point, the brush and ink settings, and the random seed of its bristles, so
+  it renders the same way every time and can be re-rendered with other ink, density or
+  wetness afterwards.
+
 
 ## Undo history tree
 
