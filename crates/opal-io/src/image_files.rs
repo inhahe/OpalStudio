@@ -204,16 +204,32 @@ fn resized<'d>(layers: &'d [Arc<Layer>], canvas: &IRect, s: &ExportSize) -> Sour
 fn shrunk(layers: &[Arc<Layer>], canvas: &IRect, kx: u32, ky: u32) -> (RasterImage, u32, u32) {
     let (w, h, kx, ky) = (canvas.width() as usize, canvas.height() as usize, kx as usize, ky as usize);
     let (sw, sh) = (w.div_ceil(kx), h.div_ceil(ky));
-    // Adds the rows `rows` to the block sums `acc`.
+    // Adds the rows `rows` to the block sums `acc`, groups of rows in parallel, each into
+    // sums of its own that are then added up (a block taller than a band is summed across
+    // bands, a band at a time, so the rows are what there is to share out).
+    const ROWS: usize = 16;
     let sum = |acc: &mut [[f32; 4]], rows: &[Pixel]| {
-        for row in rows.chunks_exact(w) {
-            for (i, a) in acc.iter_mut().enumerate() {
-                for p in &row[i * kx..((i + 1) * kx).min(w)] {
-                    for c in 0..4 {
-                        a[c] += p[c].to_f32();
+        let part = rows
+            .par_chunks(w * ROWS)
+            .map(|rows| {
+                let mut part = vec![[0.0f32; 4]; sw];
+                for row in rows.chunks_exact(w) {
+                    for (i, a) in part.iter_mut().enumerate() {
+                        for p in &row[i * kx..((i + 1) * kx).min(w)] {
+                            for c in 0..4 {
+                                a[c] += p[c].to_f32();
+                            }
+                        }
                     }
                 }
-            }
+                part
+            })
+            .reduce_with(|mut a, b| {
+                a.iter_mut().zip(&b).for_each(|(x, y)| (0..4).for_each(|c| x[c] += y[c]));
+                a
+            });
+        if let Some(part) = part {
+            acc.iter_mut().zip(&part).for_each(|(x, y)| (0..4).for_each(|c| x[c] += y[c]));
         }
     };
     // The block averages from sums over `rows` rows.
@@ -387,6 +403,8 @@ impl<I: Iterator<Item = Vec<Pixel>>> GenericImageView for JpegRows<I> {
         let w = self.width as usize;
         let mut held = self.held.borrow_mut();
         let (first, px) = &mut *held;
+        // `encode_image` promises to read each pixel once, in 8 × 8 blocks from the top.
+        assert!(y >= *first, "the JPEG encoder went back to row {y}, which it had gone past");
         while y >= *first + (px.len() / w) as u32 {
             // The encoder never goes back past the 8-row block it is in.
             let keep = (y / 8 * 8).max(*first);

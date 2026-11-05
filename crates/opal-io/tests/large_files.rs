@@ -133,3 +133,14 @@ fn save_native() {
     measure("Save", || opal_io::native::save(&d, &ids, &path).unwrap());
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+#[ignore]
+fn export_tiny() {
+    let (d, _) = large();
+    let path = temp("tiny.png");
+    let size =
+        opal_io::image_files::ExportSize { width: 20, height: 13, sampling: opal_core::resample::Sampling::default() };
+    measure("PNG at 20 x 13", || export(&d, &path, &ExportFormat::Png { sixteen_bit: false }, Some(&size)).unwrap());
+    std::fs::remove_file(path).unwrap();
+}
