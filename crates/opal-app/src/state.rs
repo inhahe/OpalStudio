@@ -165,8 +165,11 @@ pub struct AppState {
     pub exit_requested: bool,
     /// Saves and exports, written off the interface thread.
     pub writer: crate::writer::Writer,
-    /// Quitting was asked for while files were being written: it goes ahead when they are.
+    /// Quitting was asked for while files were being written: it goes ahead when they are
+    /// (unless one fails).
     pub exit_after_writes: bool,
+    /// Documents to ask about closing once the question on screen is answered.
+    pub close_queue: VecDeque<DocId>,
     /// When settings last changed and have not been written to disk yet.
     pub settings_changed: Option<Instant>,
     /// The canvas pixel under the pointer, set by the canvas during the frame.
@@ -245,6 +248,7 @@ impl AppState {
             exit_requested: false,
             writer: crate::writer::Writer::default(),
             exit_after_writes: false,
+            close_queue: VecDeque::new(),
             settings_changed: None,
             cursor_canvas: None,
             cursor_shown: None,
@@ -592,7 +596,6 @@ impl AppState {
     /// was started (not if no file was chosen).
     pub fn save(&mut self, id: DocId, choose: bool, then: Then, ctx: &egui::Context) -> bool {
         let Some(d) = self.doc_mut(id) else { return false };
-        d.commit_pending();
         let path = match (&d.path, choose) {
             (Some(p), false) => p.clone(),
             _ => {
@@ -604,37 +607,60 @@ impl AppState {
                 }
             }
         };
+        self.save_to(id, path, then, ctx);
+        true
+    }
+
+    /// Saves document `id` to `path` (off the interface thread), then does `then`. The image
+    /// takes the file at once, so a save asked for before this one is written goes to it too.
+    pub fn save_to(&mut self, id: DocId, path: PathBuf, then: Then, ctx: &egui::Context) {
+        let Some(d) = self.doc_mut(id) else { return };
+        d.commit_pending();
+        let before = (d.path.replace(path.clone()), std::mem::replace(&mut d.title, file_title(&path)));
         // The document as it is now: it can be edited while this is written.
         let (doc, ids, at) = (d.history.doc().clone(), d.ids.clone(), d.history.current());
-        let written = Written::Save { doc: id, at, path: path.clone() };
+        let written = Written::Save { doc: id, at, path: path.clone(), before };
         let job = Box::new(move || native::save(&doc, &ids, &path).map_err(|e| e.to_string()));
         self.writer.write(written, then, job, ctx);
-        true
     }
 
     /// Reports the saves and exports done since the last frame, and does what was to follow
     /// them.
     pub fn poll_writes(&mut self) {
-        for f in self.writer.finished() {
+        let finished = self.writer.finished();
+        // A failure stops quitting (whether quitting was to follow these writes or waits for
+        // them), so that it is seen; the writes done with it are judged together.
+        let failed = finished.iter().any(|f| f.result.is_err());
+        if failed {
+            self.writer.cancel_exit();
+            self.exit_after_writes = false;
+        }
+        for f in finished {
             match (f.written, f.result) {
-                (Written::Save { doc, at, path }, Ok(())) => {
+                (Written::Save { doc, at, path, .. }, Ok(())) => {
                     // The image may have been closed meanwhile; what was to follow still is.
+                    // It is saved if it still goes to this file (not if saved as another since).
                     let title = file_title(&path);
-                    if let Some(d) = self.doc_mut(doc) {
+                    if let Some(d) = self.doc_mut(doc)
+                        && d.path.as_ref() == Some(&path)
+                    {
                         d.saved_at = Some(at);
-                        d.title = title.clone();
-                        d.path = Some(path);
                     }
                     match f.then {
                         // Changed while it was written: asked about again.
-                        Then::Close(id) => self.request_close(id),
-                        Then::Exit if !self.writer.exit_pending() => self.exit_requested = true,
+                        Then::Close => self.request_close(doc),
+                        Then::Exit if !failed && !self.writer.exit_pending() => self.exit_requested = true,
                         Then::Exit => {}
                         Then::Nothing => self.notify(format!("Saved \"{title}\".")),
                     }
                 }
-                (Written::Save { .. }, Err(e)) => {
-                    self.writer.cancel_exit();
+                (Written::Save { doc, path, before, .. }, Err(e)) => {
+                    // The file it had before, unless it has been given another since.
+                    if let Some(d) = self.doc_mut(doc)
+                        && d.path.as_ref() == Some(&path)
+                    {
+                        (d.path, d.title) = before;
+                    }
                     self.message(MessageKind::Error, "Could not save", e);
                 }
                 (Written::Export { path }, Ok(())) => self.notify(format!("Exported \"{}\".", file_title(&path))),
@@ -644,6 +670,11 @@ impl AppState {
         if self.exit_after_writes && !self.writer.busy() {
             self.exit_after_writes = false;
             self.exit_requested = true;
+        }
+        while self.confirm.is_none()
+            && let Some(id) = self.close_queue.pop_front()
+        {
+            self.request_close(id);
         }
     }
 
@@ -706,15 +737,38 @@ impl AppState {
     }
 
     /// Closes a document, first asking about unsaved changes.
+    /// Closes a document, first asking about unsaved changes (after the question on screen,
+    /// if one is). One already to close once its save is written just waits.
     pub fn request_close(&mut self, id: DocId) {
+        if self.writer.closing(id) {
+            let title = self.doc(id).map(|d| d.title.clone()).unwrap_or_default();
+            return self.notify(format!("\"{title}\" closes once it is saved."));
+        }
         match self.doc(id) {
-            Some(d) if d.is_dirty() => self.confirm = Some(Confirm::Close(id)),
+            Some(d) if d.is_dirty() => {
+                if self.confirm.is_some() {
+                    self.close_queue.push_back(id);
+                } else {
+                    self.confirm = Some(Confirm::Close(id));
+                }
+            }
             Some(_) => self.close_now(id),
             None => {}
         }
     }
 
     pub fn close_now(&mut self, id: DocId) {
+        // A question about it goes with it.
+        match &mut self.confirm {
+            Some(Confirm::Close(c)) if *c == id => self.confirm = None,
+            Some(Confirm::Exit(ids)) => {
+                ids.retain(|d| *d != id);
+                if ids.is_empty() {
+                    self.confirm = None;
+                }
+            }
+            _ => {}
+        }
         self.docs.retain(|d| d.id != id);
         if self.renaming.as_ref().is_some_and(|r| r.0 == id) {
             self.renaming = None;

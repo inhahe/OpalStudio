@@ -113,7 +113,7 @@ fn confirm(ctx: &egui::Context, st: &mut AppState) {
     use crate::writer::Then;
     match (c, choice) {
         (Confirm::Close(id), Answer::Save) => {
-            st.save(id, false, Then::Close(id), ctx);
+            st.save(id, false, Then::Close, ctx);
         }
         (Confirm::Close(id), Answer::Discard) => st.close_now(id),
         (Confirm::Exit(ids), Answer::Save) => {

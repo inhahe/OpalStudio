@@ -513,7 +513,7 @@ impl OpalApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(w) = self.st.writer.current() {
+                if let Some(w) = self.st.writer.pending().next() {
                     let (doing, path) = match w {
                         crate::writer::Written::Save { path, .. } => ("Saving", path),
                         crate::writer::Written::Export { path } => ("Exporting", path),

@@ -1043,8 +1043,9 @@ fn saving_then_closing_closes_once_written_and_asks_again_if_edited_meanwhile() 
         let id = st.active_doc.unwrap();
         let at = st.active().unwrap().history.current();
         let path = std::env::temp_dir().join("never-saved.opal");
-        let then = crate::writer::Then::Close(id);
-        st.writer.write(crate::writer::Written::Save { doc: id, at, path }, then, job, &ctx);
+        st.active_mut().unwrap().path = Some(path.clone());
+        let written = crate::writer::Written::Save { doc: id, at, path, before: (None, "Untitled".into()) };
+        st.writer.write(written, crate::writer::Then::Close, job, &ctx);
         if edit {
             st.queue.push(Cmd::NewLayer);
         }
@@ -1086,7 +1087,8 @@ fn saving_all_then_quitting(fails: bool) {
     let id = st.active_doc.unwrap();
     let at = st.active().unwrap().history.current();
     for job in [first, second] {
-        let written = crate::writer::Written::Save { doc: id, at, path: std::env::temp_dir().join("never-saved.opal") };
+        let path = std::env::temp_dir().join("never-saved.opal");
+        let written = crate::writer::Written::Save { doc: id, at, path, before: (None, "Untitled".into()) };
         st.writer.write(written, crate::writer::Then::Exit, job, &ctx);
     }
     drop(release_first);
@@ -1144,4 +1146,140 @@ fn the_first_drop_of_history_is_said_once_the_status_bar_is_free() {
     let st = h.state().state();
     assert_eq!(st.notice.as_ref().map(|n| n.0.as_str()), Some(crate::doc::DROP_NOTE));
     assert!(!st.active().unwrap().drop_note_due());
+}
+
+/// A write that waits until the sender returned is dropped, then fails or not.
+fn held_result(fails: bool) -> (crate::writer::Job, std::sync::mpsc::Sender<()>) {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    (
+        Box::new(move || {
+            let _ = rx.recv();
+            if fails { Err("the disk is full".into()) } else { Ok(()) }
+        }),
+        tx,
+    )
+}
+
+#[test]
+fn a_failed_write_stops_a_quit_waiting_for_it() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 64, 64);
+    let ctx = h.ctx.clone();
+    let (job, release) = held_result(true);
+    let st = h.state_mut().state_mut();
+    let path = std::env::temp_dir().join("never-written.png");
+    st.writer.write(crate::writer::Written::Export { path }, crate::writer::Then::Nothing, job, &ctx);
+    st.queue.push(Cmd::Exit);
+    h.run();
+    drop(release);
+    until_written(&mut h);
+    h.run();
+    let st = h.state().state();
+    assert!(!st.exit_confirmed, "quit, hiding the failure");
+    assert!(st.messages.iter().any(|m| m.title == "Could not export"));
+}
+
+#[test]
+fn a_failure_reported_with_the_last_save_stops_saving_all_then_quitting() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 64, 64);
+    let ctx = h.ctx.clone();
+    let st = h.state_mut().state_mut();
+    let id = st.active_doc.unwrap();
+    let at = st.active().unwrap().history.current();
+    let mut releases = Vec::new();
+    for fails in [true, false] {
+        let (job, release) = held_result(fails);
+        let path = std::env::temp_dir().join("never-saved.opal");
+        let written = crate::writer::Written::Save { doc: id, at, path, before: (None, "Untitled".into()) };
+        st.writer.write(written, crate::writer::Then::Exit, job, &ctx);
+        releases.push(release);
+    }
+    // Both done before the next frame looks.
+    drop(releases);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    until_written(&mut h);
+    h.run();
+    let st = h.state().state();
+    assert!(!st.exit_confirmed && st.confirm.is_none(), "went on quitting past a failed save");
+    assert!(st.messages.iter().any(|m| m.title == "Could not save"));
+}
+
+#[test]
+fn a_save_takes_its_file_at_once_and_gives_it_back_if_it_fails() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 64, 64);
+    let ctx = h.ctx.clone();
+    let dir = std::env::temp_dir();
+    let (a, b) = (
+        dir.join(format!("opal-a-{}.opal", std::process::id())),
+        dir.join(format!("opal-b-{}.opal", std::process::id())),
+    );
+    let st = h.state_mut().state_mut();
+    let id = st.active_doc.unwrap();
+    st.active_mut().unwrap().path = Some(a.clone());
+    st.save_to(id, b.clone(), crate::writer::Then::Nothing, &ctx);
+    assert_eq!(st.active().unwrap().path.as_ref(), Some(&b), "the file chosen is not the image's yet");
+    // Saving again before that is written goes to the new file.
+    assert!(st.save(id, false, crate::writer::Then::Nothing, &ctx));
+    let to: Vec<std::path::PathBuf> = st
+        .writer
+        .pending()
+        .filter_map(|w| match w {
+            crate::writer::Written::Save { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(to.iter().all(|p| *p == b), "{to:?}");
+    until_written(&mut h);
+    std::fs::remove_file(&b).unwrap();
+    // A save that fails gives the image its file back.
+    let nowhere = dir.join("no such folder").join("x.opal");
+    let st = h.state_mut().state_mut();
+    st.save_to(id, nowhere, crate::writer::Then::Nothing, &ctx);
+    until_written(&mut h);
+    let st = h.state().state();
+    assert_eq!(st.active().unwrap().path.as_ref(), Some(&b), "the failed file was kept");
+    assert!(st.messages.iter().any(|m| m.title == "Could not save"));
+}
+
+#[test]
+fn closing_waits_its_turn_and_takes_its_question_with_it() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 64, 64);
+    image_of(&mut h, 32, 32);
+    let ctx = h.ctx.clone();
+    let st = h.state_mut().state_mut();
+    let (a, b) = (st.docs[0].id, st.docs[1].id);
+    // `a` to close once saved: asking to close it again only says so.
+    let (job, release) = held_result(false);
+    let at = st.doc(a).unwrap().history.current();
+    let path = std::env::temp_dir().join("never-saved.opal");
+    st.doc_mut(a).unwrap().path = Some(path.clone());
+    let written = crate::writer::Written::Save { doc: a, at, path, before: (None, "a".into()) };
+    st.writer.write(written, crate::writer::Then::Close, job, &ctx);
+    st.request_close(a);
+    assert!(st.confirm.is_none(), "asked again about an image closing once saved");
+    // A question about `b` on screen, then `a` changed while it was written: its question
+    // waits for `b`'s to be answered rather than replacing it.
+    st.doc_mut(b).unwrap().saved_at = None;
+    st.request_close(b);
+    let _ = st.doc_mut(a).unwrap().apply::<()>("Hide", |d, _| {
+        let l = d.layers[0].id;
+        d.layer_mut(l).unwrap().visible = false;
+        Ok(())
+    });
+    drop(release);
+    until_written(&mut h);
+    let st = h.state_mut().state_mut();
+    assert_eq!(st.confirm, Some(crate::state::Confirm::Close(b)), "the question on screen was replaced");
+    // Closing `b` takes its question with it, and `a`'s comes.
+    st.close_now(b);
+    assert!(st.confirm.is_none());
+    h.run();
+    assert_eq!(h.state().state().confirm, Some(crate::state::Confirm::Close(a)));
 }

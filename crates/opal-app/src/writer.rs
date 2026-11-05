@@ -9,11 +9,13 @@ use std::sync::mpsc;
 /// What a write puts where.
 #[derive(Clone, Debug)]
 pub enum Written {
-    /// Document `doc`, as it was at history state `at`, saved to `path`.
+    /// Document `doc`, as it was at history state `at`, saved to `path`; `before` is the file
+    /// it had before, and its title then (put back if the save fails).
     Save {
         doc: DocId,
         at: NodeId,
         path: PathBuf,
+        before: (Option<PathBuf>, String),
     },
     Export {
         path: PathBuf,
@@ -24,8 +26,8 @@ pub enum Written {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Then {
     Nothing,
-    /// Close the document (asking again if it changed meanwhile).
-    Close(DocId),
+    /// Close the document saved (asking again if it changed meanwhile).
+    Close,
     /// Quit, once every write marked so is done.
     Exit,
 }
@@ -102,9 +104,16 @@ impl Writer {
         out
     }
 
-    /// What is being written now, if anything.
-    pub fn current(&self) -> Option<&Written> {
-        self.pending.first().map(|p| &p.1)
+    /// The writes asked for and not yet reported, in order (the first is being written).
+    pub fn pending(&self) -> impl Iterator<Item = &Written> {
+        self.pending.iter().map(|p| &p.1)
+    }
+
+    /// Whether document `doc` is to be closed once a save still under way is written.
+    pub fn closing(&self, doc: DocId) -> bool {
+        self.pending
+            .iter()
+            .any(|(_, w, then)| *then == Then::Close && matches!(w, Written::Save { doc: d, .. } if *d == doc))
     }
 
     pub fn busy(&self) -> bool {

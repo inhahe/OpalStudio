@@ -907,11 +907,14 @@ Every write, `.opal` and exports alike, goes to a temporary file beside the targ
 replaces it only when complete, so a failed save never damages the existing file. Writes
 run on a thread of their own, one after another in the order asked (so two writes to one
 file never overlap), with the document as it was when the write was asked for: the
-interface stays live, and the status bar says what is being written. Saving the image
-marks it saved at the history state that was written, so an edit made meanwhile leaves
-it unsaved. "Save" in the close and quit questions closes or quits once the writes are
-done (asking again about an image changed meanwhile, and stopping at a failure), and
-quitting otherwise waits for writes still under way.
+interface stays live, and the status bar says what is being written. The image takes the
+file chosen at once (so a save asked for before the first is written goes there too; a
+failure gives it back the file it had), and once written it is marked saved at the history
+state written, so an edit made meanwhile leaves it unsaved. "Save" in the close and quit
+questions closes or quits once the writes are done, asking again about an image changed
+meanwhile; quitting otherwise waits for writes still under way; any failed write stops
+quitting, so that it is seen. A close question never replaces another on screen: it
+waits its turn, and one about an image that closes goes with it.
 
 ## Settings storage
 
