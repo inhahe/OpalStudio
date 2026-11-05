@@ -1407,3 +1407,31 @@ fn escape_cancels_a_paste_being_read_unless_a_box_takes_it() {
     h.run();
     assert!(h.state().state().active().unwrap().transform.is_none(), "the cancelled paste landed");
 }
+
+#[test]
+fn a_view_taking_a_while_says_so() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 256, 256);
+    h.state_mut().state_mut().active_mut().unwrap().projector.wait = std::time::Duration::ZERO;
+    // The background threads held, so the next view cannot be done.
+    let held = crate::background::testing::hold(Some(crate::background::pool()));
+    h.state_mut().state_mut().queue.push(Cmd::FlipHorizontal);
+    h.run();
+    assert!(h.query_by_label("Drawing…").is_none(), "said at once");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    // The spinner keeps repainting: frames one at a time.
+    h.step();
+    h.step();
+    assert!(h.query_by_label("Drawing…").is_some(), "the view taking a while did not say so");
+    render(&mut h, "drawing");
+    drop(held);
+    for _ in 0..200 {
+        if h.state().state().active().unwrap().projector.behind_for().is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    h.run();
+    assert!(h.query_by_label("Drawing…").is_none(), "still said once the view was done");
+}

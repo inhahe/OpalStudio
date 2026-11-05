@@ -8,7 +8,7 @@ use opal_core::geom::IRect;
 use opal_core::tile::{Tile, TileCoord};
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long the canvas waits for what it asked for before drawing the last result instead.
 /// Tests wait for it, so that what they see does not depend on timing.
@@ -78,8 +78,12 @@ impl Shared {
 pub struct Projector {
     shared: Arc<Shared>,
     asked: Option<Request>,
+    /// When the last request was made.
+    asked_at: Instant,
     /// The request [`shown`](Self::shown) last waited for.
     waited: u64,
+    /// How long the canvas waits for what it asked for ([`WAIT`]; tests may wait less).
+    pub wait: Duration,
 }
 
 impl Projector {
@@ -87,7 +91,7 @@ impl Projector {
         let shared = Arc::new(Shared::default());
         let s = shared.clone();
         std::thread::Builder::new().name("projection".into()).spawn(move || run(&s)).expect("starting a thread");
-        Projector { shared, asked: None, waited: 0 }
+        Projector { shared, asked: None, asked_at: Instant::now(), waited: 0, wait: WAIT }
     }
 
     /// Asks for the tiles of pyramid level `level` within `rect` (canvas pixels) to be brought
@@ -109,6 +113,7 @@ impl Projector {
             return;
         }
         self.asked = Some(request.clone());
+        self.asked_at = Instant::now();
         self.shared.lock().job = Some((request, ctx.clone()));
         self.shared.job.notify_one();
     }
@@ -133,6 +138,13 @@ impl Projector {
             panic!("computing the projection failed: {why}");
         }
         s.shown.clone()
+    }
+
+    /// How long the view shown has been behind the one last asked for, if it is.
+    pub fn behind_for(&self) -> Option<Duration> {
+        let asked = self.asked.as_ref()?.serial;
+        let shown = self.shared.lock().shown.as_ref().map_or(0, |s| s.serial);
+        (shown < asked).then(|| self.asked_at.elapsed())
     }
 
     /// Whether the latest result drew what changed as a preview.

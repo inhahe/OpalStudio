@@ -132,7 +132,8 @@ not a goal.
   them): the canvas asks for the view it shows and waits for it
   only briefly (20 ms, on the frame that asks), drawing the last view done meanwhile (the
   previous zoom, or the image before a change), so a huge image never holds up the
-  interface. Keys name tiles and
+  interface; a view behind for more than 150 ms says so, with a spinner and "Drawing…" in
+  the canvas's corner. Keys name tiles and
   images by weak reference (compared by address, which cannot be reused while named), and
   a layer's own tile shown as it is is held weakly too, so the cache never keeps alive
   what the document has let go of. A pyramid tile is

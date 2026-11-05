@@ -310,7 +310,8 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     d.projector.ask(&layers, level, &wider, quality, Some(cache_budget), &ctx);
     // What was asked for, or, if it is not done in time, the last view done (at the level it
     // was done at); nothing at all until the first is.
-    let shown = d.projector.shown(crate::projector::WAIT);
+    let wait = d.projector.wait;
+    let shown = d.projector.shown(wait);
     let shown_level = shown.as_ref().map_or(level, |s| s.level);
     let mut draws = Vec::new();
     for (&coord, _) in shown.iter().flat_map(|s| &s.tiles) {
@@ -356,6 +357,23 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         frame: ctx.cumulative_frame_nr(),
     };
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, callback));
+    // A view taking a while (a huge image) says so, rather than look finished.
+    const BEHIND: std::time::Duration = std::time::Duration::from_millis(150);
+    if let Some(t) = d.projector.behind_for() {
+        if t >= BEHIND {
+            let at = Rect::from_min_size(rect.right_top() + Vec2::new(-112.0, 8.0), Vec2::new(104.0, 22.0));
+            ui.painter().rect_filled(at.expand(2.0), 4.0, palette.backdrop.gamma_multiply(0.85));
+            ui.put(at, |ui: &mut egui::Ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.add(egui::Spinner::new().size(14.0));
+                    ui.label("Drawing…")
+                })
+                .inner
+            });
+        } else {
+            ctx.request_repaint_after(BEHIND - t);
+        }
+    }
     if prefs.border {
         let min = rect.min + view.to_screen(canvas.min.to_vec2()) / ppp;
         let r = Rect::from_min_size(min, canvas.size() * view.zoom / ppp);
