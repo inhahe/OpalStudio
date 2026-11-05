@@ -11,15 +11,6 @@ its colors are off; the user is warned when the image opens. Whether a profile i
 judged from its description text. **Fix:** color management with lcms2 in milestone 5:
 convert from the embedded profile into the working space on import.
 
-## The projection is computed on the UI thread
-
-`crates/opal-core/src/composite.rs` (`Projection::update`), called from
-`crates/opal-app/src/canvas.rs` every frame. Stale tiles are computed in parallel with
-rayon, but the frame waits for them, so opening or zooming out of a very large image
-(hundreds of megapixels) stalls the interface for a moment. **Fix:** compute stale tiles on
-worker threads and show the coarser pyramid level (or the previous result) until they
-arrive.
-
 ## GPU memory is only reported on Windows
 
 `crates/opal-app/src/gpu_memory.rs`. **Fix:** query `VK_EXT_memory_budget` through wgpu's

@@ -23,6 +23,7 @@ mod panels;
 mod paste;
 mod paste_keys;
 mod prefs;
+mod projector;
 mod ribbon;
 mod settings;
 mod state;

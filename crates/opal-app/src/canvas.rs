@@ -307,19 +307,23 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let held = ctx.input(|i| i.pointer.primary_down());
     let dragging = held && (d.moving.is_some() || d.transform.as_ref().is_some_and(|s| s.drag.is_some()));
     let quality = if dragging { opal_core::composite::Quality::Preview } else { opal_core::composite::Quality::Exact };
-    d.projection.set_budget(Some(cache_budget));
-    let tiles = d.projection.update(&layers, level, &wider, quality);
+    d.projector.ask(&layers, level, &wider, quality, Some(cache_budget), &ctx);
+    // What was asked for, or, if it is not done in time, the last view done (at the level it
+    // was done at); nothing at all until the first is.
+    let shown = d.projector.shown(crate::projector::WAIT);
+    let shown_level = shown.as_ref().map_or(level, |s| s.level);
     let mut draws = Vec::new();
-    for (coord, _) in tiles {
-        let r = coord.rect(level);
+    for (&coord, _) in shown.iter().flat_map(|s| &s.tiles) {
+        let r = coord.rect(shown_level);
         if r.intersect(&visible).is_empty() {
             continue;
         }
+        let tiles = &shown.as_ref().expect("a tile came from it").tiles;
         let mut sources: [Option<Arc<Tile>>; 9] = Default::default();
         for dy in -1..=1 {
             for dx in -1..=1 {
                 let n = TileCoord::new(coord.x + dx, coord.y + dy);
-                sources[((dy + 1) * 3 + dx + 1) as usize] = d.projection.tile(level, n).cloned();
+                sources[((dy + 1) * 3 + dx + 1) as usize] = tiles.get(&n).cloned();
             }
         }
         let p0 = view.to_screen(Vec2::new(r.x0 as f32, r.y0 as f32));
@@ -342,7 +346,8 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         smooth: u32::from(!nearest),
         _pad: [0; 2],
     };
-    let callback = CanvasCallback { view_key: doc_key, level, uniforms, tiles: draws, nearest, texture_budget };
+    let callback =
+        CanvasCallback { view_key: doc_key, level: shown_level, uniforms, tiles: draws, nearest, texture_budget };
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, callback));
     if prefs.border {
         let min = rect.min + view.to_screen(canvas.min.to_vec2()) / ppp;

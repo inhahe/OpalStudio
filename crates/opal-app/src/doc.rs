@@ -1,7 +1,6 @@
 //! One open document: its history, its view, and what is selected in it.
 
 use eframe::egui::{Pos2, Rect, Vec2};
-use opal_core::composite::Projection;
 use opal_core::document::{Canvas, Document, IdGen, LayerId};
 use opal_core::history::{History, NodeId};
 use std::collections::HashSet;
@@ -121,7 +120,7 @@ pub struct DocState {
     /// Groups shown expanded in the layers panel.
     pub expanded: HashSet<LayerId>,
     pub view: View,
-    pub projection: Projection,
+    pub projector: crate::projector::Projector,
     /// Counts every change to what the document shows (for repainting).
     pub revision: u64,
     /// The transform box, while one is open. Its document is the pending edit.
@@ -153,7 +152,7 @@ impl DocState {
             selected: active.into_iter().collect(),
             expanded: HashSet::new(),
             view: View::default(),
-            projection: Projection::new(),
+            projector: crate::projector::Projector::new(),
             revision: 0,
             transform: None,
             moving: None,

@@ -126,7 +126,10 @@ not a goal.
   A cached tile keeps the list of what produced it: source tiles (as pointers, with the
   offset of pixels moved off the tile grid), each image object's pixels, transform and
   sampling, and opacities. It is recomputed exactly when that list changes, so nothing has
-  to report changes to the cache. Stale tiles are computed in parallel. The cache keeps
+  to report changes to the cache. Stale tiles are computed in parallel, on a thread each
+  document has for its projection: the canvas asks for the view it shows and waits for it
+  only briefly (20 ms), drawing the last view done meanwhile (the previous zoom, or the
+  image before a change), so a huge image never holds up the interface. The cache keeps
   every tile the view shown needs; beyond that it may hold a set amount of memory (a
   preference, 2 GB by default), past which the tiles farthest from the view are dropped
   first. The GPU only shows projection tiles; a GPU

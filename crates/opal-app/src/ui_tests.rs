@@ -887,7 +887,7 @@ fn letting_go_of_the_box_draws_exactly_at_once() {
         h.hover_at(at(x, 300.0));
         h.run();
     }
-    assert!(h.state().state().active().unwrap().projection.shows_previews(), "the drag draws previews");
+    assert!(h.state().state().active().unwrap().projector.shows_previews(), "the drag draws previews");
     // The frame the button is let go, alone: nothing promises another.
     h.event(egui::Event::PointerButton {
         pos: at(460.0, 300.0),
@@ -896,7 +896,7 @@ fn letting_go_of_the_box_draws_exactly_at_once() {
         modifiers: egui::Modifiers::NONE,
     });
     h.step();
-    assert!(!h.state().state().active().unwrap().projection.shows_previews(), "the previews stay after the drag");
+    assert!(!h.state().state().active().unwrap().projector.shows_previews(), "the previews stay after the drag");
 }
 
 /// A paste for document `target` whose reading has come back with `result`, asked for
