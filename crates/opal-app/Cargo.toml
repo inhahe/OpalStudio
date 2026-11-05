@@ -27,7 +27,15 @@ arboard = { version = "3.7", default-features = false, features = ["image-data"]
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4"
-windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Foundation"] }
+# The version eframe uses, for its Windows message hook.
+winit = "0.30"
+windows = { version = "0.62", features = [
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["wgpu", "eframe"] }

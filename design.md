@@ -378,7 +378,8 @@ curve editors.
 - **Locks:** a locked layer cannot be changed, merged or deleted, and neither can a group
   with a locked layer inside; locked layers can still be moved up and down the stack.
 - **Merge Selected** merges the selected layers into one, where the topmost of them was.
-  Hidden selected layers are left as they are.
+  Selected layers that do not show (hidden, at 0% opacity, or in a hidden group) are left
+  as they are, and hidden layers inside a selected group stay, just below the result.
 - **Merge Visible** merges every visible layer into one, where the topmost of them was;
   hidden layers stay, and keep their order among themselves.
 - **Merge Group** turns a group into one pixel layer with the group's name, opacity and
@@ -391,7 +392,12 @@ curve editors.
   wanted, to make a file smaller, or to make a heavy layer cost nothing; like everything,
   it can be undone.
 - Merging and rasterizing keep the look exactly: the result composites like what it
-  replaces. (Merging layers that are not adjacent moves the lower ones above whatever lay
+  replaces.
+- **Size limits.** An image object enlarged far past the canvas could ask for more memory
+  than the computer has when drawn into pixels. Merging and rasterizing refuse, with the
+  reason, a result needing more than 2 GiB beyond four canvases' worth; baking a paste
+  into a layer, or resampling on Resize Image, keeps only the part around the canvas then,
+  and says so. (Merging layers that are not adjacent moves the lower ones above whatever lay
   between them, which can change the look where those overlap; the status bar says so.)
 
 ### Performance with many layers
@@ -460,7 +466,8 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   none); what is cropped away is darkened (adjustable). **Straighten:** dragging outside
   the box's corners rotates it; the content is turned to match when committed. Enter
   crops, Esc cancels. Cropping only moves the canvas, so nothing is lost, unless *Delete
-  cropped pixels* is set. A crop box larger than the canvas enlarges it.
+  cropped pixels* is set. A crop box larger than the canvas enlarges it. Straightening and
+  deleting cropped pixels change every layer, so they wait while a layer is locked.
 - **Crop to Content** shrinks the canvas to the visible content.
 - **Resize Image:** a size in pixels or percent (aspect ratio locked by default) and a
   resampling method. Image objects are scaled with the canvas. Pixel objects too become

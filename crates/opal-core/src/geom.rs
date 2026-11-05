@@ -245,11 +245,6 @@ impl Affine {
         [self.a * x + self.c * y + self.e, self.b * x + self.d * y + self.f]
     }
 
-    /// Applies the linear part only: where a direction goes.
-    pub fn apply_vector(&self, [x, y]: [f64; 2]) -> [f64; 2] {
-        [self.a * x + self.c * y, self.b * x + self.d * y]
-    }
-
     /// The bounding box of `r`'s image.
     pub fn bounds(&self, r: &FRect) -> FRect {
         FRect::bounding(&r.corners().map(|p| self.apply(p)))

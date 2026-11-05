@@ -593,3 +593,33 @@ fn the_crop_tool_crops_to_its_box_on_enter() {
     let c = h.state().state().active().unwrap().doc().canvas;
     assert_eq!((c.x, c.y, c.width, c.height), (20, 30, 60, 40));
 }
+
+#[test]
+fn space_keeps_the_crop_box_while_it_scrolls_the_view() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 200, 100);
+    h.key_press(egui::Key::C);
+    h.run();
+    let b = crate::crop::CropBox { center: [60.0, 50.0], size: [50.0, 30.0], angle: 0.1 };
+    h.state_mut().state_mut().active_mut().unwrap().crop = Some(b);
+    h.event(egui::Event::Key {
+        key: egui::Key::Space,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().crop, Some(b), "the box was thrown away");
+}
+
+#[test]
+fn opening_a_dialog_from_the_queue_asks_for_a_repaint() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 64, 64);
+    let before = h.state().signature();
+    h.state_mut().state_mut().run(Cmd::ResizeImage, &egui::Context::default());
+    assert_ne!(h.state().signature(), before, "the dialog would wait for the pointer to move");
+}

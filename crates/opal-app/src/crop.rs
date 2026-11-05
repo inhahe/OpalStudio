@@ -197,13 +197,38 @@ fn cropped(p: &PixelObject, canvas: &IRect) -> PixelObject {
 impl DocState {
     /// Crops to `b`: the canvas becomes the box, and if it was turned, everything turns
     /// the other way about its center, so the box's contents come out upright.
-    pub fn crop_to(&mut self, b: &CropBox, delete: bool, sampling: opal_core::resample::Sampling) {
+    ///
+    /// Moving the canvas changes no layer, but straightening and deleting cropped pixels
+    /// change every one, so they are refused (with the reason) while a layer is locked.
+    pub fn crop_to(
+        &mut self,
+        b: &CropBox,
+        delete: bool,
+        sampling: opal_core::resample::Sampling,
+    ) -> Result<(), String> {
         let canvas = b.canvas();
-        let label = if b.angle.abs() > 1e-9 { "Crop and straighten" } else { "Crop" };
-        let _ = self.apply(label, |doc, _| {
-            if b.angle.abs() > 1e-9 {
+        let turned = b.angle.abs() > 1e-9;
+        if turned || delete {
+            let mut locked = None;
+            self.doc().for_each_layer(&mut |l, _| {
+                if l.locked && locked.is_none() {
+                    locked = Some(l.name.clone());
+                }
+            });
+            if let Some(name) = locked {
+                let what = if turned { "Straightening" } else { "Deleting cropped pixels" };
+                return Err(format!("{what} changes every layer, and \"{name}\" is locked. Unlock it first."));
+            }
+        }
+        let label = if turned { "Crop and straighten" } else { "Crop" };
+        let mut clipped = false;
+        self.apply(label, |doc, _| {
+            if turned {
+                // Deleting what is cropped away is destructive anyway, so the turned pixels are
+                // resampled into pixels (which the deleting below then crops) rather than kept as
+                // images.
                 let m = Affine::rotate(-b.angle).about(b.center[0], b.center[1]);
-                transform_all(doc, &m, None, sampling);
+                clipped = transform_all(doc, &m, delete.then_some(sampling), sampling, &canvas.rect());
             }
             doc.canvas = canvas;
             if delete {
@@ -225,7 +250,11 @@ impl DocState {
                 }
             }
             Ok::<(), String>(())
-        });
+        })?;
+        if clipped {
+            self.notice = Some(crate::layer_ops::CLIPPED.into());
+        }
+        Ok(())
     }
 }
 
@@ -278,8 +307,16 @@ impl OnScreen {
 }
 
 /// The Crop tool on document `id`'s canvas: the box, its handles, the shade outside it, the
-/// guides, and the Crop and Reset buttons.
-pub fn canvas_crop(ui: &mut egui::Ui, st: &mut AppState, id: DocId, response: &Response, rect: Rect) {
+/// guides, and the Crop and Reset buttons. The box takes drags when `interactive` (not
+/// while Space scrolls the view).
+pub fn canvas_crop(
+    ui: &mut egui::Ui,
+    st: &mut AppState,
+    id: DocId,
+    response: &Response,
+    rect: Rect,
+    interactive: bool,
+) {
     let ctx = ui.ctx().clone();
     let ppp = ctx.pixels_per_point();
     let settings = st.tool_settings(crate::tools::ToolId::Crop).clone();
@@ -297,12 +334,14 @@ pub fn canvas_crop(ui: &mut egui::Ui, st: &mut AppState, id: DocId, response: &R
     let aspect = aspect(&settings, f64::from(c.width) / f64::from(c.height));
     let screen = OnScreen { corners: b.corners().map(to_screen) };
 
-    if response.drag_started_by(egui::PointerButton::Primary)
+    if interactive
+        && response.drag_started_by(egui::PointerButton::Primary)
         && let Some(origin) = ctx.input(|i| i.pointer.press_origin())
     {
         d.crop_drag = Some(CropDrag { part: screen.part_at(origin), from: to_doc(origin), start: b });
     }
     if let Some(drag) = d.crop_drag
+        && interactive
         && response.dragged_by(egui::PointerButton::Primary)
         && let Some(p) = response.interact_pointer_pos()
     {
@@ -320,7 +359,7 @@ pub fn canvas_crop(ui: &mut egui::Ui, st: &mut AppState, id: DocId, response: &R
     if response.drag_stopped() {
         d.crop_drag = None;
     }
-    let apply = response.double_clicked();
+    let apply = interactive && response.double_clicked();
 
     // ---- Drawing ----------------------------------------------------------------------
     let b = d.crop.expect("set above");
@@ -367,7 +406,9 @@ pub fn canvas_crop(ui: &mut egui::Ui, st: &mut AppState, id: DocId, response: &R
             painter.rect_stroke(r, 1.0, Stroke::new(1.0, palette.accent), egui::StrokeKind::Outside);
         }
     }
-    if let Some(p) = response.hover_pos() {
+    if let Some(p) = response.hover_pos()
+        && interactive
+    {
         let part = d.crop_drag.map_or_else(|| screen.part_at(p), |g| g.part);
         let cursor = match part {
             Part::Move => CursorIcon::Move,
@@ -420,15 +461,22 @@ pub fn canvas_crop(ui: &mut egui::Ui, st: &mut AppState, id: DocId, response: &R
                 });
             });
         });
+    let mut refused = None;
     if apply || choice == Some(true) {
         let delete = settings.bool("crop.delete");
-        let b = d.crop.take().expect("set above");
-        if b.canvas() != c || b.angle.abs() > 1e-9 {
-            d.crop_to(&b, delete, sampling);
+        let b = d.crop.expect("set above");
+        if b.canvas() != c || b.angle.abs() > 1e-9 || delete {
+            match d.crop_to(&b, delete, sampling) {
+                Ok(()) => d.crop = None,
+                Err(why) => refused = Some(why),
+            }
         }
     } else if choice == Some(false) {
         d.crop = None;
         d.revision += 1;
+    }
+    if let Some(why) = refused {
+        st.message(crate::state::MessageKind::Info, "Crop", why);
     }
 }
 
@@ -461,6 +509,47 @@ mod tests {
         let n = CropBox::dragged(&drag, [50.0, 150.0], None);
         assert!((n.angle - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
         assert_eq!(n.center, b.center);
+    }
+
+    fn state_with_image() -> DocState {
+        let mut ids = opal_core::document::IdGen::default();
+        let mut img = opal_core::raster::RasterImage::new();
+        for y in 0..100 {
+            for x in 0..100 {
+                img.set_pixel(x, y, opal_core::tile::pixel_from_f32([1.0; 4]));
+            }
+        }
+        let mut d = opal_core::document::Document::new(100, 100);
+        let l = opal_core::document::Layer::new_raster(ids.layer(), ids.object(), "l", img);
+        d.insert(opal_core::document::Position { parent: None, index: 0 }, l).unwrap();
+        DocState::new(crate::doc::DocId(1), "t".into(), d, ids, "New")
+    }
+
+    #[test]
+    fn straightening_or_deleting_is_refused_while_a_layer_is_locked() {
+        let mut s = state_with_image();
+        let id = s.doc().layers[0].id;
+        let _ = s.apply::<String>("Lock", |d, _| {
+            d.layer_mut(id).unwrap().locked = true;
+            Ok(())
+        });
+        let turned = CropBox { center: [50.0, 50.0], size: [60.0, 60.0], angle: 0.1 };
+        let sampling = opal_core::resample::Sampling::default();
+        assert!(s.crop_to(&turned, false, sampling).unwrap_err().contains("locked"));
+        let plain = CropBox { angle: 0.0, ..turned };
+        assert!(s.crop_to(&plain, true, sampling).is_err(), "deleting changes the locked layer");
+        assert!(s.crop_to(&plain, false, sampling).is_ok(), "moving the canvas changes no layer");
+    }
+
+    #[test]
+    fn deleting_cropped_pixels_works_when_straightening_too() {
+        let mut s = state_with_image();
+        let turned = CropBox { center: [50.0, 50.0], size: [40.0, 40.0], angle: 0.2 };
+        s.crop_to(&turned, true, opal_core::resample::Sampling::default()).unwrap();
+        let o = &s.doc().layers[0].objects()[0];
+        let ObjectKind::Pixels(p) = &o.kind else { panic!("pixels, cropped") };
+        let b = p.image.content_bounds().unwrap().translate(p.offset[0], p.offset[1]);
+        assert_eq!(b.intersect(&s.doc().canvas.rect()), b, "nothing is left outside the canvas");
     }
 
     #[test]

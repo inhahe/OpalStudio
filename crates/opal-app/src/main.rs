@@ -21,6 +21,7 @@ mod layer_ops;
 mod move_tool;
 mod panels;
 mod paste;
+mod paste_keys;
 mod prefs;
 mod ribbon;
 mod settings;
@@ -51,6 +52,12 @@ fn main() -> eframe::Result {
             .with_min_inner_size([720.0, 480.0])
             .with_drag_and_drop(true),
         renderer: eframe::Renderer::Wgpu,
+        // See paste_keys.rs: Ctrl+V with only files on the clipboard.
+        #[cfg(windows)]
+        event_loop_builder: Some(Box::new(|builder| {
+            use winit::platform::windows::EventLoopBuilderExtWindows;
+            builder.with_msg_hook(paste_keys::hook);
+        })),
         ..Default::default()
     };
     eframe::run_native("Opal Studio", options, Box::new(move |cc| Ok(Box::new(app::OpalApp::new(cc, files)))))

@@ -2,7 +2,7 @@
 //! with the arrow keys.
 
 use crate::doc::{DocState, Pending};
-use crate::transform::{Guides, snap_targets};
+use crate::transform::{Guides, constrain, snap, snap_targets};
 use opal_core::document::{Document, Layer, LayerContent, LayerId, ObjectKind};
 use opal_core::geom::{Affine, FRect};
 use std::sync::Arc;
@@ -87,13 +87,13 @@ impl DocState {
     }
 
     /// Shows the selected layers moved by `d` from where they are in history, as a pending
-    /// "Move" (committed when the drag ends).
+    /// "Move" (committed when the drag ends). Moving by nothing leaves no pending edit.
     pub fn move_selection_to(&mut self, d: [i64; 2]) {
         if self.pending_label().is_some_and(|l| l != "Move") || self.transform.is_some() {
             self.commit_pending();
         }
-        let doc = moved(self.history.doc(), &self.selection(), d);
-        self.pending = Some(Pending { doc, label: "Move".into() });
+        self.pending = (d != [0, 0])
+            .then(|| Pending { doc: moved(self.history.doc(), &self.selection(), d), label: "Move".into() });
         self.revision += 1;
     }
 
@@ -122,42 +122,19 @@ impl DocState {
     ) -> ([i64; 2], Guides) {
         let mut d = [pointer[0] - drag.from[0], pointer[1] - drag.from[1]];
         if shift {
-            let (ax, ay) = (d[0].abs(), d[1].abs());
-            if ax > 2.0 * ay {
-                d[1] = 0.0;
-            } else if ay > 2.0 * ax {
-                d[0] = 0.0;
-            } else {
-                let m = (ax + ay) * 0.5;
-                d = [m.copysign(d[0]), m.copysign(d[1])];
-            }
+            d = constrain(d);
         }
         let mut guides = Guides::default();
         if let Some(b) = drag.bounds
             && snap_distance >= 0.0
         {
-            let targets = snap_targets(self.history.doc(), &self.selection());
-            let best = |values: [f64; 3], targets: &[f64]| {
-                let mut best: Option<(f64, f64)> = None;
-                for v in values {
-                    for &t in targets {
-                        let gap = t - v;
-                        if gap.abs() <= snap_distance && best.is_none_or(|(g, _)| gap.abs() < g.abs()) {
-                            best = Some((gap, t));
-                        }
-                    }
-                }
-                best
-            };
+            // What moves never snaps to itself: the layers inside a moved group included.
+            let targets = snap_targets(self.history.doc(), &self.selection_and_inside());
             let (x0, x1, y0, y1) = (b.x0 + d[0], b.x1 + d[0], b.y0 + d[1], b.y1 + d[1]);
-            if let Some((gap, t)) = best([x0, (x0 + x1) * 0.5, x1], &targets.xs) {
-                d[0] += gap;
-                guides.xs.push(t);
-            }
-            if let Some((gap, t)) = best([y0, (y0 + y1) * 0.5, y1], &targets.ys) {
-                d[1] += gap;
-                guides.ys.push(t);
-            }
+            let (gx, tx) = snap(&[x0, (x0 + x1) * 0.5, x1], &targets.xs, snap_distance);
+            let (gy, ty) = snap(&[y0, (y0 + y1) * 0.5, y1], &targets.ys, snap_distance);
+            d = [d[0] + gx, d[1] + gy];
+            guides = Guides { xs: tx.into_iter().collect(), ys: ty.into_iter().collect() };
         }
         ([d[0].round() as i64, d[1].round() as i64], guides)
     }
@@ -193,6 +170,34 @@ mod tests {
         assert!(s.undo());
         let ObjectKind::Pixels(p) = &s.doc().layer(l).unwrap().objects()[0].kind else { panic!() };
         assert_eq!(p.offset, [0, 0]);
+    }
+
+    #[test]
+    fn a_move_by_nothing_records_nothing() {
+        let (mut s, _) = doc_with_dot();
+        let states = s.history.nodes().count();
+        s.move_selection_to([4, 0]);
+        s.move_selection_to([0, 0]);
+        s.commit_pending();
+        assert_eq!(s.history.nodes().count(), states);
+        assert!(!s.is_dirty());
+    }
+
+    #[test]
+    fn a_moved_group_does_not_snap_to_its_own_layers() {
+        let (mut s, dot) = doc_with_dot();
+        let g = s.ids.layer();
+        s.apply::<opal_core::document::TreeError>("Group", |d, _| {
+            d.insert(Position { parent: None, index: 1 }, Layer::new_group(g, "g"))?;
+            d.move_layer(dot, Position { parent: Some(g), index: 0 })
+        })
+        .unwrap();
+        s.select_only(g);
+        let drag = MoveDrag { from: [5.0, 5.0], bounds: s.selection_bounds(), guides: Guides::default(), shown: None };
+        // Two pixels right: within snapping distance of the dot's own edges, which must not
+        // pull it back.
+        let (d, _) = s.move_delta(&drag, [7.0, 5.0], false, 3.0);
+        assert_eq!(d, [2, 0]);
     }
 
     #[test]

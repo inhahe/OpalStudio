@@ -793,11 +793,13 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         }
         MergeSelected => {
             let (d, sel) = selection(st)?;
-            let layers: Vec<&opal_core::document::Layer> = sel.iter().filter_map(|&l| d.doc().layer(l)).collect();
-            if layers.iter().filter(|l| l.visible).count() < 2 {
+            let doc = d.doc();
+            let shown: Vec<&opal_core::document::Layer> =
+                sel.iter().filter(|&&l| crate::layer_ops::shows_in(doc, l)).filter_map(|&l| doc.layer(l)).collect();
+            if shown.len() < 2 {
                 return Err("Select two or more visible layers (Ctrl+click in the Layers panel).".into());
             }
-            match layers.iter().filter(|l| l.visible).find_map(|l| first_locked(l)) {
+            match shown.iter().find_map(|l| first_locked(l)) {
                 Some(l) => Err(format!("\"{}\" is locked. Unlock it first.", l.name)),
                 None => Ok(()),
             }

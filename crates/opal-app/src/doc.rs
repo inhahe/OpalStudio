@@ -131,6 +131,8 @@ pub struct DocState {
     /// The Crop tool's box, while the tool is in use, and a drag on it.
     pub crop: Option<crate::crop::CropBox>,
     pub crop_drag: Option<crate::crop::CropDrag>,
+    /// Something an operation on the document wants said in the status bar.
+    pub notice: Option<String>,
 }
 
 impl DocState {
@@ -155,6 +157,7 @@ impl DocState {
             moving: None,
             crop: None,
             crop_drag: None,
+            notice: None,
         }
     }
 
@@ -215,16 +218,41 @@ impl DocState {
     /// leaving out those inside a selected group: what commands acting on several layers
     /// act on, each layer once.
     pub fn selection(&self) -> Vec<LayerId> {
+        // One walk, which does not look inside a selected group.
+        fn walk(
+            layers: &[std::sync::Arc<opal_core::document::Layer>],
+            selected: &HashSet<LayerId>,
+            out: &mut Vec<LayerId>,
+        ) {
+            for l in layers {
+                if selected.contains(&l.id) {
+                    out.push(l.id);
+                } else if let Some(c) = l.children() {
+                    walk(c, selected, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.doc().layers, &self.selected, &mut out);
+        out
+    }
+
+    /// The selected layers and every layer inside the selected groups.
+    pub fn selection_and_inside(&self) -> Vec<LayerId> {
         let doc = self.doc();
         let mut out = Vec::new();
-        doc.for_each_layer(&mut |l, _| {
-            if self.selected.contains(&l.id) {
-                out.push(l.id);
+        for id in self.selection() {
+            if let Some(l) = doc.layer(id) {
+                let mut add = |l: &opal_core::document::Layer| out.push(l.id);
+                fn walk(l: &opal_core::document::Layer, f: &mut dyn FnMut(&opal_core::document::Layer)) {
+                    f(l);
+                    for c in l.children().unwrap_or(&[]) {
+                        walk(c, f);
+                    }
+                }
+                walk(l, &mut add);
             }
-        });
-        let inner: Vec<LayerId> =
-            out.iter().copied().filter(|&l| out.iter().any(|&g| g != l && doc.is_descendant(l, g))).collect();
-        out.retain(|l| !inner.contains(l));
+        }
         out
     }
 

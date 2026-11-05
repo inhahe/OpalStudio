@@ -35,6 +35,9 @@ pub struct Target {
     /// Whether it was a pixel object, turned into an image object for the session; it
     /// becomes pixels again if it ends where whole pixels can hold it exactly.
     pub was_pixels: bool,
+    /// How it was drawn, for an image object, which keeps it unless the box's own drawing
+    /// method is changed; `None` to draw it with the box's.
+    pub own: Option<Sampling>,
 }
 
 /// Where a paste goes.
@@ -277,7 +280,7 @@ fn midpoint(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
 }
 
 /// A movement kept horizontal, vertical or diagonal, whichever is nearest.
-fn constrain([x, y]: [f64; 2]) -> [f64; 2] {
+pub(crate) fn constrain([x, y]: [f64; 2]) -> [f64; 2] {
     let (ax, ay) = (x.abs(), y.abs());
     if ax > 2.0 * ay {
         [x, 0.0]
@@ -291,7 +294,7 @@ fn constrain([x, y]: [f64; 2]) -> [f64; 2] {
 
 /// The smallest shift that brings one of `values` onto one of `targets`, if one is within
 /// `tol`, with the target it lands on.
-fn snap(values: &[f64], targets: &[f64], tol: f64) -> (f64, Option<f64>) {
+pub(crate) fn snap(values: &[f64], targets: &[f64], tol: f64) -> (f64, Option<f64>) {
     let mut best: Option<(f64, f64)> = None;
     for &v in values {
         for &t in targets {
@@ -338,6 +341,10 @@ fn take_targets(layer: &mut Layer, sampling: Sampling, out: &mut Vec<(Target, FR
         LayerContent::Objects(objects) => {
             for o in objects {
                 let was_pixels = matches!(o.kind, ObjectKind::Pixels(_));
+                let own = match &o.kind {
+                    ObjectKind::Image(i) => Some(i.sampling),
+                    ObjectKind::Pixels(_) => None,
+                };
                 if let ObjectKind::Pixels(p) = &o.kind {
                     let Some(frame) = p.image.content_bounds() else { continue };
                     o.kind = ObjectKind::Image(ImageObject {
@@ -348,7 +355,7 @@ fn take_targets(layer: &mut Layer, sampling: Sampling, out: &mut Vec<(Target, FR
                     });
                 }
                 if let ObjectKind::Image(i) = &o.kind {
-                    let target = Target { layer: id, object: o.id, start: i.transform, was_pixels };
+                    let target = Target { layer: id, object: o.id, start: i.transform, was_pixels, own };
                     out.push((target, i.frame.to_f()));
                 }
             }
@@ -387,7 +394,7 @@ impl DocState {
         self.pending = Some(Pending { doc, label: "Paste".into() });
         self.transform = Some(Session {
             kind: Kind::Paste,
-            targets: vec![Target { layer: layer_id, object, start: place, was_pixels: false }],
+            targets: vec![Target { layer: layer_id, object, start: place, was_pixels: false, own: None }],
             frame: frame.to_f(),
             start: place,
             current: place,
@@ -429,14 +436,10 @@ impl DocState {
                 (b, Affine::IDENTITY)
             }
         };
-        // One object keeps its own sampling for the box to show; several share the box's.
+        // The box shows the drawing method of its one image object; with several objects,
+        // the default for pixels, which each image object keeps its own method over.
         let sampling = match &found[..] {
-            [(t, _)] if !t.was_pixels => {
-                match &doc.layer(t.layer).and_then(|l| l.objects().iter().find(|o| o.id == t.object)) {
-                    Some(Object { kind: ObjectKind::Image(i), .. }) => i.sampling,
-                    _ => sampling,
-                }
-            }
+            [(t, _)] => t.own.unwrap_or(sampling),
             _ => sampling,
         };
         self.pending = Some(Pending { doc, label: "Transform".into() });
@@ -468,22 +471,25 @@ impl DocState {
         s.current = m;
         s.draft = draft.is_some();
         let delta = inv.then(m);
-        let sampling = draft.unwrap_or(s.sampling);
+        let boxed = s.sampling;
         let targets = s.targets.clone();
         let Some(p) = self.pending.as_mut() else { return };
         for t in &targets {
             if let Some(Object { kind: ObjectKind::Image(i), .. }) = object_mut(&mut p.doc, t.layer, t.object) {
                 i.transform = t.start.then(delta);
-                i.sampling = sampling;
+                i.sampling = draft.unwrap_or(t.own.unwrap_or(boxed));
             }
         }
         self.revision += 1;
     }
 
-    /// Changes how the session's objects are drawn.
+    /// Changes how the session's objects are drawn: all of them, their own methods included.
     pub fn set_box_sampling(&mut self, sampling: Sampling) {
         let Some(s) = self.transform.as_mut() else { return };
         s.sampling = sampling;
+        for t in &mut s.targets {
+            t.own = None;
+        }
         // Redrawn even though the box stays where it is.
         s.draft = true;
         let m = s.current;
@@ -548,7 +554,7 @@ impl DocState {
         for t in &s.targets {
             let Some(o) = object_mut(&mut p.doc, t.layer, t.object) else { continue };
             let ObjectKind::Image(i) = &mut o.kind else { continue };
-            i.sampling = s.sampling;
+            i.sampling = t.own.unwrap_or(s.sampling);
             if t.was_pixels
                 && let Some(g) = i.transform.grid_map()
             {
@@ -565,8 +571,9 @@ impl DocState {
         if let Some(paste) = &s.paste
             && paste.into_active
             && let Some(dest) = paste.active
+            && bake_into(&mut p.doc, dest, s.targets[0].object)
         {
-            bake_into(&mut p.doc, dest, s.targets[0].object);
+            self.notice = Some(crate::layer_ops::CLIPPED.into());
         }
     }
 
@@ -580,24 +587,31 @@ impl DocState {
 
 /// Draws image object `object` of layer `dest` into the layer's pixels: into its topmost
 /// pixel object if it has one there, else as a new pixel object.
-fn bake_into(doc: &mut Document, dest: LayerId, object: ObjectId) {
-    let Some(Layer { content: LayerContent::Objects(objects), .. }) = doc.layer_mut(dest) else { return };
-    let Some(at) = objects.iter().position(|o| o.id == object) else { return };
-    let ObjectKind::Image(i) = objects.remove(at).kind else { return };
+/// Returns whether part of it, reaching too far past the canvas, was left out (see
+/// `layer_ops::drawable`).
+fn bake_into(doc: &mut Document, dest: LayerId, object: ObjectId) -> bool {
+    let canvas = doc.canvas.rect();
+    let Some(Layer { content: LayerContent::Objects(objects), .. }) = doc.layer_mut(dest) else { return false };
+    let Some(at) = objects.iter().position(|o| o.id == object) else { return false };
+    let ObjectKind::Image(i) = objects.remove(at).kind else { return false };
+    let Some(footprint) = resample::footprint(&i.image, &i.transform, &i.sampling) else { return false };
+    let (area, clipped) = crate::layer_ops::drawable(footprint, &canvas);
     match objects.last_mut() {
         Some(Object { kind: ObjectKind::Pixels(p), .. }) => {
             let local = i.transform.then(Affine::translate(-p.offset[0] as f64, -p.offset[1] as f64));
-            let drawn = resample::render_image(&i.image, &local, &i.sampling, None);
+            let area = area.translate(-p.offset[0], -p.offset[1]);
+            let drawn = resample::render_image(&i.image, &local, &i.sampling, Some(&area));
             Arc::make_mut(&mut p.image).draw_over(&drawn);
         }
         _ => {
-            let drawn = resample::render_image(&i.image, &i.transform, &i.sampling, None);
+            let drawn = resample::render_image(&i.image, &i.transform, &i.sampling, Some(&area));
             objects.push(Object {
                 id: object,
                 kind: ObjectKind::Pixels(PixelObject { image: Arc::new(drawn), offset: [0, 0] }),
             });
         }
     }
+    clipped
 }
 
 #[cfg(test)]
@@ -635,6 +649,39 @@ mod tests {
 
     fn close(a: [f64; 2], b: [f64; 2]) -> bool {
         (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6
+    }
+
+    #[test]
+    fn transforming_several_objects_keeps_each_image_s_own_drawing_method() {
+        use crate::doc::DocId;
+        use opal_core::document::IdGen;
+        use opal_core::raster::RasterImage;
+        use opal_core::resample::Method;
+        use opal_core::tile::pixel_from_f32;
+        let mut ids = IdGen::default();
+        let mut img = RasterImage::new();
+        img.set_pixel(1, 1, pixel_from_f32([1.0; 4]));
+        let nearest = Sampling { method: Method::Nearest, anti_ringing: false };
+        let art = ImageObject {
+            image: Arc::new(img.clone()),
+            frame: IRect::from_size(4, 4),
+            transform: Affine::IDENTITY,
+            sampling: nearest,
+        };
+        let mut doc = Document::new(50, 50);
+        let (a, b) = (ids.layer(), ids.layer());
+        doc.insert(Position { parent: None, index: 0 }, Layer::new_raster(a, ids.object(), "photo", img)).unwrap();
+        let art_layer = Layer::with_objects(b, "art", vec![Object { id: ids.object(), kind: ObjectKind::Image(art) }]);
+        doc.insert(Position { parent: None, index: 1 }, art_layer).unwrap();
+        let mut s = DocState::new(DocId(1), "t".into(), doc, ids, "New");
+        s.select_only(a);
+        s.toggle_selected(b);
+        assert!(s.begin_transform(Sampling::default()));
+        let m = s.transform.as_ref().unwrap().current.then(Affine::translate(3.0, 0.0));
+        s.set_box(m, None);
+        s.commit_pending();
+        let ObjectKind::Image(i) = &s.doc().layer(b).unwrap().objects()[0].kind else { panic!() };
+        assert_eq!(i.sampling, nearest);
     }
 
     #[test]

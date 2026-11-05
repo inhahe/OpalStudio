@@ -73,9 +73,10 @@ fn inside(q: &[Pos2; 4], p: Pos2) -> bool {
     s.iter().all(|&v| v >= 0.0) || s.iter().all(|&v| v <= 0.0)
 }
 
-/// Handles the box on document `id`'s canvas, if one is open: dragging it, and drawing it
-/// with its toolbar. `response` is the canvas's, `rect` its area on screen.
-pub fn canvas_box(ui: &mut egui::Ui, st: &mut AppState, id: DocId, response: &Response, rect: Rect) {
+/// Handles the box on document `id`'s canvas, if one is open: dragging it (when
+/// `interactive`; not while Space scrolls the view), and drawing it with its toolbar.
+/// `response` is the canvas's, `rect` its area on screen.
+pub fn canvas_box(ui: &mut egui::Ui, st: &mut AppState, id: DocId, response: &Response, rect: Rect, interactive: bool) {
     let ctx = ui.ctx().clone();
     let ppp = ctx.pixels_per_point();
     let aspect_locked = st.prefs.bool("transform.aspect_locked");
@@ -104,8 +105,9 @@ pub fn canvas_box(ui: &mut egui::Ui, st: &mut AppState, id: DocId, response: &Re
     let screen = OnScreen { corners, rotate: top + out * ROTATE_OUT };
 
     // ---- Dragging ---------------------------------------------------------------------
-    let primary = response.dragged_by(egui::PointerButton::Primary);
-    if response.drag_started_by(egui::PointerButton::Primary)
+    let primary = interactive && response.dragged_by(egui::PointerButton::Primary);
+    if interactive
+        && response.drag_started_by(egui::PointerButton::Primary)
         && let Some(origin) = ctx.input(|i| i.pointer.press_origin())
     {
         let handle = screen.handle_at(origin);
@@ -176,6 +178,7 @@ pub fn canvas_box(ui: &mut egui::Ui, st: &mut AppState, id: DocId, response: &Re
 
     // What the pointer would do.
     if let Some(p) = response.hover_pos()
+        && interactive
         && !ctx.input(|i| i.pointer.middle_down())
     {
         let h = match s.drag {

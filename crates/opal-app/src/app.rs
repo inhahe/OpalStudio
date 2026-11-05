@@ -56,6 +56,7 @@ impl OpalApp {
 
     fn create(cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>, persist: bool) -> OpalApp {
         theme::install_fonts(&cc.egui_ctx);
+        crate::paste_keys::wake(&cc.egui_ctx);
         // Ctrl+Plus and Ctrl+Minus zoom the canvas; the interface's size is a preference.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let mut st = AppState::new();
@@ -126,6 +127,9 @@ impl OpalApp {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        // Taken every frame, so a press made while a dialog is open or a field has the
+        // keyboard does not paste later.
+        let paste_presses = crate::paste_keys::take();
         // While a dialog is open, keys belong to it: no command may change what is behind
         // it, or the dialog's own fields.
         if self.st.dialog_open() {
@@ -135,7 +139,7 @@ impl OpalApp {
         }
         let typing = ctx.egui_wants_keyboard_input();
         if !typing {
-            self.clipboard_events(ctx);
+            self.clipboard_events(ctx, paste_presses);
             self.editing_keys(ctx);
         }
         // Keytips: Alt pressed and released on its own toggles them.
@@ -182,8 +186,12 @@ impl OpalApp {
     /// Copy and Paste arrive as events of their own rather than as keys (the windowing layer
     /// turns Ctrl+C, Ctrl+V and their alternatives into them): outside text fields, they
     /// are the image commands.
-    fn clipboard_events(&mut self, ctx: &egui::Context) {
-        let events = ctx.input_mut(|i| {
+    ///
+    /// Where the paste keys are counted by `paste_keys` (Windows), egui's paste events are
+    /// dropped and `presses` pastes instead, since egui reports no event for some clipboards.
+    fn clipboard_events(&mut self, ctx: &egui::Context, presses: u32) {
+        let counted = crate::paste_keys::counted();
+        let mut events = ctx.input_mut(|i| {
             let mut out = Vec::new();
             i.events.retain(|e| match e {
                 Event::Copy => {
@@ -191,13 +199,16 @@ impl OpalApp {
                     false
                 }
                 Event::Paste(_) | Event::PasteImage(_) => {
-                    out.push(Cmd::Paste);
+                    if !counted {
+                        out.push(Cmd::Paste);
+                    }
                     false
                 }
                 _ => true,
             });
             out
         });
+        events.extend(std::iter::repeat_n(Cmd::Paste, presses as usize));
         for cmd in events {
             // Copying with nothing open does nothing rather than explaining itself.
             if cmd == Cmd::Copy && self.st.active().is_none() {
@@ -217,6 +228,7 @@ impl OpalApp {
         let Some(d) = self.st.active_mut() else { return };
         let cropping = crop_tool && d.crop.is_some();
         let boxed = d.transform.is_some() || cropping;
+        let mut refused = None;
         let (enter, escape, arrows, held) = ctx.input_mut(|i| {
             let step = if i.modifiers.shift { far } else { 1 };
             let mut d = [0i64, 0];
@@ -235,13 +247,19 @@ impl OpalApp {
         });
         if cropping && d.transform.is_none() {
             if enter {
-                let b = d.crop.take().expect("cropping");
-                if b.canvas() != d.doc().canvas || b.angle != 0.0 {
-                    d.crop_to(&b, crop_delete, sampling);
+                let b = d.crop.expect("cropping");
+                if b.canvas() != d.doc().canvas || b.angle != 0.0 || crop_delete {
+                    match d.crop_to(&b, crop_delete, sampling) {
+                        Ok(()) => d.crop = None,
+                        Err(why) => refused = Some(why),
+                    }
                 }
             } else if escape {
                 d.crop = None;
                 d.revision += 1;
+            }
+            if let Some(why) = refused {
+                self.st.message(crate::state::MessageKind::Info, "Crop", why);
             }
             return;
         }
@@ -440,6 +458,7 @@ impl OpalApp {
                 (std::sync::Arc::as_ptr(l) as usize).hash(&mut h);
             }
             d.active_layer().hash(&mut h);
+            d.selection().hash(&mut h);
             d.expanded.len().hash(&mut h);
             d.view.zoom.to_bits().hash(&mut h);
             d.view.offset.x.to_bits().hash(&mut h);
@@ -460,6 +479,8 @@ impl OpalApp {
             .hash(&mut h);
         (st.new_image.is_some(), st.export.is_some(), st.prefs_open, st.about_open, st.gallery_open, &st.help)
             .hash(&mut h);
+        (st.resize_image.is_some(), st.resize_canvas.is_some(), st.rotate_by.is_some()).hash(&mut h);
+        st.notice.as_ref().map(|n| &n.0).hash(&mut h);
         h.finish()
     }
 
@@ -571,6 +592,11 @@ impl eframe::App for OpalApp {
         self.handle_exit(&ctx);
         self.save_settings_if_due(&ctx);
         self.st.thumbs.end_frame();
+        // What operations on documents asked to say.
+        let notices: Vec<String> = self.st.docs.iter_mut().filter_map(|d| d.notice.take()).collect();
+        for n in notices {
+            self.st.notify(n);
+        }
         // Changes made after something was drawn this frame (commands run at the end of
         // the frame, a panel changing a layer after the canvas drew it) need another frame
         // to show.

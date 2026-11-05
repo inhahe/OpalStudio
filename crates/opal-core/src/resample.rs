@@ -408,7 +408,10 @@ fn render_filtered(
     let src = image.reduced(level);
     let bounds = src.tile_bounds();
     let inv = inv.then(Affine::scale(scale, scale));
-    let (wu, wv) = ((fu * scale).max(1.0), (fv * scale).max(1.0));
+    // A squash so extreme that the coarsest level still leaves the kernel wider than
+    // MAX_WIDENING (one axis shrunk millions of times more than the other) is drawn with the
+    // kernel capped there, aliasing a little, rather than with billions of taps.
+    let (wu, wv) = ((fu * scale).clamp(1.0, MAX_WIDENING), (fv * scale).clamp(1.0, MAX_WIDENING));
     let margin = (kernel.radius * wu.max(wv)).ceil() as i64 + 2;
     let reach = |r: &IRect| IRect::covering(&inv.bounds(&r.to_f())).expand(margin).intersect(&bounds);
     if reach(dest).is_empty() {
@@ -531,11 +534,14 @@ fn finish(mut p: PixelF32, anti_ringing: bool, region: &Region, u: f64, v: f64) 
         for ch in 0..4 {
             let lo = near.iter().map(|q| q[ch]).fold(f32::INFINITY, f32::min);
             let hi = near.iter().map(|q| q[ch]).fold(f32::NEG_INFINITY, f32::max);
-            p[ch] = p[ch].clamp(lo, hi);
+            // Not `clamp`, which panics when the bounds cross (as they do if the source
+            // pixels are not numbers).
+            p[ch] = p[ch].max(lo).min(hi);
         }
     }
+    // Constant bounds: this clamp cannot panic, and a NaN alpha falls to transparent below.
     p[3] = p[3].clamp(0.0, 1.0);
-    if p[3] <= 0.0 { [0.0; 4] } else { p }
+    if p[3] > 0.0 { p } else { [0.0; 4] }
 }
 
 /// Draws `image` through `transform` into a new image covering `area` of the document (all
@@ -740,6 +746,28 @@ mod tests {
         assert!(lo < -0.01 && hi > 1.01, "rings without it: {lo} {hi}");
         let (lo, hi) = range(Sampling { method: CATMULL_ROM, anti_ringing: true });
         assert!(lo >= 0.0 && hi <= 1.0, "stays in range with it: {lo} {hi}");
+    }
+
+    #[test]
+    fn pixels_that_are_not_numbers_do_not_crash_anti_ringing() {
+        let mut img = RasterImage::new();
+        for y in 0..4 {
+            for x in 0..4 {
+                img.set_pixel(x, y, [half::f16::NAN; 4]);
+            }
+        }
+        render(&img, &Affine::scale(3.3, 3.3), &Sampling::default());
+    }
+
+    #[test]
+    fn an_extreme_squash_draws_quickly() {
+        // Stretched a million times one way and crushed far more the other: the kernel is
+        // capped instead of growing to billions of taps.
+        let img = solid(64, 64, [1.0; 4]);
+        let squash = Affine { a: 1e6, b: 0.0, c: 0.0, d: 2e-18, e: 0.0, f: 0.0 };
+        let t = std::time::Instant::now();
+        render_tile(&img, &squash, &Sampling::default(), TileCoord::new(0, 0));
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
     }
 
     #[test]

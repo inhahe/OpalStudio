@@ -98,9 +98,24 @@ impl Turn {
 
 /// Carries every object of `doc` through `m`. Pixel objects stay pixels where `m` is exact
 /// on the grid; otherwise they are resampled with `resample` if given, else become image
-/// objects drawn with `sampling`.
-pub fn transform_all(doc: &mut Document, m: &Affine, resample: Option<Sampling>, sampling: Sampling) {
-    fn walk(layer: &mut Layer, m: &Affine, resample_with: Option<Sampling>, sampling: Sampling) {
+/// objects drawn with `sampling`. Resampling keeps only the part within `keep` of what
+/// would reach too far (see `layer_ops::drawable`); returns whether it had to.
+pub fn transform_all(
+    doc: &mut Document,
+    m: &Affine,
+    resample: Option<Sampling>,
+    sampling: Sampling,
+    keep: &IRect,
+) -> bool {
+    let mut clipped = false;
+    fn walk(
+        layer: &mut Layer,
+        m: &Affine,
+        resample_with: Option<Sampling>,
+        sampling: Sampling,
+        keep: &IRect,
+        clipped: &mut bool,
+    ) {
         match &mut layer.content {
             LayerContent::Objects(objects) => {
                 for o in objects {
@@ -119,7 +134,11 @@ pub fn transform_all(doc: &mut Document, m: &Affine, resample: Option<Sampling>,
                                     ObjectKind::Pixels(PixelObject { image: Arc::new(turned), offset: [0, 0] })
                                 }
                                 (None, Some(s)) => {
-                                    let drawn = resample::render_image(&p.image, &placed, &s, None);
+                                    let reach =
+                                        resample::footprint(&p.image, &placed, &s).unwrap_or(IRect::new(0, 0, 0, 0));
+                                    let (area, cut) = crate::layer_ops::drawable(reach, keep);
+                                    *clipped |= cut;
+                                    let drawn = resample::render_image(&p.image, &placed, &s, Some(&area));
                                     ObjectKind::Pixels(PixelObject { image: Arc::new(drawn), offset: [0, 0] })
                                 }
                                 (None, None) => match p.image.content_bounds() {
@@ -138,14 +157,15 @@ pub fn transform_all(doc: &mut Document, m: &Affine, resample: Option<Sampling>,
             }
             LayerContent::Group(children) => {
                 for c in children {
-                    walk(Arc::make_mut(c), m, resample_with, sampling);
+                    walk(Arc::make_mut(c), m, resample_with, sampling, keep, clipped);
                 }
             }
         }
     }
     for l in &mut doc.layers {
-        walk(Arc::make_mut(l), m, resample, sampling);
+        walk(Arc::make_mut(l), m, resample, sampling, keep, &mut clipped);
     }
+    clipped
 }
 
 /// The bounds of what the visible layers hold, in whole pixels.
@@ -189,7 +209,7 @@ impl AppState {
         let result = d.apply(turn.label(), |doc, _| {
             let c = doc.canvas;
             let m = turn.map(&c);
-            transform_all(doc, &m, None, sampling);
+            transform_all(doc, &m, None, sampling, &c.rect());
             if matches!(turn, Turn::Clockwise | Turn::Counterclockwise) {
                 doc.canvas = Canvas { x: c.x, y: c.y, width: c.height, height: c.width };
             }
@@ -202,17 +222,22 @@ impl AppState {
     pub(crate) fn resize_image(&mut self, spec: &ResizeImage, resample: bool) {
         let sampling = crate::prefs::sampling(&self.prefs, "resize");
         let d = self.active_mut().expect("available");
+        let mut clipped = false;
         let result = d.apply("Resize image", |doc, _| {
             let c = doc.canvas;
             let (x, y) = (c.x as f64, c.y as f64);
             let sx = f64::from(spec.width) / f64::from(c.width);
             let sy = f64::from(spec.height) / f64::from(c.height);
             let m = Affine::scale(sx, sy).about(x, y);
-            transform_all(doc, &m, resample.then_some(sampling), sampling);
-            doc.canvas = Canvas { width: spec.width, height: spec.height, ..c };
+            let canvas = Canvas { width: spec.width, height: spec.height, ..c };
+            clipped = transform_all(doc, &m, resample.then_some(sampling), sampling, &canvas.rect());
+            doc.canvas = canvas;
             Ok::<(), String>(())
         });
         self.report(result);
+        if clipped {
+            self.notify(crate::layer_ops::CLIPPED);
+        }
     }
 
     /// Gives the canvas the size and place `spec` describes.
@@ -258,7 +283,7 @@ impl AppState {
             let r = c.rect().to_f();
             let [cx, cy] = r.center();
             let m = Affine::rotate(spec.degrees.to_radians()).about(cx, cy);
-            transform_all(doc, &m, None, sampling);
+            transform_all(doc, &m, None, sampling, &c.rect());
             if spec.grow {
                 let b = m.bounds(&r);
                 let (w, h) =
@@ -308,21 +333,21 @@ mod tests {
         // Clockwise, the bottom-left corner comes to the top-left.
         let mut d = corners();
         let c = d.canvas;
-        transform_all(&mut d, &Turn::Clockwise.map(&c), None, Sampling::default());
+        transform_all(&mut d, &Turn::Clockwise.map(&c), None, Sampling::default(), &IRect::from_size(100, 100));
         assert!(
             close(pixel_at(&d, 10, 20), 0.4) && close(pixel_at(&d, 11, 20), 0.1) && close(pixel_at(&d, 11, 22), 0.2)
         );
         let mut d = corners();
-        transform_all(&mut d, &Turn::Counterclockwise.map(&c), None, Sampling::default());
+        transform_all(&mut d, &Turn::Counterclockwise.map(&c), None, Sampling::default(), &IRect::from_size(100, 100));
         assert!(close(pixel_at(&d, 10, 20), 0.2) && close(pixel_at(&d, 10, 22), 0.1));
         let mut d = corners();
-        transform_all(&mut d, &Turn::Half.map(&c), None, Sampling::default());
+        transform_all(&mut d, &Turn::Half.map(&c), None, Sampling::default(), &IRect::from_size(100, 100));
         assert!(close(pixel_at(&d, 10, 20), 0.3) && close(pixel_at(&d, 12, 21), 0.1));
         let mut d = corners();
-        transform_all(&mut d, &Turn::FlipHorizontal.map(&c), None, Sampling::default());
+        transform_all(&mut d, &Turn::FlipHorizontal.map(&c), None, Sampling::default(), &IRect::from_size(100, 100));
         assert!(close(pixel_at(&d, 10, 20), 0.2) && close(pixel_at(&d, 12, 21), 0.4));
         let mut d = corners();
-        transform_all(&mut d, &Turn::FlipVertical.map(&c), None, Sampling::default());
+        transform_all(&mut d, &Turn::FlipVertical.map(&c), None, Sampling::default(), &IRect::from_size(100, 100));
         assert!(close(pixel_at(&d, 10, 20), 0.4) && close(pixel_at(&d, 12, 21), 0.2));
     }
 
@@ -330,10 +355,10 @@ mod tests {
     fn resizing_keeps_pixels_as_an_image_unless_resampling() {
         let mut d = corners();
         let m = Affine::scale(2.0, 2.0).about(10.0, 20.0);
-        transform_all(&mut d, &m, None, Sampling::default());
+        transform_all(&mut d, &m, None, Sampling::default(), &IRect::from_size(100, 100));
         assert!(matches!(d.layers[0].objects()[0].kind, ObjectKind::Image(_)), "kept as an image object");
         let mut d = corners();
-        transform_all(&mut d, &m, Some(Sampling::default()), Sampling::default());
+        transform_all(&mut d, &m, Some(Sampling::default()), Sampling::default(), &IRect::from_size(100, 100));
         assert!(matches!(d.layers[0].objects()[0].kind, ObjectKind::Pixels(_)), "resampled into pixels");
     }
 

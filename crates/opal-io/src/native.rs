@@ -376,11 +376,18 @@ fn check_image(frame: &IRect, m: &Affine, sampling: &Sampling) -> Result<(), Str
     let linear = [m.a, m.b, m.c, m.d];
     let moved = [m.e, m.f];
     let det = m.determinant().abs();
+    // Neither direction may stretch or squash past MAX_SCALE: the inverse's rows bound the
+    // squash, which the determinant alone does not (a stretch one way can hide a crushing
+    // squash the other).
+    let squash = m.inverse().map_or(f64::INFINITY, |inv| {
+        let [u, v] = inv.row_norms();
+        u.max(v)
+    });
     let sane = m.is_finite()
         && linear.iter().all(|v| v.abs() <= MAX_SCALE)
         && moved.iter().all(|v| v.abs() <= MAX_COORD as f64)
         && det >= 1.0 / (MAX_SCALE * MAX_SCALE)
-        && m.inverse().is_some();
+        && squash <= MAX_SCALE;
     if !sane {
         return Err(format!("transform {:?} is not usable", m.to_array()));
     }
@@ -400,13 +407,17 @@ fn shuffle(px: &[Pixel]) -> Vec<u8> {
     out
 }
 
+/// The tile from its shuffled bytes. Values that are not numbers, or infinite, which only a
+/// damaged file holds, are read as 0.
 fn unshuffle(bytes: &[u8]) -> Tile {
     let n = bytes.len() / 2;
     let (lo, hi) = bytes.split_at(n);
     let mut t = Tile::transparent();
     let values: &mut [u16] = bytemuck::cast_slice_mut(t.pixels_mut());
     for i in 0..n {
-        values[i] = u16::from_le_bytes([lo[i], hi[i]]);
+        let v = u16::from_le_bytes([lo[i], hi[i]]);
+        // Exponent all ones: infinity or not a number.
+        values[i] = if v & 0x7c00 == 0x7c00 { 0 } else { v };
     }
     t
 }
@@ -518,7 +529,8 @@ mod tests {
         };
         let ok = doc(object("[1,0,0,1,5,5]"));
         assert!(load_from(crafted(&ok, &[]), Path::new("ok.opal")).is_ok());
-        for bad in ["[0,0,0,0,0,0]", "[1e300,0,0,1,0,0]", "[1,0,0,1,1e30,0]", "[1,2,2,4,0,0]"] {
+        // The last stretches by a million one way and squashes by far more the other.
+        for bad in ["[0,0,0,0,0,0]", "[1e300,0,0,1,0,0]", "[1,0,0,1,1e30,0]", "[1,2,2,4,0,0]", "[1e6,0,0,2e-18,0,0]"] {
             let err = load_from(crafted(&doc(object(bad)), &[]), Path::new("bad.opal")).err();
             assert!(err.is_some_and(|e| e.to_string().contains("transform")), "{bad} accepted");
         }
@@ -529,6 +541,10 @@ mod tests {
         let mut t = Tile::transparent();
         t.set(1, 2, pixel_from_f32([1.0, -2.0, 0.001, 0.5]));
         assert_eq!(unshuffle(&shuffle(t.pixels())), t);
+        // A value that is not a number comes back as 0.
+        t.set(3, 3, [half::f16::NAN, half::f16::INFINITY, half::f16::ONE, half::f16::ONE]);
+        let back = unshuffle(&shuffle(t.pixels()));
+        assert_eq!(back.get(3, 3), [half::f16::ZERO, half::f16::ZERO, half::f16::ONE, half::f16::ONE]);
     }
 
     #[test]

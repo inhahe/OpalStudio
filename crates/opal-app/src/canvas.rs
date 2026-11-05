@@ -100,12 +100,14 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let snap_points = st.prefs.f64("transform.snap_distance") as f32;
     let palette = st.palette;
     let space = ctx.input(|i| i.key_down(Key::Space)) && !ctx.egui_wants_keyboard_input();
-    let tool = if space { ToolId::Hand } else { st.tool };
+    let chosen = st.tool;
+    let tool = if space { ToolId::Hand } else { chosen };
     let mut notice = None;
     let Some(d) = st.doc_mut(id) else { return };
     // While the transform box is open, it takes the pointer (Space and the middle button
-    // still scroll the view).
-    let boxed = d.transform.is_some() && !space;
+    // still scroll the view, and the box stays, waiting).
+    let boxed = d.transform.is_some();
+    let box_active = boxed && !space;
     let canvas = crate::doc::canvas_rect(&d.doc().canvas);
     d.view.viewport = vp;
     d.view.screen_rect = rect;
@@ -153,7 +155,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
 
     // With the transform box open, the primary button belongs to it (Space still pans).
     let panning = response.dragged_by(PointerButton::Middle)
-        || (tool == ToolId::Hand && !boxed && response.dragged_by(PointerButton::Primary));
+        || (tool == ToolId::Hand && !box_active && response.dragged_by(PointerButton::Primary));
     if panning {
         d.view.offset += response.drag_delta() * ppp;
     }
@@ -219,7 +221,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
                 m.shown = Some(delta);
             }
         }
-        if response.drag_stopped() && d.moving.take().is_some() {
+        if response.drag_stopped() && d.moving.take().is_some() && d.pending_label() == Some("Move") {
             d.commit_pending();
         }
     }
@@ -265,8 +267,9 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         ToolId::Crop => CursorIcon::Crosshair,
     };
     // The boxes set their own cursors, by the handle under the pointer.
-    let cropping = tool == ToolId::Crop && !boxed;
-    if (response.hovered() || response.dragged()) && !boxed && !cropping {
+    // The crop box belongs to the chosen tool, so it stays while Space scrolls the view.
+    let cropping = chosen == ToolId::Crop && !boxed;
+    if (response.hovered() || response.dragged()) && !(box_active || (cropping && !space)) {
         ctx.set_cursor_icon(cursor);
     }
     if !cropping && d.crop.take().is_some() {
@@ -363,9 +366,9 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         st.cursor_canvas = cursor_canvas;
     }
     if boxed {
-        crate::transform_ui::canvas_box(ui, st, id, &response, rect);
+        crate::transform_ui::canvas_box(ui, st, id, &response, rect, !space);
     } else if cropping {
-        crate::crop::canvas_crop(ui, st, id, &response, rect);
+        crate::crop::canvas_crop(ui, st, id, &response, rect, !space);
     }
     if let Some(n) = notice {
         st.notify(n);

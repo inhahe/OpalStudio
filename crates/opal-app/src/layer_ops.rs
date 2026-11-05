@@ -8,16 +8,32 @@ use crate::doc::{DocId, DocState};
 use crate::state::{AppState, MessageKind};
 use opal_core::composite::composite_all;
 use opal_core::document::{
-    Document, IdGen, Layer, LayerContent, LayerId, Object, ObjectKind, PixelObject, Position, TreeError,
+    Document, IdGen, Layer, LayerContent, LayerId, ObjectKind, PixelObject, Position, TreeError,
 };
 use opal_core::geom::IRect;
 use opal_core::resample;
 use std::sync::Arc;
 
-/// The most pixels merging or rasterizing may produce (2 GiB at 8 bytes a pixel). An
-/// image object enlarged far past the canvas could otherwise ask for more memory than
-/// the computer has.
-const MAX_PIXELS: i64 = 1 << 28;
+/// The most pixels merging or rasterizing may produce beyond what the canvas itself needs
+/// (2 GiB at 8 bytes a pixel). An image object enlarged far past the canvas could
+/// otherwise ask for more memory than the computer has.
+pub(crate) const MAX_PIXELS: i64 = 1 << 28;
+
+/// The area to draw an image object into, given what it reaches (`footprint`): all of it,
+/// or, if that is more than `MAX_PIXELS` and four canvases, only the part within `keep`
+/// (with `true`, to say so).
+pub(crate) fn drawable(footprint: IRect, keep: &IRect) -> (IRect, bool) {
+    let limit = MAX_PIXELS.max(4 * keep.width().saturating_mul(keep.height()));
+    if footprint.width().saturating_mul(footprint.height()) <= limit {
+        (footprint, false)
+    } else {
+        (footprint.intersect(keep), true)
+    }
+}
+
+/// What is said when part of an image object reaching far past the canvas was left out.
+pub(crate) const CLIPPED: &str = "Part of an image reached so far past the canvas that drawing all of it would have \
+     needed more memory than this computer has, so only the part around the canvas was kept.";
 
 impl AppState {
     /// Where a new layer goes: just above the active layer, in its group.
@@ -128,7 +144,7 @@ impl AppState {
         let below = d.doc().siblings(pos.parent).expect("its parent exists")[pos.index - 1].id;
         let pair: Vec<Arc<Layer>> =
             d.doc().siblings(pos.parent).expect("its parent exists")[pos.index - 1..=pos.index].to_vec();
-        if let Err(why) = check_size(&pair) {
+        if let Err(why) = check_size(&pair, &d.doc().canvas.rect()) {
             return self.message(MessageKind::Info, "Merge Down", why);
         }
         let d = self.active_mut().expect("available");
@@ -151,11 +167,12 @@ impl AppState {
     pub(crate) fn merge_selected(&mut self) {
         let d = self.active().expect("available");
         let doc = d.doc();
-        let sel: Vec<LayerId> =
-            d.selection().into_iter().filter(|&l| doc.layer(l).is_some_and(|l| l.visible)).collect();
+        let sel: Vec<LayerId> = d.selection().into_iter().filter(|&l| shows_in(doc, l)).collect();
         let Some(&top) = sel.last() else { return };
         let layers: Vec<Arc<Layer>> = sel.iter().map(|&l| Arc::new(doc.layer(l).expect("selected").clone())).collect();
-        if let Err(why) = check_size(&layers) {
+        // What compositing the selected groups leaves out stays, just below the result.
+        let kept: Vec<Arc<Layer>> = layers.iter().flat_map(|l| hidden_inside(l)).collect();
+        if let Err(why) = check_size(&layers, &d.doc().canvas.rect()) {
             return self.message(MessageKind::Info, "Merge Selected", why);
         }
         let adjacent = adjacent_siblings(doc, &sel);
@@ -167,6 +184,10 @@ impl AppState {
                 doc.remove(l)?;
             }
             *doc.layer_mut(top).ok_or(TreeError::NoSuchLayer(top))? = Layer::new_raster(top, ids.object(), name, image);
+            let pos = doc.position(top).ok_or(TreeError::NoSuchLayer(top))?;
+            for (i, h) in kept.into_iter().enumerate() {
+                doc.insert(Position { parent: pos.parent, index: pos.index + i }, (*h).clone())?;
+            }
             Ok::<(), TreeError>(())
         });
         let ok = result.is_ok();
@@ -189,19 +210,19 @@ impl AppState {
     pub(crate) fn merge_visible(&mut self) {
         let d = self.active().expect("available");
         let top = d.doc().layers.clone();
-        if let Err(why) = check_size(&top) {
+        if let Err(why) = check_size(&top, &d.doc().canvas.rect()) {
             return self.message(MessageKind::Info, "Merge Visible", why);
         }
         let d = self.active_mut().expect("available");
         let result = d.apply("Merge visible", |doc, ids| {
             let image = composite_all(&doc.layers);
-            let last_visible = doc.layers.iter().rposition(|l| l.visible).ok_or(TreeError::IndexOutOfRange)?;
+            let last_visible = doc.layers.iter().rposition(|l| shows(l)).ok_or(TreeError::IndexOutOfRange)?;
             let keep = doc.layers[last_visible].clone();
             let mut below = Vec::new();
             let mut above = Vec::new();
             for (i, l) in doc.layers.iter().enumerate() {
                 let side = if i < last_visible { &mut below } else { &mut above };
-                if l.visible {
+                if shows(l) {
                     // Hidden layers inside a visible group stay too.
                     side.extend(hidden_inside(l));
                 } else {
@@ -222,7 +243,7 @@ impl AppState {
         let id = d.active_layer().expect("available");
         let group = d.doc().layer(id).expect("exists").clone();
         let children = group.children().expect("a group").to_vec();
-        if let Err(why) = check_size(&children) {
+        if let Err(why) = check_size(&children, &d.doc().canvas.rect()) {
             return self.message(MessageKind::Info, "Merge Group", why);
         }
         let d = self.active_mut().expect("available");
@@ -230,7 +251,7 @@ impl AppState {
             let image = composite_all(&children);
             let pos = doc.position(id).ok_or(TreeError::NoSuchLayer(id))?;
             let hidden: Vec<Arc<Layer>> =
-                children.iter().flat_map(|c| if c.visible { hidden_inside(c) } else { vec![c.clone()] }).collect();
+                children.iter().flat_map(|c| if shows(c) { hidden_inside(c) } else { vec![c.clone()] }).collect();
             let mut merged = Layer::new_raster(id, ids.object(), group.name.clone(), image);
             merged.opacity = group.opacity;
             merged.visible = group.visible;
@@ -251,7 +272,7 @@ impl AppState {
     pub(crate) fn stamp_visible(&mut self) {
         let d = self.active().expect("available");
         let layers = d.doc().layers.clone();
-        if let Err(why) = check_size(&layers) {
+        if let Err(why) = check_size(&layers, &d.doc().canvas.rect()) {
             return self.message(MessageKind::Info, "Stamp Visible", why);
         }
         let index = d.active_layer().and_then(|a| d.doc().path(a)).map_or(layers.len(), |p| p[0] + 1);
@@ -265,7 +286,7 @@ impl AppState {
 
     pub(crate) fn flatten(&mut self) {
         let d = self.active().expect("available");
-        if let Err(why) = check_size(&d.doc().layers.clone()) {
+        if let Err(why) = check_size(&d.doc().layers.clone(), &d.doc().canvas.rect()) {
             return self.message(MessageKind::Info, "Flatten Image", why);
         }
         let d = self.active_mut().expect("available");
@@ -284,7 +305,7 @@ impl AppState {
         let sel = d.selection();
         let doc = d.doc();
         let targets: Vec<Arc<Layer>> = sel.iter().filter_map(|&l| doc.layer(l)).map(|l| Arc::new(l.clone())).collect();
-        if let Err(why) = check_size(&targets) {
+        if let Err(why) = check_size(&targets, &d.doc().canvas.rect()) {
             return self.message(MessageKind::Info, "Rasterize", why);
         }
         let d = self.active_mut().expect("available");
@@ -378,7 +399,7 @@ pub(crate) fn has_image_object(layer: &Layer) -> bool {
 fn hidden_inside(layer: &Layer) -> Vec<Arc<Layer>> {
     let mut out = Vec::new();
     for c in layer.children().unwrap_or(&[]) {
-        if c.visible {
+        if shows(c) {
             out.extend(hidden_inside(c));
         } else {
             out.push(c.clone());
@@ -387,27 +408,51 @@ fn hidden_inside(layer: &Layer) -> Vec<Arc<Layer>> {
     out
 }
 
+/// Whether compositing draws `layer` at all: visible, and not at 0% opacity. A layer that
+/// is not drawn would be lost by merging it, so merges leave it as it is.
+fn shows(layer: &Layer) -> bool {
+    layer.visible && layer.opacity > 0.0
+}
+
+/// Whether layer `id` of `doc` is drawn: it, and every group around it, [`shows`].
+pub(crate) fn shows_in(doc: &Document, id: LayerId) -> bool {
+    let Some(path) = doc.path(id) else { return false };
+    let mut layers: &[Arc<Layer>] = &doc.layers;
+    for &i in &path {
+        let l = &layers[i];
+        if !shows(l) {
+            return false;
+        }
+        layers = l.children().unwrap_or(&[]);
+    }
+    true
+}
+
 /// Whether `layers` (in stacking order) are siblings with nothing between them.
 fn adjacent_siblings(doc: &Document, layers: &[LayerId]) -> bool {
     let positions: Vec<Position> = layers.iter().filter_map(|&l| doc.position(l)).collect();
     positions.windows(2).all(|w| w[0].parent == w[1].parent && w[0].index + 1 == w[1].index)
 }
 
-/// Refuses work whose result would exceed `MAX_PIXELS`.
-fn check_size(layers: &[Arc<Layer>]) -> Result<(), String> {
-    let bounds = layers
+/// Refuses work whose result would exceed `MAX_PIXELS` beyond four times `canvas`: an
+/// estimate of the result's size from the tiles each pixel object holds and the area each
+/// image object reaches.
+fn check_size(layers: &[Arc<Layer>], canvas: &IRect) -> Result<(), String> {
+    let tile = i64::from(opal_core::tile::TILE_SIZE).pow(2);
+    let pixels: i64 = layers
         .iter()
         .flat_map(|l| l.all_objects())
-        .filter_map(Object::extent)
-        .fold(IRect::new(0, 0, 0, 0), |a, b| a.union(&b));
-    let pixels = bounds.width().saturating_mul(bounds.height());
-    if pixels > MAX_PIXELS {
+        .map(|o| match &o.kind {
+            ObjectKind::Pixels(p) => p.image.tile_count() as i64 * tile,
+            ObjectKind::Image(_) => o.extent().map_or(0, |e| e.width().saturating_mul(e.height())),
+        })
+        .fold(0i64, i64::saturating_add);
+    let limit = MAX_PIXELS.max(4 * canvas.width().saturating_mul(canvas.height()));
+    if pixels > limit {
         let gb = pixels as f64 * 8.0 / 1e9;
         Err(format!(
-            "The result would be {} × {} pixels ({gb:.0} GB), far past the canvas. Shrink or crop what \
-             reaches that far first.",
-            bounds.width(),
-            bounds.height()
+            "The result would need about {gb:.0} GB of memory, because something reaches far past the \
+             canvas. Shrink or crop what reaches that far first."
         ))
     } else {
         Ok(())
@@ -437,4 +482,111 @@ pub(crate) fn copy_with_new_ids(layer: &Layer, ids: &mut IdGen) -> Layer {
         }
     }
     c
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{AppState, Background, NewImage};
+    use opal_core::raster::RasterImage;
+    use opal_core::tile::pixel_from_f32;
+
+    /// An app with a `w × h` white image open.
+    fn app(w: u32, h: u32) -> AppState {
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: w, height: h, background: Background::White });
+        st
+    }
+
+    fn add_layer(st: &mut AppState, parent: Option<LayerId>, visible: bool) -> LayerId {
+        let d = st.active_mut().unwrap();
+        let mut id = None;
+        d.apply::<TreeError>("Add", |doc, ids| {
+            let l = ids.layer();
+            let mut img = RasterImage::new();
+            img.set_pixel(0, 0, pixel_from_f32([1.0; 4]));
+            let mut layer = Layer::new_raster(l, ids.object(), "x", img);
+            layer.visible = visible;
+            let index = doc.siblings(parent).map_or(0, <[_]>::len);
+            doc.insert(Position { parent, index }, layer)?;
+            id = Some(l);
+            Ok(())
+        })
+        .unwrap();
+        id.unwrap()
+    }
+
+    #[test]
+    fn merging_selected_keeps_hidden_layers_inside_a_selected_group() {
+        let mut st = app(10, 10);
+        let g = {
+            let d = st.active_mut().unwrap();
+            let g = d.ids.layer();
+            d.apply::<TreeError>("Group", |doc, _| {
+                doc.insert(Position { parent: None, index: 1 }, Layer::new_group(g, "g"))
+            })
+            .unwrap();
+            g
+        };
+        let hidden = add_layer(&mut st, Some(g), false);
+        let _shown = add_layer(&mut st, Some(g), true);
+        let x = add_layer(&mut st, None, true);
+        let d = st.active_mut().unwrap();
+        d.select_only(g);
+        d.toggle_selected(x);
+        st.merge_selected();
+        let doc = st.active().unwrap().doc();
+        assert!(doc.layer(hidden).is_some(), "the hidden layer inside the group was lost");
+        assert!(!doc.layer(hidden).unwrap().visible);
+    }
+
+    #[test]
+    fn layers_inside_hidden_groups_are_not_merged_in() {
+        let mut st = app(10, 10);
+        let g = {
+            let d = st.active_mut().unwrap();
+            let g = d.ids.layer();
+            d.apply::<TreeError>("Group", |doc, _| {
+                let mut group = Layer::new_group(g, "g");
+                group.visible = false;
+                doc.insert(Position { parent: None, index: 1 }, group)
+            })
+            .unwrap();
+            g
+        };
+        let inside = add_layer(&mut st, Some(g), true);
+        let a = add_layer(&mut st, None, true);
+        let b = add_layer(&mut st, None, true);
+        let d = st.active_mut().unwrap();
+        d.select_only(inside);
+        d.toggle_selected(a);
+        d.toggle_selected(b);
+        st.merge_selected();
+        let doc = st.active().unwrap().doc();
+        assert!(doc.layer(inside).is_some(), "a layer that did not show was merged away");
+        assert!(doc.layer(a).is_none(), "the shown layers were merged");
+    }
+
+    #[test]
+    fn size_checks_allow_large_canvases_and_count_tiles_not_bounding_boxes() {
+        // A 20000 × 15000 canvas filled (tiles shared, so this is cheap) flattens.
+        let st = app(20_000, 15_000);
+        let d = st.active().unwrap();
+        assert!(check_size(&d.doc().layers, &d.doc().canvas.rect()).is_ok());
+        // Two dots far apart are two tiles, whatever their bounding box.
+        let mut img = RasterImage::new();
+        img.set_pixel(0, 0, pixel_from_f32([1.0; 4]));
+        img.set_pixel(1_000_000, 1_000_000, pixel_from_f32([1.0; 4]));
+        let mut ids = IdGen::default();
+        let layer = Arc::new(Layer::new_raster(ids.layer(), ids.object(), "dots", img));
+        assert!(check_size(&[layer], &IRect::from_size(10, 10)).is_ok());
+    }
+
+    #[test]
+    fn drawing_far_past_the_canvas_keeps_the_part_around_it() {
+        let canvas = IRect::from_size(100, 100);
+        assert_eq!(drawable(IRect::new(-50, -50, 150, 150), &canvas), (IRect::new(-50, -50, 150, 150), false));
+        let huge = IRect::new(-1_000_000, 0, 1_000_000, 1_000);
+        assert_eq!(drawable(huge, &canvas), (IRect::new(0, 0, 100, 100), true));
+    }
 }
