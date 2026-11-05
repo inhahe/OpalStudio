@@ -95,11 +95,12 @@ impl RasterImage {
             let mut tile = Tile::transparent();
             let ox = (r.x0 - c.rect(0).x0) as u32;
             let oy = (r.y0 - c.rect(0).y0) as u32;
+            let n = (r.x1 - r.x0) as usize;
             for y in r.y0..r.y1 {
-                let row = &pixels[(y as usize) * width as usize..][..width as usize];
-                for x in r.x0..r.x1 {
-                    tile.set(ox + (x - r.x0) as u32, oy + (y - r.y0) as u32, row[x as usize]);
-                }
+                let src = &pixels[y as usize * width as usize + r.x0 as usize..][..n];
+                let ty = oy as usize + (y - r.y0) as usize;
+                let start = ty * TILE_SIZE as usize + ox as usize;
+                tile.pixels_mut()[start..start + n].copy_from_slice(src);
             }
             if !tile.is_transparent() {
                 img.tiles.insert(c, Arc::new(tile));
@@ -116,12 +117,11 @@ impl RasterImage {
             let Some(tile) = self.tiles.get(&c) else { continue };
             let tr = c.rect(0);
             let r = tr.intersect(rect);
+            let n = (r.x1 - r.x0) as usize;
             for y in r.y0..r.y1 {
-                let ty = (y - tr.y0) as u32;
-                let dst = &mut out[(y - rect.y0) as usize * w..][..w];
-                for x in r.x0..r.x1 {
-                    dst[(x - rect.x0) as usize] = tile.get((x - tr.x0) as u32, ty);
-                }
+                let start = (y - tr.y0) as usize * TILE_SIZE as usize + (r.x0 - tr.x0) as usize;
+                let dst = (y - rect.y0) as usize * w + (r.x0 - rect.x0) as usize;
+                out[dst..dst + n].copy_from_slice(&tile.pixels()[start..start + n]);
             }
         }
         out

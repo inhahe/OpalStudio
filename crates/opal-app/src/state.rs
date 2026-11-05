@@ -91,7 +91,7 @@ pub struct RibbonState {
 pub enum Keytips {
     #[default]
     Off,
-    /// Letters on the tabs (and tools).
+    /// Letters on the tabs.
     Tabs,
     /// Letters on the buttons of tab `n`.
     Buttons(usize),
@@ -159,7 +159,11 @@ pub struct AppState {
     pub exit_requested: bool,
     /// When settings last changed and have not been written to disk yet.
     pub settings_changed: Option<Instant>,
+    /// The canvas pixel under the pointer, set by the canvas during the frame.
     pub cursor_canvas: Option<(i64, i64)>,
+    /// The position the status bar shows: last frame's `cursor_canvas` (the status bar is
+    /// laid out before the canvas reports this frame's).
+    pub cursor_shown: Option<(i64, i64)>,
     pub gpu: GpuStatus,
 }
 
@@ -202,6 +206,7 @@ impl AppState {
             exit_requested: false,
             settings_changed: None,
             cursor_canvas: None,
+            cursor_shown: None,
             gpu: GpuStatus::default(),
         }
     }

@@ -130,37 +130,22 @@ impl Curve {
         true
     }
 
-    /// The curve's value at `x` (at 0 when `x` is not a number).
+    /// The curve's value at `x` (at 0 when `x` is not a number). To evaluate a curve many
+    /// times, use a [`Sampler`], which prepares it once.
     pub fn eval(&self, x: f64) -> f64 {
-        let x = if x.is_nan() { 0.0 } else { x };
+        self.sampler().eval(x)
+    }
+
+    /// The curve prepared for evaluating many times: its points extended for wrapping and
+    /// its slopes computed once.
+    pub fn sampler(&self) -> Sampler {
         let pts = self.extended();
-        let x = if self.periodic { x.rem_euclid(1.0) } else { x };
-        let n = pts.len();
-        if n == 1 {
-            return pts[0][1];
-        }
-        if x <= pts[0][0] {
-            return pts[0][1];
-        }
-        if x >= pts[n - 1][0] {
-            return pts[n - 1][1];
-        }
-        let k = pts.partition_point(|p| p[0] <= x) - 1;
-        let ([x0, y0], [x1, y1]) = (pts[k], pts[k + 1]);
-        let h = x1 - x0;
-        let t = (x - x0) / h;
-        let y = match self.interpolation {
-            Interpolation::Linear => y0 + (y1 - y0) * t,
-            Interpolation::Smooth | Interpolation::Spline => {
-                let m = self.tangents(&pts);
-                let (t2, t3) = (t * t, t * t * t);
-                (2.0 * t3 - 3.0 * t2 + 1.0) * y0
-                    + (t3 - 2.0 * t2 + t) * h * m[k]
-                    + (-2.0 * t3 + 3.0 * t2) * y1
-                    + (t3 - t2) * h * m[k + 1]
-            }
+        let slopes = match self.interpolation {
+            Interpolation::Linear => Vec::new(),
+            _ if pts.len() < 2 => Vec::new(),
+            _ => self.tangents(&pts),
         };
-        y.clamp(0.0, 1.0)
+        Sampler { pts, slopes, interpolation: self.interpolation, periodic: self.periodic }
     }
 
     /// The points evaluation works on: for a periodic curve, with copies of the last two
@@ -219,6 +204,48 @@ impl Curve {
             }
         }
         m
+    }
+}
+
+/// A [`Curve`] prepared for evaluating many times (see [`Curve::sampler`]).
+#[derive(Clone, Debug)]
+pub struct Sampler {
+    pts: Vec<[f64; 2]>,
+    /// The slope at each of `pts`; empty for linear interpolation.
+    slopes: Vec<f64>,
+    interpolation: Interpolation,
+    periodic: bool,
+}
+
+impl Sampler {
+    /// The curve's value at `x` (at 0 when `x` is not a number).
+    pub fn eval(&self, x: f64) -> f64 {
+        let x = if x.is_nan() { 0.0 } else { x };
+        let pts = &self.pts;
+        let x = if self.periodic { x.rem_euclid(1.0) } else { x };
+        let n = pts.len();
+        if n == 1 || x <= pts[0][0] {
+            return pts[0][1];
+        }
+        if x >= pts[n - 1][0] {
+            return pts[n - 1][1];
+        }
+        let k = pts.partition_point(|p| p[0] <= x) - 1;
+        let ([x0, y0], [x1, y1]) = (pts[k], pts[k + 1]);
+        let h = x1 - x0;
+        let t = (x - x0) / h;
+        let y = match self.interpolation {
+            Interpolation::Linear => y0 + (y1 - y0) * t,
+            Interpolation::Smooth | Interpolation::Spline => {
+                let m = &self.slopes;
+                let (t2, t3) = (t * t, t * t * t);
+                (2.0 * t3 - 3.0 * t2 + 1.0) * y0
+                    + (t3 - 2.0 * t2 + t) * h * m[k]
+                    + (-2.0 * t3 + 3.0 * t2) * y1
+                    + (t3 - t2) * h * m[k + 1]
+            }
+        };
+        y.clamp(0.0, 1.0)
     }
 }
 

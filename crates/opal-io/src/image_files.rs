@@ -11,6 +11,7 @@ use opal_core::document::Document;
 use opal_core::geom::IRect;
 use opal_core::raster::RasterImage;
 use opal_core::tile::Pixel;
+use rayon::prelude::*;
 use std::io::Cursor;
 use std::path::Path;
 
@@ -104,9 +105,13 @@ pub fn export(doc: &Document, path: &Path, format: &ExportFormat) -> Result<(), 
         ),
         ExportFormat::Jpeg { background, .. } => {
             let bg = from_srgb8([background[0], background[1], background[2], 255]);
-            let opaque: Vec<Pixel> = pixels.iter().map(|p| over_opaque(*p, bg)).collect();
-            let rgba = pixels_to_rgba8(&opaque);
-            let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|c| [c[0], c[1], c[2]]).collect();
+            let rgb: Vec<u8> = pixels
+                .par_iter()
+                .flat_map_iter(|p| {
+                    let [r, g, b, _] = crate::pixels::to_srgb8(over_opaque(*p, bg));
+                    [r, g, b]
+                })
+                .collect();
             DynamicImage::ImageRgb8(image::RgbImage::from_raw(w, h, rgb).expect("buffer size"))
         }
     };

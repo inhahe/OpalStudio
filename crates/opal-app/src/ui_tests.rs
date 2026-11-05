@@ -352,3 +352,36 @@ fn a_changing_pending_edit_asks_for_a_repaint() {
     set(&mut h, 0.5);
     assert_ne!(h.state().signature(), first, "the second step of a drag would not be shown");
 }
+
+// ---- Regression tests for the second (Fable) review ---------------------------------------
+
+#[test]
+fn the_status_bar_shows_the_pointer_s_canvas_position() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    with_image(&mut h, crate::state::Background::White);
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let at = v.screen_rect.min + v.to_screen(egui::vec2(10.5, 20.5)) / ppp;
+    h.hover_at(at);
+    h.run();
+    h.hover_at(at);
+    h.run();
+    assert!(h.query_by_label("10, 20").is_some(), "the status bar does not show the position");
+}
+
+#[test]
+fn shortcuts_wait_while_a_dialog_is_open() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    with_image(&mut h, crate::state::Background::White);
+    h.state_mut().state_mut().queue.push(Cmd::New);
+    h.run();
+    h.state_mut().state_mut().new_image.as_mut().unwrap().width = 777;
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::N);
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::N);
+    h.run();
+    let st = h.state().state();
+    assert_eq!(st.new_image.as_ref().map(|n| n.width), Some(777), "Ctrl+N reset the dialog");
+    assert_eq!(st.active().unwrap().doc().layers.len(), 1, "Ctrl+Shift+N changed the image behind the dialog");
+}

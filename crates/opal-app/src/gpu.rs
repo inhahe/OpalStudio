@@ -113,7 +113,7 @@ fn fs_bg(in: VsOut) -> @location(0) vec4<f32> {
 
 @fragment
 fn fs_tile(in: VsOut) -> @location(0) vec4<f32> {
-    let uv = (in.uv * 256.0 + 1.0) / 258.0;
+    let uv = (in.uv * TILE + 1.0) / TEX;
     var t: vec4<f32>;
     if (view.filter_smooth == 1u) {
         // Average four bilinear samples spread over the screen pixel's footprint. When the
@@ -137,6 +137,12 @@ fn fs_tile(in: VsOut) -> @location(0) vec4<f32> {
     return encode(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
 }
 "#;
+
+/// The shader, with the tile geometry it samples by (`TILE` interior pixels in `TEX`-wide
+/// textures) taken from the constants the uploads use, so the two cannot disagree.
+fn shader_source() -> String {
+    format!("const TILE: f32 = {}.0;\nconst TEX: f32 = {}.0;\n{SHADER}", TILE_SIZE, TEX)
+}
 
 /// The view's parameters, laid out as the shader's `View` (96 bytes).
 #[repr(C)]
@@ -225,7 +231,7 @@ impl CanvasRenderer {
     fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> CanvasRenderer {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("canvas"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source().into()),
         });
         let view_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("canvas view"),

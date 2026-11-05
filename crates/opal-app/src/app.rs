@@ -126,6 +126,14 @@ impl OpalApp {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        // While a dialog is open, keys belong to it: no command may change what is behind
+        // it, or the dialog's own fields.
+        let st = &self.st;
+        if st.confirm.is_some() || !st.messages.is_empty() || st.new_image.is_some() || st.export.is_some() {
+            self.alt_down = false;
+            self.alt_alone = false;
+            return;
+        }
         let typing = ctx.egui_wants_keyboard_input();
         // Keytips: Alt pressed and released on its own toggles them.
         let (alt, other_input) = ctx.input(|i| {
@@ -259,12 +267,17 @@ impl OpalApp {
         }
     }
 
-    fn save_settings_if_due(&mut self) {
-        if self.persist && self.st.settings_changed.is_some_and(|t| t.elapsed() > Duration::from_secs(1)) {
-            self.st.settings_changed = None;
-            if let Err(e) = config::save(&self.st) {
-                self.st.message(crate::state::MessageKind::Warning, "Settings not saved", e.to_string());
-            }
+    fn save_settings_if_due(&mut self, ctx: &egui::Context) {
+        let Some(changed) = self.st.settings_changed.filter(|_| self.persist) else { return };
+        let wait = Duration::from_secs(1);
+        if changed.elapsed() < wait {
+            // Come back when it is due, even if nothing else happens meanwhile.
+            ctx.request_repaint_after(wait - changed.elapsed());
+            return;
+        }
+        self.st.settings_changed = None;
+        if let Err(e) = config::save(&self.st) {
+            self.st.message(crate::state::MessageKind::Warning, "Settings not saved", e.to_string());
         }
     }
 
@@ -344,6 +357,8 @@ impl OpalApp {
             d.revision.hash(&mut h);
         }
         st.active_doc.hash(&mut h);
+        // A position reported this frame is shown in the next one.
+        st.cursor_canvas.hash(&mut h);
         st.prefs.revision().hash(&mut h);
         for t in ToolId::ALL {
             st.tool_settings(t).revision().hash(&mut h);
@@ -388,7 +403,7 @@ impl OpalApp {
                 let c = d.doc().canvas;
                 ui.label(RichText::new(format!("{} × {} px", c.width, c.height)).color(weak));
                 ui.separator();
-                if let Some((x, y)) = self.st.cursor_canvas {
+                if let Some((x, y)) = self.st.cursor_shown {
                     ui.label(RichText::new(format!("{x}, {y}")).color(weak));
                 }
             });
@@ -402,7 +417,7 @@ impl eframe::App for OpalApp {
         let before = self.signature();
         // The scheme can change under us when following the system's.
         self.st.palette = theme::palette(self.st.scheme(&ctx));
-        self.st.cursor_canvas = None;
+        self.st.cursor_shown = self.st.cursor_canvas.take();
         // A rename left open when another document became active is finished, in its own
         // document, as clicking elsewhere would finish it.
         if self.st.renaming.as_ref().is_some_and(|r| Some(r.0) != self.st.active_doc) {
@@ -449,7 +464,7 @@ impl eframe::App for OpalApp {
         }
         self.sync_panes();
         self.handle_exit(&ctx);
-        self.save_settings_if_due();
+        self.save_settings_if_due(&ctx);
         // Changes made after something was drawn this frame (commands run at the end of
         // the frame, a panel changing a layer after the canvas drew it) need another frame
         // to show.

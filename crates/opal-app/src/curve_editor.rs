@@ -123,10 +123,11 @@ pub fn curve_editor(ui: &mut egui::Ui, curve: &mut Curve, opts: &Options<'_>) ->
             }
         }
         let samples = (rect.width() as usize).max(2);
+        let sampler = curve.sampler();
         let line: Vec<Pos2> = (0..=samples)
             .map(|s| {
                 let x = s as f64 / samples as f64;
-                to_screen([x, curve.eval(x)])
+                to_screen([x, sampler.eval(x)])
             })
             .collect();
         let accent = visuals.selection.stroke.color;
