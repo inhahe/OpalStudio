@@ -731,24 +731,25 @@ impl AppState {
             height: spec.height,
             sampling: crate::prefs::sampling(&self.prefs, "export"),
         });
-        self.export_to(doc, path, format, size, crate::memory::Allowance::now(), ctx);
+        self.export_to(doc, path, format, size, None, ctx);
     }
 
     /// Writes `doc`'s canvas to `path` (off the interface thread; a failure inside the
-    /// encoders is reported like any other), or says why not if it would need more than
-    /// `memory`.
+    /// encoders is reported like any other), or says why not if it would need more memory
+    /// than is free when its turn comes (or than `memory`, for tests).
     pub fn export_to(
         &mut self,
         doc: Document,
         path: PathBuf,
         format: ExportFormat,
         size: Option<image_files::ExportSize>,
-        memory: crate::memory::Allowance,
+        memory: Option<crate::memory::Allowance>,
         ctx: &egui::Context,
     ) {
         let written = Written::Export { path: path.clone() };
         let job = Box::new(move |p: &_| {
-            let mut memory = memory;
+            // Measured now, not when asked for: the write may have waited behind others.
+            let mut memory = memory.unwrap_or_else(crate::memory::Allowance::now);
             memory.take(image_files::export_memory(&doc, size.as_ref()))?;
             let pool = Some(crate::background::pool());
             image_files::export_in(&doc, &path, &format, size.as_ref(), pool, p).map_err(|e| e.to_string())
@@ -855,7 +856,7 @@ mod tests {
         let doc = st.active().unwrap().doc().clone();
         let path = std::env::temp_dir().join(format!("opal-refused-{}.png", std::process::id()));
         let png = ExportFormat::Png { sixteen_bit: false };
-        st.export_to(doc, path.clone(), png, None, crate::memory::Allowance::of(Some(1000)), &ctx());
+        st.export_to(doc, path.clone(), png, None, Some(crate::memory::Allowance::of(Some(1000))), &ctx());
         for _ in 0..1000 {
             st.poll_writes(false);
             if !st.writer.busy() {
