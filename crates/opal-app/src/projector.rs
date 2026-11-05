@@ -31,8 +31,7 @@ impl Request {
             && self.rect == other.rect
             && self.quality == other.quality
             && self.budget == other.budget
-            && self.layers.len() == other.layers.len()
-            && self.layers.iter().zip(&other.layers).all(|(a, b)| Arc::ptr_eq(a, b))
+            && opal_core::composite::same_layers(&self.layers, &other.layers)
     }
 }
 

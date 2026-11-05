@@ -652,37 +652,55 @@ fn lone_source(tokens: &[Token]) -> Option<&Arc<Tile>> {
     tile
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum Key {
     Base(Vec<Token>),
-    Pyramid([Option<Arc<Tile>>; 4]),
+    /// The versions (see [`Entry::version`]) of the four tiles below.
+    Pyramid([u64; 4]),
     /// A tile drawn at its level directly (see [`Quality::Preview`]): what went into it,
     /// as for a level-0 tile. It never equals an exact key, so the next exact update
     /// replaces the tile.
     Preview(Vec<Token>),
 }
 
-impl PartialEq for Key {
-    fn eq(&self, other: &Key) -> bool {
-        match (self, other) {
-            (Key::Base(a), Key::Base(b)) | (Key::Preview(a), Key::Preview(b)) => a == b,
-            (Key::Pyramid(a), Key::Pyramid(b)) => a.iter().zip(b).all(|(x, y)| match (x, y) {
-                (None, None) => true,
-                (Some(x), Some(y)) => Arc::ptr_eq(x, y),
-                _ => false,
-            }),
-            _ => false,
-        }
-    }
+/// A cached tile's pixels.
+#[derive(Clone, Debug)]
+enum Pixels {
+    /// Nothing shows in the tile.
+    Empty,
+    /// The pixels, and whether the cache made them (rather than showing a layer's own tile,
+    /// which costs nothing more).
+    Held(Arc<Tile>, bool),
+    /// Let go to keep within the budget; made again from the key, which still holds, when
+    /// they are needed.
+    Dropped,
 }
 
 #[derive(Clone, Debug)]
 struct Entry {
     key: Key,
-    tile: Option<Arc<Tile>>,
+    pixels: Pixels,
+    /// Names what the tile shows: a new one each time it is computed with a new key, 0 when
+    /// it shows nothing. The tile above keys on it, so its pixels can be dropped without
+    /// the tile above being redrawn.
+    version: u64,
     /// For a level-0 tile: the generation of layers its key was last found current for
     /// (see [`Projection::generation`]).
     checked: u64,
+}
+
+impl Entry {
+    fn held(&self) -> Option<&Arc<Tile>> {
+        match &self.pixels {
+            Pixels::Held(t, _) => Some(t),
+            _ => None,
+        }
+    }
+}
+
+/// Whether two lists of layers are the same layers (the same allocations, in order).
+pub fn same_layers(a: &[Arc<Layer>], b: &[Arc<Layer>]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| Arc::ptr_eq(x, y))
 }
 
 /// The composited image, cached per tile, with a pyramid of reduced levels: a level-`k`
@@ -700,14 +718,15 @@ pub struct Projection {
     /// address, and where their content lies.
     layers: Vec<Arc<Layer>>,
     occupancy: Occupancy,
+    /// The last version given (see [`Entry::version`]).
+    versions: u64,
     /// How many level-0 keys have been built (for tests).
     keys_built: usize,
     /// How many bytes of tiles the cache may hold (see [`set_budget`](Self::set_budget)).
     budget: Option<u64>,
 }
 
-/// The bytes a cached tile's pixels take.
-const TILE_BYTES: u64 = (TILE_PIXELS * std::mem::size_of::<Pixel>()) as u64;
+const TILE_BYTES: u64 = crate::raster::TILE_BYTES as u64;
 
 /// How [`Projection::update`] brings tiles up to date.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -725,11 +744,11 @@ pub enum Quality {
 /// (an unchanged document in an unchanged view) costs nothing.
 #[derive(Debug)]
 struct LastUpdate {
-    /// The top-level layers, held so a replaced layer cannot reuse an old address.
-    layers: Vec<Arc<Layer>>,
+    generation: u64,
     level: u32,
     rect: IRect,
     quality: Quality,
+    budget: Option<u64>,
     result: Vec<(TileCoord, Arc<Tile>)>,
 }
 
@@ -741,8 +760,10 @@ impl Projection {
         Projection::default()
     }
 
-    /// Limits the tiles the cache holds to `bytes`, beyond those the view shown needs: past
-    /// it, an update drops the tiles farthest from the view first. `None` for no limit.
+    /// Limits the pixels the cache holds to `bytes` (`None` for no limit), counting each
+    /// tile it made once: past it, an update lets go of the tiles farthest from the view,
+    /// then of the pixels of finer levels under the view (kept as keys, and made again
+    /// when needed). The tiles at the level shown in the view always stay.
     pub fn set_budget(&mut self, bytes: Option<u64>) {
         self.budget = bytes;
     }
@@ -750,6 +771,11 @@ impl Projection {
     /// Whether the last update drew what changed as a preview (see [`Quality::Preview`]).
     pub fn shows_previews(&self) -> bool {
         self.last.as_ref().is_some_and(|l| l.quality == Quality::Preview)
+    }
+
+    fn next_version(&mut self) -> u64 {
+        self.versions += 1;
+        self.versions
     }
 
     /// Brings the tiles of pyramid level `level` that intersect `rect` (canvas pixels) up to
@@ -764,13 +790,17 @@ impl Projection {
     ) -> Vec<(TileCoord, Arc<Tile>)> {
         let level = level.min(MAX_LEVEL);
         let quality = if level == 0 { Quality::Exact } else { quality };
-        // Any change below the top level replaces the top-level layer holding it.
+        if !same_layers(&self.layers, layers) {
+            self.generation += 1;
+            self.layers = layers.to_vec();
+            self.occupancy = Occupancy::of(layers);
+        }
         if let Some(last) = &self.last
+            && last.generation == self.generation
             && last.level == level
             && last.rect == *rect
             && last.quality == quality
-            && last.layers.len() == layers.len()
-            && last.layers.iter().zip(layers).all(|(a, b)| Arc::ptr_eq(a, b))
+            && last.budget == self.budget
         {
             return last.result.clone();
         }
@@ -785,11 +815,6 @@ impl Projection {
             (rect.x1 + span - 1).div_euclid(span) * span,
             (rect.y1 + span - 1).div_euclid(span) * span,
         );
-        if self.layers.len() != layers.len() || !self.layers.iter().zip(layers).all(|(a, b)| Arc::ptr_eq(a, b)) {
-            self.generation += 1;
-            self.layers = layers.to_vec();
-            self.occupancy = Occupancy::of(layers);
-        }
         let base = self.occupancy.within(&outer);
         let result = match quality {
             Quality::Exact => {
@@ -799,14 +824,22 @@ impl Projection {
                 let mut coords = base;
                 for l in 1..=level {
                     coords = coords.iter().map(|c| c.parent()).collect();
-                    self.update_pyramid(l, &coords, &outer, &HashSet::new());
+                    self.update_pyramid(layers, l, &coords, &outer, &HashSet::new());
                 }
+                self.restore(layers, level, coords.iter().copied());
                 self.shown(level, coords.iter())
             }
             Quality::Preview => self.update_preview(layers, level, &outer, base),
         };
         self.trim(level, &outer);
-        self.last = Some(LastUpdate { layers: layers.to_vec(), level, rect: *rect, quality, result: result.clone() });
+        self.last = Some(LastUpdate {
+            generation: self.generation,
+            level,
+            rect: *rect,
+            quality,
+            budget: self.budget,
+            result: result.clone(),
+        });
         result
     }
 
@@ -846,8 +879,9 @@ impl Projection {
         for l in 1..=level {
             coords = coords.iter().map(|c| c.parent()).collect();
             let keep = if l == level { dirty.clone() } else { HashSet::new() };
-            self.update_pyramid(l, &coords, outer, &keep);
+            self.update_pyramid(layers, l, &coords, outer, &keep);
         }
+        self.restore(layers, level, coords.iter().copied());
         // The dirty ones whose key changed since they were last drawn, drawn at the level.
         let token = |o: &Object, c: TileCoord| level_token(o, c, level);
         let top = &self.levels[level as usize];
@@ -890,19 +924,27 @@ impl Projection {
             self.reduced.make(&image, level, tiles);
         }
         let show = shown_at(level, &self.reduced);
-        let drawn: Vec<(TileCoord, Entry)> = stale
+        let drawn: Vec<(TileCoord, Key, Option<Arc<Tile>>)> = stale
             .into_par_iter()
             .map(|(c, key)| {
                 let tile = composite_with(layers, c, &show).map(Arc::new);
-                (c, Entry { key, tile, checked: generation })
+                (c, key, tile)
             })
             .collect();
-        self.levels[level as usize].extend(drawn);
+        drop(show);
+        for (c, key, tile) in drawn {
+            let version = if tile.is_some() { self.next_version() } else { 0 };
+            let pixels = tile.map_or(Pixels::Empty, |t| Pixels::Held(t, true));
+            self.levels[level as usize].insert(c, Entry { key, pixels, version, checked: generation });
+        }
         self.shown(level, coords.iter().chain(&dirty))
     }
 
-    /// Drops cached tiles while they take more than the budget, farthest from `outer` first,
-    /// keeping every tile up to level `level` within it (what the view drawn needs).
+    /// Lets go of cached pixels while those the cache made take more than the budget: first
+    /// the tiles outside `outer` (or above level `level`), farthest from it first, then the
+    /// pixels of the finer levels within it, finest first, which keep their keys and versions
+    /// (so nothing above them is redrawn) and are made again only when needed. The tiles at
+    /// level `level` within `outer`, what the view shows, always stay.
     fn trim(&mut self, level: u32, outer: &IRect) {
         let Some(budget) = self.budget else { return };
         // Cheap to know, and at least what the tiles take.
@@ -910,31 +952,117 @@ impl Projection {
         if entries as u64 * TILE_BYTES <= budget {
             return;
         }
+        // Each tile the cache made counts once, however many entries share it.
+        let ptr = |t: &Arc<Tile>| Arc::as_ptr(t) as usize;
+        let mut holders: HashMap<usize, usize> = HashMap::new();
+        for cache in &self.levels {
+            for e in cache.values() {
+                if let Pixels::Held(t, true) = &e.pixels {
+                    *holders.entry(ptr(t)).or_default() += 1;
+                }
+            }
+        }
+        let mut bytes = holders.len() as u64 * TILE_BYTES;
+        if bytes <= budget {
+            return;
+        }
         let gap = |r: &IRect| {
             let dx = (outer.x0 - r.x1).max(r.x0 - outer.x1).max(0);
             let dy = (outer.y0 - r.y1).max(r.y0 - outer.y1).max(0);
             dx + dy
         };
-        let mut bytes = 0;
         let mut away: Vec<(i64, usize, TileCoord)> = Vec::new();
+        let mut under: Vec<(usize, TileCoord)> = Vec::new();
         for (l, cache) in self.levels.iter().enumerate() {
+            let below = (l as u32) < level;
             for (c, e) in cache {
-                if e.tile.is_some() {
-                    bytes += TILE_BYTES;
-                }
                 let r = c.rect(l as u32);
-                if l as u32 > level || r.intersect(outer).is_empty() {
+                // A preview off the level shown is out of date: the next exact update
+                // replaces it.
+                if l as u32 > level || r.intersect(outer).is_empty() || (below && matches!(e.key, Key::Preview(_))) {
                     away.push((gap(&r), l, *c));
+                } else if below && matches!(e.pixels, Pixels::Held(_, true)) {
+                    under.push((l, *c));
                 }
             }
         }
+        let mut release = |bytes: &mut u64, p: &Pixels| {
+            if let Pixels::Held(t, true) = p {
+                let n = holders.get_mut(&ptr(t)).expect("counted");
+                *n -= 1;
+                if *n == 0 {
+                    *bytes -= TILE_BYTES;
+                }
+            }
+        };
         away.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
         for (_, l, c) in away {
             if bytes <= budget {
-                break;
+                return;
             }
-            if self.levels[l].remove(&c).is_some_and(|e| e.tile.is_some()) {
-                bytes -= TILE_BYTES;
+            if let Some(e) = self.levels[l].remove(&c) {
+                release(&mut bytes, &e.pixels);
+            }
+        }
+        under.sort_unstable_by_key(|u| u.0);
+        for (l, c) in under {
+            if bytes <= budget {
+                return;
+            }
+            let e = self.levels[l].get_mut(&c).expect("listed");
+            let pixels = std::mem::replace(&mut e.pixels, Pixels::Dropped);
+            release(&mut bytes, &pixels);
+        }
+    }
+
+    /// Makes again the dropped pixels of the tiles `coords` at `level`, and of the finer
+    /// tiles they are made from (all current, so their keys say what they show).
+    fn restore(&mut self, layers: &[Arc<Layer>], level: u32, coords: impl IntoIterator<Item = TileCoord>) {
+        let dropped = |levels: &[HashMap<TileCoord, Entry>], l: u32, c: &TileCoord| {
+            levels[l as usize].get(c).is_some_and(|e| matches!(e.pixels, Pixels::Dropped))
+        };
+        let mut need: Vec<Vec<TileCoord>> = vec![Vec::new(); level as usize + 1];
+        need[level as usize] = coords.into_iter().filter(|c| dropped(&self.levels, level, c)).collect();
+        if need[level as usize].is_empty() {
+            return;
+        }
+        for l in (1..=level).rev() {
+            let below: HashSet<TileCoord> = need[l as usize]
+                .iter()
+                .flat_map(|c| c.children())
+                .filter(|k| dropped(&self.levels, l - 1, k))
+                .collect();
+            need[l as usize - 1] = below.into_iter().collect();
+        }
+        for (l, todo) in need.into_iter().enumerate() {
+            if todo.is_empty() {
+                continue;
+            }
+            let made: Vec<(TileCoord, Pixels)> = if l == 0 {
+                let cache = &self.levels[0];
+                todo.into_par_iter()
+                    .map(|c| {
+                        let Key::Base(tokens) = &cache[&c].key else { unreachable!("a level-0 key") };
+                        let pixels = match lone_source(tokens) {
+                            Some(t) => Pixels::Held(t.clone(), false),
+                            None => {
+                                composite_tile(layers, c).map_or(Pixels::Empty, |t| Pixels::Held(Arc::new(t), true))
+                            }
+                        };
+                        (c, pixels)
+                    })
+                    .collect()
+            } else {
+                let below = &self.levels[l - 1];
+                todo.into_par_iter()
+                    .map(|c| {
+                        let kids = c.children().map(|k| below.get(&k).and_then(Entry::held).map(|t| &**t));
+                        (c, downsample(kids).map_or(Pixels::Empty, |t| Pixels::Held(Arc::new(t), true)))
+                    })
+                    .collect()
+            };
+            for (c, pixels) in made {
+                self.levels[l].get_mut(&c).expect("dropped, so cached").pixels = pixels;
             }
         }
     }
@@ -942,13 +1070,13 @@ impl Projection {
     /// The tiles of level `level` at `coords` that have content.
     fn shown<'a>(&self, level: u32, coords: impl Iterator<Item = &'a TileCoord>) -> Vec<(TileCoord, Arc<Tile>)> {
         let top = &self.levels[level as usize];
-        coords.filter_map(|c| top.get(c).and_then(|e| e.tile.clone()).map(|t| (*c, t))).collect()
+        coords.filter_map(|c| top.get(c).and_then(Entry::held).map(|t| (*c, t.clone()))).collect()
     }
 
     /// The cached tile at `level` and `c` as of the last [`update`](Self::update) that
-    /// covered it.
+    /// covered it, if its pixels are held.
     pub fn tile(&self, level: u32, c: TileCoord) -> Option<&Arc<Tile>> {
-        self.levels.get(level as usize)?.get(&c)?.tile.as_ref()
+        self.levels.get(level as usize)?.get(&c)?.held()
     }
 
     /// Checks the cached level-0 tile `c` against `layers` (this generation's): `None` if it
@@ -976,57 +1104,74 @@ impl Projection {
         self.levels[0].retain(|c, _| coords.contains(c) || c.rect(0).intersect(outer).is_empty());
         let stale: Vec<(TileCoord, Key)> =
             coords.iter().filter_map(|&c| self.check_base(layers, c).map(|key| (c, key))).collect();
-        let cache = &mut self.levels[0];
-        let done: Vec<(TileCoord, Entry)> = stale
+        let done: Vec<(TileCoord, Key, Pixels)> = stale
             .into_par_iter()
             .map(|(c, key)| {
                 let Key::Base(tokens) = &key else { unreachable!() };
                 // A tile that one layer at full opacity supplies alone is shown as it is,
                 // without a copy.
-                let tile = match lone_source(tokens) {
-                    Some(t) => Some(t.clone()),
-                    None => composite_tile(layers, c).map(Arc::new),
+                let pixels = match lone_source(tokens) {
+                    Some(t) => Pixels::Held(t.clone(), false),
+                    None => composite_tile(layers, c).map_or(Pixels::Empty, |t| Pixels::Held(Arc::new(t), true)),
                 };
-                (c, Entry { key, tile, checked: generation })
+                (c, key, pixels)
             })
             .collect();
-        cache.extend(done);
+        for (c, key, pixels) in done {
+            let version = if matches!(pixels, Pixels::Empty) { 0 } else { self.next_version() };
+            self.levels[0].insert(c, Entry { key, pixels, version, checked: generation });
+        }
     }
 
-    /// Brings the level-`level` tiles at `coords` up to date from the level below, dropping
-    /// other cached tiles within `outer` except those in `keep`.
-    fn update_pyramid(&mut self, level: u32, coords: &HashSet<TileCoord>, outer: &IRect, keep: &HashSet<TileCoord>) {
-        let (below, rest) = self.levels.split_at_mut(level as usize);
-        let below = &below[level as usize - 1];
-        let cache = &mut rest[0];
-        cache.retain(|c, _| coords.contains(c) || keep.contains(c) || c.rect(level).intersect(outer).is_empty());
-        let mut stale = Vec::new();
-        for &c in coords {
-            let kids = c.children().map(|k| below.get(&k).and_then(|e| e.tile.clone()));
-            let key = Key::Pyramid(kids);
-            if cache.get(&c).is_none_or(|e| e.key != key) {
-                stale.push((c, key));
-            }
+    /// Brings the level-`level` tiles at `coords` up to date from the level below (made
+    /// again from `layers` where their pixels were dropped), dropping other cached tiles
+    /// within `outer` except those in `keep`.
+    fn update_pyramid(
+        &mut self,
+        layers: &[Arc<Layer>],
+        level: u32,
+        coords: &HashSet<TileCoord>,
+        outer: &IRect,
+        keep: &HashSet<TileCoord>,
+    ) {
+        let l = level as usize;
+        self.levels[l]
+            .retain(|c, _| coords.contains(c) || keep.contains(c) || c.rect(level).intersect(outer).is_empty());
+        let (below, cache) = (&self.levels[l - 1], &self.levels[l]);
+        let stale: Vec<(TileCoord, [u64; 4])> = coords
+            .iter()
+            .filter_map(|&c| {
+                let kids = c.children().map(|k| below.get(&k).map_or(0, |e| e.version));
+                let current = cache.get(&c).is_some_and(|e| e.key == Key::Pyramid(kids));
+                (!current).then_some((c, kids))
+            })
+            .collect();
+        if stale.is_empty() {
+            return;
         }
+        self.restore(layers, level - 1, stale.iter().flat_map(|(c, _)| c.children()));
+        let below = &self.levels[l - 1];
+        let pixels = |k: TileCoord| below.get(&k).and_then(Entry::held).cloned();
         // Tiles with the same four children (a uniform image is full of them) are reduced
         // once and share the result.
         let ptr = |t: &Option<Arc<Tile>>| t.as_ref().map_or(0, |t| Arc::as_ptr(t) as usize);
         let mut unique: HashMap<[usize; 4], [Option<Arc<Tile>>; 4]> = HashMap::new();
-        for (_, key) in &stale {
-            let Key::Pyramid(kids) = key else { unreachable!() };
-            unique.entry(kids.each_ref().map(ptr)).or_insert_with(|| kids.clone());
+        let mut of: Vec<(TileCoord, [u64; 4], [usize; 4])> = Vec::with_capacity(stale.len());
+        for (c, kids) in stale {
+            let tiles = c.children().map(pixels);
+            let id = tiles.each_ref().map(ptr);
+            unique.entry(id).or_insert(tiles);
+            of.push((c, kids, id));
         }
         let reduced: HashMap<[usize; 4], Option<Arc<Tile>>> = unique
             .into_par_iter()
-            .map(|(k, kids)| {
-                let tile = downsample(kids.each_ref().map(|k| k.as_deref()));
-                (k, tile.map(Arc::new))
-            })
+            .map(|(id, kids)| (id, downsample(kids.each_ref().map(|k| k.as_deref())).map(Arc::new)))
             .collect();
-        for (c, key) in stale {
-            let Key::Pyramid(kids) = &key else { unreachable!() };
-            let tile = reduced[&kids.each_ref().map(ptr)].clone();
-            cache.insert(c, Entry { tile, key, checked: 0 });
+        for (c, kids, id) in of {
+            let tile = reduced[&id].clone();
+            let version = if tile.is_some() { self.next_version() } else { 0 };
+            let pixels = tile.map_or(Pixels::Empty, |t| Pixels::Held(t, true));
+            self.levels[l].insert(c, Entry { key: Key::Pyramid(kids), pixels, version, checked: 0 });
         }
     }
 }
@@ -1576,15 +1721,16 @@ mod tests {
             t.set(0, 0, pixel_from_f32([c.x as f32 / 32.0, c.y as f32 / 4.0, 0.0, 1.0]));
             img.set_tile(c, Some(Arc::new(t)));
         }
-        add(&mut d, &mut ids, img);
-        add(&mut d, &mut ids, solid(IRect::new(0, 0, 8192, 8), [0.0, 0.0, 1.0, 0.5]));
+        // Translucent, so every tile is one the cache makes (not the layer's own).
+        let base = add(&mut d, &mut ids, img);
+        d.layer_mut(base).unwrap().opacity = 0.5;
         let mut p = Projection::new();
         p.set_budget(Some(24 * TILE_BYTES));
         let view = |x: i64| IRect::new(x, 0, x + 1024, 1024);
         // Sixteen tiles in view, then sixteen more to the right, then sixteen far beyond.
         p.update(&d.layers, 0, &view(0), Quality::Exact);
         p.update(&d.layers, 0, &view(1024), Quality::Exact);
-        let cached = |p: &Projection| p.levels[0].values().filter(|e| e.tile.is_some()).count();
+        let cached = |p: &Projection| p.levels[0].values().filter(|e| e.held().is_some()).count();
         assert_eq!(cached(&p), 24, "over budget, the farthest tiles go");
         assert!(p.tile(0, TileCoord::new(1, 0)).is_none() && p.tile(0, TileCoord::new(3, 0)).is_some());
         p.update(&d.layers, 0, &view(6144), Quality::Exact);
@@ -1602,6 +1748,95 @@ mod tests {
         p.set_budget(None);
         p.update(&d.layers, 0, &view(0), Quality::Exact);
         assert_eq!(cached(&p), 32);
+    }
+
+    /// A 4096 × 1024 layer at half opacity, every tile its own pixels, so every composite
+    /// is one the cache makes.
+    fn translucent_document() -> (Document, LayerId) {
+        let mut ids = IdGen::default();
+        let mut d = Document::new(4096, 1024);
+        let mut img = RasterImage::new();
+        for c in TileCoord::covering(&IRect::from_size(4096, 1024), 0) {
+            let mut t = Tile::filled(pixel_from_f32([0.2, 0.4, 0.6, 1.0]));
+            t.set(3, 3, pixel_from_f32([c.x as f32 / 16.0, c.y as f32 / 4.0, 0.0, 1.0]));
+            img.set_tile(c, Some(Arc::new(t)));
+        }
+        let l = add(&mut d, &mut ids, img);
+        d.layer_mut(l).unwrap().opacity = 0.5;
+        (d, l)
+    }
+
+    /// The bytes of tiles a projection made and holds, each counted once.
+    fn made_bytes(p: &Projection) -> u64 {
+        let mut ptrs = HashSet::new();
+        for cache in &p.levels {
+            for e in cache.values() {
+                if let Pixels::Held(t, true) = &e.pixels {
+                    ptrs.insert(Arc::as_ptr(t) as usize);
+                }
+            }
+        }
+        ptrs.len() as u64 * TILE_BYTES
+    }
+
+    #[test]
+    fn zoomed_out_the_budget_holds_by_dropping_finer_pixels() {
+        let (mut d, l) = translucent_document();
+        let view = IRect::from_size(4096, 1024);
+        let mut p = Projection::new();
+        // At level 2 the view shows 4 tiles, over 16 at level 1 and 64 at level 0.
+        p.set_budget(Some(6 * TILE_BYTES));
+        p.update(&d.layers, 2, &view, Quality::Exact);
+        assert!(made_bytes(&p) <= 6 * TILE_BYTES, "{} tiles held", made_bytes(&p) / TILE_BYTES);
+        for c in TileCoord::covering(&view, 2) {
+            assert!(p.tile(2, c).is_some(), "a tile shown was dropped");
+        }
+        // An edit under the view: the tile above it is drawn again, right, from dropped
+        // pixels made again.
+        let LayerContent::Objects(objects) = &mut d.layer_mut(l).unwrap().content else { panic!() };
+        let ObjectKind::Pixels(o) = &mut objects[0].kind else { panic!() };
+        Arc::make_mut(&mut o.image).set_pixel(1500, 300, pixel_from_f32([1.0, 1.0, 0.0, 1.0]));
+        let got: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 2, &view, Quality::Exact).into_iter().collect();
+        let want: HashMap<TileCoord, Arc<Tile>> =
+            Projection::new().update(&d.layers, 2, &view, Quality::Exact).into_iter().collect();
+        assert_eq!(got.len(), want.len());
+        for (c, t) in &want {
+            assert!(got[c].pixels() == t.pixels(), "tile {c:?} differs from one drawn afresh");
+        }
+        assert!(made_bytes(&p) <= 6 * TILE_BYTES);
+        // Zoomed in, the dropped tiles the view now shows are made again.
+        let near = IRect::new(1024, 0, 2048, 1024);
+        let got: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 0, &near, Quality::Exact).into_iter().collect();
+        assert_eq!(got.len(), 16);
+        let want = Projection::new().update(&d.layers, 0, &near, Quality::Exact);
+        for (c, t) in want {
+            assert!(got[&c].pixels() == t.pixels(), "tile {c:?}");
+        }
+    }
+
+    #[test]
+    fn a_lower_budget_trims_even_an_unchanged_view() {
+        let (d, _) = translucent_document();
+        let mut p = Projection::new();
+        p.update(&d.layers, 0, &IRect::new(0, 0, 1024, 1024), Quality::Exact);
+        p.update(&d.layers, 0, &IRect::new(3072, 0, 4096, 1024), Quality::Exact);
+        assert_eq!(made_bytes(&p), 32 * TILE_BYTES);
+        p.set_budget(Some(16 * TILE_BYTES));
+        p.update(&d.layers, 0, &IRect::new(3072, 0, 4096, 1024), Quality::Exact);
+        assert_eq!(made_bytes(&p), 16 * TILE_BYTES);
+    }
+
+    #[test]
+    fn a_layers_own_tiles_shown_as_they_are_cost_nothing() {
+        let mut ids = IdGen::default();
+        let mut d = Document::new(4096, 1024);
+        add(&mut d, &mut ids, solid(IRect::from_size(4096, 1024), [0.2, 0.4, 0.6, 1.0]));
+        let mut p = Projection::new();
+        p.set_budget(Some(0));
+        p.update(&d.layers, 0, &IRect::new(0, 0, 1024, 1024), Quality::Exact);
+        p.update(&d.layers, 0, &IRect::new(3072, 0, 4096, 1024), Quality::Exact);
+        assert_eq!(made_bytes(&p), 0);
+        assert!(p.tile(0, TileCoord::new(0, 0)).is_some(), "a tile that took nothing was dropped");
     }
 
     /// Times panning a view of four 24-megapixel layers at 25% (run with `--release

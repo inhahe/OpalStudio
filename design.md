@@ -129,10 +129,14 @@ not a goal.
   to report changes to the cache. Stale tiles are computed in parallel, on a thread each
   document has for its projection: the canvas asks for the view it shows and waits for it
   only briefly (20 ms), drawing the last view done meanwhile (the previous zoom, or the
-  image before a change), so a huge image never holds up the interface. The cache keeps
-  every tile the view shown needs; beyond that it may hold a set amount of memory (a
-  preference, 2 GB by default), past which the tiles farthest from the view are dropped
-  first. The GPU only shows projection tiles; a GPU
+  image before a change), so a huge image never holds up the interface. A pyramid tile is
+  keyed on the versions of the four below it (a version names what a tile shows), so the
+  pixels of a tile can be let go while its key stays. The cache may hold a set amount of
+  memory (a preference, 2 GB by default), counting each tile it made once (a layer's own
+  tile shown as it is costs nothing); past it, the tiles farthest from the view go first,
+  then the pixels of the finer levels under the view, which are made again, locally, only
+  when an edit or a zoom needs them. The tiles the view shows always stay. The GPU only
+  shows projection tiles; a GPU
   compositor matching the reference comes when adjustments need interactive speed
   (milestone 5).
 - **Display.** Each projection tile is uploaded as a 258×258 texture: the tile plus a
