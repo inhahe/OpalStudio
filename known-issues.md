@@ -1,0 +1,49 @@
+# Known issues and technical debt
+
+Each entry says where the problem lives and what the proper fix is. Fixed entries are
+deleted (the commit that fixes one says so).
+
+## Embedded color profiles are read as sRGB
+
+`crates/opal-io/src/image_files.rs` (`import_bytes`). A PNG or JPEG with an embedded profile
+other than sRGB (Adobe RGB, Display P3, a camera profile) is decoded as if it were sRGB, so
+its colors are off; the user is warned when the image opens. Whether a profile is sRGB is
+judged from its description text. **Fix:** color management with lcms2 in milestone 5:
+convert from the embedded profile into the working space on import.
+
+## The projection is computed on the UI thread
+
+`crates/opal-core/src/composite.rs` (`Projection::update`), called from
+`crates/opal-app/src/canvas.rs` every frame. Stale tiles are computed in parallel with
+rayon, but the frame waits for them, so opening or zooming out of a very large image
+(hundreds of megapixels) stalls the interface for a moment. **Fix:** compute stale tiles on
+worker threads and show the coarser pyramid level (or the previous result) until they
+arrive.
+
+## The projection cache and GPU textures are never trimmed to a budget
+
+`Projection` keeps every tile it has computed for content still in the document, and the
+GPU texture cache (`crates/opal-app/src/gpu.rs`) frees textures only after 600 frames
+unused. Fine for ordinary images; a huge document panned end to end keeps all of it in
+memory. **Fix:** evict least recently used tiles beyond a memory budget, using the GPU
+memory query for the texture side.
+
+## History keeps every state
+
+`crates/opal-core/src/history.rs`. Nothing is ever dropped, so a long session of large
+edits grows without limit. The design's history memory budget is not implemented yet.
+**Fix:** with milestone 3 (painting, the first source of large edits), count the tile
+bytes each state alone holds and drop the oldest states beyond the budget set in the
+preferences.
+
+## GPU memory is only reported on Windows
+
+`crates/opal-app/src/gpu_memory.rs`. **Fix:** query `VK_EXT_memory_budget` through wgpu's
+Vulkan backend (and Metal's `recommendedMaxWorkingSetSize`) on other platforms.
+
+## Building on Linux and macOS needs the target override removed
+
+`.cargo/config.toml` sets the MSVC target, because the MinGW toolchain's test binary
+crashed at startup. On other platforms that setting must be overridden
+(`cargo build --target <host>`). **Fix:** when the first non-Windows build is set up, move
+the override into a Windows-only build script or document per-platform `--config`.

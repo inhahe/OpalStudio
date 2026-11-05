@@ -1,0 +1,5 @@
+# Build for the MSVC target on Windows. With the MinGW (GNU) toolchain, the app's test
+# binary crashed at startup in a static initializer that the GNU linker left unrelocated.
+# On other platforms, override this with `--target <host triple>` (see known-issues.md).
+[build]
+target = "x86_64-pc-windows-msvc"

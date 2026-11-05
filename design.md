@@ -67,24 +67,30 @@ falloff, feather falloff, and the falloff of distance-based color matching.
 |---|---|
 | Language | Rust |
 | GPU | wgpu. Free GPU memory is queried directly from the OS: DXGI `QueryVideoMemoryInfo` on Windows, `VK_EXT_memory_budget` on Vulkan (wgpu does not expose it). |
-| UI | egui, with egui_dock for dockable panels; restyled from egui's default look |
+| UI | egui, with egui_tiles for the dockable panel layout (egui_dock was planned, but it lags a version behind egui); restyled from egui's default look |
 | Windowing and input | winit. Its current release reports pen pressure on Windows only and without tilt or the eraser end, so Opal Studio handles Windows' `WM_POINTER` messages itself for those; macOS and Linux pen input come later. |
 | ML inference | ONNX Runtime, run locally |
 | Color management | lcms2 (ICC profiles) |
 | Text shaping and layout | **TBD** (a HarfBuzz-class shaper with bidi, line breaking and font fallback) |
 | Vector rendering | **TBD** (vello, tiny-skia, or our own) |
-| Tests | egui's test harness (simulated input, screenshot comparison); the canvas renders to PNG without a window |
+| Tests | egui's test harness, egui_kittest (simulated input, rendering with wgpu to an image); unit tests for everything below the interface |
+| Toolchain on Windows | the MSVC target (`.cargo/config.toml`). With the MinGW toolchain the app's test binary crashed at startup in a static initializer the GNU linker left unrelocated. |
 
 egui and wgpu also compile to WebAssembly, so a browser build remains possible later; it is
 not a goal.
 
 ## Document model
 
-- A **document** has a canvas (size, color profile) and a stack of **layers**.
-- A **layer** is a container of **objects**: raster (a tiled bitmap plus a transform), vector
-  path (fill and stroke), text, brush strokes, adjustment, group. Layers have **no
-  boundary**, not even the canvas edge: content past the canvas is kept, shown dimmed, and
-  left out of exports.
+- A **document** has a canvas (size, later a color profile) and a tree of **layers**.
+- A **layer** is either a **group**, holding child layers, or holds **objects**: raster (a
+  tiled bitmap, later with a transform), and later vector paths, text, brush strokes and
+  adjustments. A group composites its children by themselves first, then applies its own
+  visibility and opacity. Layers have **no boundary**, not even the canvas edge: content
+  past the canvas is kept, shown dimmed, and left out of exports.
+- **Identifiers.** Layers and objects get identifiers that stay unique across every history
+  branch, so the generator lives beside the history, not inside a snapshot (two branches
+  that each add a layer must not reuse an identifier). The `.opal` file stores the next
+  free one.
 - A **pasted image** is a raster object that keeps its original pixels and a transform, so
   resizing it later never loses quality. Pixels are baked only when pasting into an existing
   layer.
@@ -92,8 +98,24 @@ not a goal.
   exist. Tiles are copy-on-write: an edit copies only the tiles it touches, and untouched
   tiles are shared by every history state and every branch. Tiles are a storage detail and
   never appear in the UI.
-- **Pixels** are floating point in linear light; the exact format (f16 or f32, premultiplied
-  or not) is **TBD** in the foundation milestone.
+- **Pixels** are RGBA half floats (8 bytes): linear light, sRGB/Rec.709 primaries with a
+  D65 white, premultiplied by alpha, and extended range (out-of-gamut colors are stored as
+  values below 0 or above 1, as scRGB does). Half floats keep about 11 significant bits at
+  every brightness, more than 8-bit sRGB anywhere, and GPUs sample them natively.
+  Computation converts to single precision.
+- **Compositing.** The CPU reference compositor flattens the layers into the
+  **projection**, cached per tile, with a pyramid of half-size levels for zoomed-out views.
+  A cached tile keeps the list of source tiles (as pointers) and opacities that produced it,
+  and is recomputed exactly when that list changes, so nothing has to report changes to the
+  cache. Stale tiles are computed in parallel. The GPU only shows projection tiles; a GPU
+  compositor matching the reference comes when adjustments need interactive speed
+  (milestone 5).
+- **Display.** Each projection tile is uploaded as a 258×258 texture: the tile plus a
+  one-pixel border from its neighbors, so filtering never shows seams. Below 100% the
+  level just finer (or, by preference, just coarser) than the screen is used; at and above
+  a set zoom (200% by default) pixels are sharp squares. The viewport is aligned to device
+  pixels, so 100% maps pixels one to one, and the shader composites over the checkerboard
+  inside the canvas and dims what lies beyond it.
 - The default perceptual color space, for edge detection, color-range selection and
   vectorization, is **OKLab**.
 
@@ -249,8 +271,10 @@ curve editors.
 
 ### Look
 
-- egui restyled. A neutral gray theme by default, so the interface does not skew judgment of
-  the image's colors; a light theme as an option.
+- egui restyled. Three choices of color scheme: **Dark** (the default: neutral gray, so the
+  interface does not skew judgment of the image's colors, as in most image editors),
+  **Light**, and **Follow the system** (switches along with the operating system's light
+  or dark mode).
 - One accent color, slightly rounded corners, subtle hover and press animations.
 - Fluent UI System Icons (Microsoft's, MIT), rendered sharp at any display scaling.
 - The system font: Segoe UI on Windows; a bundled open font elsewhere.
@@ -494,7 +518,12 @@ length adjustable.
 - Ctrl+Z and Ctrl+Y walk the current branch; at a fork, redo follows the branch last visited.
   The history panel shows the whole tree, with an automatic description per entry and a
   thumbnail on hover.
-- Selections are part of history; zoom and pan are not. A slider drag is one entry.
+- Selections are part of history; zoom and pan are not. A slider drag is one entry: while
+  it lasts the change is *pending* (shown live, not yet in the history) and it is committed
+  as one state on release.
+- Which layer is active is not part of history. After an action or a move through history,
+  a layer that appeared (one the action added, or one undo restored) becomes active; if the
+  active layer disappeared, the layer now in its place does.
 - The tile store makes branches cheap. History can optionally be saved in the file. How much
   memory history may use is a setting; past it, the oldest states are dropped first.
 - Every state on every branch stays usable as a source for the History brush.
@@ -534,10 +563,58 @@ For mathematically exact vector design, and later for layouts that adapt to thei
 - Constraints connect only objects within one unit, or anchor points a child unit exposes.
 - The geometry solver comes first.
 
+## Scripting
+
+Opal Studio is scriptable, from Python first, and drivable by AI assistants through an MCP
+server. Both rest on one language-neutral API.
+
+- **One API, generated from the command registry.** Every command gets a parameterized
+  form (Open takes a path, Export a path and options); the interface is one way of
+  supplying the parameters, a script another. The registry's names, descriptions and
+  parameter types generate the API's documentation, its Python stubs and the MCP tool list,
+  so they cannot drift apart. Document queries (layers, history, pixels, later selections)
+  join the commands.
+- **Out of process.** The API is a JSON-RPC protocol over a local connection (a named pipe
+  on Windows, a Unix socket elsewhere). Scripts run in the user's own Python with its own
+  packages (numpy, Pillow, OpenCV, scikit-image, ML libraries), so nothing has to be
+  embedded or bundled, any Python version works, and a crashing script cannot take the
+  editor down. Pixel data travels through shared memory and arrives as numpy arrays without
+  copying.
+- **Python package** `opal-studio` (module `opal`): connects to the running editor or starts
+  a headless one (`opal-studio --headless script.py` for batch work).
+- **In the editor:** a Run Script command, a console panel showing output and errors, and a
+  preference for which Python interpreter to use. A script's changes are grouped into one
+  history state, so one undo takes back a whole script run.
+- **MCP server.** The editor serves MCP (streamable HTTP on localhost) to clients that
+  connect to it, and `opal-studio --mcp` is a stdio shim for clients that launch their
+  servers. Its tools are the command registry; it can return the canvas, or a layer, as an
+  image, so an assistant can see what it is doing.
+- **Safety.** Local connections only; clients authenticate with a random token kept in a
+  file only the user can read; MCP requests with a foreign `Origin` are refused (against
+  DNS rebinding). While a script or assistant is connected, the status bar says so and can
+  disconnect it.
+- **Other languages** (JavaScript, Lua) can be thin clients of the same protocol later.
+
 ## Native file format
 
-**TBD** in detail: a zip containing a JSON document and the tile data, keeping everything
-editable (objects, text, selection recipes, optionally the history tree).
+`.opal`, version 0: a zip archive holding `mimetype` (stored first, uncompressed:
+`application/x-opal-studio`), `document.json` (the canvas, the layer tree and the next free
+identifier) and `tiles/<n>.bin`, one tile each. A tile shared by several layers is stored
+once. A tile file is the tile's half floats byte-shuffled (all low bytes, then all high
+bytes), which lets deflate compress photos far better. A newer format version is refused
+with a message rather than misread. Later versions add objects, text, selection recipes
+and optionally the history tree.
+
+Every write, `.opal` and exports alike, goes to a temporary file beside the target that
+replaces it only when complete, so a failed save never damages the existing file.
+
+## Settings storage
+
+Preferences, tool settings and tool presets are kept in `settings.json` in the per-user
+configuration folder (`%APPDATA%\Opal Studio\config` on Windows). Only values changed from
+their defaults are written, so a default changed in a later version reaches everyone who
+never changed it; unknown or invalid entries are skipped when loading. Changes are written
+a second after the last one, and on exit.
 
 ## Out of scope
 

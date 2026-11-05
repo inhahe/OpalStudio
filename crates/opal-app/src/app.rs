@@ -1,0 +1,570 @@
+//! The application: the window's layout, keyboard handling, and the panel tree.
+
+use crate::canvas;
+use crate::commands::Cmd;
+use crate::config;
+use crate::dialogs::{self, bytes};
+use crate::doc::DocId;
+use crate::gpu::CanvasRenderer;
+use crate::gpu_memory::GpuMemory;
+use crate::help;
+use crate::icons;
+use crate::panels;
+use crate::ribbon::{self, button_keytips, tab_keytips};
+use crate::state::{AppState, Confirm, Keytips};
+use crate::theme;
+use crate::tools::ToolId;
+use eframe::egui::{self, Event, Key, Modifiers, RichText, ViewportCommand};
+use egui_tiles::{SimplificationOptions, TileId, Tiles, UiResponse};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+/// What a tile of the panel tree shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pane {
+    /// Shown where the images go while none is open.
+    Welcome,
+    Document(DocId),
+    Layers,
+    History,
+    ToolSettings,
+}
+
+pub struct OpalApp {
+    st: AppState,
+    tree: egui_tiles::Tree<Pane>,
+    gpu_memory: Option<GpuMemory>,
+    last_gpu_poll: Option<Instant>,
+    /// Whether Alt was down last frame, and whether it has been pressed alone (for keytips).
+    alt_down: bool,
+    alt_alone: bool,
+    /// Whether settings are saved (not in tests).
+    persist: bool,
+}
+
+impl OpalApp {
+    /// Sets up the app; `files` are opened at once (from the command line).
+    pub fn new(cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>) -> OpalApp {
+        OpalApp::create(cc, files, true)
+    }
+
+    /// The app as tests use it: the user's saved settings are neither read nor written.
+    #[cfg(test)]
+    pub fn for_tests(cc: &eframe::CreationContext<'_>) -> OpalApp {
+        OpalApp::create(cc, Vec::new(), false)
+    }
+
+    fn create(cc: &eframe::CreationContext<'_>, files: Vec<PathBuf>, persist: bool) -> OpalApp {
+        theme::install_fonts(&cc.egui_ctx);
+        let mut st = AppState::new();
+        if persist {
+            config::load(&mut st);
+        }
+        st.apply_prefs(&cc.egui_ctx);
+        let mut gpu_memory = None;
+        if let Some(rs) = cc.wgpu_render_state.as_ref() {
+            CanvasRenderer::install(rs);
+            let info = rs.adapter.get_info();
+            st.gpu.adapter = info.name.clone();
+            st.gpu.backend = format!("{:?}", info.backend);
+            gpu_memory = Some(GpuMemory::new(info.vendor, info.device));
+        }
+        for f in files {
+            st.open_path(&f);
+        }
+        let tree = default_tree(&st);
+        st.opened.clear();
+        OpalApp { st, tree, gpu_memory, last_gpu_poll: None, alt_down: false, alt_alone: false, persist }
+    }
+
+    /// The state, for tests.
+    #[cfg(test)]
+    pub fn state(&self) -> &AppState {
+        &self.st
+    }
+
+    #[cfg(test)]
+    pub fn state_mut(&mut self) -> &mut AppState {
+        &mut self.st
+    }
+
+    fn handle_keys(&mut self, ctx: &egui::Context) {
+        let typing = ctx.egui_wants_keyboard_input();
+        // Keytips: Alt pressed and released on its own toggles them.
+        let (alt, other_input) = ctx.input(|i| {
+            let other = i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    Event::Key { pressed: true, .. }
+                        | Event::PointerButton { pressed: true, .. }
+                        | Event::MouseWheel { .. }
+                )
+            });
+            (i.modifiers.alt, other)
+        });
+        if alt && !self.alt_down {
+            self.alt_alone = true;
+        }
+        if alt && other_input {
+            self.alt_alone = false;
+        }
+        if !alt && self.alt_down && self.alt_alone && !typing {
+            self.st.ribbon.keytips = if self.st.ribbon.keytips == Keytips::Off { Keytips::Tabs } else { Keytips::Off };
+        }
+        self.alt_down = alt;
+        if self.st.ribbon.keytips != Keytips::Off {
+            self.keytip_keys(ctx);
+            return;
+        }
+        if typing {
+            return;
+        }
+        for cmd in Cmd::ALL {
+            for s in cmd.info().shortcuts {
+                if ctx.input_mut(|i| i.consume_shortcut(s)) {
+                    self.st.queue.push(cmd);
+                }
+            }
+        }
+        for t in ToolId::ALL {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, t.info().key)) {
+                self.st.tool = t;
+            }
+        }
+    }
+
+    /// While keytips are shown, letters pick tabs and commands instead of doing what they
+    /// usually do.
+    fn keytip_keys(&mut self, ctx: &egui::Context) {
+        let pointer = ctx.input(|i| i.pointer.any_pressed());
+        if pointer {
+            self.st.ribbon.keytips = Keytips::Off;
+            return;
+        }
+        let keys: Vec<Key> = ctx.input_mut(|i| {
+            let mut keys = Vec::new();
+            i.events.retain(|e| match e {
+                Event::Key { key, pressed: true, .. } => {
+                    keys.push(*key);
+                    false
+                }
+                Event::Text(_) | Event::Key { .. } => false,
+                _ => true,
+            });
+            keys
+        });
+        for key in keys {
+            if key == Key::Escape {
+                self.st.ribbon.keytips = match self.st.ribbon.keytips {
+                    Keytips::Buttons(_) => Keytips::Tabs,
+                    _ => Keytips::Off,
+                };
+                continue;
+            }
+            let Some(c) = key.name().chars().next().filter(|_| key.name().len() == 1) else {
+                self.st.ribbon.keytips = Keytips::Off;
+                continue;
+            };
+            match self.st.ribbon.keytips {
+                Keytips::Tabs => {
+                    if let Some(t) = tab_keytips().iter().position(|&k| k == c) {
+                        self.st.ribbon.tab = t;
+                        self.st.ribbon.keytips = Keytips::Buttons(t);
+                    } else if let Some(tool) = ToolId::ALL.into_iter().find(|t| ribbon::key_char(t.info().key) == c) {
+                        self.st.tool = tool;
+                        self.st.ribbon.keytips = Keytips::Off;
+                    } else {
+                        self.st.ribbon.keytips = Keytips::Off;
+                    }
+                }
+                Keytips::Buttons(t) => {
+                    if let Some((cmd, _)) = button_keytips(t).into_iter().find(|(_, k)| *k == c) {
+                        self.st.queue.push(cmd);
+                    }
+                    self.st.ribbon.keytips = Keytips::Off;
+                }
+                Keytips::Off => {}
+            }
+        }
+    }
+
+    /// Files dropped on the window open as documents.
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect()
+        });
+        for p in dropped {
+            self.st.open_path(&p);
+        }
+    }
+
+    /// Closing the window, or Exit, asks about unsaved changes first.
+    fn handle_exit(&mut self, ctx: &egui::Context) {
+        let window_close = ctx.input(|i| i.viewport().close_requested());
+        let wants = window_close || std::mem::take(&mut self.st.exit_requested);
+        if !wants || self.st.exit_confirmed {
+            return;
+        }
+        let dirty = self.st.dirty_docs();
+        if dirty.is_empty() {
+            self.st.exit_confirmed = true;
+            if !window_close {
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
+        } else {
+            if window_close {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            }
+            self.st.confirm = Some(Confirm::Exit(dirty));
+        }
+    }
+
+    fn poll_gpu(&mut self) {
+        let due = self.last_gpu_poll.is_none_or(|t| t.elapsed() > Duration::from_secs(1));
+        if due && let Some(m) = &self.gpu_memory {
+            self.st.gpu.memory = m.query();
+            self.last_gpu_poll = Some(Instant::now());
+        }
+    }
+
+    fn save_settings_if_due(&mut self) {
+        if self.persist && self.st.settings_changed.is_some_and(|t| t.elapsed() > Duration::from_secs(1)) {
+            self.st.settings_changed = None;
+            if let Err(e) = config::save(&self.st) {
+                self.st.message(crate::state::MessageKind::Warning, "Settings not saved", e.to_string());
+            }
+        }
+    }
+
+    /// Adds tabs for newly opened documents and shows the start page when none is open.
+    fn sync_panes(&mut self) {
+        let tiles = &mut self.tree.tiles;
+        let anchor = find_docs_container(tiles);
+        for id in std::mem::take(&mut self.st.opened) {
+            let pane = tiles.insert_pane(Pane::Document(id));
+            match anchor.and_then(|a| tiles.get_mut(a)) {
+                Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) => {
+                    tabs.add_child(pane);
+                    tabs.set_active(pane);
+                }
+                _ => {
+                    self.tree = default_tree(&self.st);
+                    return;
+                }
+            }
+        }
+        self.st.closed.clear();
+        let has_doc = tiles.iter().any(|(_, t)| matches!(t, egui_tiles::Tile::Pane(Pane::Document(_))));
+        let welcome = tiles.find_pane(&Pane::Welcome);
+        match (has_doc, welcome) {
+            (true, Some(w)) => {
+                tiles.remove(w);
+                if let Some(parent) = tiles.parent_of(w)
+                    && let Some(egui_tiles::Tile::Container(c)) = tiles.get_mut(parent)
+                {
+                    c.remove_child(w);
+                }
+            }
+            (false, None) => {
+                let pane = tiles.insert_pane(Pane::Welcome);
+                match anchor.and_then(|a| tiles.get_mut(a)) {
+                    Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) => tabs.add_child(pane),
+                    _ => self.tree = default_tree(&self.st),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A digest of everything the window shows that can change without input: the
+    /// documents and their views, the settings, the tool, the open windows.
+    fn signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let st = &self.st;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for d in &st.docs {
+            d.id.hash(&mut h);
+            d.history.current().hash(&mut h);
+            d.pending.is_some().hash(&mut h);
+            for l in &d.doc().layers {
+                (std::sync::Arc::as_ptr(l) as usize).hash(&mut h);
+            }
+            d.active_layer.hash(&mut h);
+            d.expanded.len().hash(&mut h);
+            d.view.zoom.to_bits().hash(&mut h);
+            d.view.offset.x.to_bits().hash(&mut h);
+            d.view.offset.y.to_bits().hash(&mut h);
+            d.title.hash(&mut h);
+            d.saved_at.hash(&mut h);
+        }
+        st.active_doc.hash(&mut h);
+        st.prefs.revision().hash(&mut h);
+        for t in ToolId::ALL {
+            st.tool_settings(t).revision().hash(&mut h);
+        }
+        st.tool.hash(&mut h);
+        (st.ribbon.tab, &st.ribbon.keytips, st.renaming.is_some(), st.messages.len(), st.confirm.is_some())
+            .hash(&mut h);
+        (st.new_image.is_some(), st.export.is_some(), st.prefs_open, st.about_open, st.gallery_open, &st.help)
+            .hash(&mut h);
+        h.finish()
+    }
+
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let weak = self.st.palette.weak_text;
+        ui.horizontal(|ui| {
+            let tool = self.st.tool.info();
+            ui.label(RichText::new(format!("{}  {}", tool.icon, tool.description)).color(weak));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some((used, budget)) = self.st.gpu.memory {
+                    ui.label(RichText::new(format!("GPU {} / {}", bytes(used), bytes(budget))).color(weak))
+                        .on_hover_text(format!(
+                            "{} ({})\nGPU memory this process uses, and the budget the system gives it.",
+                            self.st.gpu.adapter, self.st.gpu.backend
+                        ));
+                    ui.separator();
+                }
+                let Some(d) = self.st.active_mut() else { return };
+                let mut pct = d.view.zoom * 100.0;
+                let r = ui.add(
+                    egui::DragValue::new(&mut pct)
+                        .range(crate::doc::MIN_ZOOM * 100.0..=crate::doc::MAX_ZOOM * 100.0)
+                        .suffix("%")
+                        .speed(1.0)
+                        .max_decimals(1),
+                );
+                if r.changed() {
+                    let c = d.view.viewport * 0.5;
+                    d.view.zoom_about(pct / 100.0, c);
+                }
+                r.on_hover_text("Zoom: drag or type a value");
+                ui.separator();
+                let c = d.doc().canvas;
+                ui.label(RichText::new(format!("{} × {} px", c.width, c.height)).color(weak));
+                ui.separator();
+                if let Some((x, y)) = self.st.cursor_canvas {
+                    ui.label(RichText::new(format!("{x}, {y}")).color(weak));
+                }
+            });
+        });
+    }
+}
+
+impl eframe::App for OpalApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let before = self.signature();
+        // The scheme can change under us when following the system's.
+        self.st.palette = theme::palette(self.st.scheme(&ctx));
+        self.st.cursor_canvas = None;
+        self.handle_keys(&ctx);
+        self.handle_dropped_files(&ctx);
+        self.poll_gpu();
+
+        egui::Panel::top("ribbon").frame(egui::Frame::NONE).resizable(false).show(ui, |ui| {
+            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+            ribbon::ribbon_ui(ui, &mut self.st);
+        });
+        egui::Panel::bottom("status").resizable(false).show(ui, |ui| self.status_bar(ui));
+        let strip = self.st.prefs.choice("ui.tools");
+        if strip != "ribbon" {
+            let panel =
+                if strip == "left" { egui::Panel::left("tools-strip") } else { egui::Panel::right("tools-strip") };
+            panel.exact_size(44.0).resizable(false).show(ui, |ui| {
+                let mut y = ui.max_rect().top() + 6.0;
+                for t in ToolId::ALL {
+                    let r = egui::Rect::from_min_size(
+                        egui::pos2(ui.max_rect().center().x - 16.0, y),
+                        egui::Vec2::splat(32.0),
+                    );
+                    ribbon::tool_button(ui, &mut self.st, t, r);
+                    y += 36.0;
+                }
+            });
+        }
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(ui.visuals().panel_fill)).show(ui, |ui| {
+            let mut behavior = Behavior { st: &mut self.st };
+            self.tree.ui(&mut behavior, ui);
+        });
+
+        dialogs::show_all(&ctx, &mut self.st);
+        help::help_window(&ctx, &mut self.st);
+
+        for cmd in std::mem::take(&mut self.st.queue) {
+            self.st.run(cmd, &ctx);
+        }
+        if std::mem::take(&mut self.st.reset_panels) {
+            self.tree = default_tree(&self.st);
+        }
+        self.sync_panes();
+        self.handle_exit(&ctx);
+        self.save_settings_if_due();
+        // Changes made after something was drawn this frame (commands run at the end of
+        // the frame, a panel changing a layer after the canvas drew it) need another frame
+        // to show.
+        if self.signature() != before {
+            ctx.request_repaint();
+        }
+        let st = &mut self.st;
+        if let Some(rs) = _frame.wgpu_render_state() {
+            st.gpu.textures =
+                rs.renderer.read().callback_resources.get::<CanvasRenderer>().map_or(0, CanvasRenderer::texture_count);
+        }
+    }
+
+    fn on_exit(&mut self) {
+        if !self.persist {
+            return;
+        }
+        if let Err(e) = config::save(&self.st) {
+            eprintln!("Opal Studio: could not save settings: {e}");
+        }
+    }
+}
+
+/// The panel tree's tile for the documents (the tab container holding them or the start
+/// page).
+fn find_docs_container(tiles: &Tiles<Pane>) -> Option<TileId> {
+    let pane = tiles
+        .iter()
+        .find(|(_, t)| matches!(t, egui_tiles::Tile::Pane(Pane::Document(_) | Pane::Welcome)))
+        .map(|(id, _)| *id)?;
+    tiles.parent_of(pane)
+}
+
+/// The starting layout: images in tabs on the left; Tool settings above Layers and History
+/// on the right.
+fn default_tree(st: &AppState) -> egui_tiles::Tree<Pane> {
+    let mut tiles = Tiles::default();
+    let mut docs: Vec<TileId> = st.docs.iter().map(|d| tiles.insert_pane(Pane::Document(d.id))).collect();
+    if docs.is_empty() {
+        docs.push(tiles.insert_pane(Pane::Welcome));
+    }
+    let active = st.active_doc.and_then(|a| tiles.find_pane(&Pane::Document(a)));
+    let doc_tabs = tiles.insert_tab_tile(docs);
+    if let (Some(a), Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(t)))) =
+        (active, tiles.get_mut(doc_tabs))
+    {
+        t.set_active(a);
+    }
+    let tool = tiles.insert_pane(Pane::ToolSettings);
+    let tool_tabs = tiles.insert_tab_tile(vec![tool]);
+    let layers = tiles.insert_pane(Pane::Layers);
+    let history = tiles.insert_pane(Pane::History);
+    let lh = tiles.insert_tab_tile(vec![layers, history]);
+    let mut right = egui_tiles::Linear::new(egui_tiles::LinearDir::Vertical, vec![tool_tabs, lh]);
+    right.shares.set_share(tool_tabs, 0.35);
+    right.shares.set_share(lh, 0.65);
+    let right = tiles.insert_container(right);
+    let mut root = egui_tiles::Linear::new(egui_tiles::LinearDir::Horizontal, vec![doc_tabs, right]);
+    root.shares.set_share(doc_tabs, 0.78);
+    root.shares.set_share(right, 0.22);
+    let root = tiles.insert_container(root);
+    egui_tiles::Tree::new(egui::Id::unique("opal-panels"), root, tiles)
+}
+
+struct Behavior<'a> {
+    st: &'a mut AppState,
+}
+
+impl egui_tiles::Behavior<Pane> for Behavior<'_> {
+    fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {
+        match pane {
+            Pane::Welcome => "Start".into(),
+            Pane::Document(id) => match self.st.doc(*id) {
+                Some(d) if d.is_dirty() => format!("{}  ●", d.title).into(),
+                Some(d) => d.title.clone().into(),
+                None => "Closed".into(),
+            },
+            Pane::Layers => format!("{}  Layers", icons::LAYER).into(),
+            Pane::History => format!("{}  History", icons::HISTORY).into(),
+            Pane::ToolSettings => format!("{}  Tool settings", icons::OPTIONS).into(),
+        }
+    }
+
+    fn pane_ui(&mut self, ui: &mut egui::Ui, _tile_id: TileId, pane: &mut Pane) -> UiResponse {
+        let inset = |ui: &mut egui::Ui, f: &mut dyn FnMut(&mut egui::Ui)| {
+            egui::Frame::NONE.inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                f(ui);
+            });
+        };
+        match *pane {
+            Pane::Document(id) => canvas::canvas_ui(ui, self.st, id),
+            Pane::Welcome => welcome(ui, self.st),
+            Pane::Layers => inset(ui, &mut |ui| panels::layers_panel(ui, self.st)),
+            Pane::History => inset(ui, &mut |ui| panels::history_panel(ui, self.st)),
+            Pane::ToolSettings => inset(ui, &mut |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| panels::tool_settings_panel(ui, self.st));
+            }),
+        }
+        UiResponse::None
+    }
+
+    fn is_tab_closable(&self, tiles: &Tiles<Pane>, tile_id: TileId) -> bool {
+        matches!(tiles.get_pane(&tile_id), Some(Pane::Document(_)))
+    }
+
+    fn on_tab_close(&mut self, tiles: &mut Tiles<Pane>, tile_id: TileId) -> bool {
+        if let Some(Pane::Document(id)) = tiles.get_pane(&tile_id) {
+            self.st.request_close(*id);
+        }
+        // The tab goes once the document has closed (see `retain_pane`).
+        false
+    }
+
+    fn retain_pane(&mut self, pane: &Pane) -> bool {
+        match pane {
+            Pane::Document(id) => self.st.doc(*id).is_some(),
+            _ => true,
+        }
+    }
+
+    fn on_tab_button(&mut self, tiles: &mut Tiles<Pane>, tile_id: TileId, response: egui::Response) -> egui::Response {
+        if (response.clicked() || response.drag_started())
+            && let Some(Pane::Document(id)) = tiles.get_pane(&tile_id)
+        {
+            self.st.active_doc = Some(*id);
+        }
+        response
+    }
+
+    fn simplification_options(&self) -> SimplificationOptions {
+        SimplificationOptions { all_panes_must_have_tabs: true, ..Default::default() }
+    }
+
+    fn tab_bar_color(&self, _visuals: &egui::Visuals) -> egui::Color32 {
+        self.st.palette.tab_bar
+    }
+}
+
+fn welcome(ui: &mut egui::Ui, st: &mut AppState) {
+    ui.painter().rect_filled(ui.max_rect(), 0.0, st.palette.backdrop);
+    ui.vertical_centered(|ui| {
+        ui.add_space((ui.available_height() * 0.25).max(20.0));
+        ui.label(RichText::new("Opal Studio").size(32.0).color(st.palette.strong_text));
+        ui.add_space(16.0);
+        ui.horizontal(|ui| {
+            let w = 2.0 * 150.0 + ui.spacing().item_spacing.x;
+            ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
+            let big = |c: char, s: &str| {
+                egui::Button::new(RichText::new(format!("{c}  {s}")).size(16.0)).min_size(egui::vec2(150.0, 40.0))
+            };
+            if ui.add(big(icons::NEW, "New image")).clicked() {
+                st.queue.push(Cmd::New);
+            }
+            if ui.add(big(icons::OPEN, "Open…")).clicked() {
+                st.queue.push(Cmd::Open);
+            }
+        });
+        ui.add_space(16.0);
+        let weak = st.palette.weak_text;
+        for line in [
+            "Drop image files here to open them.",
+            "Press Ctrl+K to find any command, or Alt to type one from the ribbon.",
+            "Press F1 over any button for help.",
+        ] {
+            ui.label(RichText::new(line).color(weak));
+        }
+    });
+}

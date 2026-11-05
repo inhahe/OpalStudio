@@ -1,7 +1,7 @@
 # Opal Studio — roadmap
 
-What each milestone delivers is specified in `design.md`. Status: everything is planned and
-nothing is built yet.
+What each milestone delivers is specified in `design.md`. Status: milestone 0 is done;
+everything after it is planned.
 
 **Order:** photo editing first, with vector shapes taken early (milestone 4), because by then
 the outline tool has built most of the curve editing they need. This order is proposed, not
@@ -9,9 +9,10 @@ settled. Milestones 0–2 are the same in either order; design first would follo
 4 (vector shapes), 7 (text), 11 (constraints) and 9 (vectorization), and then the photo
 milestones.
 
-## 0. Foundation
+## 0. Foundation (done)
 - Cargo workspace; window with egui and dockable panels.
-- Canvas viewport: pan and zoom, GPU compositing of tiles, transparency checkerboard,
+- Canvas viewport: pan and zoom, GPU display of the composited tiles (compositing itself is
+  the CPU reference; the GPU compositor moved to milestone 5), transparency checkerboard,
   off-canvas content dimmed.
 - Document model: layers holding objects (raster and group objects first).
 - Tile store: sparse 256×256 tiles, copy-on-write. Settle the pixel format.
@@ -25,8 +26,8 @@ milestones.
   context menus, and built-in help pages per group (F1, and the ? on group labels).
 - The theme: neutral gray and light; Fluent UI icons.
 - Free GPU memory queried from the OS.
-- Color engine: every color model of the colorpicker, plus OKLab and OKLCh, in Rust and
-  WGSL.
+- Color engine: every color model of the colorpicker, plus OKLab and OKLCh, in Rust (the
+  WGSL versions come with their first GPU user, the color picker in milestone 3).
 - Settings framework: basic and advanced sections, defaults shown, changed settings marked,
   reset, named presets. The curve editor, both with a chosen color model (the channel curve
   editor) and without one.
@@ -42,6 +43,17 @@ milestones.
   layers under the cursor); faint outline around the active layer.
 - Crop, resize the image, resize the canvas, rotate.
 - Export PNG and JPEG at a chosen size.
+- Layer thumbnails in the Layers panel; history thumbnails on hover.
+
+## S. Scripting and MCP (proposed: right after milestone 1)
+- Parameterized commands: every command callable with parameters as well as from the
+  interface; Python stubs, API documentation and MCP tools generated from the registry.
+- The JSON-RPC API over a local pipe or socket, with token authentication; document queries;
+  pixels through shared memory.
+- The `opal` Python package; Run Script, the console panel, the interpreter preference;
+  a script run as one history state; headless batch mode.
+- The MCP server (local HTTP, and the `--mcp` stdio shim), returning the canvas as an image;
+  the status bar's connection indicator.
 
 ## 2. Selection core
 - The mask, and the blend through it that every operation uses.
@@ -87,7 +99,10 @@ milestones.
 - Layer masks; the blend modes from milestone 3 on layers.
 - Blend If: curves over channels of a chosen color model, for this layer and for the pixels
   beneath it.
-- Color management with ICC profiles; the floating-point pipeline end to end.
+- Color management with ICC profiles (embedded profiles honored on import); the
+  floating-point pipeline end to end.
+- A GPU compositor matching the CPU reference, so adjustments preview at interactive speed
+  on large images.
 
 ## 6. Retouching
 - *Sample from*: current, below, all visible, chosen and named sets.
