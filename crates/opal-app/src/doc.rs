@@ -36,6 +36,10 @@ impl Default for View {
     }
 }
 
+/// What the status bar says the first time a document's history states are dropped.
+pub const DROP_NOTE: &str =
+    "The oldest history states are being dropped, to keep history within its memory limit (Preferences › History).";
+
 pub const MIN_ZOOM: f32 = 1.0 / 128.0;
 pub const MAX_ZOOM: f32 = 128.0;
 
@@ -167,20 +171,17 @@ impl DocState {
     /// [`History::set_budget`]).
     pub fn set_history_budget(&mut self, bytes: u64) {
         self.history.set_budget(bytes);
-        self.note_dropped();
     }
 
-    /// Says, the first time it happens, that the oldest history states are being dropped.
-    /// (If something else is to be said already, it waits for the next change.)
-    fn note_dropped(&mut self) {
-        if self.history.dropped() > 0 && !self.told_dropped && self.notice.is_none() {
-            self.told_dropped = true;
-            self.notice = Some(
-                "The oldest history states are being dropped, to keep history within its memory limit \
-                 (Preferences › History)."
-                    .into(),
-            );
-        }
+    /// Whether the user is yet to be told that history states are being dropped (the app
+    /// says it once the status bar is free; see [`DROP_NOTE`]).
+    pub fn drop_note_due(&self) -> bool {
+        self.history.dropped() > 0 && !self.told_dropped
+    }
+
+    /// Records that the user was told that history states are being dropped.
+    pub fn drop_note_told(&mut self) {
+        self.told_dropped = true;
     }
 
     /// The active layer: the one the panels and single-layer commands act on.
@@ -312,7 +313,6 @@ impl DocState {
         let mut d = before.clone();
         f(&mut d, &mut self.ids)?;
         self.history.commit(d, label);
-        self.note_dropped();
         self.revision += 1;
         self.fix_active_layer(Some(&before));
         Ok(())
@@ -343,7 +343,6 @@ impl DocState {
         self.finish_transform();
         if let Some(p) = self.pending.take() {
             self.history.commit(p.doc, p.label);
-            self.note_dropped();
             self.revision += 1;
         }
     }
@@ -355,7 +354,6 @@ impl DocState {
         if moved {
             self.revision += 1;
             self.fix_active_layer(Some(&before));
-            self.note_dropped();
         }
         moved
     }
@@ -367,7 +365,6 @@ impl DocState {
         if moved {
             self.revision += 1;
             self.fix_active_layer(Some(&before));
-            self.note_dropped();
         }
         moved
     }
@@ -376,7 +373,7 @@ impl DocState {
         self.commit_pending();
         // Committing can drop old states to keep history within its budget.
         if !self.history.contains(node) {
-            self.told_dropped = true;
+            self.drop_note_told();
             self.notice =
                 Some("That state was dropped to keep history within its memory limit (Preferences › History).".into());
             return;
@@ -385,7 +382,6 @@ impl DocState {
         self.history.goto(node);
         self.revision += 1;
         self.fix_active_layer(Some(&before));
-        self.note_dropped();
     }
 
     /// After the layers changed from `before`, picks the active layer (see `fix_active`).
@@ -561,32 +557,6 @@ mod tests {
     }
 
     #[test]
-    fn the_first_drop_waits_rather_than_hide_another_notice() {
-        let mut s = state();
-        let layer = add_layer(&mut s, "paint");
-        let paint = |s: &mut DocState, x: i64| {
-            s.apply::<()>("Paint", |d, ids| {
-                let mut img = opal_core::raster::RasterImage::new();
-                img.set_pixel(x, 0, opal_core::tile::pixel_from_f32([1.0; 4]));
-                d.remove(layer).unwrap();
-                d.insert(Position { parent: None, index: 1 }, Layer::new_raster(layer, ids.object(), "paint", img))
-                    .unwrap();
-                Ok(())
-            })
-            .unwrap();
-        };
-        for x in 0..3 {
-            paint(&mut s, x);
-        }
-        s.notice = Some("Something else".into());
-        s.set_history_budget(0);
-        assert!(s.history.dropped() > 0);
-        assert_eq!(s.notice.take().as_deref(), Some("Something else"));
-        paint(&mut s, 7);
-        assert!(s.notice.is_some_and(|n| n.contains("Preferences")), "the drop was never said");
-    }
-
-    #[test]
     fn dropping_history_states_is_said_once() {
         let mut s = state();
         let layer = add_layer(&mut s, "paint");
@@ -604,11 +574,12 @@ mod tests {
         for x in 0..4 {
             paint(&mut s, x);
         }
-        assert!(s.notice.is_none());
+        assert!(!s.drop_note_due());
         s.set_history_budget(0);
         assert!(s.history.dropped() > 0);
-        assert!(s.notice.take().is_some_and(|n| n.contains("Preferences")), "the first drop is announced");
+        assert!(s.drop_note_due(), "the first drop is to be said");
+        s.drop_note_told();
         paint(&mut s, 9);
-        assert!(s.notice.is_none(), "and only the first");
+        assert!(!s.drop_note_due(), "and only the first");
     }
 }

@@ -1106,3 +1106,42 @@ fn saving_all_then_quitting(fails: bool) {
         assert!(st.exit_confirmed, "did not quit once every save was written");
     }
 }
+
+#[test]
+fn the_first_drop_of_history_is_said_once_the_status_bar_is_free() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 64, 64);
+    {
+        let d = h.state_mut().state_mut().active_mut().unwrap();
+        // Painting the background: each state's tile is its own.
+        let bg = d.doc().layers[0].id;
+        for x in 0..3 {
+            let _ = d.apply::<()>("Paint", |doc, _| {
+                let opal_core::document::LayerContent::Objects(objects) = &mut doc.layer_mut(bg).unwrap().content
+                else {
+                    panic!()
+                };
+                let opal_core::document::ObjectKind::Pixels(p) = &mut objects[0].kind else { panic!() };
+                std::sync::Arc::make_mut(&mut p.image).set_pixel(x, 0, opal_core::tile::pixel_from_f32([1.0; 4]));
+                Ok(())
+            });
+        }
+        // An operation's own notice, given in the frame the states are dropped.
+        d.notice = Some("Some of it was clipped.".into());
+        d.set_history_budget(0);
+        assert!(d.drop_note_due());
+    }
+    h.run();
+    let st = h.state().state();
+    assert_eq!(st.notice.as_ref().map(|n| n.0.as_str()), Some("Some of it was clipped."), "the notice was hidden");
+    assert!(st.active().unwrap().drop_note_due());
+    // Once that notice has had its time, the drop is said.
+    let st = h.state_mut().state_mut();
+    let long_ago = std::time::Instant::now() - crate::state::NOTICE_SHOWN - std::time::Duration::from_secs(1);
+    st.notice.as_mut().unwrap().1 = long_ago;
+    h.run();
+    let st = h.state().state();
+    assert_eq!(st.notice.as_ref().map(|n| n.0.as_str()), Some(crate::doc::DROP_NOTE));
+    assert!(!st.active().unwrap().drop_note_due());
+}

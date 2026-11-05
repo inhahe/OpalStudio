@@ -186,6 +186,9 @@ pub struct AppState {
     pub reading: Option<Reading>,
 }
 
+/// How long the status bar shows a notice.
+pub const NOTICE_SHOWN: std::time::Duration = std::time::Duration::from_secs(6);
+
 /// A paste whose clipboard reading runs on a worker thread.
 pub struct Reading {
     pub rx: std::sync::mpsc::Receiver<crate::clipboard::ReadResult>,
@@ -260,9 +263,14 @@ impl AppState {
         }
     }
 
-    /// Shows `text` in the status bar for a while.
+    /// Shows `text` in the status bar for a while (see [`NOTICE_SHOWN`]).
     pub fn notify(&mut self, text: impl Into<String>) {
         self.notice = Some((text.into(), Instant::now()));
+    }
+
+    /// Whether the status bar shows no notice now.
+    pub fn notice_free(&self) -> bool {
+        self.notice.as_ref().is_none_or(|(_, at)| at.elapsed() >= NOTICE_SHOWN)
     }
 
     /// Whether a dialog is open, so keys and the canvas belong to it.

@@ -500,7 +500,7 @@ impl OpalApp {
         ui.horizontal(|ui| {
             let tool = self.st.tool.info();
             // A recent notice, for a few seconds, instead of the tool's description.
-            const SHOWN: std::time::Duration = std::time::Duration::from_secs(6);
+            const SHOWN: std::time::Duration = crate::state::NOTICE_SHOWN;
             match &self.st.notice {
                 Some((text, at)) if at.elapsed() < SHOWN => {
                     ui.label(
@@ -623,6 +623,15 @@ impl eframe::App for OpalApp {
         let notices: Vec<String> = self.st.docs.iter_mut().filter_map(|d| d.notice.take()).collect();
         for n in notices {
             self.st.notify(n);
+        }
+        // The first drop of history states is said once the status bar is free, so that it
+        // neither hides another notice nor is hidden by one (the status bar repaints when its
+        // notice expires).
+        if self.st.notice_free()
+            && let Some(d) = self.st.docs.iter_mut().find(|d| d.drop_note_due())
+        {
+            d.drop_note_told();
+            self.st.notify(crate::doc::DROP_NOTE);
         }
         // Changes made after something was drawn this frame (commands run at the end of
         // the frame, a panel changing a layer after the canvas drew it) need another frame

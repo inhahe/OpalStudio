@@ -817,7 +817,7 @@ qualities of ink, 浓淡干湿 (dense, light, dry, wet), are each part of the br
   (the state left behind may put the others over the limit), from the oldest states and
   abandoned branches only; past the limit with nothing else to drop, history waits for
   the next action. The History panel shows what history holds, and the first drop is
-  announced.
+  announced, once the status bar is free (it neither hides another notice nor is hidden).
 - Every state on every branch stays usable as a source for the History brush.
 
 ## Vectorization (raster to vector)
