@@ -515,25 +515,55 @@ impl Occupancy {
 /// a few tiles however large it is.
 fn composite_region(layers: &[Arc<Layer>], range: Option<&IRect>) -> RasterImage {
     prepare(layers, range);
-    let made: Vec<(Vec<TileCoord>, Option<Arc<Tile>>)> = tiles_to_make(layers, range)
-        .into_par_iter()
-        .map(|(at, tokens)| {
-            let tile = match lone_source(&tokens).and_then(Weak::upgrade) {
-                Some(t) => Some(t),
-                None => composite_tile(layers, at[0]).map(Arc::new),
-            };
-            (at, tile)
+    let mut img = RasterImage::new();
+    place(layers, &tiles_to_make(layers, range), &mut img);
+    img
+}
+
+/// [`composite_within`] a batch of tiles at a time, telling `go_on` before each batch how
+/// many of the places the tiles go have one so far, and how many there are in all, and
+/// stopping (`None`) if it says not to go on.
+pub fn composite_within_until(
+    layers: &[Arc<Layer>],
+    range: &IRect,
+    go_on: &mut dyn FnMut(usize, usize) -> bool,
+) -> Option<RasterImage> {
+    // Enough sets of tiles to keep every thread busy, few enough to stop soon when asked.
+    const BATCH: usize = 1024;
+    prepare(layers, Some(range));
+    let work = tiles_to_make(layers, Some(range));
+    let total = work.iter().map(|(at, _)| at.len()).sum();
+    let mut img = RasterImage::new();
+    let mut placed = 0;
+    for batch in work.chunks(BATCH) {
+        if !go_on(placed, total) {
+            return None;
+        }
+        placed += place(layers, batch, &mut img);
+    }
+    Some(img)
+}
+
+/// Makes the tiles `work` lists ([`tiles_to_make`]), in parallel, and puts each where it
+/// goes in `img`; returns how many places that is.
+fn place(layers: &[Arc<Layer>], work: &[(Vec<TileCoord>, Vec<Token>)], img: &mut RasterImage) -> usize {
+    let made: Vec<Option<Arc<Tile>>> = work
+        .par_iter()
+        .map(|(at, tokens)| match lone_source(tokens).and_then(Weak::upgrade) {
+            Some(t) => Some(t),
+            None => composite_tile(layers, at[0]).map(Arc::new),
         })
         .collect();
-    let mut img = RasterImage::new();
-    for (at, tile) in made {
+    let mut places = 0;
+    for ((at, _), tile) in work.iter().zip(made) {
+        places += at.len();
         if let Some(t) = tile {
-            for c in at {
+            for &c in at {
                 img.set_tile(c, Some(t.clone()));
             }
         }
     }
-    img
+    places
 }
 
 /// The tiles compositing `layers` within `range` makes ([`composite_region`]): where each

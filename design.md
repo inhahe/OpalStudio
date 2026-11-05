@@ -436,7 +436,8 @@ curve editors.
   counts every image object it draws, hidden or not, and no pixel object. The command is refused with
   how much it needs and how much is free; a paste that cannot be baked stays an image in
   the layer. Exports and copies are checked the same way: an export takes its bands in
-  flight and, at another size, the image it is drawn from (`export_memory`); a copy takes
+  flight and, at another size, the image it is drawn from with its copied edges
+  (`export_memory`); a copy takes
   about 48 bytes a pixel while it goes onto the clipboard (the pixels, the 16-bit PNG,
   the bitmap, the system's copies of both, and the copy kept for pasting back), and on
   Windows no more than the 4 GB a clipboard bitmap holds. Opening a PNG or JPEG (or
@@ -555,7 +556,9 @@ aspect ratio locked by default, with a resampling method. Export never changes t
 document. The image is made and encoded a band of rows (a tile's height) at a time and
 streamed into the PNG or JPEG encoder, so exporting at the canvas's size holds one band,
 never the whole image; at another size it holds the canvas once more (averaged in blocks
-first when shrinking by 2 or more), which the bands are drawn from. A JPEG is at most
+first when shrinking by 2 or more; otherwise composited as one, tiles alike made once,
+cancellable between batches of tiles), with its edge pixels copied outward as far as the
+filter reaches, which the bands are drawn from. A JPEG is at most
 65,535 pixels a side (the format's limit): the dialog says so and offers no export past
 it.
 

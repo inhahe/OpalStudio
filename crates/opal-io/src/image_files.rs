@@ -6,7 +6,7 @@ use half::f16;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{DynamicImage, GenericImageView, ImageDecoder, ImageReader};
-use opal_core::composite::{composite_within, flatten};
+use opal_core::composite::{composite_within_until, flatten};
 use opal_core::document::{Document, Layer};
 use opal_core::geom::{Affine, IRect};
 use opal_core::raster::RasterImage;
@@ -155,26 +155,57 @@ enum Source<'d> {
 }
 
 /// The memory exporting `doc` (at `size`, if given) takes beyond the document: the bands
-/// in flight (one being made, one waiting, one being encoded, and its encoding), and at
-/// another size the image the result is drawn from and the canvas rows it is made from.
+/// in flight (one being made, as tiles and then as rows; one waiting; one being encoded,
+/// and its encoding), and at another size the image the result is drawn from, with its
+/// edges copied outward ([`frame_edges`]), and the canvas rows a shrunk one is made from.
 pub fn export_memory(doc: &Document, size: Option<&ExportSize>) -> u64 {
+    use opal_core::raster::TILE_BYTES;
     let canvas = doc.canvas.rect();
-    let row = |w: u32| u64::from(w) * BAND as u64 * 8;
-    match size.filter(|s| resizes(doc, s)) {
-        None => 4 * row(doc.canvas.width),
-        Some(s) => {
-            let source = match shrink_factors(&canvas, s) {
-                (kx, ky) if kx * ky >= 2 => {
-                    let (w, h) = (u64::from(doc.canvas.width), u64::from(doc.canvas.height));
-                    let (sw, sh) = (w.div_ceil(u64::from(kx)), h.div_ceil(u64::from(ky)));
-                    let tiles = |n: u64| n.div_ceil(u64::from(TILE_SIZE));
-                    tiles(sw) * tiles(sh) * opal_core::raster::TILE_BYTES + row(doc.canvas.width)
-                }
-                _ => opal_core::composite::composite_cost(&doc.layers, Some(&canvas)),
-            };
-            4 * row(s.width) + source
-        }
-    }
+    let band = |w: u32| u64::from(w) * BAND as u64 * 8;
+    let Some(s) = size.filter(|s| resizes(doc, s)) else { return 5 * band(doc.canvas.width) };
+    let (at, border) = resized_frame(&canvas, s);
+    let source = if shrink_factors(&canvas, s) == (1, 1) {
+        opal_core::composite::composite_cost(&doc.layers, Some(&canvas))
+    } else {
+        tiles_over(&at) * TILE_BYTES + 2 * band(doc.canvas.width)
+    };
+    // The tiles the edges are copied into: those reaching past the canvas's pixels (which,
+    // shared with a layer, are copied first).
+    let edges = tiles_over(&at.expand(border)) - tiles_within(&at);
+    5 * band(s.width) + source + edges * TILE_BYTES
+}
+
+/// How many tiles `r` touches.
+fn tiles_over(r: &IRect) -> u64 {
+    let t = i64::from(TILE_SIZE);
+    let n = |a: i64, b: i64| if b > a { ((b - 1).div_euclid(t) - a.div_euclid(t) + 1) as u64 } else { 0 };
+    n(r.x0, r.x1) * n(r.y0, r.y1)
+}
+
+/// How many tiles lie wholly within `r`.
+fn tiles_within(r: &IRect) -> u64 {
+    let t = i64::from(TILE_SIZE);
+    let n = |a: i64, b: i64| (b.div_euclid(t) - (a + t - 1).div_euclid(t)).max(0) as u64;
+    n(r.x0, r.x1) * n(r.y0, r.y1)
+}
+
+/// For an export of `canvas` at `s`: where the canvas's pixels are in the image the result
+/// is drawn from (at the origin, averaged in blocks, when shrinking by 2 or more; the
+/// canvas itself otherwise), and how far past them its edge pixels are copied (as far as
+/// the filter reaches).
+fn resized_frame(canvas: &IRect, s: &ExportSize) -> (IRect, i64) {
+    let (kx, ky) = shrink_factors(canvas, s);
+    // Blocks along the right and bottom edges may be part blocks (see `shrunk`).
+    let blocks = |n: i64, k: u32| (n + i64::from(k) - 1) / i64::from(k);
+    let at =
+        if kx * ky >= 2 { IRect::from_size(blocks(canvas.width(), kx), blocks(canvas.height(), ky)) } else { *canvas };
+    (at, resample::reach(&to_size(&at, s), &s.sampling).ceil() as i64 + 1)
+}
+
+/// The transform from the pixels at `at` to those of the result at `s`.
+fn to_size(at: &IRect, s: &ExportSize) -> Affine {
+    Affine::translate(-at.x0 as f64, -at.y0 as f64)
+        .then(Affine::scale(f64::from(s.width) / at.width() as f64, f64::from(s.height) / at.height() as f64))
 }
 
 /// Whether exporting `doc` at `s` draws it at another size.
@@ -246,38 +277,30 @@ impl<'d> Exported<'d> {
 /// advance `progress`; `None` if it is cancelled meanwhile.
 fn resized<'d>(layers: &'d [Arc<Layer>], canvas: &IRect, s: &ExportSize, progress: &Progress) -> Option<Source<'d>> {
     let (kx, ky) = shrink_factors(canvas, s);
-    // The image, and where in it the canvas's pixels are.
-    let (mut image, at) = if kx * ky >= 2 {
-        let (image, sw, sh) = shrunk(layers, canvas, kx, ky, progress)?;
-        (image, IRect::from_size(i64::from(sw), i64::from(sh)))
-    } else {
-        (composited(layers, canvas, progress)?, *canvas)
-    };
-    let to_size = Affine::translate(-at.x0 as f64, -at.y0 as f64)
-        .then(Affine::scale(f64::from(s.width) / at.width() as f64, f64::from(s.height) / at.height() as f64));
-    let border = resample::reach(&to_size, &s.sampling).ceil() as i64 + 1;
+    let (at, border) = resized_frame(canvas, s);
+    let mut image =
+        if kx * ky >= 2 { shrunk(layers, canvas, kx, ky, progress)?.0 } else { composited(layers, canvas, progress)? };
     frame_edges(&mut image, &at, border);
-    Some(Source::Resized { image: Box::new(image), to_size, sampling: s.sampling })
+    Some(Source::Resized { image: Box::new(image), to_size: to_size(&at, s), sampling: s.sampling })
 }
 
-/// The canvas composited ([`composite_within`]), a tile row at a time, each advancing
-/// `progress` by its pixels; `None` if it is cancelled meanwhile. Tiles are composited
-/// whole, so the result is the same as compositing the canvas at once.
+/// The canvas composited ([`composite_within_until`], tiles alike made once across all of
+/// it), advancing `progress` by the canvas's pixels as its tiles are made; `None` if it is
+/// cancelled meanwhile.
 fn composited(layers: &[Arc<Layer>], canvas: &IRect, progress: &Progress) -> Option<RasterImage> {
-    let mut out = RasterImage::new();
-    let mut y = canvas.y0;
-    while y < canvas.y1 {
-        if progress.is_cancelled() {
-            return None;
-        }
-        let y1 = ((y.div_euclid(BAND) + 1) * BAND).min(canvas.y1);
-        for (c, t) in composite_within(layers, &IRect::new(canvas.x0, y, canvas.x1, y1)).tiles() {
-            out.set_tile(c, Some(t.clone()));
-        }
-        progress.advance((canvas.width() * (y1 - y)) as u64);
-        y = y1;
-    }
-    Some(out)
+    let pixels = (canvas.width() * canvas.height()) as u64;
+    let mut told = 0;
+    let mut tell = |placed: usize, total: usize| {
+        let now = pixels * placed as u64 / total.max(1) as u64;
+        progress.advance(now - told);
+        told = now;
+    };
+    let image = composite_within_until(layers, canvas, &mut |placed, total| {
+        tell(placed, total);
+        !progress.is_cancelled()
+    })?;
+    tell(1, 1);
+    Some(image)
 }
 
 /// The canvas averaged in blocks of `kx × ky` pixels (the blocks along the right and bottom
@@ -940,23 +963,48 @@ mod tests {
     }
 
     #[test]
+    fn an_enlarged_export_composites_tiles_alike_once_across_the_canvas() {
+        let mut ids = IdGen::default();
+        let mut d = Document::new(2048, 2048);
+        let img = RasterImage::filled(&IRect::from_size(2048, 2048), opal_core::tile::pixel_from_f32([0.2, 0.4, 0.6, 1.0]));
+        let l = ids.layer();
+        d.insert(Position { parent: None, index: 0 }, Layer::new_raster(l, ids.object(), "l", img)).unwrap();
+        d.layer_mut(l).unwrap().opacity = 0.5;
+        let size = ExportSize { width: 3000, height: 3000, sampling: Sampling::default() };
+        let Some(Source::Resized { image, .. }) = resized(&d.layers, &d.canvas.rect(), &size, &Progress::default()) else {
+            panic!("not resized")
+        };
+        // The canvas's 64 tiles are one composite (its edges are copied into tiles past it).
+        let inside: std::collections::HashSet<*const opal_core::tile::Tile> = image
+            .tiles()
+            .filter(|(c, _)| (0..8).contains(&c.x) && (0..8).contains(&c.y))
+            .map(|(_, t)| Arc::as_ptr(t))
+            .collect();
+        assert_eq!(inside.len(), 1);
+    }
+
+    #[test]
     fn an_export_takes_its_bands_and_what_it_is_drawn_from() {
         use opal_core::raster::TILE_BYTES;
-        let row = |w: u64| w * 256 * 8;
+        let band = |w: u64| w * 256 * 8;
         let size = |width, height| ExportSize { width, height, sampling: Sampling::default() };
         let mut ids = IdGen::default();
         let mut d = Document::new(3000, 2000);
-        assert_eq!(export_memory(&d, None), 4 * row(3000));
-        assert_eq!(export_memory(&d, Some(&size(3000, 2000))), 4 * row(3000), "the canvas's own size");
-        // Halved: averaged into 1500 × 1000 (6 × 4 tiles), from rows of the canvas.
-        assert_eq!(export_memory(&d, Some(&size(1500, 1000))), 4 * row(1500) + 24 * TILE_BYTES + row(3000));
-        // Enlarged: drawn from the canvas composited, here one tile made.
+        assert_eq!(export_memory(&d, None), 5 * band(3000));
+        assert_eq!(export_memory(&d, Some(&size(3000, 2000))), 5 * band(3000), "the canvas's own size");
+        // Halved: averaged into 1500 × 1000 (6 × 4 tiles), from bands of the canvas; its
+        // edges copied 5 pixels out (Bicubic reaches 4) into the tiles past the 5 × 3
+        // within it, of the 7 × 5 the copies reach.
+        let halved = 5 * band(1500) + 24 * TILE_BYTES + 2 * band(3000) + (35 - 15) * TILE_BYTES;
+        assert_eq!(export_memory(&d, Some(&size(1500, 1000))), halved);
+        // Enlarged: drawn from the canvas composited, here one tile made; its edges copied
+        // into the tiles past the 11 × 7 within it, of the 13 × 9 the copies reach.
         let mut img = RasterImage::new();
         img.set_pixel(5, 5, opal_core::tile::pixel_from_f32([1.0; 4]));
         let l = ids.layer();
         d.insert(Position { parent: None, index: 0 }, Layer::new_raster(l, ids.object(), "l", img)).unwrap();
         d.layer_mut(l).unwrap().opacity = 0.5;
-        assert_eq!(export_memory(&d, Some(&size(4000, 3000))), 4 * row(4000) + TILE_BYTES);
+        assert_eq!(export_memory(&d, Some(&size(4000, 3000))), 5 * band(4000) + TILE_BYTES + (117 - 77) * TILE_BYTES);
     }
 
     /// The exports to try progress on: at the canvas's size, shrunk (by block averages), and
