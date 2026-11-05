@@ -539,61 +539,47 @@ fn composite_region(layers: &[Arc<Layer>], range: Option<&IRect>) -> RasterImage
 /// The tiles compositing `layers` within `range` makes ([`composite_region`]): where each
 /// goes (tiles alike made once), and its key. Those showing an image object are each their
 /// own, as what they show depends on where they are.
+///
+/// Tiles are grouped as their keys are found, so a key is kept once for each set of tiles
+/// alike, not once for each tile.
 fn tiles_to_make(layers: &[Arc<Layer>], range: Option<&IRect>) -> Vec<(Vec<TileCoord>, Vec<Token>)> {
+    type Alike = HashMap<Vec<u64>, (Vec<TileCoord>, Vec<Token>)>;
+    type Own = Vec<(Vec<TileCoord>, Vec<Token>)>;
     let coords: Vec<TileCoord> = occupied_tiles(layers, range).into_iter().collect();
-    let keyed: Vec<(TileCoord, Vec<Token>)> = coords
-        .par_iter()
-        .map(|&c| {
-            let mut tokens = Vec::new();
-            key_into(layers, c, &mut tokens, &object_token);
-            (c, tokens)
-        })
-        .collect();
-    let mut alike: HashMap<Vec<u64>, (Vec<TileCoord>, Vec<Token>)> = HashMap::new();
-    let mut work: Vec<(Vec<TileCoord>, Vec<Token>)> = Vec::new();
-    for (c, tokens) in keyed {
-        match signature(&tokens) {
-            Some(s) => alike.entry(s).or_insert_with(|| (Vec::new(), tokens)).0.push(c),
-            None => work.push((vec![c], tokens)),
-        }
-    }
-    work.extend(alike.into_values());
-    work
-}
-
-/// The memory, in bytes, the tiles compositing `layers` within `range` (everywhere when
-/// `None`) would take: one tile for each it makes, nothing for one it shares (see
-/// [`composite_region`]). Worked out keeping only the keys that differ, so that asking
-/// costs little even where the answer is large.
-pub fn composite_cost(layers: &[Arc<Layer>], range: Option<&IRect>) -> u64 {
-    let coords: Vec<TileCoord> = occupied_tiles(layers, range).into_iter().collect();
-    // The keys of the tiles made alike, and how many are made each their own.
-    let (alike, own) = coords
+    let (alike, mut own) = coords
         .par_iter()
         .fold(
-            || (HashSet::new(), 0u64),
+            || (Alike::new(), Own::new()),
             |(mut alike, mut own), &c| {
                 let mut tokens = Vec::new();
                 key_into(layers, c, &mut tokens, &object_token);
-                if lone_source(&tokens).is_none() {
-                    match signature(&tokens) {
-                        Some(s) => {
-                            alike.insert(s);
-                        }
-                        None => own += 1,
-                    }
+                match signature(&tokens) {
+                    Some(s) => alike.entry(s).or_insert_with(|| (Vec::new(), tokens)).0.push(c),
+                    None => own.push((vec![c], tokens)),
                 }
                 (alike, own)
             },
         )
         .reduce(
-            || (HashSet::new(), 0),
-            |(mut a, n), (b, m)| {
-                a.extend(b);
-                (a, n + m)
+            || (Alike::new(), Own::new()),
+            |(mut a, mut x), (b, y)| {
+                for (s, (at, tokens)) in b {
+                    a.entry(s).or_insert_with(|| (Vec::new(), tokens)).0.extend(at);
+                }
+                x.extend(y);
+                (a, x)
             },
         );
-    (alike.len() as u64 + own) * TILE_BYTES
+    own.extend(alike.into_values());
+    own
+}
+
+/// The memory, in bytes, the tiles compositing `layers` within `range` (everywhere when
+/// `None`) would take: one tile for each it makes, nothing for one it shares (see
+/// [`composite_region`]).
+pub fn composite_cost(layers: &[Arc<Layer>], range: Option<&IRect>) -> u64 {
+    let made = tiles_to_make(layers, range).iter().filter(|(_, tokens)| lone_source(tokens).is_none()).count();
+    made as u64 * TILE_BYTES
 }
 
 /// `tokens` as numbers, alike exactly when the tiles they are the keys of composite alike

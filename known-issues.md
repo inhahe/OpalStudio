@@ -41,3 +41,15 @@ bits, fails to open with "Limits exceeded" (and so does a paste of one copied as
 **Fix:** lift the decoder's limit, and refuse instead, with the reason, an image whose
 decoding (the decoder's buffer, the conversion to the working format, the tiles) would
 need more memory than is free.
+
+## Zoomed out on a very large canvas, the view keys every tile beneath it
+
+`crates/opal-core/src/composite.rs` (`Projection::update`). A zoomed-out view is built
+bottom-up: every level-0 tile under it gets a cache entry (its key, a reference to its
+pixels), and each level above is keyed on the four below. On a 300,000-pixel white canvas
+shown whole that is 1.37 million entries: about 800 MB, and a second after each edit to
+rebuild the keys (the "Drawing…" sign shows meanwhile). Zoomed in, only the tiles in view
+are keyed, as on any canvas. **Fix:** store large uniform areas as one entry (a sparse
+quadtree of tiles in `RasterImage`, a uniform block standing for all the tiles it covers),
+so that the view can key a block of alike tiles once at the level it is shown. A change
+to how every layer stores its pixels, so it waits for a decision on that design.

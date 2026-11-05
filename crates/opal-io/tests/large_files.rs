@@ -1,5 +1,6 @@
-//! Times exporting and saving a large document, and measures the memory each takes beyond
-//! the document. Run by hand, one at a time so that each gets a process of its own:
+//! Times exporting and saving a large document, and what the largest canvas costs, and
+//! measures the memory each takes beyond the document (how far each raises the process's
+//! peak, so a step after a larger one shows only what it adds past that). Run by hand, one at a time so that each gets a process of its own:
 //! `cargo test --release -p opal-io --test large_files -- --ignored --nocapture --test-threads 1 <name>`.
 
 use opal_core::document::{Document, IdGen, Layer, Position};
@@ -142,5 +143,75 @@ fn export_tiny() {
     let size =
         opal_io::image_files::ExportSize { width: 20, height: 13, sampling: opal_core::resample::Sampling::default() };
     measure("PNG at 20 x 13", || export(&d, &path, &ExportFormat::Png { sixteen_bit: false }, Some(&size)).unwrap());
+    std::fs::remove_file(path).unwrap();
+}
+
+/// A `side × side` canvas filled white as New Image fills it: one tile inside, one along
+/// each edge, one in the corner.
+fn white(side: u32) -> (Document, IdGen) {
+    let area = opal_core::geom::IRect::from_size(i64::from(side), i64::from(side));
+    let mut made: std::collections::HashMap<(i64, i64), Arc<Tile>> = std::collections::HashMap::new();
+    let mut img = RasterImage::new();
+    for c in TileCoord::covering(&area, 0) {
+        let part = area.intersect(&c.rect(0));
+        let size = (part.width(), part.height());
+        let t = made.entry(size).or_insert_with(|| {
+            let mut t = Tile::transparent();
+            for y in 0..size.1 {
+                for x in 0..size.0 {
+                    t.set(x as u32, y as u32, pixel_from_f32([1.0; 4]));
+                }
+            }
+            Arc::new(t)
+        });
+        img.set_tile(c, Some(t.clone()));
+    }
+    let mut ids = IdGen::default();
+    let mut d = Document::new(side, side);
+    d.insert(Position { parent: None, index: 0 }, Layer::new_raster(ids.layer(), ids.object(), "l", img)).unwrap();
+    (d, ids)
+}
+
+/// What the largest canvas costs to make, show whole, change, merge and save.
+#[test]
+#[ignore]
+fn huge_white_canvas() {
+    use opal_core::composite::{Projection, Quality, composite_all, composite_cost};
+    let side = 300_000;
+    let mut built = None;
+    measure("New 300,000-pixel white canvas", || built = Some(white(side)));
+    let (mut d, ids) = built.unwrap();
+    let whole = opal_core::geom::IRect::from_size(i64::from(side), i64::from(side));
+    let mut p = Projection::new();
+    p.set_budget(Some(1 << 30));
+    // About what fits it in a window: level 9 (1/512).
+    measure("Shown whole", || {
+        p.update(&d.layers, 9, &whole, Quality::Exact);
+    });
+    measure("Shown whole again, unchanged", || {
+        p.update(&d.layers, 9, &whole, Quality::Exact);
+    });
+    let mut dot = RasterImage::new();
+    for y in 1000..1100 {
+        for x in 1000..1100 {
+            dot.set_pixel(x, y, pixel_from_f32([1.0, 0.0, 0.0, 0.5]));
+        }
+    }
+    let mut ids2 = ids.clone();
+    d.insert(Position { parent: None, index: 1 }, Layer::new_raster(ids2.layer(), ids2.object(), "dot", dot)).unwrap();
+    measure("Shown whole after a layer is added", || {
+        p.update(&d.layers, 9, &whole, Quality::Exact);
+    });
+    let mut cost = 0;
+    measure("Cost of merging, found", || cost = composite_cost(&d.layers, None));
+    eprintln!("  merging makes {} MB", cost >> 20);
+    measure("Merged", || {
+        composite_all(&d.layers);
+    });
+    let path = temp("huge.opal");
+    measure("Saved", || opal_io::native::save(&d, &ids2, &path, &opal_io::Progress::default()).unwrap());
+    eprintln!("  file: {} MB", std::fs::metadata(&path).unwrap().len() >> 20);
+    let mut loaded = None;
+    measure("Opened", || loaded = Some(opal_io::native::load(&path).unwrap()));
     std::fs::remove_file(path).unwrap();
 }
