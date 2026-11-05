@@ -48,9 +48,16 @@ impl Copied {
 }
 
 /// The memory a copy takes per pixel while it is put on the clipboard: the pixels (8
-/// bytes), the 16-bit PNG and its encoding (up to 16), the two bitmaps (8), the system's
-/// copies of all three (up to 16), and the copy kept for pasting back here (8).
-pub const COPY_BYTES: u64 = 56;
+/// bytes), the 16-bit PNG and its encoding (up to 16), the two bitmaps and the plain one
+/// as a file (12), the system's copies of all four (up to 20), and the copy kept for
+/// pasting back here (8).
+#[cfg(windows)]
+pub const COPY_BYTES: u64 = 64;
+/// The memory a copy takes per pixel while it is put on the clipboard: the pixels (8
+/// bytes), the image at 8 bits a channel (4), the clipboard's copy of it (4), and the
+/// copy kept for pasting back here (8).
+#[cfg(not(windows))]
+pub const COPY_BYTES: u64 = 24;
 
 /// Why `w × h` pixels cannot go on the system clipboard, if they cannot: on Windows, its
 /// bitmaps (the format every program reads) hold at most 4 GB, about a billion pixels.
@@ -269,9 +276,11 @@ fn too_large_to_paste(need: u64, free: u64) -> String {
 /// that can be read (so that what else is offered is tried), or an error if it is one but
 /// would need more memory than is free (so that the paste says why).
 #[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
-fn imported(read: Result<image_files::Imported, opal_io::IoError>) -> Result<Option<Pasted>, String> {
+/// `file` says it was a file (copied in a file manager), whose name the refusal gives.
+fn imported(read: Result<image_files::Imported, opal_io::IoError>, file: bool) -> Result<Option<Pasted>, String> {
     match read {
         Ok(i) => Ok(Some(from_import(i))),
+        Err(e @ opal_io::IoError::TooLarge { .. }) if file => Err(e.to_string()),
         Err(opal_io::IoError::TooLarge { need, free, .. }) => Err(too_large_to_paste(need, free)),
         Err(_) => Ok(None),
     }
@@ -300,7 +309,7 @@ fn read_system(own: Option<OwnCopy>) -> ReadResult {
     #[cfg(not(windows))]
     if let Ok(files) = cb.get().file_list() {
         for f in files {
-            if let Some(p) = imported(image_files::import(&f, crate::memory::free()))? {
+            if let Some(p) = imported(image_files::import(&f, crate::memory::free()), true)? {
                 return Ok(Some(p));
             }
         }
@@ -341,7 +350,11 @@ fn write_system(copy: &Copied) -> Result<Option<u32>, String> {
                 let _ = raw::set_without_clear(f.get(), &png);
             }
             raw::set_without_clear(formats::CF_DIBV5, &dib).map_err(|e| e.to_string())?;
-            raw::set_without_clear(formats::CF_DIB, &opaque).map_err(|e| e.to_string())?;
+            // The plain bitmap, and the system's (CF_BITMAP) made from it: those Windows
+            // makes from a CF_DIBV5 with bit fields miss the masks after its header and are
+            // garbled. Without them programs get those, so like the PNG they are not a must.
+            let _ = raw::set_without_clear(formats::CF_DIB, &opaque);
+            let _ = raw::set_bitmap_with(&bmp_file(&opaque), clipboard_win::options::NoClear);
         }
         Ok(raw::seq_num().map(|n| n.get()))
     }
@@ -416,14 +429,22 @@ fn dib_opaque(pixels: &[Pixel], w: u32, h: u32) -> Vec<u8> {
     out.extend(32u16.to_le_bytes()); // bits per pixel
     u32s(&mut out, &[BI_RGB, bitmap_size(w, h), 0, 0, 0, 0]);
     debug_assert_eq!(out.len(), HEADER as usize);
+    let white = opal_core::tile::pixel_from_f32([1.0; 4]);
     rows(&mut out, pixels, w, |p| {
-        // Premultiplied, so over white is the pixel plus white where it is not opaque.
-        let [r, g, b, a] = opal_core::tile::pixel_to_f32(p);
-        let white = 1.0 - a;
-        let [r, g, b, _] =
-            opal_io::pixels::to_srgb8(opal_core::tile::pixel_from_f32([r + white, g + white, b + white, 1.0]));
+        let [r, g, b, _] = opal_io::pixels::to_srgb8(opal_io::pixels::over_opaque(p, white));
         [b, g, r, 0]
     });
+    out
+}
+
+/// The bitmap file holding the packed bitmap `dib` (a `BITMAPINFOHEADER` with no colour
+/// table, then the pixels).
+#[cfg(any(windows, test))]
+fn bmp_file(dib: &[u8]) -> Vec<u8> {
+    const FILE_HEADER: u32 = 14;
+    let mut out = b"BM".to_vec();
+    u32s(&mut out, &[FILE_HEADER + dib.len() as u32, 0, FILE_HEADER + 40]);
+    out.extend_from_slice(dib);
     out
 }
 
@@ -439,14 +460,15 @@ fn bitmap_size(w: u32, h: u32) -> u32 {
     u32::try_from(4 * u64::from(w) * u64::from(h)).expect("a copy the clipboard can hold (check_copy)")
 }
 
-/// The rows of `pixels` (`w` to a row), bottom up, each pixel as `bytes` gives it, appended
-/// to `out`. (Bottom up because some programs, Word among them, cannot paste a bitmap
-/// stored top down.)
+/// The rows of `pixels` (`w` to a row), bottom up, each pixel as `bytes` gives it (rows in
+/// parallel), appended to `out`. (Bottom up because some programs, Word among them, cannot
+/// paste a bitmap stored top down.)
 #[cfg(any(windows, test))]
-fn rows(out: &mut Vec<u8>, pixels: &[Pixel], w: u32, bytes: impl Fn(Pixel) -> [u8; 4]) {
-    for row in pixels.chunks_exact(w.max(1) as usize).rev() {
-        out.extend(row.iter().flat_map(|&p| bytes(p)));
-    }
+fn rows(out: &mut Vec<u8>, pixels: &[Pixel], w: u32, bytes: impl Fn(Pixel) -> [u8; 4] + Sync) {
+    use rayon::prelude::*;
+    out.par_extend(
+        pixels.par_chunks_exact(w.max(1) as usize).rev().flat_map_iter(|row| row.iter().flat_map(|&p| bytes(p))),
+    );
 }
 
 /// The formats `arboard` does not read, or reads only at 8 bits: PNG and JPEG as files
@@ -477,7 +499,7 @@ fn read_windows_formats() -> Result<Option<Pasted>, String> {
         (png, files, jpeg)
     };
     let decoded = |bytes: Vec<u8>, as_file: &str| {
-        imported(image_files::import_bytes(&bytes, std::path::Path::new(as_file), crate::memory::free()))
+        imported(image_files::import_bytes(&bytes, std::path::Path::new(as_file), crate::memory::free()), false)
     };
     if let Some(b) = png
         && let Some(p) = decoded(b, "clipboard.png")?
@@ -485,7 +507,7 @@ fn read_windows_formats() -> Result<Option<Pasted>, String> {
         return Ok(Some(p));
     }
     for f in files {
-        if let Some(p) = imported(image_files::import(&f, crate::memory::free()))? {
+        if let Some(p) = imported(image_files::import(&f, crate::memory::free()), true)? {
             return Ok(Some(p));
         }
     }
@@ -545,13 +567,18 @@ mod tests {
     fn a_clipboard_image_too_large_to_open_is_said_not_passed_over() {
         let path = std::path::PathBuf::from("clipboard.png");
         let too_large = opal_io::IoError::TooLarge { path: path.clone(), need: 2_000_000_000, free: 1_000_000_000 };
-        let why = imported(Err(too_large)).unwrap_err();
+        let why = imported(Err(too_large), false).unwrap_err();
         assert_eq!(
             why,
             "pasting the image on the clipboard would need about 2.0 GB of memory, but only 1.0 GB is free"
         );
+        // A file copied in a file manager is named.
+        let big = std::path::PathBuf::from("big.png");
+        let file = opal_io::IoError::TooLarge { path: big, need: 2_000_000_000, free: 1_000_000_000 };
+        let why = imported(Err(file), true).unwrap_err();
+        assert!(why.starts_with("big.png: "), "{why}");
         let unreadable = opal_io::IoError::Decode { path, message: "not an image".into() };
-        assert!(matches!(imported(Err(unreadable)), Ok(None)), "what else is offered is not tried");
+        assert!(matches!(imported(Err(unreadable), false), Ok(None)), "what else is offered is not tried");
     }
 
     #[test]
@@ -578,6 +605,15 @@ mod tests {
     }
 
     #[test]
+    fn the_plain_bitmap_as_a_file_reads_back() {
+        use image::GenericImageView;
+        let px = [pixel_from_f32([1.0, 0.0, 0.0, 1.0]), pixel_from_f32([0.0, 0.0, 1.0, 1.0])];
+        let file =
+            image::load_from_memory_with_format(&bmp_file(&dib_opaque(&px, 1, 2)), image::ImageFormat::Bmp).unwrap();
+        assert_eq!((file.get_pixel(0, 0).0, file.get_pixel(0, 1).0), ([255, 0, 0, 255], [0, 0, 255, 255]));
+    }
+
+    #[test]
     fn both_bitmaps_read_back_as_written() {
         use image::GenericImageView;
         let px = [
@@ -594,16 +630,24 @@ mod tests {
             image::DynamicImage::from_decoder(d).unwrap()
         };
         let with_alpha = read(dib_v5(&px, 3, 2));
-        let opaque = read(dib_opaque(&px, 3, 2));
         for (i, &p) in px.iter().enumerate() {
             let (x, y) = (i as u32 % 3, i as u32 / 3);
             assert_eq!(with_alpha.get_pixel(x, y).0, opal_io::pixels::to_srgb8(p), "pixel {i}, with transparency");
-            let [r, g, b, a] = opal_core::tile::pixel_to_f32(p);
-            let over_white = opal_core::tile::pixel_from_f32([r + 1.0 - a, g + 1.0 - a, b + 1.0 - a, 1.0]);
-            let [r, g, b, _] = opal_io::pixels::to_srgb8(over_white);
-            assert_eq!(opaque.get_pixel(x, y).0[..3], [r, g, b], "pixel {i}, over white");
         }
-        assert_eq!(opaque.get_pixel(2, 0).0[..3], [255, 255, 255], "clear over white is white");
+        // Over white, in linear light: opaque red stays red; clear is white; black at half
+        // opacity is a linear half grey, 188 in sRGB; green at a quarter is 0.75 of white
+        // plus 0.25 green, so red and blue at linear 0.75 (225) and green full.
+        let px = [
+            pixel_from_f32([1.0, 0.0, 0.0, 1.0]),
+            pixel_from_f32([0.0; 4]),
+            pixel_from_f32([0.0, 0.0, 0.0, 0.5]),
+            pixel_from_f32([0.0, 0.25, 0.0, 0.25]),
+        ];
+        let opaque = read(dib_opaque(&px, 4, 1));
+        let want = [[255, 0, 0], [255, 255, 255], [188, 188, 188], [225, 255, 225]];
+        for (i, w) in want.iter().enumerate() {
+            assert_eq!(opaque.get_pixel(i as u32, 0).0[..3], *w, "pixel {i}, over white");
+        }
     }
 }
 
@@ -665,15 +709,29 @@ mod system_tests {
         let Read::Later(read) = SystemClipboard::default().read_image() else { panic!("read off the thread") };
         let bitmap = read().unwrap().expect("the bitmap was read");
         assert_eq!((bitmap.width, bitmap.height), (2, 2));
-        // A copy's own bitmap, as programs reading only it (arboard among them) read it.
+        // A copy's own bitmaps, of four colours (so a shift would show), as programs read
+        // them: the one with transparency as arboard does, the plain one as it is, and the
+        // system bitmap Windows makes from them.
+        let px: Vec<Pixel> = [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0], [1.0, 1.0, 0.0, 1.0]]
+            .map(opal_core::tile::pixel_from_f32)
+            .to_vec();
         cb.write_image(Copied { from: IRect::from_size(2, 2), pixels: px.clone() }, &egui::Context::default());
         drop(cb.shared.when_written());
         let theirs = arboard::Clipboard::new().unwrap().get_image().expect("our bitmap is read");
         assert_eq!((theirs.width, theirs.height), (2, 2));
-        assert_eq!(theirs.bytes[..4], opal_io::pixels::to_srgb8(px[0]));
+        let as_read: Vec<[u8; 4]> = theirs.bytes.chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect();
+        assert_eq!(as_read, px.iter().map(|&p| opal_io::pixels::to_srgb8(p)).collect::<Vec<_>>());
         let _open = open_clipboard().unwrap();
         let mut plain = Vec::new();
         clipboard_win::raw::get_vec(clipboard_win::formats::CF_DIB, &mut plain).unwrap();
         assert_eq!(plain, dib_opaque(&px, 2, 2), "the plain bitmap is ours, not one Windows made");
+        let mut system = Vec::new();
+        clipboard_win::raw::get_bitmap(&mut system).unwrap();
+        drop(_open);
+        let system = image::load_from_memory_with_format(&system, image::ImageFormat::Bmp).unwrap().to_rgb8();
+        for (i, &p) in px.iter().enumerate() {
+            let [r, g, b, _] = opal_io::pixels::to_srgb8(p);
+            assert_eq!(system.get_pixel(i as u32 % 2, i as u32 / 2).0, [r, g, b], "system bitmap, pixel {i}");
+        }
     }
 }
