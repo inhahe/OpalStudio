@@ -1,0 +1,6 @@
+# Rust build output
+/target/
+
+# ML model weights are downloaded at run time, never committed
+/models/
+*.onnx
