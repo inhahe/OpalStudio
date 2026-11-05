@@ -234,6 +234,29 @@ fn from_import(i: image_files::Imported) -> Pasted {
     Pasted { width: i.width, height: i.height, image: i.image, from: None, warnings: i.warnings }
 }
 
+/// The memory pasting the bitmap on the clipboard would take (see [`bitmap_memory`]), if it
+/// holds one.
+#[cfg(windows)]
+#[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
+fn clipboard_bitmap_memory() -> Option<u64> {
+    use clipboard_win::{formats, raw};
+    let _open = open_clipboard().ok()?;
+    let size = raw::size(formats::CF_DIB)?.get() as u64;
+    let mut header = [0u8; 16];
+    raw::get(formats::CF_DIB, &mut header).ok()?;
+    bitmap_memory(&header, size)
+}
+
+/// The memory pasting a bitmap of `size` bytes, whose header (a `BITMAPINFOHEADER`) begins
+/// `header`, takes as it is read: the bitmap, the image at 8 bits a channel (4 bytes a
+/// pixel), the working pixels (8) and their tiles (8).
+#[cfg(any(windows, test))]
+fn bitmap_memory(header: &[u8], size: u64) -> Option<u64> {
+    let int = |at: usize| Some(i32::from_le_bytes(header.get(at..at + 4)?.try_into().ok()?));
+    let pixels = u64::from(int(4)?.unsigned_abs()) * u64::from(int(8)?.unsigned_abs());
+    Some(size.saturating_add(pixels.saturating_mul(20)))
+}
+
 /// What reading an image the clipboard offers gave: the image, `None` if it was not one
 /// that can be read (so that what else is offered is tried), or an error if it is one but
 /// would need more memory than is free (so that the paste says why).
@@ -258,6 +281,16 @@ fn read_system(own: Option<OwnCopy>) -> ReadResult {
         if let Some(p) = read_windows_formats()? {
             return Ok(Some(p));
         }
+    }
+    #[cfg(windows)]
+    if let (Some(need), Some(free)) = (clipboard_bitmap_memory(), crate::memory::free())
+        && need > free
+    {
+        return Err(format!(
+            "pasting the image on the clipboard would need about {} of memory, but only {} is free",
+            opal_io::bytes(need),
+            opal_io::bytes(free)
+        ));
     }
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     #[cfg(not(windows))]
@@ -446,6 +479,18 @@ mod tests {
     use opal_core::tile::pixel_from_f32;
 
     #[test]
+    fn a_bitmap_s_memory_is_read_from_its_header() {
+        // 40-byte header; 30,000 wide, 20,000 tall (stored top-down, so negative).
+        let mut header = vec![0u8; 16];
+        header[0..4].copy_from_slice(&40u32.to_le_bytes());
+        header[4..8].copy_from_slice(&30_000i32.to_le_bytes());
+        header[8..12].copy_from_slice(&(-20_000i32).to_le_bytes());
+        let size = 40 + 4 * 30_000 * 20_000;
+        assert_eq!(bitmap_memory(&header, size), Some(size + 20 * 600_000_000));
+        assert_eq!(bitmap_memory(&header[..6], size), None, "a header cut short");
+    }
+
+    #[test]
     fn a_clipboard_image_too_large_to_open_is_said_not_passed_over() {
         let path = std::path::PathBuf::from("clipboard.png");
         let too_large = opal_io::IoError::TooLarge { path: path.clone(), need: 2_000_000_000, free: 1_000_000_000 };
@@ -515,5 +560,26 @@ mod system_tests {
         let other = read().unwrap().unwrap();
         assert_eq!(other.from, None);
         assert_eq!(opal_io::pixels::to_srgb16(other.image.pixel(1, 1)), opal_io::pixels::to_srgb16(px[0]));
+        // A bitmap alone (32-bit, BI_RGB), as most programs copy: its size is checked, then
+        // it is read.
+        {
+            let mut dib: Vec<u8> = Vec::new();
+            for v in [40u32, 2, 2] {
+                dib.extend(v.to_le_bytes());
+            }
+            dib.extend(1u16.to_le_bytes());
+            dib.extend(32u16.to_le_bytes());
+            for v in [0u32, 16, 0, 0, 0, 0] {
+                dib.extend(v.to_le_bytes());
+            }
+            dib.extend([200u8, 100, 50, 255].repeat(4));
+            let _open = open_clipboard().unwrap();
+            clipboard_win::raw::empty().unwrap();
+            clipboard_win::raw::set_without_clear(clipboard_win::formats::CF_DIB, &dib).unwrap();
+        }
+        assert!(clipboard_bitmap_memory().is_some_and(|n| n > 0), "the bitmap's size was not read");
+        let Read::Later(read) = SystemClipboard::default().read_image() else { panic!("read off the thread") };
+        let bitmap = read().unwrap().expect("the bitmap was read");
+        assert_eq!((bitmap.width, bitmap.height), (2, 2));
     }
 }

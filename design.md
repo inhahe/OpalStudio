@@ -442,7 +442,10 @@ curve editors.
   the bitmap, the system's copies of both, and the copy kept for pasting back), and on
   Windows no more than the 4 GB a clipboard bitmap holds. Opening a PNG or JPEG (or
   pasting one) is checked before it is decoded: the decoder's buffer, a turned copy if
-  its orientation turns it, and 24 bytes a pixel for the conversions and tiles. (Merging layers that are not adjacent moves the lower ones above whatever lay
+  its orientation turns it, and 24 bytes a pixel for the conversions and tiles; opening
+  an `.opal` file before its tiles are read (each held twice for a moment); and, on
+  Windows, pasting a system bitmap from its header before it is read (the bitmap, and
+  20 bytes a pixel). (Merging layers that are not adjacent moves the lower ones above whatever lay
   between them, which can change the look where those overlap; the status bar says so.)
 
 ### Performance with many layers

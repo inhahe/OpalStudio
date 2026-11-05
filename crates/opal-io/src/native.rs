@@ -226,13 +226,13 @@ pub struct Loaded {
 }
 
 /// Loads an `.opal` file.
-pub fn load(path: &Path) -> Result<Loaded, IoError> {
+pub fn load(path: &Path, free: Option<u64>) -> Result<Loaded, IoError> {
     let file = std::fs::File::open(path).map_err(|e| IoError::io(path, e))?;
-    load_from(std::io::BufReader::new(file), path)
+    load_from(std::io::BufReader::new(file), path, free)
 }
 
 /// Loads an `.opal` file from a reader; `path` is used only in messages.
-pub fn load_from(reader: impl Read + Seek, path: &Path) -> Result<Loaded, IoError> {
+pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<u64>) -> Result<Loaded, IoError> {
     let bad = |message: String| IoError::Format { path: path.to_owned(), message };
     let mut zip = ZipArchive::new(reader).map_err(|e| bad(format!("not a zip archive ({e})")))?;
 
@@ -267,8 +267,16 @@ pub fn load_from(reader: impl Read + Seek, path: &Path) -> Result<Loaded, IoErro
     // Read every tile the document references, once each.
     let mut wanted: Vec<usize> = Vec::new();
     collect_tile_numbers(&file.layers, &mut wanted);
+    let places = wanted.len() as u64;
     wanted.sort_unstable();
     wanted.dedup();
+    // Refused before any is read if they would need more than is free: each tile is held
+    // twice for a moment (as read, and as pixels), and each place one goes is an entry in
+    // its image.
+    let need = (wanted.len() as u64).saturating_mul(2 * TILE_BYTES as u64).saturating_add(places.saturating_mul(64));
+    if let Some(free) = free.filter(|&f| need > f) {
+        return Err(IoError::TooLarge { path: path.to_owned(), need, free });
+    }
     let mut raw: Vec<(usize, Vec<u8>)> = Vec::with_capacity(wanted.len());
     for n in wanted {
         let bytes = read_entry(&mut zip, &format!("tiles/{n}.bin"), TILE_BYTES, path)?;
@@ -485,11 +493,23 @@ mod tests {
     }
 
     #[test]
+    fn a_document_needing_more_memory_than_is_free_is_refused_before_its_tiles_are_read() {
+        let (doc, ids) = sample();
+        let path = std::env::temp_dir().join(format!("opal-native-free-{}.opal", std::process::id()));
+        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        let refused = load(&path, Some(1_000_000));
+        let opened = load(&path, Some(1 << 30));
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(refused, Err(IoError::TooLarge { free: 1_000_000, .. })), "{:?}", refused.err());
+        assert!(opened.is_ok());
+    }
+
+    #[test]
     fn save_and_load_round_trip() {
         let (doc, ids) = sample();
         let path = std::env::temp_dir().join(format!("opal-native-{}.opal", std::process::id()));
         save(&doc, &ids, &path, &Progress::default()).unwrap();
-        let loaded = load(&path).unwrap();
+        let loaded = load(&path, None).unwrap();
         std::fs::remove_file(&path).unwrap();
 
         let d = loaded.doc;
@@ -539,7 +559,7 @@ mod tests {
 
         let path = std::env::temp_dir().join(format!("opal-native-v1-{}.opal", std::process::id()));
         save(&doc, &ids, &path, &Progress::default()).unwrap();
-        let loaded = load(&path).unwrap();
+        let loaded = load(&path, None).unwrap();
         std::fs::remove_file(&path).unwrap();
         let d = loaded.doc;
         assert_eq!(d.canvas, doc.canvas);
@@ -563,10 +583,10 @@ mod tests {
             )
         };
         let ok = doc(object("[1,0,0,1,5,5]"));
-        assert!(load_from(crafted(&ok, &[]), Path::new("ok.opal")).is_ok());
+        assert!(load_from(crafted(&ok, &[]), Path::new("ok.opal"), None).is_ok());
         // The last stretches by a million one way and squashes by far more the other.
         for bad in ["[0,0,0,0,0,0]", "[1e300,0,0,1,0,0]", "[1,0,0,1,1e30,0]", "[1,2,2,4,0,0]", "[1e6,0,0,2e-18,0,0]"] {
-            let err = load_from(crafted(&doc(object(bad)), &[]), Path::new("bad.opal")).err();
+            let err = load_from(crafted(&doc(object(bad)), &[]), Path::new("bad.opal"), None).err();
             assert!(err.is_some_and(|e| e.to_string().contains("transform")), "{bad} accepted");
         }
     }
@@ -585,7 +605,7 @@ mod tests {
     #[test]
     fn damaged_files_are_refused_with_a_reason() {
         let path = Path::new("broken.opal");
-        let err = load_from(std::io::Cursor::new(b"not a zip".to_vec()), path).err().unwrap();
+        let err = load_from(std::io::Cursor::new(b"not a zip".to_vec()), path, None).err().unwrap();
         assert!(err.to_string().contains("not a zip"), "{err}");
 
         // A newer format version is refused rather than misread.
@@ -602,7 +622,7 @@ mod tests {
             zip.finish().unwrap();
         }
         buf.set_position(0);
-        let err = load_from(buf, path).err().unwrap();
+        let err = load_from(buf, path, None).err().unwrap();
         assert!(err.to_string().contains("newer Opal Studio"), "{err}");
     }
 
@@ -642,16 +662,16 @@ mod tests {
     #[test]
     fn duplicate_identifiers_are_refused() {
         let json = doc_json(&[layer_json(3, 4), layer_json(3, 5)]);
-        let err = load_from(crafted(&json, &[]), Path::new("dup.opal")).err().expect("refused");
+        let err = load_from(crafted(&json, &[]), Path::new("dup.opal"), None).err().expect("refused");
         assert!(err.to_string().contains("more than once"), "{err}");
         let json = doc_json(&[layer_json(3, 4), layer_json(5, 4)]);
-        assert!(load_from(crafted(&json, &[]), Path::new("dup.opal")).is_err(), "a shared object id");
+        assert!(load_from(crafted(&json, &[]), Path::new("dup.opal"), None).is_err(), "a shared object id");
     }
 
     #[test]
     fn identifiers_too_large_to_continue_from_are_refused() {
         let json = doc_json(&[layer_json(u64::MAX, 4)]);
-        let err = load_from(crafted(&json, &[]), Path::new("big.opal")).err().expect("refused");
+        let err = load_from(crafted(&json, &[]), Path::new("big.opal"), None).err().expect("refused");
         assert!(err.to_string().contains("identifier"), "{err}");
     }
 
@@ -659,7 +679,8 @@ mod tests {
     fn an_oversized_tile_entry_is_refused() {
         let json = r#"{"format":"opal-studio","version":0,"canvas":{"width":1,"height":1},"next_id":10,"layers":[{"id":1,"name":"l","visible":true,"locked":false,"opacity":1.0,"kind":"objects","objects":[{"id":2,"kind":"raster","tiles":[[0,0,0]]}]}]}"#;
         let big = vec![0u8; TILE_BYTES * 3];
-        let err = load_from(crafted(json, &[("tiles/0.bin", &big)]), Path::new("bomb.opal")).err().expect("refused");
+        let err =
+            load_from(crafted(json, &[("tiles/0.bin", &big)]), Path::new("bomb.opal"), None).err().expect("refused");
         assert!(err.to_string().contains("tiles/0.bin"), "{err}");
     }
 

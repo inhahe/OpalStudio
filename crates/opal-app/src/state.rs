@@ -561,7 +561,7 @@ impl AppState {
         let title = file_title(path);
         let is_native = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("opal"));
         if is_native {
-            match native::load(path) {
+            match native::load(path, crate::memory::free()) {
                 Ok(loaded) => {
                     let id = self.add_doc(title, loaded.doc, loaded.ids, "Open");
                     self.doc_mut(id).expect("just added").path = Some(path.to_owned());

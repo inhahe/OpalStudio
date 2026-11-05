@@ -993,7 +993,7 @@ fn a_save_is_written_off_the_interface_thread_and_marks_the_image_clean() {
     let st = h.state().state();
     assert!(!st.active().unwrap().is_dirty(), "the image is not marked saved");
     assert!(st.notice.as_ref().is_some_and(|n| n.0.starts_with("Saved")), "{:?}", st.notice);
-    let loaded = opal_io::native::load(&path).expect("the file reads back");
+    let loaded = opal_io::native::load(&path, None).expect("the file reads back");
     assert_eq!(loaded.doc.canvas.width, 300);
     std::fs::remove_file(&path).unwrap();
 }

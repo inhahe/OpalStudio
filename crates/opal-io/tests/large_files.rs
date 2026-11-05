@@ -196,7 +196,7 @@ fn huge_white_canvas() {
     measure("Saved", || opal_io::native::save(&d, &ids2, &path, &opal_io::Progress::default()).unwrap());
     eprintln!("  file: {} MB", std::fs::metadata(&path).unwrap().len() >> 20);
     let mut loaded = None;
-    measure("Opened", || loaded = Some(opal_io::native::load(&path).unwrap()));
+    measure("Opened", || loaded = Some(opal_io::native::load(&path, None).unwrap()));
     std::fs::remove_file(path).unwrap();
 }
 
