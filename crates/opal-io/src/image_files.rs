@@ -966,12 +966,14 @@ mod tests {
     fn an_enlarged_export_composites_tiles_alike_once_across_the_canvas() {
         let mut ids = IdGen::default();
         let mut d = Document::new(2048, 2048);
-        let img = RasterImage::filled(&IRect::from_size(2048, 2048), opal_core::tile::pixel_from_f32([0.2, 0.4, 0.6, 1.0]));
+        let img =
+            RasterImage::filled(&IRect::from_size(2048, 2048), opal_core::tile::pixel_from_f32([0.2, 0.4, 0.6, 1.0]));
         let l = ids.layer();
         d.insert(Position { parent: None, index: 0 }, Layer::new_raster(l, ids.object(), "l", img)).unwrap();
         d.layer_mut(l).unwrap().opacity = 0.5;
         let size = ExportSize { width: 3000, height: 3000, sampling: Sampling::default() };
-        let Some(Source::Resized { image, .. }) = resized(&d.layers, &d.canvas.rect(), &size, &Progress::default()) else {
+        let Some(Source::Resized { image, .. }) = resized(&d.layers, &d.canvas.rect(), &size, &Progress::default())
+        else {
             panic!("not resized")
         };
         // The canvas's 64 tiles are one composite (its edges are copied into tiles past it).
