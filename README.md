@@ -52,7 +52,8 @@ cargo test --workspace                     # all tests, interface tests included
   shown dimmed.
 - **History.** Doing something new after undoing starts a branch instead of discarding the
   redo states, and the History panel goes to any state on any branch. History may use a
-  set amount of memory (a preference); past it, the oldest states are dropped.
+  set amount of memory (a preference); past it, the oldest states and abandoned branches
+  are dropped, never the newest work.
 - **Viewing.** Zoom with the wheel, the Zoom tool, pinching or the zoom commands; scroll
   with the Hand tool, Space-drag or the middle button. The image is drawn on the GPU in
   linear light, smoothly when zoomed out and as sharp pixels when zoomed in.

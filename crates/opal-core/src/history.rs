@@ -169,7 +169,12 @@ impl History {
 
     /// The state [`redo`](Self::redo) would move to.
     pub fn redo_target(&self) -> Option<NodeId> {
-        let n = self.node(self.current);
+        self.redo_target_of(self.current)
+    }
+
+    /// The state redo would move to from `id`.
+    fn redo_target_of(&self, id: NodeId) -> Option<NodeId> {
+        let n = self.node(id);
         n.last_child.or_else(|| n.children.last().copied())
     }
 
@@ -230,13 +235,21 @@ impl History {
 
     /// Drops the oldest states while the others hold more than the budget. A state can be
     /// dropped when it has no children, or is the root with one child (which becomes the
-    /// root), so the history stays one tree; never the current state, the one before it or
-    /// the one redo goes to, so one step either way always works, however large.
+    /// root), so the history stays one tree. Never dropped: the current state, the one
+    /// before it (so the last action can be undone, however large), and every state redo
+    /// goes through from here, the newest work, which undoing to look back must not lose;
+    /// past the budget, the history waits for the next action to trim it.
     fn trim(&mut self) {
-        let keep = [Some(self.current), self.node(self.current).parent, self.redo_target()];
+        let mut keep: HashSet<NodeId> =
+            [Some(self.current), self.node(self.current).parent].into_iter().flatten().collect();
+        let mut at = self.current;
+        while let Some(next) = self.redo_target_of(at) {
+            keep.insert(next);
+            at = next;
+        }
         while self.usage.extra() > self.budget {
             let droppable = |(id, n): &(NodeId, &Node)| {
-                !keep.contains(&Some(*id)) && (n.children.is_empty() || (*id == self.root && n.children.len() == 1))
+                !keep.contains(id) && (n.children.is_empty() || (*id == self.root && n.children.len() == 1))
             };
             let Some(oldest) = self.nodes().find(droppable).map(|(id, _)| id) else { break };
             self.remove(oldest);
@@ -607,6 +620,21 @@ mod tests {
         assert!(h.memory() > TILE_BYTES);
         assert_eq!(h.redo_target(), Some(last), "the state redo goes to was dropped");
         assert!(h.undo(), "the state before was dropped");
+    }
+
+    #[test]
+    fn undoing_to_look_back_never_loses_the_newest_work() {
+        // Each state adds a tile of its own to the one before's.
+        let mut h = painted_history(0);
+        let d = painted(h.doc(), 300);
+        h.commit(d, "Paint 1");
+        let d = painted(h.doc(), 600);
+        let newest = h.commit(d, "Paint 2");
+        h.set_budget(TILE_BYTES);
+        // Back to the start: the newest states are over the budget, and stay.
+        assert!(h.undo() && h.undo());
+        assert!(h.redo() && h.redo(), "the newest work was dropped");
+        assert_eq!(h.current(), newest);
     }
 
     #[test]
