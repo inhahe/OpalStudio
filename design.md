@@ -433,7 +433,9 @@ curve editors.
   and Linux; `memory.rs`), since a failed allocation ends the program: merging counts
   exactly the tiles it would make (none for those it shares), drawing into pixels exactly
   the tiles it draws (`render_cost`), summed over everything one command draws; Rasterize
-  counts every image object it draws, hidden or not, and no pixel object. The command is refused with
+  counts every image object it draws, hidden or not, and no pixel object. A transform box
+  that leaves pixel layers turned or flipped draws them back into pixels only if that
+  fits; otherwise they stay images, drawn as exactly, and the status bar says why. The command is refused with
   how much it needs and how much is free; a paste that cannot be baked stays an image in
   the layer. Exports and copies are checked the same way: an export takes its bands in
   flight and, at another size, the image it is drawn from with its copied edges

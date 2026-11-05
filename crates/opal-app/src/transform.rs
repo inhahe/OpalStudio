@@ -12,10 +12,11 @@
 
 use crate::clipboard::Pasted;
 use crate::doc::{DocState, Pending};
+use crate::memory::Allowance;
 use opal_core::document::{
     Document, ImageObject, Layer, LayerContent, LayerId, Object, ObjectId, ObjectKind, PixelObject, Position,
 };
-use opal_core::geom::{Affine, FRect, IRect};
+use opal_core::geom::{Affine, FRect, GridMap, IRect};
 use opal_core::resample::{self, Sampling};
 use std::sync::Arc;
 
@@ -616,6 +617,8 @@ impl DocState {
         }
         let Some(s) = self.transform.take() else { return };
         let Some(p) = self.pending.as_mut() else { return };
+        let mut memory = Allowance::now();
+        let mut refused = None;
         for t in &s.targets {
             let Some(o) = object_mut(&mut p.doc, t.layer, t.object) else { continue };
             let ObjectKind::Image(i) = &mut o.kind else { continue };
@@ -623,15 +626,14 @@ impl DocState {
             if t.was_pixels
                 && let Some(g) = i.transform.grid_map()
             {
-                // Exactly on the grid: pixels again. A plain move keeps the pixels as they
-                // are; a quarter turn or flip copies them, exactly.
-                o.kind = if (g.a, g.b, g.c, g.d) == (1, 0, 0, 1) {
-                    ObjectKind::Pixels(PixelObject { image: i.image.clone(), offset: [g.e, g.f] })
-                } else {
-                    let turned = resample::render_image(&i.image, &i.transform, &i.sampling, None);
-                    ObjectKind::Pixels(PixelObject { image: Arc::new(turned), offset: [0, 0] })
-                };
+                match back_to_pixels(i, &g, &mut memory) {
+                    Ok(pixels) => o.kind = pixels,
+                    Err(why) => refused = Some(why),
+                }
             }
+        }
+        if let Some(why) = refused {
+            self.notice = Some(format!("Turned layers stay images, not drawn into pixels: {why}"));
         }
         if let Some(paste) = &s.paste
             && paste.into_active
@@ -656,6 +658,18 @@ impl DocState {
     }
 }
 
+/// Image object `i`, whose transform maps the grid onto itself (`g`), as pixels again: as
+/// they are, moved, or copied turned or flipped (exactly) if `memory` holds the copy; else
+/// why not (it is drawn as exactly as an image).
+fn back_to_pixels(i: &ImageObject, g: &GridMap, memory: &mut Allowance) -> Result<ObjectKind, String> {
+    if (g.a, g.b, g.c, g.d) == (1, 0, 0, 1) {
+        return Ok(ObjectKind::Pixels(PixelObject { image: i.image.clone(), offset: [g.e, g.f] }));
+    }
+    memory.take(resample::render_cost(&i.image, &i.transform, &i.sampling, None))?;
+    let turned = resample::render_image(&i.image, &i.transform, &i.sampling, None);
+    Ok(ObjectKind::Pixels(PixelObject { image: Arc::new(turned), offset: [0, 0] }))
+}
+
 /// Draws image object `object` of layer `dest` into the layer's pixels: into its topmost
 /// pixel object if it has one there, else as a new pixel object.
 /// Returns whether part of it, reaching too far past the canvas, was left out (see
@@ -666,12 +680,11 @@ fn bake_into(doc: &mut Document, dest: LayerId, object: ObjectId) -> Result<bool
     let Some(Layer { content: LayerContent::Objects(objects), .. }) = doc.layer_mut(dest) else { return Ok(false) };
     let Some(at) = objects.iter().position(|o| o.id == object) else { return Ok(false) };
     let ObjectKind::Image(i) = &objects[at].kind else { return Ok(false) };
-    let mut memory = crate::memory::Allowance::now();
-    let Some((area, clipped)) = crate::layer_ops::drawable(&i.image, &i.transform, &i.sampling, &canvas, &mut memory)?
-    else {
-        return Ok(false);
-    };
+    let mut memory = Allowance::now();
+    let drawable = crate::layer_ops::drawable(&i.image, &i.transform, &i.sampling, &canvas, &mut memory)?;
     let ObjectKind::Image(i) = objects.remove(at).kind else { unreachable!("an image object, just seen") };
+    // An image that shows nothing goes, leaving nothing.
+    let Some((area, clipped)) = drawable else { return Ok(false) };
     match objects.last_mut() {
         Some(Object { kind: ObjectKind::Pixels(p), .. }) => {
             let local = i.transform.then(Affine::translate(-p.offset[0] as f64, -p.offset[1] as f64));
@@ -727,6 +740,51 @@ mod tests {
 
     fn close(a: [f64; 2], b: [f64; 2]) -> bool {
         (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6
+    }
+
+    #[test]
+    fn a_turn_back_to_pixels_needing_more_than_is_free_stays_an_image() {
+        let img = opal_core::raster::RasterImage::filled(
+            &IRect::from_size(600, 300),
+            opal_core::tile::pixel_from_f32([0.2, 0.4, 0.6, 1.0]),
+        );
+        let half = Affine::scale(-1.0, -1.0).then(Affine::translate(600.0, 300.0));
+        let i = ImageObject {
+            image: Arc::new(img),
+            frame: IRect::from_size(600, 300),
+            transform: half,
+            sampling: Sampling::default(),
+        };
+        let g = half.grid_map().unwrap();
+        let need = resample::render_cost(&i.image, &half, &i.sampling, None);
+        assert!(need > 0);
+        let why = back_to_pixels(&i, &g, &mut Allowance::of(Some(need - 1))).unwrap_err();
+        assert!(why.contains("memory"), "{why}");
+        let turned = back_to_pixels(&i, &g, &mut Allowance::of(Some(need))).unwrap();
+        assert!(matches!(turned, ObjectKind::Pixels(_)));
+        // Moved, it is the same pixels, and takes nothing.
+        let moved = Affine::translate(256.0, 0.0);
+        let i = ImageObject { transform: moved, ..i };
+        assert!(back_to_pixels(&i, &moved.grid_map().unwrap(), &mut Allowance::of(Some(0))).is_ok());
+    }
+
+    #[test]
+    fn a_paste_showing_nothing_goes_when_drawn_into_the_layer() {
+        use opal_core::document::IdGen;
+        use opal_core::raster::RasterImage;
+        let mut ids = IdGen::default();
+        let mut doc = Document::new(100, 100);
+        let image = ImageObject {
+            image: Arc::new(RasterImage::new()),
+            frame: IRect::from_size(10, 10),
+            transform: Affine::scale(2.0, 2.0),
+            sampling: Sampling::default(),
+        };
+        let (layer, object) = (ids.layer(), ids.object());
+        let pasted = Object { id: object, kind: ObjectKind::Image(image) };
+        doc.insert(Position { parent: None, index: 0 }, Layer::with_objects(layer, "l", vec![pasted])).unwrap();
+        assert_eq!(bake_into(&mut doc, layer, object), Ok(false));
+        assert!(doc.layer(layer).unwrap().objects().is_empty(), "an empty image object stayed");
     }
 
     #[test]
