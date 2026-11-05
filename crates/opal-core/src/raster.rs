@@ -115,6 +115,31 @@ impl RasterImage {
         self.tiles.retain(|_, t| !t.is_transparent());
     }
 
+    /// An image of `area` all pixel `p`. Tiles alike are one tile (those `area` covers
+    /// whole, and those it covers alike in part: along each edge, and the corners), so even
+    /// the largest area costs a few tiles.
+    pub fn filled(area: &IRect, p: Pixel) -> RasterImage {
+        // The tiles made so far, by the part of the tile they fill.
+        let mut made: HashMap<[i64; 4], Arc<Tile>> = HashMap::new();
+        let mut img = RasterImage::new();
+        for c in TileCoord::covering(area, 0) {
+            let r = c.rect(0);
+            let part = area.intersect(&r);
+            let key = [part.x0 - r.x0, part.y0 - r.y0, part.x1 - r.x0, part.y1 - r.y0];
+            let tile = made.entry(key).or_insert_with(|| {
+                let mut t = Tile::transparent();
+                for y in key[1]..key[3] {
+                    for x in key[0]..key[2] {
+                        t.set(x as u32, y as u32, p);
+                    }
+                }
+                Arc::new(t)
+            });
+            img.tiles.insert(c, tile.clone());
+        }
+        img
+    }
+
     /// Builds an image from a row-major buffer of `width × height` pixels placed with its
     /// top-left corner at the canvas origin. Tiles that come out fully transparent are
     /// left out.
@@ -235,8 +260,10 @@ impl RasterImage {
 
     /// The bytes the reduced copies built so far take.
     pub fn reduced_bytes(&self) -> u64 {
-        let tiles: usize = self.pyramid.iter().filter_map(|c| c.get()).map(|r| r.tile_count()).sum();
-        tiles as u64 * TILE_BYTES
+        // Each tile once, however many places share it (see `halved`).
+        let tiles: HashSet<*const Tile> =
+            self.pyramid.iter().filter_map(|c| c.get()).flat_map(|r| r.tiles.values().map(Arc::as_ptr)).collect();
+        tiles.len() as u64 * TILE_BYTES
     }
 
     /// Whether level `k` of the pyramid has been built.
@@ -365,6 +392,18 @@ mod tests {
     }
 
     #[test]
+    fn a_filled_area_is_a_few_tiles_however_large() {
+        let p = pixel_from_f32([0.2, 0.4, 0.6, 1.0]);
+        // Off the grid on every side: inside, four edges and four corners.
+        let area = IRect::new(-100, 30, 5000, 3000);
+        let img = RasterImage::filled(&area, p);
+        let distinct: HashSet<*const Tile> = img.tiles().map(|(_, t)| Arc::as_ptr(t)).collect();
+        assert_eq!(distinct.len(), 9);
+        assert_eq!(img.content_bounds(), Some(area));
+        assert_eq!((img.pixel(-100, 30), img.pixel(4999, 2999)), (p, p));
+    }
+
+    #[test]
     fn halving_makes_each_tile_alike_once() {
         let grey = Arc::new(Tile::filled(pixel_from_f32([0.7, 0.7, 0.7, 1.0])));
         let other = Arc::new(Tile::filled(pixel_from_f32([0.1, 0.2, 0.3, 1.0])));
@@ -377,6 +416,7 @@ mod tests {
         let half = img.reduced(1);
         let distinct: HashSet<*const Tile> = half.tiles().map(|(_, t)| Arc::as_ptr(t)).collect();
         assert_eq!((half.tile_count(), distinct.len()), (16, 2));
+        assert_eq!(img.reduced_bytes(), 2 * TILE_BYTES, "the tiles shared counted once each");
         assert_eq!(half.pixel(0, 0), pixel_from_f32([0.7, 0.7, 0.7, 1.0]));
         assert_ne!(half.pixel(5 * 128, 2 * 128), half.pixel(0, 0));
     }

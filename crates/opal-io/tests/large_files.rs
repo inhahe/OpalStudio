@@ -146,26 +146,10 @@ fn export_tiny() {
     std::fs::remove_file(path).unwrap();
 }
 
-/// A `side × side` canvas filled white as New Image fills it: one tile inside, one along
-/// each edge, one in the corner.
+/// A `side × side` canvas filled white as New Image fills it.
 fn white(side: u32) -> (Document, IdGen) {
     let area = opal_core::geom::IRect::from_size(i64::from(side), i64::from(side));
-    let mut made: std::collections::HashMap<(i64, i64), Arc<Tile>> = std::collections::HashMap::new();
-    let mut img = RasterImage::new();
-    for c in TileCoord::covering(&area, 0) {
-        let part = area.intersect(&c.rect(0));
-        let size = (part.width(), part.height());
-        let t = made.entry(size).or_insert_with(|| {
-            let mut t = Tile::transparent();
-            for y in 0..size.1 {
-                for x in 0..size.0 {
-                    t.set(x as u32, y as u32, pixel_from_f32([1.0; 4]));
-                }
-            }
-            Arc::new(t)
-        });
-        img.set_tile(c, Some(t.clone()));
-    }
+    let img = RasterImage::filled(&area, pixel_from_f32([1.0; 4]));
     let mut ids = IdGen::default();
     let mut d = Document::new(side, side);
     d.insert(Position { parent: None, index: 0 }, Layer::new_raster(ids.layer(), ids.object(), "l", img)).unwrap();

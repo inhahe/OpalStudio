@@ -13,12 +13,11 @@ use eframe::egui;
 use opal_core::document::{Document, IdGen, Layer, LayerId, Position};
 use opal_core::geom::IRect;
 use opal_core::raster::RasterImage;
-use opal_core::tile::{Tile, TileCoord, pixel_from_f32};
+use opal_core::tile::pixel_from_f32;
 use opal_io::image_files::{self, ExportFormat};
 use opal_io::native;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -813,31 +812,10 @@ impl AppState {
     }
 }
 
-/// A `width × height` image of colour `rgba` from the origin. Tiles alike are one tile:
-/// those inside, those along the right edge, along the bottom, and the corner, so even
-/// the largest canvas costs a few tiles.
+/// A `width × height` image of colour `rgba` from the origin: inside, along the right edge,
+/// along the bottom and in the corner, one tile each ([`RasterImage::filled`]).
 fn filled(width: u32, height: u32, rgba: [f32; 4]) -> RasterImage {
-    let area = IRect::from_size(i64::from(width), i64::from(height));
-    let p = pixel_from_f32(rgba);
-    // The tiles made so far, by the part of the tile they fill (from its corner).
-    let mut made: HashMap<(i64, i64), Arc<Tile>> = HashMap::new();
-    let mut img = RasterImage::new();
-    for c in TileCoord::covering(&area, 0) {
-        let r = c.rect(0);
-        let part = area.intersect(&r);
-        let size = (part.width(), part.height());
-        let tile = made.entry(size).or_insert_with(|| {
-            let mut t = Tile::transparent();
-            for y in 0..size.1 {
-                for x in 0..size.0 {
-                    t.set(x as u32, y as u32, p);
-                }
-            }
-            Arc::new(t)
-        });
-        img.set_tile(c, Some(tile.clone()));
-    }
-    img
+    RasterImage::filled(&IRect::from_size(i64::from(width), i64::from(height)), pixel_from_f32(rgba))
 }
 
 /// The name a file is shown under.
@@ -859,6 +837,7 @@ fn with_extension(mut path: PathBuf, ext: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn app_with_image() -> AppState {
         let mut st = AppState::new();
@@ -908,7 +887,8 @@ mod tests {
     fn a_new_white_image_shares_its_tiles_alike() {
         // Tiles inside, along the right edge, along the bottom, and the corner.
         let img = filled(1000, 600, [1.0; 4]);
-        let distinct: std::collections::HashSet<*const Tile> = img.tiles().map(|(_, t)| Arc::as_ptr(t)).collect();
+        let distinct: std::collections::HashSet<*const opal_core::tile::Tile> =
+            img.tiles().map(|(_, t)| Arc::as_ptr(t)).collect();
         assert_eq!((img.tile_count(), distinct.len()), (12, 4));
         assert_eq!(img.pixel(999, 599), pixel_from_f32([1.0; 4]));
         assert_eq!(img.pixel(1000, 599)[3].to_f32(), 0.0);
