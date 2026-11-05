@@ -48,9 +48,9 @@ impl Copied {
 }
 
 /// The memory a copy takes per pixel while it is put on the clipboard: the pixels (8
-/// bytes), the 16-bit PNG and its encoding (up to 16), the bitmap (4), the system's copies
-/// of both (up to 12), and the copy kept for pasting back here (8).
-pub const COPY_BYTES: u64 = 48;
+/// bytes), the 16-bit PNG and its encoding (up to 16), the two bitmaps (8), the system's
+/// copies of all three (up to 16), and the copy kept for pasting back here (8).
+pub const COPY_BYTES: u64 = 56;
 
 /// Why `w × h` pixels cannot go on the system clipboard, if they cannot: on Windows, its
 /// bitmaps (the format every program reads) hold at most 4 GB, about a billion pixels.
@@ -326,6 +326,7 @@ fn write_system(copy: &Copied) -> Result<Option<u32>, String> {
         use clipboard_win::{formats, raw};
         let png = image_files::encode_png16(&copy.pixels, w, h);
         let dib = dib_v5(&copy.pixels, w, h);
+        let opaque = dib_opaque(&copy.pixels, w, h);
         {
             let _open = open_clipboard()?;
             raw::empty().map_err(|e| format!("the clipboard could not be emptied ({e})"))?;
@@ -336,6 +337,7 @@ fn write_system(copy: &Copied) -> Result<Option<u32>, String> {
                 let _ = raw::set_without_clear(f.get(), &png);
             }
             raw::set_without_clear(formats::CF_DIBV5, &dib).map_err(|e| e.to_string())?;
+            raw::set_without_clear(formats::CF_DIB, &opaque).map_err(|e| e.to_string())?;
         }
         Ok(raw::seq_num().map(|n| n.get()))
     }
@@ -366,36 +368,81 @@ fn open_clipboard() -> Result<clipboard_win::Clipboard, String> {
 }
 
 /// `pixels` (`w × h`, row by row) as the clipboard's 32-bit bitmap with transparency
-/// (`CF_DIBV5`): the header, then the rows bottom up, each pixel blue, green, red, alpha,
-/// in sRGB with straight alpha. (Bottom up because some programs, Word among them, cannot
-/// paste a bitmap stored top down.)
+/// (`CF_DIBV5`): a `BITMAPV5HEADER` with bit fields; the three colour masks again after it,
+/// where Windows itself writes them (in the bitmaps it makes from others) and Paint.NET,
+/// the `image` crate and others read past them; then the rows, each pixel blue, green, red,
+/// alpha, in sRGB with straight alpha.
 #[cfg(any(windows, test))]
 fn dib_v5(pixels: &[Pixel], w: u32, h: u32) -> Vec<u8> {
     const HEADER: u32 = 124;
     const BI_BITFIELDS: u32 = 3;
     const LCS_SRGB: u32 = 0x7352_4742;
     const LCS_GM_IMAGES: u32 = 4;
-    fn u32s(out: &mut Vec<u8>, vs: &[u32]) {
-        vs.iter().for_each(|v| out.extend(v.to_le_bytes()));
-    }
-    let mut out = Vec::with_capacity(HEADER as usize + 4 * pixels.len());
+    const MASKS: [u32; 3] = [0x00ff_0000, 0x0000_ff00, 0x0000_00ff];
+    let mut out = Vec::with_capacity(HEADER as usize + 12 + 4 * pixels.len());
     u32s(&mut out, &[HEADER, w, h]);
     out.extend(1u16.to_le_bytes()); // planes
     out.extend(32u16.to_le_bytes()); // bits per pixel
-    let size = u32::try_from(4 * u64::from(w) * u64::from(h)).expect("a copy the clipboard can hold (check_copy)");
-    u32s(&mut out, &[BI_BITFIELDS, size, 0, 0, 0, 0]);
-    u32s(&mut out, &[0x00ff_0000, 0x0000_ff00, 0x0000_00ff, 0xff00_0000, LCS_SRGB]);
+    u32s(&mut out, &[BI_BITFIELDS, bitmap_size(w, h), 0, 0, 0, 0]);
+    u32s(&mut out, &MASKS);
+    u32s(&mut out, &[0xff00_0000, LCS_SRGB]);
     u32s(&mut out, &[0; 9]); // endpoints, unused with sRGB
     u32s(&mut out, &[0; 3]); // gamma, likewise
     u32s(&mut out, &[LCS_GM_IMAGES, 0, 0, 0]);
     debug_assert_eq!(out.len(), HEADER as usize);
-    for row in pixels.chunks_exact(w.max(1) as usize).rev() {
-        for &p in row {
-            let [r, g, b, a] = opal_io::pixels::to_srgb8(p);
-            out.extend([b, g, r, a]);
-        }
-    }
+    u32s(&mut out, &MASKS);
+    rows(&mut out, pixels, w, |p| {
+        let [r, g, b, a] = opal_io::pixels::to_srgb8(p);
+        [b, g, r, a]
+    });
     out
+}
+
+/// `pixels` as the clipboard's plain bitmap (`CF_DIB`), for programs that do not read
+/// transparency: a `BITMAPINFOHEADER`, then the rows, each pixel over white, blue, green,
+/// red and an unused byte. Given rather than left to Windows, whose own, made from the
+/// bitmap with transparency, misses the masks after its header and is garbled.
+#[cfg(any(windows, test))]
+fn dib_opaque(pixels: &[Pixel], w: u32, h: u32) -> Vec<u8> {
+    const HEADER: u32 = 40;
+    const BI_RGB: u32 = 0;
+    let mut out = Vec::with_capacity(HEADER as usize + 4 * pixels.len());
+    u32s(&mut out, &[HEADER, w, h]);
+    out.extend(1u16.to_le_bytes()); // planes
+    out.extend(32u16.to_le_bytes()); // bits per pixel
+    u32s(&mut out, &[BI_RGB, bitmap_size(w, h), 0, 0, 0, 0]);
+    debug_assert_eq!(out.len(), HEADER as usize);
+    rows(&mut out, pixels, w, |p| {
+        // Premultiplied, so over white is the pixel plus white where it is not opaque.
+        let [r, g, b, a] = opal_core::tile::pixel_to_f32(p);
+        let white = 1.0 - a;
+        let [r, g, b, _] =
+            opal_io::pixels::to_srgb8(opal_core::tile::pixel_from_f32([r + white, g + white, b + white, 1.0]));
+        [b, g, r, 0]
+    });
+    out
+}
+
+/// Little-endian `vs`, appended to `out`.
+#[cfg(any(windows, test))]
+fn u32s(out: &mut Vec<u8>, vs: &[u32]) {
+    vs.iter().for_each(|v| out.extend(v.to_le_bytes()));
+}
+
+/// The bytes of a `w × h` bitmap's pixels at 32 bits.
+#[cfg(any(windows, test))]
+fn bitmap_size(w: u32, h: u32) -> u32 {
+    u32::try_from(4 * u64::from(w) * u64::from(h)).expect("a copy the clipboard can hold (check_copy)")
+}
+
+/// The rows of `pixels` (`w` to a row), bottom up, each pixel as `bytes` gives it, appended
+/// to `out`. (Bottom up because some programs, Word among them, cannot paste a bitmap
+/// stored top down.)
+#[cfg(any(windows, test))]
+fn rows(out: &mut Vec<u8>, pixels: &[Pixel], w: u32, bytes: impl Fn(Pixel) -> [u8; 4]) {
+    for row in pixels.chunks_exact(w.max(1) as usize).rev() {
+        out.extend(row.iter().flat_map(|&p| bytes(p)));
+    }
 }
 
 /// The formats `arboard` does not read, or reads only at 8 bits: PNG and JPEG as files
@@ -513,13 +560,43 @@ mod tests {
         let red = pixel_from_f32([1.0, 0.0, 0.0, 1.0]);
         let clear_blue = pixel_from_f32([0.0, 0.0, 0.5, 0.5]);
         let dib = dib_v5(&[red, red, clear_blue, clear_blue], 2, 2);
-        assert_eq!(dib.len(), 124 + 16);
+        assert_eq!(dib.len(), 124 + 12 + 16);
         let u32_at = |i: usize| u32::from_le_bytes(dib[i..i + 4].try_into().unwrap());
         assert_eq!((u32_at(0), u32_at(4), u32_at(8)), (124, 2, 2));
         assert_eq!(u32_at(16), 3, "bit fields, so the alpha channel counts");
+        assert_eq!((u32_at(124), u32_at(128), u32_at(132)), (0xff0000, 0xff00, 0xff), "the masks after the header");
         // The bottom row first: the half-transparent blue (straight alpha), then the red.
-        assert_eq!(&dib[124..128], &[255, 0, 0, 128]);
-        assert_eq!(&dib[132..136], &[0, 0, 255, 255]);
+        assert_eq!(&dib[136..140], &[255, 0, 0, 128]);
+        assert_eq!(&dib[144..148], &[0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn both_bitmaps_read_back_as_written() {
+        use image::GenericImageView;
+        let px = [
+            pixel_from_f32([1.0, 0.0, 0.0, 1.0]),
+            pixel_from_f32([0.0, 0.0, 0.5, 0.5]),
+            pixel_from_f32([0.0; 4]),
+            pixel_from_f32([0.2, 0.4, 0.1, 1.0]),
+            pixel_from_f32([0.1, 0.1, 0.1, 0.25]),
+            pixel_from_f32([0.0, 0.3, 0.0, 0.75]),
+        ];
+        // Read as the `image` crate reads a bitmap from the clipboard (as arboard does).
+        let read = |dib: Vec<u8>| {
+            let d = image::codecs::bmp::BmpDecoder::new_without_file_header(std::io::Cursor::new(dib)).unwrap();
+            image::DynamicImage::from_decoder(d).unwrap()
+        };
+        let with_alpha = read(dib_v5(&px, 3, 2));
+        let opaque = read(dib_opaque(&px, 3, 2));
+        for (i, &p) in px.iter().enumerate() {
+            let (x, y) = (i as u32 % 3, i as u32 / 3);
+            assert_eq!(with_alpha.get_pixel(x, y).0, opal_io::pixels::to_srgb8(p), "pixel {i}, with transparency");
+            let [r, g, b, a] = opal_core::tile::pixel_to_f32(p);
+            let over_white = opal_core::tile::pixel_from_f32([r + 1.0 - a, g + 1.0 - a, b + 1.0 - a, 1.0]);
+            let [r, g, b, _] = opal_io::pixels::to_srgb8(over_white);
+            assert_eq!(opaque.get_pixel(x, y).0[..3], [r, g, b], "pixel {i}, over white");
+        }
+        assert_eq!(opaque.get_pixel(2, 0).0[..3], [255, 255, 255], "clear over white is white");
     }
 }
 
@@ -581,5 +658,15 @@ mod system_tests {
         let Read::Later(read) = SystemClipboard::default().read_image() else { panic!("read off the thread") };
         let bitmap = read().unwrap().expect("the bitmap was read");
         assert_eq!((bitmap.width, bitmap.height), (2, 2));
+        // A copy's own bitmap, as programs reading only it (arboard among them) read it.
+        cb.write_image(Copied { from: IRect::from_size(2, 2), pixels: px.clone() }, &egui::Context::default());
+        drop(cb.shared.when_written());
+        let theirs = arboard::Clipboard::new().unwrap().get_image().expect("our bitmap is read");
+        assert_eq!((theirs.width, theirs.height), (2, 2));
+        assert_eq!(theirs.bytes[..4], opal_io::pixels::to_srgb8(px[0]));
+        let _open = open_clipboard().unwrap();
+        let mut plain = Vec::new();
+        clipboard_win::raw::get_vec(clipboard_win::formats::CF_DIB, &mut plain).unwrap();
+        assert_eq!(plain, dib_opaque(&px, 2, 2), "the plain bitmap is ours, not one Windows made");
     }
 }

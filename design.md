@@ -438,8 +438,8 @@ curve editors.
   the layer. Exports and copies are checked the same way: an export takes its bands in
   flight and, at another size, the image it is drawn from with its copied edges
   (`export_memory`); a copy takes
-  about 48 bytes a pixel while it goes onto the clipboard (the pixels, the 16-bit PNG,
-  the bitmap, the system's copies of both, and the copy kept for pasting back), and on
+  about 56 bytes a pixel while it goes onto the clipboard (the pixels, the 16-bit PNG,
+  the two bitmaps, the system's copies of all three, and the copy kept for pasting back), and on
   Windows no more than the 4 GB a clipboard bitmap holds. Opening a PNG or JPEG (or
   pasting one) is checked before it is decoded: the decoder's buffer, a turned copy if
   its orientation turns it, and 24 bytes a pixel for the conversions and tiles; opening
@@ -520,8 +520,11 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   Copy (Ctrl+C) copies the selected layers within the canvas; Copy Merged (Ctrl+Shift+C)
   everything visible within the canvas. Copies are encoded and written on a worker
   thread too, in the order made, and a paste waits for one still being written. On
-  Windows a copy goes on the clipboard as a 16-bit PNG (for programs that read PNG) and an
-  8-bit bitmap, in one go; elsewhere as an 8-bit image. A copy made in Opal Studio keeps
+  Windows a copy goes on the clipboard as a 16-bit PNG (for programs that read PNG), an
+  8-bit bitmap with transparency (`CF_DIBV5`: bit fields, with the colour masks repeated
+  after the header, where Windows writes them and Paint.NET and the `image` crate read past
+  them) and a plain bitmap over white (`CF_DIB`, given rather than left to Windows, whose
+  own from a `CF_DIBV5` with bit fields is garbled), in one go; elsewhere as an 8-bit image. A copy made in Opal Studio keeps
   its full precision for pasting back into Opal Studio.
 
 ## Image size, crop and rotation

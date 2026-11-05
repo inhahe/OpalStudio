@@ -43,17 +43,3 @@ are keyed, as on any canvas. **Fix:** store large uniform areas as one entry (a 
 quadtree of tiles in `RasterImage`, a uniform block standing for all the tiles it covers),
 so that the view can key a block of alike tiles once at the level it is shown. A change
 to how every layer stores its pixels, so it waits for a decision on that design.
-
-## Programs built on the `image` crate cannot read the bitmap Opal Studio copies
-
-`crates/opal-app/src/clipboard.rs` (`dib_v5`). A copy puts a `CF_DIBV5` on the clipboard:
-a `BITMAPV5HEADER` with `BI_BITFIELDS`, the masks in the header, the pixels right after
-it. The `image` crate's BMP decoder (0.25) takes a V4 or V5 header with `BI_BITFIELDS` to
-be followed by three more mask DWORDs, as a `BITMAPINFOHEADER` is, so it reads 12 bytes
-too far and fails ("failed to fill whole buffer"); `arboard`, which reads only
-`CF_DIBV5` and decodes it so, fails on our bitmap, and so would any program reading it
-that way and not our PNG. Microsoft's documents are ambiguous on whether the masks
-repeat after a V5 header. **Fix:** find what Windows itself writes (`GetDIBits` with a V5
-header, its `CF_DIB`→`CF_DIBV5` synthesis) and what common readers accept, and write the
-form every one of them reads (perhaps `BI_RGB` with the alpha mask set, which has no
-masks to place).
