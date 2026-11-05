@@ -119,7 +119,8 @@ pub fn flatten_canvas(doc: &Document, size: Option<&ExportSize>) -> (Vec<Pixel>,
             let source = RasterImage::from_pixels(w + 2 * border, h + 2 * border, &framed);
             let b = f64::from(border);
             let out = IRect::from_size(i64::from(s.width), i64::from(s.height));
-            let resized = resample::render_image(&source, &Affine::translate(-b, -b).then(to_size), &s.sampling, Some(&out));
+            let resized =
+                resample::render_image(&source, &Affine::translate(-b, -b).then(to_size), &s.sampling, Some(&out));
             (resized.read_rect(&out), s.width, s.height)
         }
         _ => (flat, w, h),

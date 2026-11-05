@@ -4,10 +4,11 @@ A 2D graphics editor that aims to be more intuitive than the usual ones: everyth
 editable, every setting that affects a result can be adjusted, and the interface always
 says what a command does and, when it cannot run, why.
 
-Early days: this is milestone 0 of the roadmap, the foundation. You can open and create
-images, arrange layers, undo through a branching history, and save and export; painting
-and selection tools come next. See `roadmap.md` for what is planned and `design.md` for how
-it is built. Known problems are listed in `known-issues.md`.
+Early days: milestones 0 (the foundation) and 1 (paste and place) of the roadmap are
+built. You can open and create images, paste and place images, move, scale, rotate, crop
+and resize, arrange and merge layers, undo through a branching history, and save and
+export; scripting, selections and painting come next. See `roadmap.md` for what is planned
+and `design.md` for how it is built. Known problems are listed in `known-issues.md`.
 
 Free software under the GNU General Public License, version 3 or later (`LICENSE`).
 
@@ -26,11 +27,25 @@ cargo test --workspace                     # all tests, interface tests included
 
 - **Files.** Open PNG and JPEG (8 and 16 bits; EXIF orientation honored) and Opal
   Studio's own `.opal` files, which keep every layer. Save as `.opal`; export the canvas
-  to PNG (8 or 16 bits) or JPEG. Saving never damages the existing file if it fails.
-  Drop files on the window to open them; several images open as tabs.
-- **Layers and groups.** Add, duplicate, delete, reorder (buttons or dragging, into and
-  out of groups), rename, hide, lock, change opacity, merge down, flatten. Layers have no
-  edges: content past the canvas is kept and shown dimmed.
+  to PNG (8 or 16 bits) or JPEG, at its own size or another. Saving never damages the
+  existing file if it fails. Drop files on the window to open them; several images open
+  as tabs.
+- **Paste and place.** Ctrl+V pastes an image (from Opal Studio, another program, or an
+  image file copied in Explorer) into a box that moves, scales and rotates it, snapping to
+  the canvas and other layers; Enter places it. A pasted image keeps its own pixels, so it
+  can be resized again later without losing quality. Paste in Place, Copy and Copy Merged;
+  pasting with nothing open makes a new image.
+- **Moving and transforming.** The Move tool drags the selected layers (clicking picks the
+  layer under the pointer; right-click lists every layer there); the arrow keys nudge;
+  Transform (Ctrl+T) scales and rotates layers, losslessly.
+- **The image.** The Crop tool, with aspect ratios, guides and straightening; Crop to
+  Content; Resize Image and Resize Canvas; quarter turns, flips and rotation by any angle.
+  Cropping and resizing the canvas never delete anything unless asked to.
+- **Layers and groups.** Add, duplicate, delete, group, reorder (buttons or dragging,
+  into and out of groups), rename, hide, lock, change opacity; select several with Ctrl
+  and Shift; merge down, merge selected, merge visible, merge a group, stamp visible,
+  flatten; rasterize; thumbnails. Layers have no edges: content past the canvas is kept and
+  shown dimmed.
 - **History.** Undo and redo never discard anything: doing something new after undoing
   starts a branch, and the History panel goes to any state on any branch.
 - **Viewing.** Zoom with the wheel, the Zoom tool, pinching or the zoom commands; scroll

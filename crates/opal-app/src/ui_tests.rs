@@ -125,7 +125,7 @@ fn content_beyond_the_canvas_is_dimmed_and_can_be_hidden() {
         });
         // A white square left of the canvas, as a layer that extends past its edge would have.
         let d = st.active_mut().unwrap();
-        let layer = d.active_layer.unwrap();
+        let layer = d.active_layer().unwrap();
         d.apply::<()>("paint", |doc, ids| {
             let mut img = opal_core::raster::RasterImage::new();
             for y in 100..150 {
@@ -262,10 +262,10 @@ fn clicking_a_layer_name_selects_the_layer() {
     h.state_mut().state_mut().queue.push(Cmd::NewLayer);
     h.run();
     let bottom = h.state().state().active().unwrap().doc().layers[0].id;
-    assert_ne!(h.state().state().active().unwrap().active_layer, Some(bottom));
+    assert_ne!(h.state().state().active().unwrap().active_layer(), Some(bottom));
     h.get_by_label("Background").click();
     h.run();
-    assert_eq!(h.state().state().active().unwrap().active_layer, Some(bottom));
+    assert_eq!(h.state().state().active().unwrap().active_layer(), Some(bottom));
 }
 
 #[test]
@@ -341,7 +341,7 @@ fn a_changing_pending_edit_asks_for_a_repaint() {
     let _gpu = gpu_lock();
     let mut h = harness();
     with_image(&mut h, crate::state::Background::White);
-    let layer = h.state().state().active().unwrap().active_layer.unwrap();
+    let layer = h.state().state().active().unwrap().active_layer().unwrap();
     let set = |h: &mut Harness<'static, OpalApp>, op: f32| {
         h.state_mut().state_mut().active_mut().unwrap().edit_pending("Change opacity", |d| {
             d.layer_mut(layer).unwrap().opacity = op;
@@ -384,4 +384,212 @@ fn shortcuts_wait_while_a_dialog_is_open() {
     let st = h.state().state();
     assert_eq!(st.new_image.as_ref().map(|n| n.width), Some(777), "Ctrl+N reset the dialog");
     assert_eq!(st.active().unwrap().doc().layers.len(), 1, "Ctrl+Shift+N changed the image behind the dialog");
+}
+
+// ---- Milestone 1: paste, transform, move, crop, merge ------------------------------------
+
+/// A `w × h` image of one straight-alpha color, as the clipboard would hand it over.
+fn pasted(w: u32, h: u32, rgba: [f32; 4]) -> crate::clipboard::Pasted {
+    let px = vec![opal_core::tile::pixel_from_f32(rgba); (w * h) as usize];
+    crate::clipboard::Pasted {
+        width: w,
+        height: h,
+        image: opal_core::raster::RasterImage::from_pixels(w, h, &px),
+        from: None,
+        warnings: Vec::new(),
+    }
+}
+
+fn put_on_clipboard(h: &mut Harness<'static, OpalApp>, p: crate::clipboard::Pasted) {
+    h.state_mut().state_mut().clipboard = Box::new(crate::clipboard::TestClipboard { image: Some(p), text: false });
+}
+
+fn image_of(h: &mut Harness<'static, OpalApp>, w: u32, ht: u32) {
+    h.state_mut().state_mut().create_image(&crate::state::NewImage {
+        width: w,
+        height: ht,
+        background: crate::state::Background::White,
+    });
+    h.run();
+}
+
+#[test]
+fn ctrl_v_opens_the_box_and_enter_places_the_paste_as_one_state() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    put_on_clipboard(&mut h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
+    // Ctrl+V reaches the app as a paste event, not as a key.
+    h.event(egui::Event::Paste(String::new()));
+    h.run();
+    let d = h.state().state().active().unwrap();
+    assert!(d.transform.is_some(), "the box opened");
+    assert_eq!(d.doc().layers.len(), 2, "on a new layer");
+    let states = d.history.nodes().count();
+    render(&mut h, "paste-box");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let d = h.state().state().active().unwrap();
+    assert!(d.transform.is_none() && d.pending.is_none());
+    assert_eq!(d.history.nodes().count(), states + 1);
+    assert_eq!(d.history.undo_label(), Some("Paste"));
+    let top = &d.doc().layers[1];
+    let opal_core::document::ObjectKind::Image(i) = &top.objects()[0].kind else { panic!("an image object") };
+    // Centered on the canvas, on whole pixels.
+    assert_eq!((i.transform.e, i.transform.f), (175.0, 130.0));
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().doc().layers.len(), 1, "undo takes the paste back");
+}
+
+#[test]
+fn escape_cancels_a_paste_and_restores_the_selection() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 200, 200);
+    let bg = h.state().state().active().unwrap().active_layer().unwrap();
+    put_on_clipboard(&mut h, pasted(10, 10, [0.0, 1.0, 0.0, 1.0]));
+    h.state_mut().state_mut().queue.push(Cmd::Paste);
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    let d = h.state().state().active().unwrap();
+    assert!(d.transform.is_none() && d.pending.is_none());
+    assert_eq!(d.doc().layers.len(), 1);
+    assert_eq!(d.active_layer(), Some(bg));
+    assert!(!d.is_dirty());
+}
+
+#[test]
+fn dragging_inside_the_box_moves_the_paste() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    put_on_clipboard(&mut h, pasted(100, 100, [0.0, 0.0, 1.0, 1.0]));
+    h.state_mut().state_mut().queue.push(Cmd::Paste);
+    h.run();
+    let (v, start) = {
+        let d = h.state().state().active().unwrap();
+        (d.view, d.transform.as_ref().unwrap().current)
+    };
+    let ppp = h.ctx.pixels_per_point();
+    let at = |x: f32, y: f32| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    // From the middle of the box, 30 canvas pixels right, with snapping off.
+    h.state_mut().state_mut().prefs.set("transform.snapping", crate::settings::Value::Bool(false));
+    h.hover_at(at(200.0, 150.0));
+    h.run();
+    h.drag_at(at(200.0, 150.0));
+    h.run();
+    for x in [205.0, 215.0, 230.0] {
+        h.hover_at(at(x, 150.0));
+        h.run();
+    }
+    h.drop_at(at(230.0, 150.0));
+    h.run();
+    let d = h.state().state().active().unwrap();
+    let now = d.transform.as_ref().unwrap().current;
+    assert!((now.e - start.e - 30.0).abs() <= 1.0, "moved {}", now.e - start.e);
+    assert_eq!(now.f, start.f);
+}
+
+#[test]
+fn copy_then_paste_in_place_puts_it_back_where_it_came_from() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    h.state_mut().state_mut().clipboard = Box::new(crate::clipboard::TestClipboard::default());
+    {
+        let d = h.state_mut().state_mut().active_mut().unwrap();
+        let mut img = opal_core::raster::RasterImage::new();
+        for y in 20..30 {
+            for x in 40..60 {
+                img.set_pixel(x, y, opal_core::tile::pixel_from_f32([1.0, 0.0, 0.0, 1.0]));
+            }
+        }
+        let _ = d.apply("Add", |doc, ids| {
+            let l = opal_core::document::Layer::new_raster(ids.layer(), ids.object(), "dot", img);
+            doc.insert(opal_core::document::Position { parent: None, index: 1 }, l)
+        });
+    }
+    h.event(egui::Event::Copy);
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::V);
+    h.run();
+    let d = h.state().state().active().unwrap();
+    let s = d.transform.as_ref().expect("the box opened");
+    assert_eq!((s.current.e, s.current.f), (40.0, 20.0), "in place");
+    assert_eq!((s.frame.width(), s.frame.height()), (20.0, 10.0), "the copy was trimmed to the content");
+}
+
+#[test]
+fn pasting_with_nothing_open_makes_a_new_image() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    h.run();
+    put_on_clipboard(&mut h, pasted(33, 44, [0.5, 0.5, 0.5, 1.0]));
+    h.event(egui::Event::Paste(String::new()));
+    h.run();
+    let d = h.state().state().active().expect("a new image");
+    assert_eq!((d.doc().canvas.width, d.doc().canvas.height), (33, 44));
+}
+
+#[test]
+fn transforming_a_pixel_layer_by_whole_pixels_leaves_it_pixels() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 100, 100);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::T);
+    h.run();
+    {
+        let d = h.state_mut().state_mut().active_mut().unwrap();
+        let m = d.transform.as_ref().expect("the box opened").current;
+        d.set_box(m.then(opal_core::geom::Affine::translate(7.0, -3.0)), None);
+    }
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let d = h.state().state().active().unwrap();
+    let opal_core::document::ObjectKind::Pixels(p) = &d.doc().layers[0].objects()[0].kind else {
+        panic!("a whole-pixel move keeps a pixel layer pixels")
+    };
+    assert_eq!(p.offset, [7, -3]);
+    assert_eq!(d.history.undo_label(), Some("Transform"));
+}
+
+#[test]
+fn merge_selected_combines_the_selected_layers() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 50, 50);
+    h.state_mut().state_mut().queue.push(Cmd::NewLayer);
+    h.run();
+    let st = h.state_mut().state_mut();
+    let d = st.active_mut().unwrap();
+    let ids = d.doc().layer_ids();
+    d.select_only(ids[0]);
+    d.toggle_selected(ids[1]);
+    st.queue.push(Cmd::MergeSelected);
+    h.run();
+    let d = h.state().state().active().unwrap();
+    assert_eq!(d.doc().layers.len(), 1);
+    assert_eq!(d.history.undo_label(), Some("Merge selected"));
+}
+
+#[test]
+fn the_crop_tool_crops_to_its_box_on_enter() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 200, 100);
+    h.key_press(egui::Key::C);
+    h.run();
+    {
+        let d = h.state_mut().state_mut().active_mut().unwrap();
+        assert!(d.crop.is_some(), "the box appears with the tool");
+        d.crop = Some(crate::crop::CropBox { center: [50.0, 50.0], size: [60.0, 40.0], angle: 0.0 });
+    }
+    h.run();
+    render(&mut h, "crop-box");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let c = h.state().state().active().unwrap().doc().canvas;
+    assert_eq!((c.x, c.y, c.width, c.height), (20, 30, 60, 40));
 }

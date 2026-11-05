@@ -128,13 +128,16 @@ impl OpalApp {
     fn handle_keys(&mut self, ctx: &egui::Context) {
         // While a dialog is open, keys belong to it: no command may change what is behind
         // it, or the dialog's own fields.
-        let st = &self.st;
-        if st.confirm.is_some() || !st.messages.is_empty() || st.new_image.is_some() || st.export.is_some() {
+        if self.st.dialog_open() {
             self.alt_down = false;
             self.alt_alone = false;
             return;
         }
         let typing = ctx.egui_wants_keyboard_input();
+        if !typing {
+            self.clipboard_events(ctx);
+            self.editing_keys(ctx);
+        }
         // Keytips: Alt pressed and released on its own toggles them.
         let (alt, other_input) = ctx.input(|i| {
             let other = i.events.iter().any(|e| {
@@ -173,6 +176,95 @@ impl OpalApp {
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, t.info().key)) {
                 self.st.tool = t;
             }
+        }
+    }
+
+    /// Copy and Paste arrive as events of their own rather than as keys (the windowing layer
+    /// turns Ctrl+C, Ctrl+V and their alternatives into them): outside text fields, they
+    /// are the image commands.
+    fn clipboard_events(&mut self, ctx: &egui::Context) {
+        let events = ctx.input_mut(|i| {
+            let mut out = Vec::new();
+            i.events.retain(|e| match e {
+                Event::Copy => {
+                    out.push(Cmd::Copy);
+                    false
+                }
+                Event::Paste(_) | Event::PasteImage(_) => {
+                    out.push(Cmd::Paste);
+                    false
+                }
+                _ => true,
+            });
+            out
+        });
+        for cmd in events {
+            // Copying with nothing open does nothing rather than explaining itself.
+            if cmd == Cmd::Copy && self.st.active().is_none() {
+                continue;
+            }
+            self.st.queue.push(cmd);
+        }
+    }
+
+    /// Enter, Esc and the arrow keys: applying or cancelling the transform box, and moving
+    /// it or the selected layers by a pixel (or, with Shift, by the nudge distance).
+    fn editing_keys(&mut self, ctx: &egui::Context) {
+        let far = self.st.prefs.f64("nav.nudge").round() as i64;
+        let crop_tool = self.st.tool == ToolId::Crop;
+        let crop_delete = self.st.tool_settings(ToolId::Crop).bool("crop.delete");
+        let sampling = crate::prefs::sampling(&self.st.prefs, "transform");
+        let Some(d) = self.st.active_mut() else { return };
+        let cropping = crop_tool && d.crop.is_some();
+        let boxed = d.transform.is_some() || cropping;
+        let (enter, escape, arrows, held) = ctx.input_mut(|i| {
+            let step = if i.modifiers.shift { far } else { 1 };
+            let mut d = [0i64, 0];
+            for (key, dx, dy) in
+                [(Key::ArrowLeft, -1, 0), (Key::ArrowRight, 1, 0), (Key::ArrowUp, 0, -1), (Key::ArrowDown, 0, 1)]
+            {
+                let n = i.count_and_consume_key(Modifiers::SHIFT, key) + i.count_and_consume_key(Modifiers::NONE, key);
+                d[0] += dx * step * n as i64;
+                d[1] += dy * step * n as i64;
+            }
+            let held = [Key::ArrowLeft, Key::ArrowRight, Key::ArrowUp, Key::ArrowDown].iter().any(|k| i.key_down(*k));
+            // Enter and Esc belong to the box only while there is one.
+            let enter = boxed && i.consume_key(Modifiers::NONE, Key::Enter);
+            let escape = boxed && i.consume_key(Modifiers::NONE, Key::Escape);
+            (enter, escape, d, held)
+        });
+        if cropping && d.transform.is_none() {
+            if enter {
+                let b = d.crop.take().expect("cropping");
+                if b.canvas() != d.doc().canvas || b.angle != 0.0 {
+                    d.crop_to(&b, crop_delete, sampling);
+                }
+            } else if escape {
+                d.crop = None;
+                d.revision += 1;
+            }
+            return;
+        }
+        if d.transform.is_some() {
+            if enter {
+                d.commit_pending();
+            } else if escape {
+                d.cancel_transform();
+            } else if arrows != [0, 0]
+                && let Some(s) = d.transform.as_ref()
+            {
+                let m = s.current.then(opal_core::geom::Affine::translate(arrows[0] as f64, arrows[1] as f64));
+                d.set_box(m, None);
+            }
+            return;
+        }
+        if arrows != [0, 0] && !d.selection().is_empty() {
+            match crate::move_tool::locked_in_selection(d) {
+                Some(name) => self.st.notify(format!("\"{name}\" is locked, so it cannot be moved. Unlock it first.")),
+                None => d.nudge_selection(arrows),
+            }
+        } else if !held && d.pending_label() == Some("Nudge") {
+            d.commit_pending();
         }
     }
 
@@ -347,7 +439,7 @@ impl OpalApp {
             for l in &d.doc().layers {
                 (std::sync::Arc::as_ptr(l) as usize).hash(&mut h);
             }
-            d.active_layer.hash(&mut h);
+            d.active_layer().hash(&mut h);
             d.expanded.len().hash(&mut h);
             d.view.zoom.to_bits().hash(&mut h);
             d.view.offset.x.to_bits().hash(&mut h);
@@ -375,7 +467,19 @@ impl OpalApp {
         let weak = self.st.palette.weak_text;
         ui.horizontal(|ui| {
             let tool = self.st.tool.info();
-            ui.label(RichText::new(format!("{}  {}", tool.icon, tool.description)).color(weak));
+            // A recent notice, for a few seconds, instead of the tool's description.
+            const SHOWN: std::time::Duration = std::time::Duration::from_secs(6);
+            match &self.st.notice {
+                Some((text, at)) if at.elapsed() < SHOWN => {
+                    ui.label(
+                        RichText::new(format!("{}  {text}", crate::icons::INFO)).color(self.st.palette.strong_text),
+                    );
+                    ui.ctx().request_repaint_after(SHOWN.saturating_sub(at.elapsed()));
+                }
+                _ => {
+                    ui.label(RichText::new(format!("{}  {}", tool.icon, tool.description)).color(weak));
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some((used, budget)) = self.st.gpu.memory {
                     ui.label(RichText::new(format!("GPU {} / {}", bytes(used), bytes(budget))).color(weak))
@@ -466,6 +570,7 @@ impl eframe::App for OpalApp {
         self.sync_panes();
         self.handle_exit(&ctx);
         self.save_settings_if_due(&ctx);
+        self.st.thumbs.end_frame();
         // Changes made after something was drawn this frame (commands run at the end of
         // the frame, a panel changing a layer after the canvas drew it) need another frame
         // to show.

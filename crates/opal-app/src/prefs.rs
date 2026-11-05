@@ -1,8 +1,91 @@
 //! The preferences: every application-wide setting.
 
-use crate::settings::{Def, Init, Kind};
+use crate::settings::{Def, Init, Kind, Settings};
+use opal_core::resample::{Method, Sampling};
 
-pub const SECTIONS: &[&str] = &["Interface", "Canvas", "Navigation", "Export"];
+pub const SECTIONS: &[&str] = &["Interface", "Canvas", "Navigation", "Transform", "Resize", "Export"];
+
+/// The resampling methods, as a setting's choices.
+const METHODS: &[(&str, &str)] =
+    &[("nearest", "Nearest"), ("bilinear", "Bilinear"), ("bicubic", "Bicubic"), ("lanczos", "Lanczos")];
+
+/// One of the five settings that make up a [`Sampling`], under the key prefix `$p`.
+macro_rules! sampling_def {
+    ($p:literal, $section:literal, method) => {
+        Def {
+            key: concat!($p, ".method"),
+            label: "Resampling",
+            help: "How pixels are computed at another size or angle. Bicubic suits photos; \
+                   Lanczos is sharper still, with more ringing at hard edges; Bilinear is \
+                   softer; Nearest keeps hard square pixels, for pixel art.",
+            section: $section,
+            kind: Kind::Choice(METHODS),
+            default: Init::Choice("bicubic"),
+            advanced: false,
+        }
+    };
+    ($p:literal, $section:literal, b) => {
+        Def {
+            key: concat!($p, ".bicubic_b"),
+            label: "Bicubic blur (B)",
+            help: "The B of the Mitchell–Netravali cubic: 0 is sharpest (Catmull–Rom with C = \
+                   0.5); 1/3 with C = 1/3 is Mitchell's softer choice; 1 is a B-spline, smooth \
+                   and blurry.",
+            section: $section,
+            kind: Kind::Float { min: 0.0, max: 1.0, decimals: 3, suffix: "", log: false },
+            default: Init::Float(0.0),
+            advanced: true,
+        }
+    };
+    ($p:literal, $section:literal, c) => {
+        Def {
+            key: concat!($p, ".bicubic_c"),
+            label: "Bicubic sharpening (C)",
+            help: "The C of the Mitchell–Netravali cubic: more sharpens edges, and rings more.",
+            section: $section,
+            kind: Kind::Float { min: 0.0, max: 1.0, decimals: 3, suffix: "", log: false },
+            default: Init::Float(0.5),
+            advanced: true,
+        }
+    };
+    ($p:literal, $section:literal, lobes) => {
+        Def {
+            key: concat!($p, ".lanczos_lobes"),
+            label: "Lanczos lobes",
+            help: "How far Lanczos reaches: more lobes keep finer detail and ring more.",
+            section: $section,
+            kind: Kind::Choice(&[("2", "2"), ("3", "3"), ("4", "4")]),
+            default: Init::Choice("3"),
+            advanced: true,
+        }
+    };
+    ($p:literal, $section:literal, anti_ringing) => {
+        Def {
+            key: concat!($p, ".anti_ringing"),
+            label: "Anti-ringing",
+            help: "Keeps each pixel within the range of the source pixels nearest it, which \
+                   removes the light and dark halos sharp filters draw along hard edges.",
+            section: $section,
+            kind: Kind::Bool,
+            default: Init::Bool(true),
+            advanced: true,
+        }
+    };
+}
+
+/// The sampling the five settings under `prefix` describe.
+pub fn sampling(p: &Settings, prefix: &str) -> Sampling {
+    let method = match p.choice(&format!("{prefix}.method")).as_str() {
+        "nearest" => Method::Nearest,
+        "bilinear" => Method::Bilinear,
+        "lanczos" => Method::Lanczos { lobes: p.choice(&format!("{prefix}.lanczos_lobes")).parse().unwrap_or(3) },
+        _ => Method::Bicubic {
+            b: p.f64(&format!("{prefix}.bicubic_b")) as f32,
+            c: p.f64(&format!("{prefix}.bicubic_c")) as f32,
+        },
+    };
+    Sampling { method, anti_ringing: p.bool(&format!("{prefix}.anti_ringing")) }
+}
 
 pub static PREFS: &[Def] = &[
     // Interface
@@ -43,6 +126,15 @@ pub static PREFS: &[Def] = &[
         section: "Interface",
         kind: Kind::Float { min: 75.0, max: 200.0, decimals: 0, suffix: "%", log: false },
         default: Init::Float(100.0),
+        advanced: false,
+    },
+    Def {
+        key: "ui.layer_thumbs",
+        label: "Layer thumbnails",
+        help: "A small picture of each layer's content in the Layers panel.",
+        section: "Interface",
+        kind: Kind::Choice(&[("off", "Off"), ("small", "Small"), ("large", "Large")]),
+        default: Init::Choice("small"),
         advanced: false,
     },
     Def {
@@ -170,7 +262,104 @@ pub static PREFS: &[Def] = &[
         default: Init::Float(100.0),
         advanced: true,
     },
+    Def {
+        key: "nav.nudge",
+        label: "Shift+arrow moves by",
+        help: "The arrow keys move the selected layers (or the transform box) by one pixel; \
+               with Shift, by this many.",
+        section: "Navigation",
+        kind: Kind::Float { min: 2.0, max: 500.0, decimals: 0, suffix: " px", log: true },
+        default: Init::Float(10.0),
+        advanced: true,
+    },
+    // Transform
+    sampling_def!("transform", "Transform", method),
+    sampling_def!("transform", "Transform", b),
+    sampling_def!("transform", "Transform", c),
+    sampling_def!("transform", "Transform", lobes),
+    sampling_def!("transform", "Transform", anti_ringing),
+    Def {
+        key: "transform.fit_large",
+        label: "Shrink large pastes to fit",
+        help: "A pasted image larger than the canvas starts shrunk to fit inside it (it keeps \
+               all its pixels, so enlarging it again loses nothing). Off: it starts at its own \
+               size.",
+        section: "Transform",
+        kind: Kind::Bool,
+        default: Init::Bool(true),
+        advanced: false,
+    },
+    Def {
+        key: "transform.aspect_locked",
+        label: "Keep the aspect ratio",
+        help: "Scaling with a corner or edge keeps the width and height in proportion; Shift \
+               while dragging does the opposite. The lock button on the box switches this too.",
+        section: "Transform",
+        kind: Kind::Bool,
+        default: Init::Bool(true),
+        advanced: false,
+    },
+    Def {
+        key: "transform.snapping",
+        label: "Snapping",
+        help: "While dragging, edges and centers snap to the canvas's and to other layers'. Alt \
+               while dragging does the opposite. The snapping button on the box switches this too.",
+        section: "Transform",
+        kind: Kind::Bool,
+        default: Init::Bool(true),
+        advanced: false,
+    },
+    Def {
+        key: "transform.snap_distance",
+        label: "Snapping distance",
+        help: "How close, on screen, an edge must come to snap.",
+        section: "Transform",
+        kind: Kind::Float { min: 1.0, max: 40.0, decimals: 0, suffix: " px", log: false },
+        default: Init::Float(8.0),
+        advanced: true,
+    },
+    Def {
+        key: "transform.rotate_step",
+        label: "Shift rotates in steps of",
+        help: "Holding Shift while rotating turns in steps of this angle.",
+        section: "Transform",
+        kind: Kind::Float { min: 1.0, max: 90.0, decimals: 1, suffix: "°", log: false },
+        default: Init::Float(15.0),
+        advanced: true,
+    },
+    Def {
+        key: "transform.draft",
+        label: "Faster drawing while dragging",
+        help: "While a corner, edge or the box itself is being dragged, draw with Bilinear, \
+               which keeps up with large images; the chosen method takes over on release.",
+        section: "Transform",
+        kind: Kind::Bool,
+        default: Init::Bool(true),
+        advanced: true,
+    },
+    // Resize
+    sampling_def!("resize", "Resize", method),
+    sampling_def!("resize", "Resize", b),
+    sampling_def!("resize", "Resize", c),
+    sampling_def!("resize", "Resize", lobes),
+    sampling_def!("resize", "Resize", anti_ringing),
+    Def {
+        key: "resize.resample",
+        label: "Resample pixels",
+        help: "Off: layers keep their pixels and are drawn at the new size, so resizing back \
+               later loses nothing (the file stays as large as it was). On: pixel layers are \
+               resampled at the new size now, which makes a smaller image smaller on disk too.",
+        section: "Resize",
+        kind: Kind::Bool,
+        default: Init::Bool(false),
+        advanced: false,
+    },
     // Export
+    sampling_def!("export", "Export", method),
+    sampling_def!("export", "Export", b),
+    sampling_def!("export", "Export", c),
+    sampling_def!("export", "Export", lobes),
+    sampling_def!("export", "Export", anti_ringing),
     Def {
         key: "export.jpeg_quality",
         label: "JPEG quality",

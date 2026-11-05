@@ -267,9 +267,10 @@ impl Layer {
     /// The bounding box of the outlines of everything in the layer, or `None` if it is
     /// empty.
     pub fn bounds(&self) -> Option<FRect> {
-        self.all_objects().iter().filter_map(|o| o.bounds()).reduce(|a, b| {
-            FRect::new(a.x0.min(b.x0), a.y0.min(b.y0), a.x1.max(b.x1), a.y1.max(b.y1))
-        })
+        self.all_objects()
+            .iter()
+            .filter_map(|o| o.bounds())
+            .reduce(|a, b| FRect::new(a.x0.min(b.x0), a.y0.min(b.y0), a.x1.max(b.x1), a.y1.max(b.y1)))
     }
 }
 

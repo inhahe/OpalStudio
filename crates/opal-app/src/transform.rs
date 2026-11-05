@@ -1,0 +1,718 @@
+//! The transform box: placing a paste, and transforming layers.
+//!
+//! A session keeps the document being transformed as the document's pending edit, so the
+//! whole session becomes one history state ("Paste" or "Transform") when committed, and
+//! cancelling leaves the document as it was. Any other change to the document commits the
+//! session first (see [`DocState::commit_pending`]).
+//!
+//! The box is a rectangle, `frame`, in its own coordinates, carried into the document by
+//! `current`. For one object, the frame is the object's own frame and `current` its
+//! transform; for several, the frame is their bounding box and starts untransformed. Every
+//! object moves by the box's change since the session began.
+
+use crate::clipboard::Pasted;
+use crate::doc::{DocState, Pending};
+use opal_core::document::{
+    Document, ImageObject, Layer, LayerContent, LayerId, Object, ObjectId, ObjectKind, PixelObject, Position,
+};
+use opal_core::geom::{Affine, FRect, IRect};
+use opal_core::resample::{self, Sampling};
+use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Paste,
+    Transform,
+}
+
+/// An object the box moves.
+#[derive(Clone, Debug)]
+pub struct Target {
+    pub layer: LayerId,
+    pub object: ObjectId,
+    /// Its transform when the session began.
+    pub start: Affine,
+    /// Whether it was a pixel object, turned into an image object for the session; it
+    /// becomes pixels again if it ends where whole pixels can hold it exactly.
+    pub was_pixels: bool,
+}
+
+/// Where a paste goes.
+#[derive(Clone, Debug)]
+pub struct PasteInto {
+    /// The new layer the pasted image goes on, and where it sits.
+    pub layer: LayerId,
+    pub position: Position,
+    pub name: String,
+    /// The layer it can go into instead (baked into its pixels when committed), if there is
+    /// a suitable one.
+    pub active: Option<LayerId>,
+    /// Whether it goes into `active` rather than onto the new layer.
+    pub into_active: bool,
+}
+
+/// What a drag on the box does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Handle {
+    Move,
+    Rotate,
+    /// A corner, clockwise from the frame's top-left (0) to its bottom-left (3).
+    Corner(usize),
+    /// An edge: top (0), right (1), bottom (2), left (3).
+    Edge(usize),
+}
+
+/// A drag in progress: what is dragged, where it began (document pixels), and the box's
+/// transform then.
+#[derive(Clone, Copy, Debug)]
+pub struct Drag {
+    pub handle: Handle,
+    pub from: [f64; 2],
+    pub start: Affine,
+}
+
+/// The pointer and keys during a drag, and the settings that shape it.
+#[derive(Clone, Copy, Debug)]
+pub struct DragInput {
+    pub pointer: [f64; 2],
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub aspect_locked: bool,
+    pub snapping: bool,
+    /// How close (document pixels) an edge must come to snap.
+    pub snap_distance: f64,
+    /// Shift rotates in steps of this many radians.
+    pub rotate_step: f64,
+}
+
+/// Lines to snap to: x coordinates of vertical lines and y coordinates of horizontal ones.
+#[derive(Clone, Debug, Default)]
+pub struct SnapTargets {
+    pub xs: Vec<f64>,
+    pub ys: Vec<f64>,
+}
+
+/// The snap lines a drag ended on, to show.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Guides {
+    pub xs: Vec<f64>,
+    pub ys: Vec<f64>,
+}
+
+/// The box as numbers: where the frame's top-left corner is (document pixels), its size in
+/// the document, its angle in degrees (clockwise), and whether it is mirrored.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Params {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub angle: f64,
+    pub mirrored: bool,
+}
+
+pub struct Session {
+    pub kind: Kind,
+    pub targets: Vec<Target>,
+    pub frame: FRect,
+    /// The box's transform when the session began, and now.
+    pub start: Affine,
+    pub current: Affine,
+    pub sampling: Sampling,
+    pub paste: Option<PasteInto>,
+    /// The layers selected before, restored by cancelling (the active one last).
+    pub was_selected: Vec<LayerId>,
+    pub drag: Option<Drag>,
+    pub guides: Guides,
+    /// Whether the objects are drawn with draft sampling now (while a drag lasts).
+    pub draft: bool,
+}
+
+/// The smallest scale a drag may leave along an axis, so the box never collapses.
+const MIN_SCALE: f64 = 1e-4;
+
+impl Session {
+    pub fn label(&self) -> &'static str {
+        match self.kind {
+            Kind::Paste => "Paste",
+            Kind::Transform => "Transform",
+        }
+    }
+
+    /// The box's corners in the document, clockwise from the frame's top-left.
+    pub fn corners(&self) -> [[f64; 2]; 4] {
+        self.frame.corners().map(|p| self.current.apply(p))
+    }
+
+    pub fn params(&self) -> Params {
+        let m = &self.current;
+        let sx = m.a.hypot(m.b);
+        let sy = m.determinant() / sx;
+        let [x, y] = m.apply([self.frame.x0, self.frame.y0]);
+        Params {
+            x,
+            y,
+            width: sx * self.frame.width(),
+            height: sy.abs() * self.frame.height(),
+            angle: m.b.atan2(m.a).to_degrees(),
+            mirrored: sy < 0.0,
+        }
+    }
+
+    /// The transform that puts the box where `p` says.
+    pub fn with_params(&self, p: &Params) -> Affine {
+        let sx = (p.width / self.frame.width()).max(MIN_SCALE);
+        let sy = (p.height / self.frame.height()).max(MIN_SCALE) * if p.mirrored { -1.0 } else { 1.0 };
+        Affine::translate(-self.frame.x0, -self.frame.y0)
+            .then(Affine::scale(sx, sy))
+            .then(Affine::rotate(p.angle.to_radians()))
+            .then(Affine::translate(p.x, p.y))
+    }
+
+    /// Where the box would be with the drag `drag` at `input`, and the snap lines used.
+    pub fn dragged(&self, drag: &Drag, input: &DragInput, targets: &SnapTargets) -> (Affine, Guides) {
+        let start = drag.start;
+        let Some(inv) = start.inverse() else { return (start, Guides::default()) };
+        let snapping = input.snapping != input.alt;
+        let tol = if snapping { input.snap_distance } else { -1.0 };
+        let frame = self.frame;
+        let corners = frame.corners();
+        let center = frame.center();
+        match drag.handle {
+            Handle::Move => {
+                let mut d = [input.pointer[0] - drag.from[0], input.pointer[1] - drag.from[1]];
+                if input.shift {
+                    d = constrain(d);
+                }
+                let moved = start.then(Affine::translate(d[0], d[1]));
+                let b = moved.bounds(&frame);
+                let (sx, gx) = snap(&[b.x0, (b.x0 + b.x1) * 0.5, b.x1], &targets.xs, tol);
+                let (sy, gy) = snap(&[b.y0, (b.y0 + b.y1) * 0.5, b.y1], &targets.ys, tol);
+                let mut m = moved.then(Affine::translate(sx, sy));
+                // A box on the pixel grid stays on it, so a paste at its own size stays crisp.
+                if start.grid_map().is_some() {
+                    m.e = m.e.round();
+                    m.f = m.f.round();
+                }
+                (m, Guides { xs: gx.into_iter().collect(), ys: gy.into_iter().collect() })
+            }
+            Handle::Rotate => {
+                let c = start.apply(center);
+                let a0 = (drag.from[1] - c[1]).atan2(drag.from[0] - c[0]);
+                let a1 = (input.pointer[1] - c[1]).atan2(input.pointer[0] - c[0]);
+                let mut turn = a1 - a0;
+                if input.shift && input.rotate_step > 0.0 {
+                    let now = start.b.atan2(start.a);
+                    let target = ((now + turn) / input.rotate_step).round() * input.rotate_step;
+                    turn = target - now;
+                }
+                (start.then(Affine::rotate(turn).about(c[0], c[1])), Guides::default())
+            }
+            Handle::Corner(k) | Handle::Edge(k) => {
+                let corner = matches!(drag.handle, Handle::Corner(_));
+                // The point dragged, in the frame's coordinates, and the one held still.
+                let grabbed = if corner { corners[k] } else { midpoint(corners[k], corners[(k + 1) % 4]) };
+                let held = if input.ctrl {
+                    center
+                } else if corner {
+                    corners[(k + 2) % 4]
+                } else {
+                    midpoint(corners[(k + 2) % 4], corners[(k + 3) % 4])
+                };
+                // Snap the dragged point itself.
+                let (sx, gx) = snap(&[input.pointer[0]], &targets.xs, tol);
+                let (sy, gy) = snap(&[input.pointer[1]], &targets.ys, tol);
+                let p = inv.apply([input.pointer[0] + sx, input.pointer[1] + sy]);
+                let d0 = [grabbed[0] - held[0], grabbed[1] - held[1]];
+                let d = [p[0] - held[0], p[1] - held[1]];
+                let ratio = |num: f64, den: f64| if den.abs() < 1e-12 { 1.0 } else { num / den };
+                let locked = input.aspect_locked != input.shift;
+                let (mut kx, mut ky) = match (corner, k % 2) {
+                    (true, _) => (ratio(d[0], d0[0]), ratio(d[1], d0[1])),
+                    (false, 0) => (1.0, ratio(d[1], d0[1])),
+                    (false, _) => (ratio(d[0], d0[0]), 1.0),
+                };
+                if locked {
+                    let s = if corner {
+                        // The pointer projected onto the diagonal through the held point.
+                        (d[0] * d0[0] + d[1] * d0[1]) / (d0[0] * d0[0] + d0[1] * d0[1]).max(1e-12)
+                    } else if k % 2 == 0 {
+                        ky
+                    } else {
+                        kx
+                    };
+                    (kx, ky) = (s, s);
+                }
+                let keep = |k: f64| if k.abs() < MIN_SCALE { MIN_SCALE.copysign(k) } else { k };
+                let local = Affine::scale(keep(kx), keep(ky)).about(held[0], held[1]);
+                (local.then(start), Guides { xs: gx.into_iter().collect(), ys: gy.into_iter().collect() })
+            }
+        }
+    }
+
+    /// The transform that fits the box inside `canvas` (or, with `fill`, makes it cover
+    /// the canvas), centered, keeping its angle and aspect ratio.
+    pub fn fitted(&self, canvas: &IRect, fill: bool) -> Affine {
+        let p = self.params();
+        let (w, h) = (p.width, p.height);
+        let (cw, ch) = (canvas.width() as f64, canvas.height() as f64);
+        let (s, c) = p.angle.to_radians().sin_cos();
+        let (s, c) = (s.abs(), c.abs());
+        let k = if fill {
+            ((cw * c + ch * s) / w).max((cw * s + ch * c) / h)
+        } else {
+            (cw / (w * c + h * s)).min(ch / (w * s + h * c))
+        };
+        let sized = self.with_params(&Params { width: w * k, height: h * k, ..p });
+        // Center it on the canvas.
+        let centered = sized.apply(self.frame.center());
+        let [cx, cy] = canvas.to_f().center();
+        sized.then(Affine::translate(cx - centered[0], cy - centered[1]))
+    }
+}
+
+fn midpoint(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
+    [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5]
+}
+
+/// A movement kept horizontal, vertical or diagonal, whichever is nearest.
+fn constrain([x, y]: [f64; 2]) -> [f64; 2] {
+    let (ax, ay) = (x.abs(), y.abs());
+    if ax > 2.0 * ay {
+        [x, 0.0]
+    } else if ay > 2.0 * ax {
+        [0.0, y]
+    } else {
+        let m = (ax + ay) * 0.5;
+        [m.copysign(x), m.copysign(y)]
+    }
+}
+
+/// The smallest shift that brings one of `values` onto one of `targets`, if one is within
+/// `tol`, with the target it lands on.
+fn snap(values: &[f64], targets: &[f64], tol: f64) -> (f64, Option<f64>) {
+    let mut best: Option<(f64, f64)> = None;
+    for &v in values {
+        for &t in targets {
+            let d = t - v;
+            if d.abs() <= tol && best.is_none_or(|(b, _)| d.abs() < b.abs()) {
+                best = Some((d, t));
+            }
+        }
+    }
+    best.map_or((0.0, None), |(d, t)| (d, Some(t)))
+}
+
+/// The lines things snap to: the canvas's edges and center, and the edges and centers of
+/// the visible layers other than `except`.
+pub fn snap_targets(doc: &Document, except: &[LayerId]) -> SnapTargets {
+    let c = doc.canvas.rect().to_f();
+    let mut t = SnapTargets { xs: vec![c.x0, c.center()[0], c.x1], ys: vec![c.y0, c.center()[1], c.y1] };
+    doc.for_each_layer(&mut |l, _| {
+        if l.visible
+            && !l.is_group()
+            && !except.contains(&l.id)
+            && let Some(b) = l.bounds()
+        {
+            t.xs.extend([b.x0, b.center()[0], b.x1]);
+            t.ys.extend([b.y0, b.center()[1], b.y1]);
+        }
+    });
+    t
+}
+
+/// The object `id` in layer `layer` of `doc`, for changing.
+fn object_mut(doc: &mut Document, layer: LayerId, id: ObjectId) -> Option<&mut Object> {
+    match &mut doc.layer_mut(layer)?.content {
+        LayerContent::Objects(objects) => objects.iter_mut().find(|o| o.id == id),
+        LayerContent::Group(_) => None,
+    }
+}
+
+/// Turns the pixel objects of `layer` (and of the layers inside it) into image objects,
+/// recording every object as a target.
+fn take_targets(layer: &mut Layer, sampling: Sampling, out: &mut Vec<(Target, FRect)>) {
+    let id = layer.id;
+    match &mut layer.content {
+        LayerContent::Objects(objects) => {
+            for o in objects {
+                let was_pixels = matches!(o.kind, ObjectKind::Pixels(_));
+                if let ObjectKind::Pixels(p) = &o.kind {
+                    let Some(frame) = p.image.content_bounds() else { continue };
+                    o.kind = ObjectKind::Image(ImageObject {
+                        image: p.image.clone(),
+                        frame,
+                        transform: Affine::translate(p.offset[0] as f64, p.offset[1] as f64),
+                        sampling,
+                    });
+                }
+                if let ObjectKind::Image(i) = &o.kind {
+                    let target = Target { layer: id, object: o.id, start: i.transform, was_pixels };
+                    out.push((target, i.frame.to_f()));
+                }
+            }
+        }
+        LayerContent::Group(children) => {
+            for c in children {
+                take_targets(Arc::make_mut(c), sampling, out);
+            }
+        }
+    }
+}
+
+impl DocState {
+    /// Starts placing `pasted` on a new layer at `position`, carried into the document by
+    /// `place`. `into` is the layer it may go into instead.
+    pub fn begin_paste(
+        &mut self,
+        pasted: &Pasted,
+        place: Affine,
+        sampling: Sampling,
+        position: Position,
+        into: Option<LayerId>,
+    ) {
+        self.commit_pending();
+        let was_selected = self.selection_with_active_last();
+        let (layer_id, object) = (self.ids.layer(), self.ids.object());
+        let frame = IRect::from_size(i64::from(pasted.width), i64::from(pasted.height));
+        let image = ImageObject { image: Arc::new(pasted.image.clone()), frame, transform: place, sampling };
+        let name = "Pasted image".to_owned();
+        let layer =
+            Layer::with_objects(layer_id, name.clone(), vec![Object { id: object, kind: ObjectKind::Image(image) }]);
+        let mut doc = self.history.doc().clone();
+        if doc.insert(position, layer).is_err() {
+            return;
+        }
+        self.pending = Some(Pending { doc, label: "Paste".into() });
+        self.transform = Some(Session {
+            kind: Kind::Paste,
+            targets: vec![Target { layer: layer_id, object, start: place, was_pixels: false }],
+            frame: frame.to_f(),
+            start: place,
+            current: place,
+            sampling,
+            paste: Some(PasteInto { layer: layer_id, position, name, active: into, into_active: false }),
+            was_selected,
+            drag: None,
+            guides: Guides::default(),
+            draft: false,
+        });
+        self.select_only(layer_id);
+        self.revision += 1;
+    }
+
+    /// Starts transforming the selected layers. Pixel objects become image objects for the
+    /// session, drawn with `sampling` (image objects keep their own). Returns whether there
+    /// was anything to transform.
+    pub fn begin_transform(&mut self, sampling: Sampling) -> bool {
+        self.commit_pending();
+        let was_selected = self.selection_with_active_last();
+        let mut doc = self.history.doc().clone();
+        let mut found = Vec::new();
+        for id in self.selection() {
+            if let Some(l) = doc.layer_mut(id) {
+                take_targets(l, sampling, &mut found);
+            }
+        }
+        if found.is_empty() {
+            return false;
+        }
+        let (frame, start) = match &found[..] {
+            [(t, frame)] => (*frame, t.start),
+            _ => {
+                let b = found
+                    .iter()
+                    .map(|(t, f)| t.start.bounds(f))
+                    .reduce(|a, b| FRect::new(a.x0.min(b.x0), a.y0.min(b.y0), a.x1.max(b.x1), a.y1.max(b.y1)))
+                    .expect("not empty");
+                (b, Affine::IDENTITY)
+            }
+        };
+        // One object keeps its own sampling for the box to show; several share the box's.
+        let sampling = match &found[..] {
+            [(t, _)] if !t.was_pixels => {
+                match &doc.layer(t.layer).and_then(|l| l.objects().iter().find(|o| o.id == t.object)) {
+                    Some(Object { kind: ObjectKind::Image(i), .. }) => i.sampling,
+                    _ => sampling,
+                }
+            }
+            _ => sampling,
+        };
+        self.pending = Some(Pending { doc, label: "Transform".into() });
+        self.transform = Some(Session {
+            kind: Kind::Transform,
+            targets: found.into_iter().map(|(t, _)| t).collect(),
+            frame,
+            start,
+            current: start,
+            sampling,
+            paste: None,
+            was_selected,
+            drag: None,
+            guides: Guides::default(),
+            draft: false,
+        });
+        self.revision += 1;
+        true
+    }
+
+    /// Puts the box at `m`, drawing with `draft` sampling (while dragging) or the session's.
+    /// Nothing happens if that is how it already is.
+    pub fn set_box(&mut self, m: Affine, draft: Option<Sampling>) {
+        let Some(s) = self.transform.as_mut() else { return };
+        let Some(inv) = s.start.inverse() else { return };
+        if m.inverse().is_none() || (m == s.current && draft.is_some() == s.draft) {
+            return;
+        }
+        s.current = m;
+        s.draft = draft.is_some();
+        let delta = inv.then(m);
+        let sampling = draft.unwrap_or(s.sampling);
+        let targets = s.targets.clone();
+        let Some(p) = self.pending.as_mut() else { return };
+        for t in &targets {
+            if let Some(Object { kind: ObjectKind::Image(i), .. }) = object_mut(&mut p.doc, t.layer, t.object) {
+                i.transform = t.start.then(delta);
+                i.sampling = sampling;
+            }
+        }
+        self.revision += 1;
+    }
+
+    /// Changes how the session's objects are drawn.
+    pub fn set_box_sampling(&mut self, sampling: Sampling) {
+        let Some(s) = self.transform.as_mut() else { return };
+        s.sampling = sampling;
+        // Redrawn even though the box stays where it is.
+        s.draft = true;
+        let m = s.current;
+        self.set_box(m, None);
+    }
+
+    /// For a paste, switches between placing it on its new layer and putting it into the
+    /// active layer (where it is baked into the pixels when committed).
+    pub fn toggle_paste_into_active(&mut self) {
+        let Some(s) = self.transform.as_mut() else { return };
+        let Some(paste) = s.paste.as_mut() else { return };
+        let Some(dest) = paste.active else { return };
+        let Some(p) = self.pending.as_mut() else { return };
+        let t = &mut s.targets[0];
+        let Some(object) = object_mut(&mut p.doc, t.layer, t.object).cloned() else { return };
+        if paste.into_active {
+            // Back onto its own layer.
+            if let Some(Layer { content: LayerContent::Objects(objects), .. }) = p.doc.layer_mut(dest) {
+                objects.retain(|o| o.id != object.id);
+            }
+            let layer = Layer::with_objects(paste.layer, paste.name.clone(), vec![object]);
+            if p.doc.insert(paste.position, layer).is_err() {
+                return;
+            }
+            t.layer = paste.layer;
+        } else {
+            let Some(Layer { content: LayerContent::Objects(objects), .. }) = p.doc.layer_mut(dest) else { return };
+            objects.push(object);
+            let _ = p.doc.remove(paste.layer);
+            t.layer = dest;
+        }
+        paste.into_active = !paste.into_active;
+        let active = t.layer;
+        self.select_only(active);
+        self.revision += 1;
+    }
+
+    /// Ends the session, leaving the document as it was.
+    pub fn cancel_transform(&mut self) {
+        let Some(s) = self.transform.take() else { return };
+        self.pending = None;
+        self.revision += 1;
+        let doc = self.history.doc();
+        let kept: Vec<LayerId> = s.was_selected.into_iter().filter(|&l| doc.layer(l).is_some()).collect();
+        if let Some(&active) = kept.last() {
+            self.select_only(active);
+            for &l in &kept {
+                if !self.is_selected(l) {
+                    self.toggle_selected(l);
+                }
+            }
+            self.make_active(active);
+        }
+    }
+
+    /// Makes the session's result final in the pending document (called just before it is
+    /// committed): the chosen sampling everywhere, pixel objects that end on the pixel grid
+    /// back as pixels, and a paste into the active layer baked into it.
+    pub(crate) fn finish_transform(&mut self) {
+        let Some(s) = self.transform.take() else { return };
+        let Some(p) = self.pending.as_mut() else { return };
+        for t in &s.targets {
+            let Some(o) = object_mut(&mut p.doc, t.layer, t.object) else { continue };
+            let ObjectKind::Image(i) = &mut o.kind else { continue };
+            i.sampling = s.sampling;
+            if t.was_pixels
+                && let Some(g) = i.transform.grid_map()
+            {
+                // Exactly on the grid: pixels again. A plain move keeps the pixels as they
+                // are; a quarter turn or flip copies them, exactly.
+                o.kind = if (g.a, g.b, g.c, g.d) == (1, 0, 0, 1) {
+                    ObjectKind::Pixels(PixelObject { image: i.image.clone(), offset: [g.e, g.f] })
+                } else {
+                    let turned = resample::render_image(&i.image, &i.transform, &i.sampling, None);
+                    ObjectKind::Pixels(PixelObject { image: Arc::new(turned), offset: [0, 0] })
+                };
+            }
+        }
+        if let Some(paste) = &s.paste
+            && paste.into_active
+            && let Some(dest) = paste.active
+        {
+            bake_into(&mut p.doc, dest, s.targets[0].object);
+        }
+    }
+
+    /// The selected layers with the active one last (to restore them).
+    fn selection_with_active_last(&self) -> Vec<LayerId> {
+        let mut v: Vec<LayerId> = self.selection().into_iter().filter(|&l| Some(l) != self.active_layer()).collect();
+        v.extend(self.active_layer());
+        v
+    }
+}
+
+/// Draws image object `object` of layer `dest` into the layer's pixels: into its topmost
+/// pixel object if it has one there, else as a new pixel object.
+fn bake_into(doc: &mut Document, dest: LayerId, object: ObjectId) {
+    let Some(Layer { content: LayerContent::Objects(objects), .. }) = doc.layer_mut(dest) else { return };
+    let Some(at) = objects.iter().position(|o| o.id == object) else { return };
+    let ObjectKind::Image(i) = objects.remove(at).kind else { return };
+    match objects.last_mut() {
+        Some(Object { kind: ObjectKind::Pixels(p), .. }) => {
+            let local = i.transform.then(Affine::translate(-p.offset[0] as f64, -p.offset[1] as f64));
+            let drawn = resample::render_image(&i.image, &local, &i.sampling, None);
+            Arc::make_mut(&mut p.image).draw_over(&drawn);
+        }
+        _ => {
+            let drawn = resample::render_image(&i.image, &i.transform, &i.sampling, None);
+            objects.push(Object {
+                id: object,
+                kind: ObjectKind::Pixels(PixelObject { image: Arc::new(drawn), offset: [0, 0] }),
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(frame: FRect, current: Affine) -> Session {
+        Session {
+            kind: Kind::Transform,
+            targets: Vec::new(),
+            frame,
+            start: current,
+            current,
+            sampling: Sampling::default(),
+            paste: None,
+            was_selected: Vec::new(),
+            drag: None,
+            guides: Guides::default(),
+            draft: false,
+        }
+    }
+
+    fn input(pointer: [f64; 2]) -> DragInput {
+        DragInput {
+            pointer,
+            shift: false,
+            ctrl: false,
+            alt: false,
+            aspect_locked: true,
+            snapping: false,
+            snap_distance: 5.0,
+            rotate_step: 15f64.to_radians(),
+        }
+    }
+
+    fn close(a: [f64; 2], b: [f64; 2]) -> bool {
+        (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6
+    }
+
+    #[test]
+    fn a_corner_drag_scales_about_the_opposite_corner_keeping_the_aspect() {
+        let s = session(FRect::new(0.0, 0.0, 100.0, 50.0), Affine::translate(10.0, 10.0));
+        let drag = Drag { handle: Handle::Corner(2), from: [110.0, 60.0], start: s.current };
+        let (m, _) = s.dragged(&drag, &input([210.0, 70.0]), &SnapTargets::default());
+        let mut s2 = session(s.frame, m);
+        s2.current = m;
+        let c = s2.corners();
+        assert!(close(c[0], [10.0, 10.0]), "the opposite corner stays: {:?}", c[0]);
+        let p = s2.params();
+        assert!((p.width / p.height - 2.0).abs() < 1e-9, "aspect kept: {p:?}");
+        // Shift frees it: the corner follows the pointer.
+        let (m, _) = s.dragged(&drag, &DragInput { shift: true, ..input([210.0, 70.0]) }, &SnapTargets::default());
+        assert!(close(m.apply([100.0, 50.0]), [210.0, 70.0]));
+    }
+
+    #[test]
+    fn an_edge_drag_with_the_lock_open_scales_one_side() {
+        let s = session(FRect::new(0.0, 0.0, 100.0, 50.0), Affine::IDENTITY);
+        let drag = Drag { handle: Handle::Edge(1), from: [100.0, 25.0], start: s.current };
+        let free = DragInput { aspect_locked: false, ..input([150.0, 40.0]) };
+        let (m, _) = s.dragged(&drag, &free, &SnapTargets::default());
+        assert!(close(m.apply([100.0, 50.0]), [150.0, 50.0]), "only the width changes");
+        assert!(close(m.apply([0.0, 0.0]), [0.0, 0.0]), "the left edge stays");
+    }
+
+    #[test]
+    fn ctrl_scales_about_the_center() {
+        let s = session(FRect::new(0.0, 0.0, 100.0, 100.0), Affine::IDENTITY);
+        let drag = Drag { handle: Handle::Corner(2), from: [100.0, 100.0], start: s.current };
+        let (m, _) = s.dragged(&drag, &DragInput { ctrl: true, ..input([150.0, 150.0]) }, &SnapTargets::default());
+        assert!(close(m.apply([50.0, 50.0]), [50.0, 50.0]));
+        assert!(close(m.apply([100.0, 100.0]), [150.0, 150.0]));
+    }
+
+    #[test]
+    fn moves_snap_and_shift_rotation_steps() {
+        let s = session(FRect::new(0.0, 0.0, 100.0, 100.0), Affine::IDENTITY);
+        let targets = SnapTargets { xs: vec![500.0], ys: vec![] };
+        let drag = Drag { handle: Handle::Move, from: [50.0, 50.0], start: s.current };
+        let snapping = DragInput { snapping: true, ..input([447.0, 50.0]) };
+        let (m, g) = s.dragged(&drag, &snapping, &targets);
+        assert_eq!((m.e, m.f), (400.0, 0.0), "the right edge snaps to 500");
+        assert_eq!(g.xs, vec![500.0]);
+        let (m, _) = s.dragged(&drag, &DragInput { alt: true, ..snapping }, &targets);
+        assert_eq!(m.e, 397.0, "Alt turns snapping off for the drag");
+
+        let drag = Drag { handle: Handle::Rotate, from: [150.0, 50.0], start: s.current };
+        let (m, _) = s.dragged(&drag, &DragInput { shift: true, ..input([140.0, 90.0]) }, &targets);
+        let angle = m.b.atan2(m.a).to_degrees();
+        assert!((angle - 30.0).abs() < 1e-9, "steps of 15°: {angle}");
+    }
+
+    #[test]
+    fn params_round_trip_and_fit_keeps_inside_the_canvas() {
+        let s = session(FRect::new(0.0, 0.0, 300.0, 100.0), Affine::IDENTITY);
+        let p = Params { x: 20.0, y: 30.0, width: 150.0, height: 75.0, angle: 30.0, mirrored: true };
+        let mut s2 = session(s.frame, s.with_params(&p));
+        let q = s2.params();
+        for (a, b) in [(p.x, q.x), (p.y, q.y), (p.width, q.width), (p.height, q.height), (p.angle, q.angle)] {
+            assert!((a - b).abs() < 1e-9, "{p:?} vs {q:?}");
+        }
+        assert!(q.mirrored);
+        let canvas = IRect::from_size(400, 400);
+        s2.current = s2.fitted(&canvas, false);
+        let b = FRect::bounding(&s2.corners());
+        assert!(b.x0 >= -1e-6 && b.y0 >= -1e-6 && b.x1 <= 400.0 + 1e-6 && b.y1 <= 400.0 + 1e-6, "{b:?}");
+        assert!((b.x1 - b.x0 - 400.0).abs() < 1e-6 || (b.y1 - b.y0 - 400.0).abs() < 1e-6, "it touches two sides");
+        s2.current = s2.fitted(&canvas, true);
+        let inv = s2.current.inverse().unwrap();
+        for p in canvas.to_f().corners() {
+            let q = inv.apply(p);
+            assert!(
+                q[0] >= -1e-6 && q[0] <= 300.0 + 1e-6 && q[1] >= -1e-6 && q[1] <= 100.0 + 1e-6,
+                "fill covers the canvas"
+            );
+        }
+    }
+}

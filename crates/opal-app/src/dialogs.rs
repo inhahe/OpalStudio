@@ -21,6 +21,12 @@ pub fn show_all(ctx: &egui::Context, st: &mut AppState) {
         new_image(ctx, st);
     } else if st.export.is_some() {
         export(ctx, st);
+    } else if st.resize_image.is_some() {
+        resize_image(ctx, st);
+    } else if st.resize_canvas.is_some() {
+        resize_canvas(ctx, st);
+    } else if st.rotate_by.is_some() {
+        rotate_by(ctx, st);
     }
     preferences(ctx, st);
     about(ctx, st);
@@ -213,6 +219,20 @@ fn export(ctx: &egui::Context, st: &mut AppState) {
             ui.radio_value(&mut spec.kind, ExportKind::Jpeg, "JPEG");
         });
         ui.add_space(4.0);
+        if let Some(c) = st.doc(spec.doc).map(|d| d.doc().canvas) {
+            egui::Grid::new("export-size").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                size_fields(ui, &mut spec.width, &mut spec.height, &mut spec.keep_aspect, (c.width, c.height));
+            });
+            if (spec.width, spec.height) != (c.width, c.height) {
+                ui.label(
+                    RichText::new(
+                        "Resized as it is written, with the resampling below; the image itself stays as it is.",
+                    )
+                    .small()
+                    .color(st.palette.weak_text),
+                );
+            }
+        }
         let changed = settings::settings_ui(ui, &mut st.prefs, Show::Section("Export"), &palette, "export");
         if changed {
             st.settings_touched();
@@ -236,6 +256,199 @@ fn export(ctx: &egui::Context, st: &mut AppState) {
         }
         Some(false) => st.export = None,
         None => st.export = Some(spec),
+    }
+}
+
+/// Width and height fields, in pixels and percent of `original`, kept in proportion while
+/// `keep` is set. For a two-column grid.
+fn size_fields(ui: &mut egui::Ui, w: &mut u32, h: &mut u32, keep: &mut bool, original: (u32, u32)) {
+    let (ow, oh) = (f64::from(original.0), f64::from(original.1));
+    let before = (*w, *h);
+    ui.label("Width");
+    ui.horizontal(|ui| {
+        ui.add(egui::DragValue::new(w).range(1..=MAX_SIDE).suffix(" px"));
+        let mut pct = f64::from(*w) / ow * 100.0;
+        if ui.add(egui::DragValue::new(&mut pct).range(0.01..=10_000.0).suffix("%").max_decimals(2)).changed() {
+            *w = ((ow * pct / 100.0).round() as u32).clamp(1, MAX_SIDE);
+        }
+    });
+    ui.end_row();
+    ui.label("Height");
+    ui.horizontal(|ui| {
+        ui.add(egui::DragValue::new(h).range(1..=MAX_SIDE).suffix(" px"));
+        let mut pct = f64::from(*h) / oh * 100.0;
+        if ui.add(egui::DragValue::new(&mut pct).range(0.01..=10_000.0).suffix("%").max_decimals(2)).changed() {
+            *h = ((oh * pct / 100.0).round() as u32).clamp(1, MAX_SIDE);
+        }
+    });
+    ui.end_row();
+    ui.label("");
+    ui.checkbox(keep, "Keep the aspect ratio");
+    ui.end_row();
+    if *keep {
+        if *w != before.0 {
+            *h = ((f64::from(*w) * oh / ow).round() as u32).clamp(1, MAX_SIDE);
+        } else if *h != before.1 {
+            *w = ((f64::from(*h) * ow / oh).round() as u32).clamp(1, MAX_SIDE);
+        }
+    }
+}
+
+/// OK and Cancel (also Enter and Esc): `Some(true)` for OK.
+fn ok_cancel(ui: &mut egui::Ui, ok: &str) -> Option<bool> {
+    let mut done = None;
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        if ui.button(ok).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            done = Some(true);
+        }
+        if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            done = Some(false);
+        }
+    });
+    done
+}
+
+fn resize_image(ctx: &egui::Context, st: &mut AppState) {
+    let Some(mut spec) = st.resize_image.clone() else { return };
+    let Some(c) = st.active().map(|d| d.doc().canvas) else {
+        st.resize_image = None;
+        return;
+    };
+    let palette = st.palette;
+    let mut done = None;
+    egui::Modal::new(egui::Id::unique("resize-image")).show(ctx, |ui| {
+        ui.heading("Resize image");
+        ui.label("Scales everything in the image to a new size.");
+        ui.add_space(4.0);
+        egui::Grid::new("resize-image-size").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+            size_fields(ui, &mut spec.width, &mut spec.height, &mut spec.keep_aspect, (c.width, c.height));
+        });
+        ui.add_space(4.0);
+        if settings::settings_ui(ui, &mut st.prefs, Show::Section("Resize"), &palette, "resize") {
+            st.settings_touched();
+        }
+        let note = if st.prefs.bool("resize.resample") {
+            "Pixel layers will be resampled at the new size now: a smaller image takes less memory and a \
+             smaller file, and enlarging it again later cannot bring the detail back."
+        } else {
+            "Layers keep their pixels and are drawn at the new size, so resizing back later loses nothing; \
+             the file stays as large as it was."
+        };
+        ui.label(RichText::new(note).small().color(palette.weak_text));
+        done = ok_cancel(ui, "Resize");
+    });
+    match done {
+        Some(true) => {
+            st.resize_image = None;
+            let resample = st.prefs.bool("resize.resample");
+            st.resize_image(&spec, resample);
+        }
+        Some(false) => st.resize_image = None,
+        None => st.resize_image = Some(spec),
+    }
+}
+
+fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
+    let Some(mut spec) = st.resize_canvas.clone() else { return };
+    let Some(c) = st.active().map(|d| d.doc().canvas) else {
+        st.resize_canvas = None;
+        return;
+    };
+    let palette = st.palette;
+    let mut done = None;
+    egui::Modal::new(egui::Id::unique("resize-canvas")).show(ctx, |ui| {
+        ui.heading("Resize canvas");
+        ui.label("Changes the canvas, not what is on it: nothing past its new edges is removed.");
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut spec.by_margins, false, "New size");
+            ui.radio_value(&mut spec.by_margins, true, "Add to each side");
+        });
+        ui.add_space(4.0);
+        if spec.by_margins {
+            egui::Grid::new("resize-canvas-margins").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                for (name, i) in [("Left", 0), ("Top", 1), ("Right", 2), ("Bottom", 3)] {
+                    ui.label(name);
+                    ui.add(egui::DragValue::new(&mut spec.margins[i]).range(-30_000..=30_000).suffix(" px"));
+                    ui.end_row();
+                }
+            });
+            ui.label(RichText::new("Negative numbers cut that side.").small().color(palette.weak_text));
+        } else {
+            egui::Grid::new("resize-canvas-size").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                ui.label("Width");
+                ui.add(egui::DragValue::new(&mut spec.width).range(1..=MAX_SIDE).suffix(" px"));
+                ui.end_row();
+                ui.label("Height");
+                ui.add(egui::DragValue::new(&mut spec.height).range(1..=MAX_SIDE).suffix(" px"));
+                ui.end_row();
+                ui.label("Anchor").on_hover_text("Where the old canvas sits in the new one.");
+                egui::Grid::new("anchor").spacing([2.0, 2.0]).show(ui, |ui| {
+                    for y in 0..3u8 {
+                        for x in 0..3u8 {
+                            let on = spec.anchor == [x, y];
+                            let glyph = if on { "●" } else { "○" };
+                            if ui.add(egui::Button::new(glyph).selected(on).min_size(egui::vec2(22.0, 22.0))).clicked()
+                            {
+                                spec.anchor = [x, y];
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+                ui.end_row();
+            });
+        }
+        let n = spec.canvas(&c);
+        ui.label(
+            RichText::new(format!("The canvas will be {} × {} px.", n.width, n.height))
+                .small()
+                .color(palette.weak_text),
+        );
+        done = ok_cancel(ui, "Resize");
+    });
+    match done {
+        Some(true) => {
+            st.resize_canvas = None;
+            st.resize_canvas(&spec);
+        }
+        Some(false) => st.resize_canvas = None,
+        None => st.resize_canvas = Some(spec),
+    }
+}
+
+fn rotate_by(ctx: &egui::Context, st: &mut AppState) {
+    let Some(mut spec) = st.rotate_by.clone() else { return };
+    let palette = st.palette;
+    let mut done = None;
+    egui::Modal::new(egui::Id::unique("rotate-by")).show(ctx, |ui| {
+        ui.heading("Rotate by angle");
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label("Angle");
+            ui.add(
+                egui::DragValue::new(&mut spec.degrees).range(-360.0..=360.0).speed(0.25).suffix("°").max_decimals(2),
+            );
+            ui.label(RichText::new("clockwise").color(palette.weak_text));
+        });
+        ui.checkbox(&mut spec.grow, "Grow the canvas so nothing is cut off");
+        ui.label(
+            RichText::new("Layers keep their pixels, so turning again later loses nothing.")
+                .small()
+                .color(palette.weak_text),
+        );
+        done = ok_cancel(ui, "Rotate");
+    });
+    match done {
+        Some(true) => {
+            st.rotate_by = None;
+            if spec.degrees != 0.0 {
+                st.rotate_by(&spec);
+            }
+        }
+        Some(false) => st.rotate_by = None,
+        None => st.rotate_by = Some(spec),
     }
 }
 

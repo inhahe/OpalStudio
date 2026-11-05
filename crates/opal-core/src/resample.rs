@@ -192,8 +192,8 @@ pub fn render_tile(image: &RasterImage, transform: &Affine, sampling: &Sampling,
 /// Copies pixels for a transform that maps the grid onto itself.
 fn render_exact(image: &RasterImage, g: &GridMap, dest: &IRect) -> Option<Tile> {
     let gi = g.inverse();
-    let corners =
-        [(dest.x0, dest.y0), (dest.x1 - 1, dest.y0), (dest.x0, dest.y1 - 1), (dest.x1 - 1, dest.y1 - 1)].map(|(x, y)| gi.pixel(x, y));
+    let corners = [(dest.x0, dest.y0), (dest.x1 - 1, dest.y0), (dest.x0, dest.y1 - 1), (dest.x1 - 1, dest.y1 - 1)]
+        .map(|(x, y)| gi.pixel(x, y));
     let src = IRect::new(
         corners.iter().map(|p| p.0).min()?,
         corners.iter().map(|p| p.1).min()?,
@@ -391,7 +391,13 @@ fn add(acc: &mut PixelF32, w: f32, p: PixelF32) {
 }
 
 /// Filters for a transform that does not map the grid onto itself.
-fn render_filtered(image: &RasterImage, inv: &Affine, method: Method, anti_ringing: bool, dest: &IRect) -> Option<Tile> {
+fn render_filtered(
+    image: &RasterImage,
+    inv: &Affine,
+    method: Method,
+    anti_ringing: bool,
+    dest: &IRect,
+) -> Option<Tile> {
     let kernel = Kernel::new(method);
     // How many source pixels one result pixel spans along each source axis.
     let [fu, fv] = inv.row_norms();
@@ -558,7 +564,12 @@ pub fn render_image(image: &RasterImage, transform: &Affine, sampling: &Sampling
 pub fn footprint(image: &RasterImage, transform: &Affine, sampling: &Sampling) -> Option<IRect> {
     let content = image.content_bounds()?;
     let r = reach(transform, sampling);
-    let grown = crate::geom::FRect::new(content.x0 as f64 - r, content.y0 as f64 - r, content.x1 as f64 + r, content.y1 as f64 + r);
+    let grown = crate::geom::FRect::new(
+        content.x0 as f64 - r,
+        content.y0 as f64 - r,
+        content.x1 as f64 + r,
+        content.y1 as f64 + r,
+    );
     Some(IRect::covering(&transform.bounds(&grown)))
 }
 
@@ -663,9 +674,10 @@ mod tests {
             (0..64 * 64).map(|i| pixel_from_f32([((i * 7) % 64) as f32 / 64.0, 0.5, 0.25, 1.0])).collect();
         let img = RasterImage::from_pixels(64, 64, &px);
         // Shrinking along one axis, and (for the direct bilinear path) enlarging along both.
-        for aligned in
-            [Affine::scale(3.3, 0.61).then(Affine::translate(4.25, 9.5)), Affine::scale(2.5, 1.25).then(Affine::translate(-3.0, 0.5))]
-        {
+        for aligned in [
+            Affine::scale(3.3, 0.61).then(Affine::translate(4.25, 9.5)),
+            Affine::scale(2.5, 1.25).then(Affine::translate(-3.0, 0.5)),
+        ] {
             // The same map with a rotation too small to change any pixel, which forces the
             // general path. (Nearest has one path only; a point exactly on a pixel's edge
             // could fall either way.)
@@ -713,13 +725,16 @@ mod tests {
     #[test]
     fn anti_ringing_removes_overshoot_at_hard_edges() {
         // Black then white, enlarged: Catmull-Rom overshoots on both sides of the edge.
-        let px: Vec<Pixel> =
-            (0..16 * 4).map(|i| if i % 16 < 8 { pixel_from_f32([0.0, 0.0, 0.0, 1.0]) } else { pixel_from_f32([1.0; 4]) }).collect();
+        let px: Vec<Pixel> = (0..16 * 4)
+            .map(|i| if i % 16 < 8 { pixel_from_f32([0.0, 0.0, 0.0, 1.0]) } else { pixel_from_f32([1.0; 4]) })
+            .collect();
         let img = RasterImage::from_pixels(16, 4, &px);
         let m = Affine::scale(9.7, 9.7);
         let range = |s: Sampling| {
             let out = render(&img, &m, &s);
-            (0..155).map(|x| pixel_to_f32(out.pixel(x, 20))[0]).fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| (lo.min(v), hi.max(v)))
+            (0..155)
+                .map(|x| pixel_to_f32(out.pixel(x, 20))[0])
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| (lo.min(v), hi.max(v)))
         };
         let (lo, hi) = range(Sampling { method: CATMULL_ROM, anti_ringing: false });
         assert!(lo < -0.01 && hi > 1.01, "rings without it: {lo} {hi}");

@@ -64,3 +64,27 @@ Vulkan backend (and Metal's `recommendedMaxWorkingSetSize`) on other platforms.
 crashed at startup. On other platforms that setting must be overridden
 (`cargo build --target <host>`). **Fix:** when the first non-Windows build is set up, move
 the override into a Windows-only build script or document per-platform `--config`.
+
+## Dragging a large image object redraws it at full resolution
+
+`crates/opal-app/src/transform_ui.rs` and `crates/opal-core/src/composite.rs`. The
+projection is computed at full resolution and reduced from there, so while a transform box
+is dragged over a large pasted image, every frame redraws all of its full-resolution tiles
+under the view, even zoomed out. A 24-megapixel image takes about 25 ms to redraw (with the
+faster method used while dragging) on a 16-core processor, so the drag keeps up there but
+would lag on a slower one, or over many layers. **Fix:** while dragging, composite the
+pyramid level on screen directly from each layer's reduced copy (as the design's
+*Previews first* plans), and recompute full resolution when the drag ends.
+
+## Copies to other programs are 8-bit
+
+`crates/opal-app/src/clipboard.rs` (`write_image`). Copying puts the image on the system
+clipboard as 8-bit PNG and bitmap, through `arboard`; pasting back into Opal Studio uses
+the full-precision copy it keeps, but other programs get 8 bits per channel. **Fix:** also
+write a 16-bit PNG under the registered "PNG" format with `clipboard-win`.
+
+## Pasting decodes the clipboard on the interface thread
+
+`crates/opal-app/src/paste.rs`. Reading and decoding a very large image from the clipboard
+(a 50-megapixel PNG) holds up the interface for as long as that takes. **Fix:** read and
+decode on a worker thread and open the transform box when the image is ready.

@@ -157,6 +157,30 @@ impl RasterImage {
         out
     }
 
+    /// Composites `src` over this image, tile by tile (premultiplied "over"): what drawing
+    /// `src` onto these pixels leaves.
+    pub fn draw_over(&mut self, src: &RasterImage) {
+        let mut a = vec![[0.0f32; 4]; crate::tile::TILE_PIXELS];
+        let mut b = vec![[0.0f32; 4]; crate::tile::TILE_PIXELS];
+        for (c, s) in src.tiles() {
+            match self.tiles.get(&c) {
+                None => self.set_tile(c, Some(s.clone())),
+                Some(_) => {
+                    s.to_f32(&mut b);
+                    let dst = self.tile_mut(c);
+                    dst.to_f32(&mut a);
+                    for (d, s) in a.iter_mut().zip(&b) {
+                        let k = 1.0 - s[3];
+                        for i in 0..4 {
+                            d[i] = s[i] + d[i] * k;
+                        }
+                    }
+                    *dst = Tile::from_f32(&a);
+                }
+            }
+        }
+    }
+
     /// The smallest rectangle holding every pixel that is not fully transparent, or `None`
     /// for an image with no content. Computed on first use and kept until a pixel changes.
     pub fn content_bounds(&self) -> Option<IRect> {

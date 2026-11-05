@@ -482,9 +482,10 @@ document.
 ## Thumbnails
 
 Each layer in the layers panel shows a thumbnail of its content within the canvas
-(size adjustable, or off), and hovering a state in the history panel shows a thumbnail of
-the image at that state. Thumbnails are computed in the background, so a large document
-never makes the panels wait.
+(small, large, or off), and hovering a state in the history panel shows a thumbnail of
+the image at that state. A thumbnail averages a few point samples of the composite per
+thumbnail pixel, which costs a millisecond or two however large the image, so it is made
+when first shown and remade only when what it shows changes.
 
 ## Text
 

@@ -9,10 +9,12 @@ use crate::theme;
 use crate::tools::{self, ToolId};
 use crate::widgets::menu_command;
 use eframe::egui::{
-    self, Color32, CursorIcon, Event, Key, MouseWheelUnit, PointerButton, Pos2, Rect, Sense, Stroke, Vec2,
+    self, Color32, CursorIcon, Event, Key, MouseWheelUnit, PointerButton, Pos2, Rect, RichText, Sense, Shape, Stroke,
+    Vec2,
 };
 use eframe::egui_wgpu;
 use opal_core::composite::MAX_LEVEL;
+use opal_core::document::LayerId;
 use opal_core::geom::IRect;
 use opal_core::tile::{TILE_SIZE, Tile, TileCoord};
 use std::sync::Arc;
@@ -93,10 +95,17 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
 
     let prefs = CanvasPrefs::read(&st.prefs);
     let zs = st.tool_settings(ToolId::Zoom).clone();
+    let ms = st.tool_settings(ToolId::Move).clone();
+    let snapping = st.prefs.bool("transform.snapping");
+    let snap_points = st.prefs.f64("transform.snap_distance") as f32;
     let palette = st.palette;
     let space = ctx.input(|i| i.key_down(Key::Space)) && !ctx.egui_wants_keyboard_input();
     let tool = if space { ToolId::Hand } else { st.tool };
+    let mut notice = None;
     let Some(d) = st.doc_mut(id) else { return };
+    // While the transform box is open, it takes the pointer (Space and the middle button
+    // still scroll the view).
+    let boxed = d.transform.is_some() && !space;
     let canvas = crate::doc::canvas_rect(&d.doc().canvas);
     d.view.viewport = vp;
     d.view.screen_rect = rect;
@@ -142,12 +151,79 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         }
     }
 
+    // With the transform box open, the primary button belongs to it (Space still pans).
     let panning = response.dragged_by(PointerButton::Middle)
-        || (tool == ToolId::Hand && response.dragged_by(PointerButton::Primary));
+        || (tool == ToolId::Hand && !boxed && response.dragged_by(PointerButton::Primary));
     if panning {
         d.view.offset += response.drag_delta() * ppp;
     }
-    if tool == ToolId::Zoom {
+    let modifiers = ctx.input(|i| i.modifiers);
+    let to_doc = |p: Pos2, v: &crate::doc::View| {
+        let c = v.to_canvas(to_px(p));
+        [f64::from(c.x), f64::from(c.y)]
+    };
+    let pick_opacity = (ms.f64("move.pick_opacity") / 100.0) as f32;
+    // Ctrl+click with any other tool selects the layer under the pointer, as the Move tool's
+    // click does.
+    if !boxed
+        && tool != ToolId::Move
+        && modifiers.command
+        && response.clicked()
+        && let Some(p) = response.interact_pointer_pos()
+        && let Some(l) = crate::move_tool::pick(d, to_doc(p, &d.view), pick_opacity, modifiers.alt)
+    {
+        d.select_only(l);
+    }
+    if tool == ToolId::Move && !boxed {
+        let snap = if snapping { f64::from(snap_points * ppp / d.view.zoom) } else { -1.0 };
+        let pick = ms.bool("move.pick");
+        if response.clicked()
+            && pick
+            && let Some(p) = response.interact_pointer_pos()
+            && let Some(l) = crate::move_tool::pick(d, to_doc(p, &d.view), pick_opacity, modifiers.alt)
+        {
+            if modifiers.shift { d.toggle_selected(l) } else { d.select_only(l) }
+        }
+        if response.drag_started_by(PointerButton::Primary)
+            && let Some(origin) = ctx.input(|i| i.pointer.press_origin())
+        {
+            let from = to_doc(origin, &d.view);
+            if pick
+                && !modifiers.shift
+                && let Some(l) = crate::move_tool::pick(d, from, pick_opacity, modifiers.alt)
+                && !d.is_selected(l)
+            {
+                d.select_only(l);
+            }
+            match crate::move_tool::locked_in_selection(d) {
+                Some(name) => notice = Some(format!("\"{name}\" is locked, so it cannot be moved. Unlock it first.")),
+                None => {
+                    let bounds = d.selection_bounds();
+                    d.moving =
+                        Some(crate::move_tool::MoveDrag { from, bounds, guides: Default::default(), shown: None });
+                }
+            }
+        }
+        if let Some(drag) = d.moving.clone()
+            && response.dragged_by(PointerButton::Primary)
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            let (delta, guides) =
+                d.move_delta(&drag, to_doc(p, &d.view), modifiers.shift, if modifiers.alt { -1.0 } else { snap });
+            // Only a change of place redraws (holding still costs nothing).
+            if drag.shown != Some(delta) {
+                d.move_selection_to(delta);
+            }
+            if let Some(m) = d.moving.as_mut() {
+                m.guides = guides;
+                m.shown = Some(delta);
+            }
+        }
+        if response.drag_stopped() && d.moving.take().is_some() {
+            d.commit_pending();
+        }
+    }
+    if tool == ToolId::Zoom && !boxed {
         let alt = ctx.input(|i| i.modifiers.alt);
         if response.clicked()
             && let Some(p) = pointer_px
@@ -185,9 +261,18 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         ToolId::Hand => CursorIcon::Grab,
         ToolId::Zoom if ctx.input(|i| i.modifiers.alt) => CursorIcon::ZoomOut,
         ToolId::Zoom => CursorIcon::ZoomIn,
+        ToolId::Move => CursorIcon::Move,
+        ToolId::Crop => CursorIcon::Crosshair,
     };
-    if response.hovered() || response.dragged() {
+    // The boxes set their own cursors, by the handle under the pointer.
+    let cropping = tool == ToolId::Crop && !boxed;
+    if (response.hovered() || response.dragged()) && !boxed && !cropping {
         ctx.set_cursor_icon(cursor);
+    }
+    if !cropping && d.crop.take().is_some() {
+        // The crop box goes when the tool does; it was only a proposal.
+        d.crop_drag = None;
+        d.revision += 1;
     }
     let cursor_canvas = pointer_px.map(|p| {
         let c = d.view.to_canvas(p);
@@ -223,10 +308,6 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         draws.push(TileDraw { coord, rect: [p0.x, p0.y, p1.x, p1.y], sources });
     }
     let doc_key = d.id.0;
-    // The app clears this at the start of each frame; the canvas under the pointer sets it.
-    if cursor_canvas.is_some() {
-        st.cursor_canvas = cursor_canvas;
-    }
 
     let nearest = view.zoom >= prefs.sharp_from;
     let uniforms = ViewUniforms {
@@ -254,7 +335,54 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
             egui::StrokeKind::Outside,
         );
     }
+    let to_screen = |p: [f64; 2]| rect.min + view.to_screen(Vec2::new(p[0] as f32, p[1] as f32)) / ppp;
+    if !boxed && !cropping {
+        draw_outlines(ui, d, rect, &to_screen, palette.accent);
+    }
+    if let Some(m) = &d.moving {
+        draw_guides(ui, &m.guides, rect, &to_screen);
+    }
+    // Where the context menu was opened, for listing the layers there.
+    let menu_at_id = response.id.with("menu-at");
+    if response.secondary_clicked()
+        && let Some(p) = response.interact_pointer_pos()
+    {
+        let at = to_doc(p, &view);
+        ctx.data_mut(|m| m.insert_temp(menu_at_id, at));
+    }
+    let menu_at: Option<[f64; 2]> = ctx.data(|m| m.get_temp(menu_at_id));
+    let here: Vec<(LayerId, String)> = match menu_at {
+        Some([x, y]) => opal_core::composite::layers_at(&d.doc().layers, x.floor() as i64, y.floor() as i64)
+            .into_iter()
+            .filter_map(|(l, _)| Some((l, d.doc().layer(l)?.name.clone())))
+            .collect(),
+        None => Vec::new(),
+    };
+    // The app clears this at the start of each frame; the canvas under the pointer sets it.
+    if cursor_canvas.is_some() {
+        st.cursor_canvas = cursor_canvas;
+    }
+    if boxed {
+        crate::transform_ui::canvas_box(ui, st, id, &response, rect);
+    } else if cropping {
+        crate::crop::canvas_crop(ui, st, id, &response, rect);
+    }
+    if let Some(n) = notice {
+        st.notify(n);
+    }
     response.context_menu(|ui| {
+        if !here.is_empty() {
+            ui.label(RichText::new("Layers here").small().color(palette.weak_text));
+            for (l, name) in &here {
+                if ui.button(format!("{}  {name}", crate::icons::LAYER)).on_hover_text("Select this layer").clicked() {
+                    if let Some(d) = st.doc_mut(id) {
+                        d.select_only(*l);
+                    }
+                    ui.close();
+                }
+            }
+            ui.separator();
+        }
         for &cmd in CANVAS_MENU {
             match cmd {
                 None => {
@@ -264,6 +392,46 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
             }
         }
     });
+}
+
+/// A faint outline around what each selected layer holds (stronger for the active layer).
+fn draw_outlines(
+    ui: &egui::Ui,
+    d: &crate::doc::DocState,
+    rect: Rect,
+    to_screen: &dyn Fn([f64; 2]) -> Pos2,
+    accent: Color32,
+) {
+    let painter = ui.painter().with_clip_rect(rect);
+    let doc = d.doc();
+    for l in d.selection() {
+        let Some(layer) = doc.layer(l) else { continue };
+        if !layer.visible {
+            continue;
+        }
+        let strength = if Some(l) == d.active_layer() { 0.7 } else { 0.4 };
+        let stroke = Stroke::new(1.0, accent.gamma_multiply(strength));
+        for o in layer.all_objects() {
+            if let Some(corners) = o.outline() {
+                let pts: Vec<Pos2> = corners.iter().map(|&p| to_screen(p)).collect();
+                painter.add(Shape::dashed_line(&[pts[0], pts[1], pts[2], pts[3], pts[0]], stroke, 4.0, 3.0));
+            }
+        }
+    }
+}
+
+/// The snap lines a drag is using, across the whole view.
+pub fn draw_guides(ui: &egui::Ui, guides: &crate::transform::Guides, rect: Rect, to_screen: &dyn Fn([f64; 2]) -> Pos2) {
+    let painter = ui.painter().with_clip_rect(rect);
+    let stroke = Stroke::new(1.0, Color32::from_rgb(230, 60, 200));
+    for &x in &guides.xs {
+        let sx = to_screen([x, 0.0]).x;
+        painter.line_segment([Pos2::new(sx, rect.top()), Pos2::new(sx, rect.bottom())], stroke);
+    }
+    for &y in &guides.ys {
+        let sy = to_screen([0.0, y]).y;
+        painter.line_segment([Pos2::new(rect.left(), sy), Pos2::new(rect.right(), sy)], stroke);
+    }
 }
 
 /// The canvas's context menu; `None` is a separator.

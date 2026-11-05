@@ -1,14 +1,15 @@
 //! The application's state, and the actions commands run.
 
+use crate::clipboard::Clipboard;
 use crate::commands::{Cmd, availability};
 use crate::doc::{DocId, DocState};
+use crate::image_ops::{ResizeCanvas, ResizeImage, RotateBy, Turn};
 use crate::prefs::PREFS;
 use crate::settings::{Settings, Value};
 use crate::theme::{self, Palette, Scheme};
 use crate::tools::{self, ToolId};
 use eframe::egui;
-use opal_core::composite::composite_all;
-use opal_core::document::{Document, IdGen, Layer, LayerContent, LayerId, Position};
+use opal_core::document::{Document, IdGen, Layer, LayerId, Position};
 use opal_core::geom::IRect;
 use opal_core::raster::RasterImage;
 use opal_core::tile::{Tile, TileCoord, pixel_from_f32};
@@ -68,6 +69,10 @@ pub enum ExportKind {
 pub struct ExportDialog {
     pub doc: DocId,
     pub kind: ExportKind,
+    /// The size to export at, the canvas's to begin with.
+    pub width: u32,
+    pub height: u32,
+    pub keep_aspect: bool,
 }
 
 /// What the ribbon remembers between frames.
@@ -165,6 +170,13 @@ pub struct AppState {
     /// laid out before the canvas reports this frame's).
     pub cursor_shown: Option<(i64, i64)>,
     pub gpu: GpuStatus,
+    pub clipboard: Box<dyn Clipboard>,
+    /// A short note for the status bar, and when it was given (it fades after a while).
+    pub notice: Option<(String, Instant)>,
+    pub resize_image: Option<ResizeImage>,
+    pub resize_canvas: Option<ResizeCanvas>,
+    pub rotate_by: Option<RotateBy>,
+    pub thumbs: crate::thumbs::Thumbnails,
 }
 
 impl AppState {
@@ -208,7 +220,33 @@ impl AppState {
             cursor_canvas: None,
             cursor_shown: None,
             gpu: GpuStatus::default(),
+            // Tests never touch the real clipboard.
+            #[cfg(not(test))]
+            clipboard: Box::new(crate::clipboard::SystemClipboard::default()),
+            #[cfg(test)]
+            clipboard: Box::new(crate::clipboard::TestClipboard::default()),
+            notice: None,
+            resize_image: None,
+            resize_canvas: None,
+            rotate_by: None,
+            thumbs: Default::default(),
         }
+    }
+
+    /// Shows `text` in the status bar for a while.
+    pub fn notify(&mut self, text: impl Into<String>) {
+        self.notice = Some((text.into(), Instant::now()));
+    }
+
+    /// Whether a dialog is open, so keys and the canvas belong to it.
+    pub fn dialog_open(&self) -> bool {
+        self.confirm.is_some()
+            || !self.messages.is_empty()
+            || self.new_image.is_some()
+            || self.export.is_some()
+            || self.resize_image.is_some()
+            || self.resize_canvas.is_some()
+            || self.rotate_by.is_some()
     }
 
     /// The color scheme in use: the chosen one, or the system's when following it.
@@ -293,7 +331,14 @@ impl AppState {
             Cmd::SaveAs => self.save_active(true),
             Cmd::Export => {
                 let doc = self.active_doc.expect("available");
-                self.export = Some(ExportDialog { doc, kind: self.last_export });
+                let c = self.active().expect("available").doc().canvas;
+                self.export = Some(ExportDialog {
+                    doc,
+                    kind: self.last_export,
+                    width: c.width,
+                    height: c.height,
+                    keep_aspect: true,
+                });
             }
             Cmd::Close => {
                 let id = self.active_doc.expect("available");
@@ -304,22 +349,54 @@ impl AppState {
             Cmd::Undo => {
                 self.active_mut().expect("available").undo();
             }
+            Cmd::Copy => self.copy(false),
+            Cmd::CopyMerged => self.copy(true),
+            Cmd::Paste => self.paste(false),
+            Cmd::PasteInPlace => self.paste(true),
+            Cmd::Transform => self.transform(),
+            Cmd::CropToContent => self.crop_to_content(),
+            Cmd::ResizeImage => {
+                let c = self.active().expect("available").doc().canvas;
+                self.resize_image = Some(ResizeImage { width: c.width, height: c.height, keep_aspect: true });
+            }
+            Cmd::ResizeCanvas => {
+                let c = self.active().expect("available").doc().canvas;
+                self.resize_canvas = Some(ResizeCanvas {
+                    width: c.width,
+                    height: c.height,
+                    anchor: [1, 1],
+                    by_margins: false,
+                    margins: [0; 4],
+                });
+            }
+            Cmd::RotateBy => self.rotate_by = Some(RotateBy { degrees: 0.0, grow: true }),
+            Cmd::RotateCw => self.turn(Turn::Clockwise),
+            Cmd::RotateCcw => self.turn(Turn::Counterclockwise),
+            Cmd::Rotate180 => self.turn(Turn::Half),
+            Cmd::FlipHorizontal => self.turn(Turn::FlipHorizontal),
+            Cmd::FlipVertical => self.turn(Turn::FlipVertical),
             Cmd::Redo => {
                 self.active_mut().expect("available").redo();
             }
             Cmd::NewLayer => self.new_layer(false),
             Cmd::NewGroup => self.new_layer(true),
-            Cmd::Duplicate => self.duplicate_layer(),
-            Cmd::DeleteLayer => self.delete_layer(),
+            Cmd::Duplicate => self.duplicate_layers(),
+            Cmd::GroupLayers => self.group_layers(),
+            Cmd::DeleteLayer => self.delete_layers(),
             Cmd::MoveUp => self.move_layer(true),
             Cmd::MoveDown => self.move_layer(false),
             Cmd::MergeDown => self.merge_down(),
+            Cmd::MergeSelected => self.merge_selected(),
+            Cmd::MergeVisible => self.merge_visible(),
+            Cmd::MergeGroup => self.merge_group(),
+            Cmd::StampVisible => self.stamp_visible(),
             Cmd::Flatten => self.flatten(),
+            Cmd::Rasterize => self.rasterize(),
             Cmd::ToggleVisible => self.toggle_layer(true),
             Cmd::ToggleLock => self.toggle_layer(false),
             Cmd::Rename => {
                 let d = self.active().expect("available");
-                let id = d.active_layer.expect("available");
+                let id = d.active_layer().expect("available");
                 let name = d.doc().layer(id).map(|l| l.name.clone()).unwrap_or_default();
                 self.renaming = Some((d.id, id, name));
             }
@@ -414,9 +491,14 @@ impl AppState {
         };
         let layer = Layer::new_raster(ids.layer(), ids.object(), "Background", image);
         doc.insert(Position { parent: None, index: 0 }, layer).expect("an empty document takes a layer");
+        self.new_untitled(doc, ids, "New image");
+    }
+
+    /// Opens `doc` as a new, untitled image.
+    pub(crate) fn new_untitled(&mut self, doc: Document, ids: IdGen, label: &str) {
         self.untitled += 1;
         let title = format!("Untitled {}", self.untitled);
-        self.add_doc(title, doc, ids, "New image");
+        self.add_doc(title, doc, ids, label);
     }
 
     fn open_dialog(&mut self) {
@@ -533,7 +615,14 @@ impl AppState {
             }
         };
         let doc = d.doc().clone();
-        if let Err(e) = image_files::export(&doc, &path, &format, None) {
+        let c = doc.canvas;
+        let size = (spec.width, spec.height) != (c.width, c.height);
+        let size = size.then(|| image_files::ExportSize {
+            width: spec.width,
+            height: spec.height,
+            sampling: crate::prefs::sampling(&self.prefs, "export"),
+        });
+        if let Err(e) = image_files::export(&doc, &path, &format, size.as_ref()) {
             self.message(MessageKind::Error, "Could not export", e.to_string());
         }
     }
@@ -565,183 +654,11 @@ impl AppState {
         self.docs.iter().filter(|d| d.is_dirty()).map(|d| d.id).collect()
     }
 
-    // ---- Layers -----------------------------------------------------------------------
-
-    /// Where a new layer goes: just above the active layer, in its group.
-    fn above_active(d: &DocState) -> Position {
-        d.active_layer
-            .and_then(|a| d.doc().position(a))
-            .map(|p| Position { parent: p.parent, index: p.index + 1 })
-            .unwrap_or(Position { parent: None, index: d.doc().layers.len() })
-    }
-
-    fn new_layer(&mut self, group: bool) {
-        let d = self.active_mut().expect("available");
-        let pos = Self::above_active(d);
-        let label = if group { "New group" } else { "New layer" };
-        let result = d.apply(label, |doc, ids| {
-            let id = ids.layer();
-            let n = count_layers(doc) + 1;
-            let layer = if group {
-                Layer::new_group(id, format!("Group {n}"))
-            } else {
-                Layer::new_empty(id, format!("Layer {n}"))
-            };
-            doc.insert(pos, layer)
-        });
-        self.report(result);
-    }
-
-    fn duplicate_layer(&mut self) {
-        let d = self.active_mut().expect("available");
-        let src = d.active_layer.expect("available");
-        let result = d.apply("Duplicate layer", |doc, ids| {
-            let layer = doc.layer(src).expect("the active layer exists");
-            let mut copy = copy_with_new_ids(layer, ids);
-            copy.name = format!("{} copy", layer.name);
-            let pos = doc.position(src).expect("the active layer exists");
-            doc.insert(Position { parent: pos.parent, index: pos.index + 1 }, copy)
-        });
-        self.report(result);
-    }
-
-    fn delete_layer(&mut self) {
-        let d = self.active_mut().expect("available");
-        let id = d.active_layer.expect("available");
-        let result = d.apply("Delete layer", |doc, _| doc.remove(id).map(|_| ()));
-        self.report(result);
-    }
-
-    fn move_layer(&mut self, up: bool) {
-        let d = self.active_mut().expect("available");
-        let id = d.active_layer.expect("available");
-        let pos = d.doc().position(id).expect("the active layer exists");
-        let to = Position { parent: pos.parent, index: if up { pos.index + 1 } else { pos.index - 1 } };
-        let result = d.apply(if up { "Move layer up" } else { "Move layer down" }, |doc, _| doc.move_layer(id, to));
-        self.report(result);
-    }
-
-    /// Moves a layer to `to` (from dragging in the Layers panel).
-    pub fn move_layer_to(&mut self, id: LayerId, to: Position) {
-        let Some(d) = self.active_mut() else { return };
-        if d.doc().position(id) == Some(to) {
-            return;
-        }
-        let result = d.apply("Move layer", |doc, _| doc.move_layer(id, to));
-        self.report(result);
-    }
-
-    fn merge_down(&mut self) {
-        let d = self.active_mut().expect("available");
-        let upper = d.active_layer.expect("available");
-        let pos = d.doc().position(upper).expect("the active layer exists");
-        let below = d.doc().siblings(pos.parent).expect("its parent exists")[pos.index - 1].id;
-        let result = d.apply("Merge down", |doc, ids| {
-            let siblings = doc.siblings(pos.parent).expect("its parent exists");
-            let pair = [siblings[pos.index - 1].clone(), siblings[pos.index].clone()];
-            let image = composite_all(&pair);
-            let lower = doc.layer(below).expect("exists");
-            let merged = Layer::new_raster(below, ids.object(), lower.name.clone(), image);
-            doc.remove(upper)?;
-            *doc.layer_mut(below).expect("exists") = merged;
-            Ok::<(), opal_core::document::TreeError>(())
-        });
-        self.report(result);
-        if let Some(d) = self.active_mut() {
-            d.active_layer = Some(below);
-        }
-    }
-
-    fn flatten(&mut self) {
-        let d = self.active_mut().expect("available");
-        let result = d.apply("Flatten image", |doc, ids| {
-            let image = composite_all(&doc.layers);
-            doc.layers = vec![Arc::new(Layer::new_raster(ids.layer(), ids.object(), "Background", image))];
-            Ok::<(), opal_core::document::TreeError>(())
-        });
-        self.report(result);
-    }
-
-    fn toggle_layer(&mut self, visibility: bool) {
-        let d = self.active_mut().expect("available");
-        let id = d.active_layer.expect("available");
-        self.set_layer_flag(id, visibility);
-    }
-
-    /// Flips a layer's visibility (`visibility`) or lock.
-    pub fn set_layer_flag(&mut self, id: LayerId, visibility: bool) {
-        let Some(d) = self.active_mut() else { return };
-        let Some(l) = d.doc().layer(id) else { return };
-        let label = match (visibility, l.visible, l.locked) {
-            (true, true, _) => "Hide layer",
-            (true, false, _) => "Show layer",
-            (false, _, true) => "Unlock layer",
-            (false, _, false) => "Lock layer",
-        };
-        let result = d.apply(label, |doc, _| {
-            let l = doc.layer_mut(id).ok_or(opal_core::document::TreeError::NoSuchLayer(id))?;
-            if visibility {
-                l.visible = !l.visible;
-            } else {
-                l.locked = !l.locked;
-            }
-            Ok::<(), opal_core::document::TreeError>(())
-        });
-        self.report(result);
-    }
-
-    /// Ends a rename in progress: with `true`, gives the layer the text typed (in the
-    /// document it was started in, whichever is active now); with `false`, drops it.
-    pub fn finish_rename(&mut self, keep: bool) {
-        if let Some((doc, id, name)) = self.renaming.take()
-            && keep
-        {
-            self.rename_layer(doc, id, name);
-        }
-    }
-
-    pub fn rename_layer(&mut self, doc: DocId, id: LayerId, name: String) {
-        let Some(d) = self.doc_mut(doc) else { return };
-        if d.doc().layer(id).is_none_or(|l| l.name == name) || name.trim().is_empty() {
-            return;
-        }
-        let result = d.apply("Rename layer", |doc, _| {
-            doc.layer_mut(id).ok_or(opal_core::document::TreeError::NoSuchLayer(id))?.name = name;
-            Ok::<(), opal_core::document::TreeError>(())
-        });
-        self.report(result);
-    }
-
-    fn report<E: std::fmt::Display>(&mut self, r: Result<(), E>) {
+    pub(crate) fn report<E: std::fmt::Display>(&mut self, r: Result<(), E>) {
         if let Err(e) = r {
             self.message(MessageKind::Error, "That did not work", e.to_string());
         }
     }
-}
-
-/// How many layers the document has, groups included (for naming new ones).
-fn count_layers(doc: &Document) -> usize {
-    let mut n = 0;
-    doc.for_each_layer(&mut |_, _| n += 1);
-    n
-}
-
-/// A copy of `layer` (and, for a group, everything in it) with fresh identifiers. Pixels are
-/// shared until changed.
-fn copy_with_new_ids(layer: &Layer, ids: &mut IdGen) -> Layer {
-    let mut c = layer.clone();
-    c.id = ids.layer();
-    match &mut c.content {
-        LayerContent::Objects(objects) => {
-            for o in objects {
-                o.id = ids.object();
-            }
-        }
-        LayerContent::Group(children) => {
-            *children = children.iter().map(|ch| Arc::new(copy_with_new_ids(ch, ids))).collect();
-        }
-    }
-    c
 }
 
 /// A bitmap covering `width × height` from the origin with one premultiplied linear color.
@@ -816,7 +733,7 @@ mod tests {
         assert_eq!(d.doc().layers.len(), 3);
         let names: Vec<_> = d.doc().layers.iter().map(|l| l.name.clone()).collect();
         assert_eq!(names, ["Background", "Layer 2", "Layer 2 copy"]);
-        assert_eq!(d.active_layer, Some(d.doc().layers[2].id), "the copy is active");
+        assert_eq!(d.active_layer(), Some(d.doc().layers[2].id), "the copy is active");
         st.run(Cmd::MoveDown, &c);
         assert_eq!(st.active().unwrap().doc().layers[1].name, "Layer 2 copy");
         st.run(Cmd::Undo, &c);
@@ -830,7 +747,7 @@ mod tests {
         let c = ctx();
         st.run(Cmd::NewLayer, &c);
         let d = st.active_mut().unwrap();
-        let top = d.active_layer.unwrap();
+        let top = d.active_layer().unwrap();
         d.apply::<()>("paint", |doc, ids| {
             let mut img = RasterImage::new();
             img.set_pixel(0, 0, pixel_from_f32([0.0, 0.0, 0.5, 0.5]));
@@ -843,7 +760,7 @@ mod tests {
         let d = st.active().unwrap();
         assert_eq!(d.doc().layers.len(), 1);
         assert_eq!(d.doc().layers[0].id, bottom);
-        assert_eq!(d.active_layer, Some(bottom));
+        assert_eq!(d.active_layer(), Some(bottom));
         let px = d.doc().layers[0].objects()[0].image().pixel(0, 0);
         // Half-transparent blue over white.
         let px = opal_core::tile::pixel_to_f32(px);
@@ -870,10 +787,10 @@ mod tests {
     fn duplicates_get_fresh_ids_throughout() {
         let mut ids = IdGen::default();
         let mut g = Layer::new_group(ids.layer(), "g");
-        if let LayerContent::Group(c) = &mut g.content {
+        if let opal_core::document::LayerContent::Group(c) = &mut g.content {
             c.push(Arc::new(Layer::new_raster(ids.layer(), ids.object(), "x", RasterImage::new())));
         }
-        let copy = copy_with_new_ids(&g, &mut ids);
+        let copy = crate::layer_ops::copy_with_new_ids(&g, &mut ids);
         let child = &copy.children().unwrap()[0];
         assert_ne!(copy.id, g.id);
         assert_ne!(child.id, g.children().unwrap()[0].id);
@@ -908,12 +825,12 @@ mod tests {
         st.run(Cmd::ToggleLock, &c);
         // A locked layer inside an unlocked group.
         st.run(Cmd::NewGroup, &c);
-        let group = st.active().unwrap().active_layer.unwrap();
+        let group = st.active().unwrap().active_layer().unwrap();
         let bg = st.active().unwrap().doc().layers[0].id;
         st.move_layer_to(bg, Position { parent: Some(group), index: 0 });
-        st.active_mut().unwrap().active_layer = Some(bg);
+        st.active_mut().unwrap().select_only(bg);
         st.run(Cmd::ToggleLock, &c);
-        st.active_mut().unwrap().active_layer = Some(group);
+        st.active_mut().unwrap().select_only(group);
         assert!(availability(&st, Cmd::DeleteLayer).unwrap_err().contains("locked"));
     }
 
@@ -921,7 +838,7 @@ mod tests {
     fn a_rename_finishes_in_the_document_it_began_in() {
         let mut st = app_with_image();
         let a = st.active_doc.unwrap();
-        let layer = st.active().unwrap().active_layer.unwrap();
+        let layer = st.active().unwrap().active_layer().unwrap();
         st.run(Cmd::Rename, &ctx());
         st.renaming.as_mut().unwrap().2 = "Sky".into();
         // Another image opens, with a layer of the same identifier, before Enter.

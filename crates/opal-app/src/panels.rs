@@ -14,7 +14,12 @@ use std::sync::Arc;
 
 /// What the user did in the Layers panel, applied once the panel is drawn.
 enum Action {
-    Select(LayerId),
+    /// A click on a layer's row, with the modifiers held: plain selects it alone, Ctrl
+    /// adds or removes it, Shift selects the range from the active layer.
+    Click(LayerId, egui::Modifiers),
+    /// Makes the layer active, keeping the selection if it is already in it (for a context
+    /// menu or a drag).
+    Touch(LayerId),
     Flag(LayerId, bool),
     Expand(LayerId, bool),
     StartRename(LayerId),
@@ -58,8 +63,14 @@ pub fn layers_panel(ui: &mut egui::Ui, st: &mut AppState) {
 
     let d = st.active().expect("checked above");
     let doc = d.doc().clone();
-    let active = d.active_layer;
+    let active = d.active_layer();
+    let selected: HashSet<LayerId> = doc.layer_ids().into_iter().filter(|&l| d.is_selected(l)).collect();
     let expanded = d.expanded.clone();
+    let thumb = match st.prefs.choice("ui.layer_thumbs").as_str() {
+        "small" => 28.0,
+        "large" => 44.0,
+        _ => 0.0,
+    };
     let menu: Vec<MenuEntry> = LAYER_MENU
         .iter()
         .map(|&c| MenuEntry { cmd: c, available: availability(st, c), shortcut: shortcut_text(ui.ctx(), c) })
@@ -75,10 +86,15 @@ pub fn layers_panel(ui: &mut egui::Ui, st: &mut AppState) {
     let released = ui.input(|i| i.pointer.any_released());
     let mut actions = Vec::new();
     let mut drop_target: Option<(Position, Rect, bool)> = None;
+    let mut order = Vec::new();
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         let mut rows = RowCtx {
             doc: &doc,
+            thumb,
+            thumbs: &mut st.thumbs,
             active,
+            selected: &selected,
+            order: &mut order,
             scroll_to,
             expanded: &expanded,
             renaming: &renaming,
@@ -105,7 +121,7 @@ pub fn layers_panel(ui: &mut egui::Ui, st: &mut AppState) {
     if dragging.is_some() && released {
         egui::DragAndDrop::clear_payload(ui.ctx());
     }
-    apply(st, actions);
+    apply(st, actions, &order);
 }
 
 struct MenuEntry {
@@ -116,7 +132,13 @@ struct MenuEntry {
 
 struct RowCtx<'a> {
     doc: &'a Document,
+    /// The size of layer thumbnails, in points (0 for none).
+    thumb: f32,
+    thumbs: &'a mut crate::thumbs::Thumbnails,
     active: Option<LayerId>,
+    selected: &'a HashSet<LayerId>,
+    /// The layers in the order their rows are drawn, top to bottom (for Shift+click).
+    order: &'a mut Vec<LayerId>,
     scroll_to: bool,
     expanded: &'a HashSet<LayerId>,
     renaming: &'a Option<(LayerId, String)>,
@@ -140,8 +162,10 @@ fn layer_rows(ui: &mut egui::Ui, cx: &mut RowCtx<'_>, layers: &[Arc<Layer>], par
     }
 }
 
-fn layer_row(ui: &mut egui::Ui, cx: &mut RowCtx<'_>, layer: &Layer, pos: Position, depth: usize) {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::click_and_drag());
+fn layer_row(ui: &mut egui::Ui, cx: &mut RowCtx<'_>, layer: &Arc<Layer>, pos: Position, depth: usize) {
+    let height = ROW_HEIGHT.max(cx.thumb + 6.0);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::click_and_drag());
+    cx.order.push(layer.id);
     let is_active = cx.active == Some(layer.id);
     let visuals = ui.visuals().clone();
     if is_active {
@@ -149,6 +173,8 @@ fn layer_row(ui: &mut egui::Ui, cx: &mut RowCtx<'_>, layer: &Layer, pos: Positio
         if cx.scroll_to {
             response.scroll_to_me(None);
         }
+    } else if cx.selected.contains(&layer.id) {
+        ui.painter().rect_filled(rect, 4.0, cx.accent.gamma_multiply(0.18));
     } else if response.hovered() {
         ui.painter().rect_filled(rect, 4.0, visuals.widgets.hovered.weak_bg_fill);
     }
@@ -186,8 +212,24 @@ fn layer_row(ui: &mut egui::Ui, cx: &mut RowCtx<'_>, layer: &Layer, pos: Positio
             cx.actions.push(Action::Expand(layer.id, !open));
         }
         row.label(icon(icons::GROUP, 15.0));
-    } else {
+    } else if cx.thumb == 0.0 {
         row.label(icon(icons::LAYER, 15.0).color(cx.weak));
+    }
+    if cx.thumb > 0.0 {
+        let ppp = row.ctx().pixels_per_point();
+        let size = (cx.thumb * ppp).round() as u32;
+        let texture = cx.thumbs.layer(row.ctx(), layer, cx.doc.canvas.rect(), size);
+        let (r, _) = row.allocate_exact_size(Vec2::splat(cx.thumb), Sense::hover());
+        let fit = texture.size_vec2() / ppp;
+        let shown = Rect::from_center_size(r.center(), fit);
+        checkerboard(row.painter(), shown);
+        row.painter().image(
+            texture.id(),
+            shown,
+            Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        row.painter().rect_stroke(shown, 0.0, Stroke::new(1.0, cx.weak.gamma_multiply(0.5)), egui::StrokeKind::Outside);
     }
     match cx.renaming {
         Some((id, name)) if *id == layer.id => {
@@ -214,8 +256,10 @@ fn layer_row(ui: &mut egui::Ui, cx: &mut RowCtx<'_>, layer: &Layer, pos: Positio
         }
     }
 
-    if response.clicked() || response.secondary_clicked() || response.drag_started() {
-        cx.actions.push(Action::Select(layer.id));
+    if response.clicked() {
+        cx.actions.push(Action::Click(layer.id, ui.input(|i| i.modifiers)));
+    } else if response.secondary_clicked() || response.drag_started() {
+        cx.actions.push(Action::Touch(layer.id));
     }
     if response.double_clicked() {
         cx.actions.push(Action::StartRename(layer.id));
@@ -273,7 +317,7 @@ fn layer_row(ui: &mut egui::Ui, cx: &mut RowCtx<'_>, layer: &Layer, pos: Positio
                 Err(why) => r.on_disabled_hover_text(why.as_str()),
             };
             if r.clicked() {
-                cx.actions.push(Action::Select(layer.id));
+                cx.actions.push(Action::Touch(layer.id));
                 cx.actions.push(Action::Command(e.cmd));
                 ui.close();
             }
@@ -281,11 +325,26 @@ fn layer_row(ui: &mut egui::Ui, cx: &mut RowCtx<'_>, layer: &Layer, pos: Positio
     });
 }
 
+/// A small light-and-dark checkerboard behind a thumbnail, so transparency shows.
+fn checkerboard(p: &egui::Painter, r: Rect) {
+    let cell = 5.0;
+    p.rect_filled(r, 0.0, Color32::from_gray(230));
+    let (nx, ny) = ((r.width() / cell).ceil() as i32, (r.height() / cell).ceil() as i32);
+    for j in 0..ny {
+        for i in 0..nx {
+            if (i + j) % 2 == 1 {
+                let c = Rect::from_min_size(r.min + Vec2::new(i as f32 * cell, j as f32 * cell), Vec2::splat(cell));
+                p.rect_filled(c.intersect(r), 0.0, Color32::from_gray(190));
+            }
+        }
+    }
+}
+
 /// The opacity slider for the active layer. Dragging it changes the image live and becomes
 /// one history step when released.
 fn opacity_row(ui: &mut egui::Ui, st: &mut AppState) {
     let Some(d) = st.active_mut() else { return };
-    let Some(id) = d.active_layer else { return };
+    let Some(id) = d.active_layer() else { return };
     let Some(layer) = d.doc().layer(id) else { return };
     let locked = layer.locked;
     let mut pct = layer.opacity * 100.0;
@@ -303,18 +362,33 @@ fn opacity_row(ui: &mut egui::Ui, st: &mut AppState) {
         }
         // One history step per change: commit once the slider is let go, or the typed value
         // is finished (the field loses focus), not on every keystroke.
-        if d.pending.is_some() && !r.dragged() && !r.has_focus() {
+        if d.pending_label() == Some("Change opacity") && !r.dragged() && !r.has_focus() {
             d.commit_pending();
         }
     });
 }
 
-fn apply(st: &mut AppState, actions: Vec<Action>) {
+fn apply(st: &mut AppState, actions: Vec<Action>, order: &[LayerId]) {
     for a in actions {
         match a {
-            Action::Select(id) => {
+            Action::Click(id, m) => {
                 if let Some(d) = st.active_mut() {
-                    d.active_layer = Some(id);
+                    if m.command {
+                        d.toggle_selected(id);
+                    } else if m.shift {
+                        d.select_range(id, order);
+                    } else {
+                        d.select_only(id);
+                    }
+                }
+            }
+            Action::Touch(id) => {
+                if let Some(d) = st.active_mut() {
+                    if d.is_selected(id) {
+                        d.make_active(id);
+                    } else {
+                        d.select_only(id);
+                    }
                 }
             }
             Action::Flag(id, visibility) => st.set_layer_flag(id, visibility),
@@ -369,7 +443,10 @@ pub fn history_panel(ui: &mut egui::Ui, st: &mut AppState) {
     ui.separator();
     let accent = st.palette.accent;
     let weak = st.palette.weak_text;
-    let d = st.active().expect("checked above");
+    // The document and the thumbnails, borrowed apart.
+    let active = st.active_doc;
+    let d = st.docs.iter().find(|d| Some(d.id) == active).expect("checked above");
+    let st_thumbs = &mut st.thumbs;
     let h = &d.history;
     let current = h.current();
     let saved = d.saved_at;
@@ -427,7 +504,22 @@ pub fn history_panel(ui: &mut egui::Ui, st: &mut AppState) {
             if !on_path.contains(&n) {
                 tip.push_str("\nOn another branch: click to go there.");
             }
-            if r.on_hover_text(tip).clicked() && n != current {
+            let thumbs = &mut *st_thumbs;
+            let r = r.on_hover_ui(|ui| {
+                ui.label(&tip);
+                let ppp = ui.ctx().pixels_per_point();
+                let texture = thumbs.document(ui.ctx(), node.doc(), (160.0 * ppp) as u32);
+                let size = texture.size_vec2() / ppp;
+                let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+                checkerboard(ui.painter(), rect);
+                ui.painter().image(
+                    texture.id(),
+                    rect,
+                    Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            });
+            if r.clicked() && n != current {
                 goto = Some(n);
             }
             let main = node.last_child.or_else(|| node.children.last().copied());
@@ -451,6 +543,11 @@ pub fn history_panel(ui: &mut egui::Ui, st: &mut AppState) {
 // ---- Tool settings --------------------------------------------------------------------
 
 pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
+    // While the transform box is open, its settings come first.
+    if st.active().is_some_and(|d| d.transform.is_some()) {
+        crate::transform_ui::settings(ui, st);
+        return;
+    }
     let tool = st.tool;
     let info = tool.info();
     ui.horizontal(|ui| {
@@ -479,16 +576,21 @@ fn presets_row(ui: &mut egui::Ui, st: &mut AppState) {
     let weak = st.palette.weak_text;
     ui.horizontal(|ui| {
         let mut apply: Option<String> = None;
-        egui::ComboBox::from_id_salt("tool-preset").selected_text("Presets").show_ui(ui, |ui| {
-            if names.is_empty() {
-                ui.label(RichText::new("No presets saved yet.").color(weak));
-            }
-            for n in &names {
-                if ui.button(n).on_hover_text("Apply these settings").clicked() {
-                    apply = Some(n.clone());
+        let label = ui.label("Presets").id;
+        egui::ComboBox::from_id_salt("tool-preset")
+            .selected_text("Apply…")
+            .show_ui(ui, |ui| {
+                if names.is_empty() {
+                    ui.label(RichText::new("No presets saved yet.").color(weak));
                 }
-            }
-        });
+                for n in &names {
+                    if ui.button(n).on_hover_text("Apply these settings").clicked() {
+                        apply = Some(n.clone());
+                    }
+                }
+            })
+            .response
+            .labelled_by(label);
         if let Some(n) = apply {
             let map = st.presets[&tool][&n].clone();
             let s = st.tool_settings.get_mut(&tool).expect("every tool has settings");

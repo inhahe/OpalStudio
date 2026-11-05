@@ -85,7 +85,12 @@ enum FileObjectKind {
         #[serde(default)]
         offset: [i64; 2],
     },
-    Image { tiles: Vec<[i64; 3]>, frame: IRect, transform: Affine, sampling: Sampling },
+    Image {
+        tiles: Vec<[i64; 3]>,
+        frame: IRect,
+        transform: Affine,
+        sampling: Sampling,
+    },
 }
 
 impl FileObjectKind {
@@ -346,7 +351,8 @@ fn build_layer(l: FileLayer, tiles: &HashMap<usize, Arc<Tile>>, path: &Path) -> 
                         ObjectKind::Pixels(PixelObject { image, offset })
                     }
                     FileObjectKind::Image { frame, transform, sampling, .. } => {
-                        check_image(&frame, &transform, &sampling).map_err(|m| bad(format!("object {}: {m}", o.id.0)))?;
+                        check_image(&frame, &transform, &sampling)
+                            .map_err(|m| bad(format!("object {}: {m}", o.id.0)))?;
                         ObjectKind::Image(ImageObject { image, frame, transform, sampling })
                     }
                 };
@@ -478,7 +484,11 @@ mod tests {
             transform: Affine::rotate(0.25).then(Affine::scale(2.5, 0.5)).then(Affine::translate(-1.5, 9.0)),
             sampling: Sampling { method: Method::Lanczos { lobes: 4 }, anti_ringing: false },
         };
-        let layer = Layer::with_objects(ids.layer(), "Pasted", vec![Object { id: ids.object(), kind: ObjectKind::Image(image.clone()) }]);
+        let layer = Layer::with_objects(
+            ids.layer(),
+            "Pasted",
+            vec![Object { id: ids.object(), kind: ObjectKind::Image(image.clone()) }],
+        );
         doc.insert(Position { parent: None, index: 2 }, layer).unwrap();
 
         let path = std::env::temp_dir().join(format!("opal-native-v1-{}.opal", std::process::id()));
@@ -502,7 +512,9 @@ mod tests {
             )
         };
         let doc = |layer: String| {
-            format!(r#"{{"format":"opal-studio","version":1,"canvas":{{"width":1,"height":1}},"next_id":10,"layers":[{layer}]}}"#)
+            format!(
+                r#"{{"format":"opal-studio","version":1,"canvas":{{"width":1,"height":1}},"next_id":10,"layers":[{layer}]}}"#
+            )
         };
         let ok = doc(object("[1,0,0,1,5,5]"));
         assert!(load_from(crafted(&ok, &[]), Path::new("ok.opal")).is_ok());

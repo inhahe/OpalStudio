@@ -20,14 +20,34 @@ pub enum Cmd {
     Exit,
     Undo,
     Redo,
+    Copy,
+    CopyMerged,
+    Paste,
+    PasteInPlace,
+    Transform,
     NewLayer,
     NewGroup,
     Duplicate,
+    GroupLayers,
     DeleteLayer,
     MoveUp,
     MoveDown,
     MergeDown,
+    MergeSelected,
+    MergeVisible,
+    MergeGroup,
+    StampVisible,
     Flatten,
+    Rasterize,
+    CropToContent,
+    ResizeImage,
+    ResizeCanvas,
+    RotateCw,
+    RotateCcw,
+    Rotate180,
+    RotateBy,
+    FlipHorizontal,
+    FlipVertical,
     ToggleVisible,
     ToggleLock,
     Rename,
@@ -67,12 +87,20 @@ const fn ctrl_shift(key: Key) -> KeyboardShortcut {
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), key)
 }
 
+const fn ctrl_alt(key: Key) -> KeyboardShortcut {
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::ALT), key)
+}
+
+const fn ctrl_shift_alt(key: Key) -> KeyboardShortcut {
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT).plus(Modifiers::ALT), key)
+}
+
 const fn plain(key: Key) -> KeyboardShortcut {
     KeyboardShortcut::new(Modifiers::NONE, key)
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 35] = [
+    pub const ALL: [Cmd; 55] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -83,14 +111,34 @@ impl Cmd {
         Cmd::Exit,
         Cmd::Undo,
         Cmd::Redo,
+        Cmd::Copy,
+        Cmd::CopyMerged,
+        Cmd::Paste,
+        Cmd::PasteInPlace,
+        Cmd::Transform,
         Cmd::NewLayer,
         Cmd::NewGroup,
         Cmd::Duplicate,
+        Cmd::GroupLayers,
         Cmd::DeleteLayer,
         Cmd::MoveUp,
         Cmd::MoveDown,
         Cmd::MergeDown,
+        Cmd::MergeSelected,
+        Cmd::MergeVisible,
+        Cmd::MergeGroup,
+        Cmd::StampVisible,
         Cmd::Flatten,
+        Cmd::Rasterize,
+        Cmd::CropToContent,
+        Cmd::ResizeImage,
+        Cmd::ResizeCanvas,
+        Cmd::RotateCw,
+        Cmd::RotateCcw,
+        Cmd::Rotate180,
+        Cmd::RotateBy,
+        Cmd::FlipHorizontal,
+        Cmd::FlipVertical,
         Cmd::ToggleVisible,
         Cmd::ToggleLock,
         Cmd::Rename,
@@ -184,6 +232,53 @@ impl Cmd {
                  the branch you were last on; the History panel reaches the others.",
                 const { &[ctrl(Key::Y), ctrl_shift(Key::Z)] },
             ),
+            Cmd::Copy => i(
+                "Copy",
+                icons::COPY,
+                "Copy the selected layers, as they look, to the clipboard.",
+                "Copies what the selected layers show within the canvas, trimmed to their content, \
+                 for pasting here or into another program. Pasting back into Opal Studio keeps \
+                 full precision, and Paste in Place puts it back where it came from.",
+                const { &[ctrl(Key::C)] },
+            ),
+            Cmd::CopyMerged => i(
+                "Copy Merged",
+                icons::COPY_MERGED,
+                "Copy everything visible within the canvas to the clipboard.",
+                "All visible layers combined, as the canvas shows them, trimmed to their content.",
+                const { &[ctrl_shift(Key::C)] },
+            ),
+            Cmd::Paste => i(
+                "Paste",
+                icons::PASTE,
+                "Paste the image on the clipboard, then place and size it.",
+                "The image goes onto a new layer above the active one and keeps its own pixels, so \
+                 it can be resized again later without losing quality. A box around it moves, \
+                 scales and rotates it; Enter or the check mark places it, Esc cancels. With no \
+                 image open, pasting makes a new image of the clipboard. Images copied from other \
+                 programs and image files copied in Explorer both work.",
+                const { &[ctrl(Key::V)] },
+            ),
+            Cmd::PasteInPlace => i(
+                "Paste in Place",
+                icons::PASTE_IN_PLACE,
+                "Paste where the copy came from.",
+                "A copy made in Opal Studio goes back exactly where it was copied from; anything \
+                 else goes at the canvas's top-left corner. Otherwise like Paste.",
+                const { &[ctrl_shift(Key::V)] },
+            ),
+            Cmd::Transform => i(
+                "Transform",
+                icons::TRANSFORM,
+                "Move, scale and rotate the selected layers with a box.",
+                "Drag inside the box to move, a corner or edge to scale, the handle above it (or \
+                 anywhere outside it) to rotate. Shift frees the aspect ratio (or locks it, when \
+                 the box's lock is open), Ctrl scales from the center, Alt turns snapping off or \
+                 on while dragging. Enter or the check mark applies it; Esc cancels. Pixel layers \
+                 transformed this way keep their pixels, so they can be transformed again without \
+                 losing quality.",
+                const { &[ctrl(Key::T)] },
+            ),
             Cmd::NewLayer => i(
                 "New Layer",
                 icons::LAYER_ADD,
@@ -196,22 +291,31 @@ impl Cmd {
                 icons::GROUP,
                 "Add a group to hold layers.",
                 "A group combines the layers inside it, then shows the result with the group's \
-                 own visibility and opacity. Drag layers onto it in the Layers panel.",
-                const { &[ctrl(Key::G)] },
+                 own visibility and opacity. Drag layers onto it in the Layers panel. To put \
+                 layers into a new group at once, select them and use Group Layers.",
+                &[],
             ),
             Cmd::Duplicate => i(
                 "Duplicate Layer",
                 icons::COPY,
-                "Copy the active layer.",
-                "The copy goes just above the original. It shares the original's pixels until \
+                "Copy the selected layers.",
+                "Each copy goes just above its original. It shares the original's pixels until \
                  one of them is changed, so duplicating is instant and costs no memory.",
                 const { &[ctrl(Key::J)] },
+            ),
+            Cmd::GroupLayers => i(
+                "Group Layers",
+                icons::GROUP_LAYERS,
+                "Put the selected layers into a new group.",
+                "The group goes where the topmost of them was. Select several layers with Ctrl+click \
+                 or Shift+click in the Layers panel.",
+                const { &[ctrl(Key::G)] },
             ),
             Cmd::DeleteLayer => i(
                 "Delete Layer",
                 icons::DELETE,
-                "Remove the active layer.",
-                "Removes the layer (and, for a group, everything in it). Undo brings it back.",
+                "Remove the selected layers.",
+                "Removes the layers (and, for a group, everything in it). Undo brings them back.",
                 &[],
             ),
             Cmd::MoveUp => i(
@@ -236,11 +340,124 @@ impl Cmd {
                  and the lower one cannot be a group.",
                 const { &[ctrl(Key::E)] },
             ),
+            Cmd::MergeSelected => i(
+                "Merge Selected",
+                icons::MERGE_SELECTED,
+                "Combine the selected layers into one.",
+                "The result takes the place and name of the topmost of them. Hidden selected layers \
+                 are left as they are. When the layers were not next to each other, the ones that \
+                 lay between them end up below the result, and the status bar says so.",
+                &[],
+            ),
+            Cmd::MergeVisible => i(
+                "Merge Visible",
+                icons::MERGE_VISIBLE,
+                "Combine every visible layer into one.",
+                "The result takes the place of the topmost visible layer. Hidden layers stay, \
+                 including those inside groups, in their order.",
+                &[],
+            ),
+            Cmd::MergeGroup => i(
+                "Merge Group",
+                icons::GROUP,
+                "Turn the active group into one pixel layer.",
+                "The layer keeps the group's name, opacity and visibility, and looks just as the \
+                 group did. Hidden layers inside the group stay, just below it.",
+                &[],
+            ),
+            Cmd::StampVisible => i(
+                "Stamp Visible",
+                icons::STAMP,
+                "Add a layer holding everything visible, combined.",
+                "The layers themselves stay as they are: the stamp is a flat copy to retouch on, \
+                 placed above the active layer (outside any group).",
+                const { &[ctrl_shift_alt(Key::E)] },
+            ),
             Cmd::Flatten => i(
                 "Flatten Image",
                 icons::STACK,
                 "Combine all visible layers into one.",
                 "Hidden layers are discarded. Undo brings everything back.",
+                &[],
+            ),
+            Cmd::Rasterize => i(
+                "Rasterize",
+                icons::RASTERIZE,
+                "Turn the selected layers' images into plain pixels.",
+                "A pasted or transformed image keeps its own pixels so that transforming it again \
+                 loses nothing. Rasterizing draws it into ordinary pixels as the canvas shows it, \
+                 which makes the file smaller and the layer cheaper to show. It is never \
+                 required: everything else works on images as they are.",
+                &[],
+            ),
+            Cmd::CropToContent => i(
+                "Crop to Content",
+                icons::CROP_TO_CONTENT,
+                "Shrink (or grow) the canvas to fit what the visible layers hold.",
+                "Only the canvas changes: no pixels are removed, so enlarging the canvas again \
+                 brings back anything cropped away. For a crop of your own, use the Crop tool (C).",
+                &[],
+            ),
+            Cmd::ResizeImage => i(
+                "Resize Image",
+                icons::RESIZE_IMAGE,
+                "Change the image's size, scaling everything in it.",
+                "Asks for the new size in pixels or percent, and how to resample. Layers keep \
+                 their pixels and are drawn at the new size, so resizing again later loses \
+                 nothing, unless you choose to resample them, which makes the file smaller.",
+                const { &[ctrl_alt(Key::I)] },
+            ),
+            Cmd::ResizeCanvas => i(
+                "Resize Canvas",
+                icons::RESIZE_CANVAS,
+                "Change the canvas's size without scaling what is on it.",
+                "Asks for the new size and where the old canvas sits in it. Nothing outside the \
+                 new canvas is removed: it is only hidden past the edge, and enlarging the canvas \
+                 again brings it back.",
+                const { &[ctrl_alt(Key::C)] },
+            ),
+            Cmd::RotateCw => i(
+                "Rotate Right",
+                icons::ROTATE_CW,
+                "Turn the whole image a quarter turn clockwise.",
+                "Pixel layers are turned exactly, without resampling.",
+                &[],
+            ),
+            Cmd::RotateCcw => i(
+                "Rotate Left",
+                icons::ROTATE_CCW,
+                "Turn the whole image a quarter turn counterclockwise.",
+                "Pixel layers are turned exactly, without resampling.",
+                &[],
+            ),
+            Cmd::Rotate180 => i(
+                "Rotate 180°",
+                icons::ROTATE_180,
+                "Turn the whole image upside down.",
+                "Pixel layers are turned exactly, without resampling.",
+                &[],
+            ),
+            Cmd::RotateBy => i(
+                "Rotate by Angle",
+                icons::ROTATE_BY,
+                "Turn the whole image by any angle.",
+                "Asks for the angle, and whether to grow the canvas so nothing is cut off. Layers \
+                 keep their pixels, so turning again later loses nothing. To straighten a photo \
+                 while cropping it, use the Crop tool.",
+                &[],
+            ),
+            Cmd::FlipHorizontal => i(
+                "Flip Horizontally",
+                icons::FLIP_H,
+                "Mirror the whole image left to right.",
+                "Pixel layers are mirrored exactly, without resampling.",
+                &[],
+            ),
+            Cmd::FlipVertical => i(
+                "Flip Vertically",
+                icons::FLIP_V,
+                "Mirror the whole image top to bottom.",
+                "Pixel layers are mirrored exactly, without resampling.",
                 &[],
             ),
             Cmd::ToggleVisible => i(
@@ -413,6 +630,18 @@ pub static RIBBON: &[Tab] = &[
                 cmds: &[Cmd::Undo, Cmd::Redo],
             },
             Group {
+                name: "Clipboard",
+                description: "Copying and pasting images, here and between programs.",
+                large: 1,
+                cmds: &[Cmd::Paste, Cmd::Copy, Cmd::CopyMerged, Cmd::PasteInPlace],
+            },
+            Group {
+                name: "Transform",
+                description: "Moving, scaling and rotating layers. The Move tool (V) moves them too.",
+                large: 1,
+                cmds: &[Cmd::Transform],
+            },
+            Group {
                 name: "Layers",
                 description: "The most used layer commands. The Layer tab has all of them.",
                 large: 1,
@@ -427,13 +656,37 @@ pub static RIBBON: &[Tab] = &[
         ],
     },
     Tab {
+        name: "Image",
+        groups: &[
+            Group {
+                name: "Size",
+                description: "The size of the image, and of the canvas it is shown on.",
+                large: 2,
+                cmds: &[Cmd::ResizeImage, Cmd::ResizeCanvas, Cmd::CropToContent],
+            },
+            Group {
+                name: "Rotate",
+                description: "Turning and mirroring the whole image.",
+                large: 2,
+                cmds: &[
+                    Cmd::RotateCw,
+                    Cmd::RotateCcw,
+                    Cmd::Rotate180,
+                    Cmd::RotateBy,
+                    Cmd::FlipHorizontal,
+                    Cmd::FlipVertical,
+                ],
+            },
+        ],
+    },
+    Tab {
         name: "Layer",
         groups: &[
             Group {
                 name: "New",
                 description: "Adding layers and groups.",
                 large: 2,
-                cmds: &[Cmd::NewLayer, Cmd::NewGroup, Cmd::Duplicate],
+                cmds: &[Cmd::NewLayer, Cmd::NewGroup, Cmd::Duplicate, Cmd::GroupLayers],
             },
             Group {
                 name: "Arrange",
@@ -444,9 +697,22 @@ pub static RIBBON: &[Tab] = &[
             },
             Group {
                 name: "Combine",
-                description: "Combining layers into one.",
+                description: "Combining layers into one. Combining keeps the look exactly.",
                 large: 2,
-                cmds: &[Cmd::MergeDown, Cmd::Flatten],
+                cmds: &[
+                    Cmd::MergeDown,
+                    Cmd::MergeSelected,
+                    Cmd::MergeVisible,
+                    Cmd::MergeGroup,
+                    Cmd::StampVisible,
+                    Cmd::Flatten,
+                ],
+            },
+            Group {
+                name: "Convert",
+                description: "Turning editable content into plain pixels.",
+                large: 1,
+                cmds: &[Cmd::Rasterize],
             },
             Group {
                 name: "Properties",
@@ -507,7 +773,63 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
     match cmd {
         New | Open | Preferences | Exit | ToggleOffCanvas | ToggleTheme | ToggleRibbon | CycleToolsPlace
         | ResetPanels | Search | Help | Shortcuts | About | WidgetGallery => Ok(()),
-        Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup => needs_doc(),
+        Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup | CopyMerged
+        | StampVisible | ResizeCanvas | CropToContent => needs_doc(),
+        Paste | PasteInPlace => Ok(()),
+        Copy | GroupLayers => selection(st).map(|_| ()),
+        Transform | Rasterize => {
+            let (d, sel) = selection(st)?;
+            let layers: Vec<&opal_core::document::Layer> = sel.iter().filter_map(|&l| d.doc().layer(l)).collect();
+            if let Some(l) = layers.iter().find_map(|l| first_locked(l)) {
+                return Err(format!("\"{}\" is locked. Unlock it first.", l.name));
+            }
+            if cmd == Rasterize && !layers.iter().any(|l| crate::layer_ops::has_image_object(l)) {
+                return Err("Nothing to rasterize: the selected layers hold only pixels already.".into());
+            }
+            if cmd == Transform && layers.iter().all(|l| l.all_objects().is_empty()) {
+                return Err("The selected layers are empty.".into());
+            }
+            Ok(())
+        }
+        MergeSelected => {
+            let (d, sel) = selection(st)?;
+            let layers: Vec<&opal_core::document::Layer> = sel.iter().filter_map(|&l| d.doc().layer(l)).collect();
+            if layers.iter().filter(|l| l.visible).count() < 2 {
+                return Err("Select two or more visible layers (Ctrl+click in the Layers panel).".into());
+            }
+            match layers.iter().filter(|l| l.visible).find_map(|l| first_locked(l)) {
+                Some(l) => Err(format!("\"{}\" is locked. Unlock it first.", l.name)),
+                None => Ok(()),
+            }
+        }
+        MergeVisible => {
+            let d = st.active().ok_or("Open or create an image first.")?;
+            let visible: Vec<_> = d.doc().layers.iter().filter(|l| l.visible).collect();
+            if visible.len() < 2 && visible.iter().all(|l| !l.is_group()) {
+                return Err("There is only one visible layer.".into());
+            }
+            match visible.iter().find_map(|l| first_locked(l)) {
+                Some(l) => Err(format!("\"{}\" is locked. Unlock it first.", l.name)),
+                None => Ok(()),
+            }
+        }
+        MergeGroup => {
+            let l = active_layer(st)?;
+            if !l.is_group() {
+                return Err(format!("\"{}\" is not a group.", l.name));
+            }
+            match first_locked(l) {
+                Some(l) => Err(format!("\"{}\" is locked. Unlock it first.", l.name)),
+                None => Ok(()),
+            }
+        }
+        ResizeImage | RotateCw | RotateCcw | Rotate180 | RotateBy | FlipHorizontal | FlipVertical => {
+            let d = st.active().ok_or("Open or create an image first.")?;
+            match d.doc().layers.iter().find_map(|l| first_locked(l)) {
+                Some(l) => Err(format!("\"{}\" is locked, and this changes every layer. Unlock it first.", l.name)),
+                None => Ok(()),
+            }
+        }
         Flatten => {
             let d = st.active().ok_or("Open or create an image first.")?;
             match d.doc().layers.iter().find_map(|l| first_locked(l)) {
@@ -527,11 +849,15 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
                 Err("Nothing to redo: you have not undone anything since the last change.".into())
             }
         }
-        Duplicate | ToggleVisible | ToggleLock | Rename => active_layer(st).map(|_| ()),
-        DeleteLayer => match first_locked(active_layer(st)?) {
-            Some(l) => Err(format!("\"{}\" is locked. Unlock it first.", l.name)),
-            None => Ok(()),
-        },
+        ToggleVisible | ToggleLock | Rename => active_layer(st).map(|_| ()),
+        Duplicate => selection(st).map(|_| ()),
+        DeleteLayer => {
+            let (d, sel) = selection(st)?;
+            match sel.iter().filter_map(|&l| d.doc().layer(l)).find_map(first_locked) {
+                Some(l) => Err(format!("\"{}\" is locked. Unlock it first.", l.name)),
+                None => Ok(()),
+            }
+        }
         MoveUp | MoveDown => {
             let d = st.active().ok_or("Open or create an image first.")?;
             let l = active_layer(st)?;
@@ -575,9 +901,16 @@ fn first_locked(layer: &opal_core::document::Layer) -> Option<&opal_core::docume
     layer.children()?.iter().find_map(|c| first_locked(c))
 }
 
+/// The active document and its selected layers (see `DocState::selection`).
+fn selection(st: &AppState) -> Result<(&crate::doc::DocState, Vec<opal_core::document::LayerId>), String> {
+    let d = st.active().ok_or("Open or create an image first.")?;
+    let sel = d.selection();
+    if sel.is_empty() { Err("Select a layer in the Layers panel first.".into()) } else { Ok((d, sel)) }
+}
+
 fn active_layer(st: &AppState) -> Result<&opal_core::document::Layer, String> {
     let d = st.active().ok_or("Open or create an image first.")?;
-    let id = d.active_layer.ok_or("Select a layer in the Layers panel first.")?;
+    let id = d.active_layer().ok_or("Select a layer in the Layers panel first.")?;
     d.doc().layer(id).ok_or_else(|| "Select a layer in the Layers panel first.".into())
 }
 

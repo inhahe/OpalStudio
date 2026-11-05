@@ -6,6 +6,8 @@ use eframe::egui::Key;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ToolId {
+    Move,
+    Crop,
     Hand,
     Zoom,
 }
@@ -26,15 +28,151 @@ pub struct ToolInfo {
 
 impl ToolId {
     /// Every tool, in toolbar order.
-    pub const ALL: [ToolId; 2] = [ToolId::Hand, ToolId::Zoom];
+    pub const ALL: [ToolId; 4] = [ToolId::Move, ToolId::Crop, ToolId::Hand, ToolId::Zoom];
 
     pub fn info(self) -> &'static ToolInfo {
         match self {
+            ToolId::Move => &MOVE,
+            ToolId::Crop => &CROP,
             ToolId::Hand => &HAND,
             ToolId::Zoom => &ZOOM,
         }
     }
 }
+
+pub static MOVE_SETTINGS: &[Def] = &[
+    Def {
+        key: "move.pick",
+        label: "Click selects the layer",
+        help: "Clicking or starting a drag selects the topmost layer under the pointer first \
+               (Shift+click adds it to the selection, Alt+click picks its group). Off: drags \
+               move the selected layers from anywhere.",
+        section: "Move",
+        kind: Kind::Bool,
+        default: Init::Bool(true),
+        advanced: false,
+    },
+    Def {
+        key: "move.pick_opacity",
+        label: "Counts as under the pointer from",
+        help: "How opaque a layer must be at the point clicked to be picked, so a nearly \
+               transparent haze does not catch every click. Ctrl+click with other tools picks \
+               layers the same way.",
+        section: "Move",
+        kind: Kind::Float { min: 1.0, max: 100.0, decimals: 0, suffix: "%", log: false },
+        default: Init::Float(10.0),
+        advanced: true,
+    },
+];
+
+pub static CROP_SETTINGS: &[Def] = &[
+    Def {
+        key: "crop.aspect",
+        label: "Aspect ratio",
+        help: "Free lets the box take any shape (Shift while dragging keeps its current one); \
+               the others keep it in proportion.",
+        section: "Crop",
+        kind: Kind::Choice(&[
+            ("free", "Free"),
+            ("original", "As the image"),
+            ("1:1", "1:1 (square)"),
+            ("4:3", "4:3"),
+            ("3:2", "3:2"),
+            ("16:9", "16:9"),
+            ("5:4", "5:4"),
+            ("custom", "Custom"),
+        ]),
+        default: Init::Choice("free"),
+        advanced: false,
+    },
+    Def {
+        key: "crop.portrait",
+        label: "Portrait",
+        help: "Turn the ratio so the box is taller than it is wide.",
+        section: "Crop",
+        kind: Kind::Bool,
+        default: Init::Bool(false),
+        advanced: false,
+    },
+    Def {
+        key: "crop.custom_w",
+        label: "Custom ratio width",
+        help: "With a custom aspect ratio: its width part (for 7:5, the 7).",
+        section: "Crop",
+        kind: Kind::Float { min: 0.01, max: 10_000.0, decimals: 2, suffix: "", log: true },
+        default: Init::Float(7.0),
+        advanced: true,
+    },
+    Def {
+        key: "crop.custom_h",
+        label: "Custom ratio height",
+        help: "With a custom aspect ratio: its height part (for 7:5, the 5).",
+        section: "Crop",
+        kind: Kind::Float { min: 0.01, max: 10_000.0, decimals: 2, suffix: "", log: true },
+        default: Init::Float(5.0),
+        advanced: true,
+    },
+    Def {
+        key: "crop.guides",
+        label: "Guides",
+        help: "Lines across the box to compose by.",
+        section: "Crop",
+        kind: Kind::Choice(&[("thirds", "Rule of thirds"), ("grid", "Grid"), ("none", "None")]),
+        default: Init::Choice("thirds"),
+        advanced: false,
+    },
+    Def {
+        key: "crop.delete",
+        label: "Delete cropped pixels",
+        help: "Off: cropping only moves the canvas, so enlarging it again brings back what was \
+               cropped away. On: pixels outside the new canvas are removed (images and other \
+               editable content keep theirs).",
+        section: "Crop",
+        kind: Kind::Bool,
+        default: Init::Bool(false),
+        advanced: false,
+    },
+    Def {
+        key: "crop.shade",
+        label: "Shade outside",
+        help: "How dark what falls outside the box is drawn.",
+        section: "Crop",
+        kind: Kind::Float { min: 0.0, max: 100.0, decimals: 0, suffix: "%", log: false },
+        default: Init::Float(60.0),
+        advanced: true,
+    },
+];
+
+static CROP: ToolInfo = ToolInfo {
+    id: "crop",
+    name: "Crop",
+    icon: icons::CROP,
+    key: Key::C,
+    description: "Drag the box to choose what to keep; drag outside a corner to straighten. Enter crops.",
+    help: "A box covers the canvas: drag its corners or edges to resize it, inside it to move it, \
+           or elsewhere to draw a new one. Dragging just outside a corner turns it, to \
+           straighten a tilted photo: the image is turned to match when you crop. Enter, the \
+           Crop button or a double-click inside the box crops; Esc puts the box back. Cropping \
+           only moves the canvas, so nothing is lost unless Delete cropped pixels is set; a box \
+           larger than the canvas enlarges it.",
+    settings: CROP_SETTINGS,
+};
+
+static MOVE: ToolInfo = ToolInfo {
+    id: "move",
+    name: "Move",
+    icon: icons::MOVE,
+    key: Key::V,
+    description: "Drag to move the selected layers; click to select the layer under the pointer.",
+    help: "Dragging moves the selected layers by whole pixels, snapping to the canvas's and \
+           other layers' edges and centers (Alt while dragging turns snapping off or on; Shift \
+           keeps the move horizontal, vertical or diagonal). Clicking selects the topmost \
+           layer under the pointer; Shift+click adds it to the selection, Alt+click selects its \
+           group, and right-clicking lists every layer there. With any tool, the arrow keys \
+           move the selected layers by a pixel, and Ctrl+click selects the layer under the \
+           pointer. To scale or rotate, use Transform (Ctrl+T).",
+    settings: MOVE_SETTINGS,
+};
 
 static HAND: ToolInfo = ToolInfo {
     id: "hand",

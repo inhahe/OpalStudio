@@ -113,18 +113,29 @@ pub struct DocState {
     /// at this state asks nothing.
     pub saved_at: Option<NodeId>,
     pub pending: Option<Pending>,
-    pub active_layer: Option<LayerId>,
+    /// The layer the panels and single-layer commands act on. Always one of `selected`.
+    active: Option<LayerId>,
+    /// The layers selected in the Layers panel, which commands that act on several layers
+    /// act on. Not part of history, like the active layer.
+    selected: HashSet<LayerId>,
     /// Groups shown expanded in the layers panel.
     pub expanded: HashSet<LayerId>,
     pub view: View,
     pub projection: Projection,
     /// Counts every change to what the document shows (for repainting).
     pub revision: u64,
+    /// The transform box, while one is open. Its document is the pending edit.
+    pub transform: Option<crate::transform::Session>,
+    /// A Move tool drag in progress.
+    pub moving: Option<crate::move_tool::MoveDrag>,
+    /// The Crop tool's box, while the tool is in use, and a drag on it.
+    pub crop: Option<crate::crop::CropBox>,
+    pub crop_drag: Option<crate::crop::CropDrag>,
 }
 
 impl DocState {
     pub fn new(id: DocId, title: String, doc: Document, ids: IdGen, label: &str) -> DocState {
-        let active_layer = doc.layers.last().map(|l| l.id);
+        let active = doc.layers.last().map(|l| l.id);
         let history = History::new(doc, label);
         DocState {
             id,
@@ -134,12 +145,87 @@ impl DocState {
             history,
             ids,
             pending: None,
-            active_layer,
+            active,
+            selected: active.into_iter().collect(),
             expanded: HashSet::new(),
             view: View::default(),
             projection: Projection::new(),
             revision: 0,
+            transform: None,
+            moving: None,
+            crop: None,
+            crop_drag: None,
         }
+    }
+
+    /// The active layer: the one the panels and single-layer commands act on.
+    pub fn active_layer(&self) -> Option<LayerId> {
+        self.active
+    }
+
+    /// Makes `id` the active layer and the only one selected.
+    pub fn select_only(&mut self, id: LayerId) {
+        self.active = Some(id);
+        self.selected = HashSet::from([id]);
+    }
+
+    /// Adds `id` to the selection, making it active, or takes it out (unless it is the only
+    /// one selected); the active layer then moves to another selected layer.
+    pub fn toggle_selected(&mut self, id: LayerId) {
+        if !self.selected.contains(&id) {
+            self.selected.insert(id);
+            self.active = Some(id);
+        } else if self.selected.len() > 1 {
+            self.selected.remove(&id);
+            if self.active == Some(id) {
+                self.active = self.selection().last().copied();
+            }
+        }
+    }
+
+    /// Selects the layers from the active one to `id` in `order` (the order the Layers
+    /// panel lists them in), making `id` active.
+    pub fn select_range(&mut self, id: LayerId, order: &[LayerId]) {
+        let from = self.active.and_then(|a| order.iter().position(|&l| l == a));
+        let to = order.iter().position(|&l| l == id);
+        match (from, to) {
+            (Some(a), Some(b)) => {
+                let (lo, hi) = (a.min(b), a.max(b));
+                self.selected = order[lo..=hi].iter().copied().collect();
+                self.active = Some(id);
+            }
+            _ => self.select_only(id),
+        }
+    }
+
+    /// Makes a selected layer the active one, keeping the selection.
+    pub fn make_active(&mut self, id: LayerId) {
+        if self.selected.contains(&id) {
+            self.active = Some(id);
+        } else {
+            self.select_only(id);
+        }
+    }
+
+    pub fn is_selected(&self, id: LayerId) -> bool {
+        self.selected.contains(&id)
+    }
+
+    /// The selected layers that exist, in document order (depth first, bottom to top),
+    /// leaving out those inside a selected group: what commands acting on several layers
+    /// act on, each layer once.
+    pub fn selection(&self) -> Vec<LayerId> {
+        let doc = self.doc();
+        let mut out = Vec::new();
+        doc.for_each_layer(&mut |l, _| {
+            if self.selected.contains(&l.id) {
+                out.push(l.id);
+            }
+        });
+        let inner: Vec<LayerId> =
+            out.iter().copied().filter(|&l| out.iter().any(|&g| g != l && doc.is_descendant(l, g))).collect();
+        out.retain(|l| !inner.contains(l));
+        out
     }
 
     /// The name to suggest for files made from this document: the title without any
@@ -182,16 +268,28 @@ impl DocState {
     }
 
     /// Changes the pending edit (starting one labeled `label` if none is in progress), for
-    /// changes made continuously, like dragging a slider, that become one history state.
+    /// changes made continuously, like dragging a slider, that become one history state. A
+    /// pending edit of another kind (a transform box, say) is committed first: two edits
+    /// never merge into one state.
     pub fn edit_pending(&mut self, label: &str, f: impl FnOnce(&mut Document)) {
+        if self.pending.as_ref().is_some_and(|p| p.label != label) || self.transform.is_some() {
+            self.commit_pending();
+        }
         let p =
             self.pending.get_or_insert_with(|| Pending { doc: self.history.doc().clone(), label: label.to_owned() });
         f(&mut p.doc);
         self.revision += 1;
     }
 
-    /// Commits the pending edit, if any, as one history state.
+    /// The label of the pending edit, if one is in progress.
+    pub fn pending_label(&self) -> Option<&str> {
+        self.pending.as_ref().map(|p| p.label.as_str())
+    }
+
+    /// Commits the pending edit, if any, as one history state; a transform box in
+    /// progress is applied first.
     pub fn commit_pending(&mut self) {
+        self.finish_transform();
         if let Some(p) = self.pending.take() {
             self.history.commit(p.doc, p.label);
             self.revision += 1;
@@ -228,25 +326,39 @@ impl DocState {
         self.fix_active_layer(Some(&before));
     }
 
-    /// After the layers changed from `before`: if layers appeared (an action added one, or
-    /// moving through history restored one), the topmost of them becomes active; otherwise,
-    /// if the active layer no longer exists, the layer now in its place does (or the one
-    /// below it, or the top layer).
+    /// After the layers changed from `before`, picks the active layer (see `fix_active`).
+    /// The selection loses layers that no longer exist; if it loses the active one, or
+    /// the active layer changed, the active layer alone is selected.
     fn fix_active_layer(&mut self, before: Option<&Document>) {
+        let was = self.active;
+        self.fix_active(before);
+        let now: HashSet<LayerId> = self.history.doc().layer_ids().into_iter().collect();
+        self.selected.retain(|l| now.contains(l));
+        match self.active {
+            Some(a) if a != was.unwrap_or(a) || !self.selected.contains(&a) => self.select_only(a),
+            Some(_) => {}
+            None => self.selected.clear(),
+        }
+    }
+
+    /// If layers appeared (an action added one, or moving through history restored one),
+    /// the topmost of them becomes active; otherwise, if the active layer no longer exists,
+    /// the layer now in its place does (or the one below it, or the top layer).
+    fn fix_active(&mut self, before: Option<&Document>) {
         let doc = self.history.doc();
         let now: Vec<LayerId> = doc.layer_ids();
         if let Some(before) = before {
             let old: HashSet<LayerId> = before.layer_ids().into_iter().collect();
             if let Some(restored) = now.iter().rev().find(|id| !old.contains(id)) {
-                self.active_layer = Some(*restored);
+                self.active = Some(*restored);
                 return;
             }
         }
-        if self.active_layer.is_some_and(|a| now.contains(&a)) {
+        if self.active.is_some_and(|a| now.contains(&a)) {
             return;
         }
-        let place = before.zip(self.active_layer).and_then(|(b, a)| b.position(a));
-        self.active_layer = place
+        let place = before.zip(self.active).and_then(|(b, a)| b.position(a));
+        self.active = place
             .and_then(|pos| {
                 let siblings = doc.siblings(pos.parent)?;
                 let i = pos.index.min(siblings.len().checked_sub(1)?);
@@ -279,14 +391,14 @@ mod tests {
         })
         .unwrap();
         let id = new.unwrap();
-        s.active_layer = Some(id);
+        s.select_only(id);
         id
     }
 
     #[test]
     fn a_pending_edit_becomes_one_history_state() {
         let mut s = state();
-        let bg = s.active_layer.unwrap();
+        let bg = s.active_layer().unwrap();
         for op in [0.9, 0.7, 0.5] {
             s.edit_pending("Opacity", |d| d.layer_mut(bg).unwrap().opacity = op);
         }
@@ -308,18 +420,18 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert_ne!(s.active_layer, Some(top), "the deleted layer is no longer active");
+        assert_ne!(s.active_layer(), Some(top), "the deleted layer is no longer active");
         s.undo();
-        assert_eq!(s.active_layer, Some(top));
+        assert_eq!(s.active_layer(), Some(top));
     }
 
     #[test]
     fn undoing_an_addition_selects_a_remaining_layer() {
         let mut s = state();
-        let bg = s.active_layer.unwrap();
+        let bg = s.active_layer().unwrap();
         add_layer(&mut s, "Top");
         s.undo();
-        assert_eq!(s.active_layer, Some(bg));
+        assert_eq!(s.active_layer(), Some(bg));
     }
 
     #[test]
@@ -347,6 +459,9 @@ mod tests {
         v.fit(canvas, Vec2::new(500.0, 500.0), 1.0);
         assert!(v.zoom < 0.5 && v.zoom > 0.4);
         let center = v.to_screen(canvas.center().to_vec2());
-        assert!((center - Vec2::new(250.0, 250.0)).length() < 1.0, "the canvas is centered wherever it lies: {center:?}");
+        assert!(
+            (center - Vec2::new(250.0, 250.0)).length() < 1.0,
+            "the canvas is centered wherever it lies: {center:?}"
+        );
     }
 }

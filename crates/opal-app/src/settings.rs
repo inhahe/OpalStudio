@@ -261,6 +261,7 @@ fn setting_row(ui: &mut egui::Ui, settings: &mut Settings, def: &'static Def, pa
     let is_changed = settings.is_changed(def.key);
     let default_text = describe(def, &def.default_value());
     let label = ui.label(def.label);
+    let label_id = label.id;
     let tip = format!("{}\n\nDefault: {default_text}", def.help);
     label.on_hover_text(&tip);
     let mut changed = false;
@@ -286,7 +287,8 @@ fn setting_row(ui: &mut egui::Ui, settings: &mut Settings, def: &'static Def, pa
                         }
                     }
                 })
-                .response;
+                .response
+                .labelled_by(label_id);
             if changed {
                 r.mark_changed();
             }

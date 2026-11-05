@@ -4,8 +4,10 @@
 
 mod app;
 mod canvas;
+mod clipboard;
 mod commands;
 mod config;
+mod crop;
 mod curve_editor;
 mod dialogs;
 mod doc;
@@ -14,13 +16,20 @@ mod gpu;
 mod gpu_memory;
 mod help;
 mod icons;
+mod image_ops;
+mod layer_ops;
+mod move_tool;
 mod panels;
+mod paste;
 mod prefs;
 mod ribbon;
 mod settings;
 mod state;
 mod theme;
+mod thumbs;
 mod tools;
+mod transform;
+mod transform_ui;
 #[cfg(test)]
 mod ui_tests;
 mod widgets;

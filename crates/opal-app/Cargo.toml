@@ -23,8 +23,10 @@ egui_tiles = "0.18"
 rfd = "0.17"
 directories = "6"
 mimalloc = { workspace = true }
+arboard = { version = "3.7", default-features = false, features = ["image-data"] }
 
 [target.'cfg(windows)'.dependencies]
+clipboard-win = "5.4"
 windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Foundation"] }
 
 [dev-dependencies]

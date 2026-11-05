@@ -110,7 +110,8 @@ fn image_touches(i: &ImageObject, c: TileCoord) -> bool {
     let (Some(content), Some(inv)) = (i.image.content_bounds(), i.transform.inverse()) else { return false };
     let back = inv.bounds(&c.rect(0).to_f());
     let r = resample::reach(&i.transform, &i.sampling);
-    let content = FRect::new(content.x0 as f64 - r, content.y0 as f64 - r, content.x1 as f64 + r, content.y1 as f64 + r);
+    let content =
+        FRect::new(content.x0 as f64 - r, content.y0 as f64 - r, content.x1 as f64 + r, content.y1 as f64 + r);
     back.x0 < content.x1 && back.x1 > content.x0 && back.y0 < content.y1 && back.y1 > content.y0
 }
 
@@ -165,6 +166,91 @@ pub fn composite_tile(layers: &[Arc<Layer>], c: TileCoord) -> Option<Tile> {
     }
     let t = Tile::from_f32(&acc);
     (!t.is_transparent()).then_some(t)
+}
+
+/// How opaque object `o` is at document pixel `(x, y)` (an image object's nearest pixel).
+fn alpha_at(o: &Object, x: i64, y: i64) -> f32 {
+    match &o.kind {
+        ObjectKind::Pixels(p) => p.image.pixel(x - p.offset[0], y - p.offset[1])[3].to_f32(),
+        ObjectKind::Image(i) => match i.transform.inverse() {
+            Some(inv) => {
+                let [u, v] = inv.apply([x as f64 + 0.5, y as f64 + 0.5]);
+                i.image.pixel(u.floor() as i64, v.floor() as i64)[3].to_f32()
+            }
+            None => 0.0,
+        },
+    }
+}
+
+/// What object `o` shows at document point `(x, y)`: the pixel there (an image object's
+/// nearest pixel).
+fn object_point(o: &Object, x: f64, y: f64) -> PixelF32 {
+    let p = match &o.kind {
+        ObjectKind::Pixels(p) => p.image.pixel(x.floor() as i64 - p.offset[0], y.floor() as i64 - p.offset[1]),
+        ObjectKind::Image(i) => match i.transform.inverse() {
+            Some(inv) => {
+                let [u, v] = inv.apply([x, y]);
+                i.image.pixel(u.floor() as i64, v.floor() as i64)
+            }
+            None => return [0.0; 4],
+        },
+    };
+    crate::tile::pixel_to_f32(p)
+}
+
+/// What `layer` itself holds at document point `(x, y)`, whatever its own visibility and
+/// opacity (the layers inside a group count with theirs).
+pub fn layer_point(layer: &Layer, x: f64, y: f64) -> PixelF32 {
+    let mut acc = [0.0f32; 4];
+    match &layer.content {
+        LayerContent::Objects(objects) => {
+            for o in objects {
+                over(std::slice::from_mut(&mut acc), &[object_point(o, x, y)], 1.0);
+            }
+        }
+        LayerContent::Group(children) => acc = point(children, x, y),
+    }
+    acc
+}
+
+/// What `layers` show at document point `(x, y)`, composited as the canvas composites but
+/// from each object's nearest pixel: for thumbnails, where a few such points averaged per
+/// thumbnail pixel stand in for the full composite at a tiny fraction of the cost.
+pub fn point(layers: &[Arc<Layer>], x: f64, y: f64) -> PixelF32 {
+    let mut acc = [0.0f32; 4];
+    for layer in layers {
+        if layer.visible && layer.opacity > 0.0 {
+            let p = layer_point(layer, x, y);
+            over(std::slice::from_mut(&mut acc), &[p], layer.opacity);
+        }
+    }
+    acc
+}
+
+/// The layers whose content shows at document pixel `(x, y)`, topmost first, with how
+/// opaque it is there (times their opacity and their groups'): for picking layers with the
+/// pointer. Groups themselves are not listed; hidden layers are left out.
+pub fn layers_at(layers: &[Arc<Layer>], x: i64, y: i64) -> Vec<(crate::document::LayerId, f32)> {
+    fn walk(layers: &[Arc<Layer>], x: i64, y: i64, scale: f32, out: &mut Vec<(crate::document::LayerId, f32)>) {
+        for layer in layers.iter().rev() {
+            if !layer.visible || layer.opacity <= 0.0 {
+                continue;
+            }
+            let k = scale * layer.opacity;
+            match &layer.content {
+                LayerContent::Objects(objects) => {
+                    let a = objects.iter().fold(0.0f32, |a, o| a + alpha_at(o, x, y) * (1.0 - a));
+                    if a > 0.0 {
+                        out.push((layer.id, a * k));
+                    }
+                }
+                LayerContent::Group(children) => walk(children, x, y, k, out),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(layers, x, y, 1.0, &mut out);
+    out
 }
 
 /// Calls `f` with every visible object of `layers`, at any depth.
@@ -694,7 +780,10 @@ mod tests {
             let [ox, oy] = offset;
             assert_eq!(at(ox, oy), Some([1.0, 0.0, 0.0, 1.0]), "offset {offset:?}");
             assert_eq!(at(ox + 255, oy + 255), Some([0.0, 1.0, 0.0, 1.0]), "offset {offset:?}");
-            assert_eq!(flatten(&d.layers, &IRect::new(ox, oy, ox + 1, oy + 1)), vec![pixel_from_f32([1.0, 0.0, 0.0, 1.0])]);
+            assert_eq!(
+                flatten(&d.layers, &IRect::new(ox, oy, ox + 1, oy + 1)),
+                vec![pixel_from_f32([1.0, 0.0, 0.0, 1.0])]
+            );
         }
         // On the tile grid, the stored tile itself is shown.
         pixels_mut(&mut d, l).offset = [256, 512];
@@ -721,13 +810,18 @@ mod tests {
             sampling: nearest,
         };
         let top = ids.layer();
-        let layer = Layer::with_objects(top, "image", vec![Object { id: ids.object(), kind: ObjectKind::Image(image) }]);
+        let layer =
+            Layer::with_objects(top, "image", vec![Object { id: ids.object(), kind: ObjectKind::Image(image) }]);
         d.insert(Position { parent: None, index: 1 }, layer).unwrap();
         let view = IRect::from_size(2000, 2000);
         let mut p = Projection::new();
         let before: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 0, &view).into_iter().collect();
         let px = flatten(&d.layers, &IRect::new(399, 100, 401, 101));
-        assert_eq!(px, vec![pixel_from_f32([1.0, 0.0, 0.0, 1.0]), [half::f16::ZERO; 4]], "300 pixels wide from x = 100");
+        assert_eq!(
+            px,
+            vec![pixel_from_f32([1.0, 0.0, 0.0, 1.0]), [half::f16::ZERO; 4]],
+            "300 pixels wide from x = 100"
+        );
 
         let LayerContent::Objects(objects) = &mut d.layer_mut(top).unwrap().content else { panic!() };
         let ObjectKind::Image(i) = &mut objects[0].kind else { panic!() };
@@ -755,13 +849,45 @@ mod tests {
         };
         let expected = crate::resample::render_image(&image.image, &image.transform, &image.sampling, None);
         let mut ids = IdGen::default();
-        let layer = Layer::with_objects(ids.layer(), "image", vec![Object { id: ids.object(), kind: ObjectKind::Image(image) }]);
+        let layer = Layer::with_objects(
+            ids.layer(),
+            "image",
+            vec![Object { id: ids.object(), kind: ObjectKind::Image(image) }],
+        );
         let layers = vec![Arc::new(layer)];
         let got = composite_all(&layers);
         assert_eq!(got.tile_count(), expected.tile_count());
         for (c, t) in expected.tiles() {
             assert_eq!(got.tile(c).map(|g| g.pixels() == t.pixels()), Some(true), "tile {c:?}");
         }
+    }
+
+    #[test]
+    fn point_samples_match_the_composite() {
+        let mut ids = IdGen::default();
+        let mut d = Document::new(4, 4);
+        add(&mut d, &mut ids, solid(IRect::from_size(4, 4), [1.0, 0.0, 0.0, 1.0]));
+        let top = add(&mut d, &mut ids, solid(IRect::from_size(2, 4), [0.0, 0.0, 0.5, 0.5]));
+        d.layer_mut(top).unwrap().opacity = 0.5;
+        let flat = flatten(&d.layers, &IRect::from_size(4, 1));
+        for (x, p) in flat.iter().enumerate() {
+            assert!(close(point(&d.layers, x as f64 + 0.5, 0.5), pixel_to_f32(*p)));
+        }
+    }
+
+    #[test]
+    fn layers_at_lists_what_shows_topmost_first() {
+        let mut ids = IdGen::default();
+        let mut d = Document::new(10, 10);
+        let bottom = add(&mut d, &mut ids, solid(IRect::from_size(10, 10), [1.0; 4]));
+        let top = add(&mut d, &mut ids, solid(IRect::from_size(5, 5), [0.0, 0.0, 0.5, 0.5]));
+        d.layer_mut(top).unwrap().opacity = 0.5;
+        let at = layers_at(&d.layers, 2, 2);
+        assert_eq!(at.iter().map(|p| p.0).collect::<Vec<_>>(), vec![top, bottom]);
+        assert!((at[0].1 - 0.25).abs() < 1e-3, "half alpha at half opacity: {}", at[0].1);
+        assert_eq!(layers_at(&d.layers, 7, 7).iter().map(|p| p.0).collect::<Vec<_>>(), vec![bottom]);
+        d.layer_mut(bottom).unwrap().visible = false;
+        assert!(layers_at(&d.layers, 7, 7).is_empty());
     }
 
     #[test]
