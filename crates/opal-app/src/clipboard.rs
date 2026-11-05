@@ -238,6 +238,23 @@ fn from_import(i: image_files::Imported) -> Pasted {
 /// the clipboard still holds this application's last copy.
 #[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
 fn read_system(own: Option<OwnCopy>) -> ReadResult {
+    // Formats are fetched one at a time, each with the clipboard opened for it alone, so the
+    // clipboard can change between them (the user copying again): then everything is read
+    // again, from what it holds now.
+    #[cfg(windows)]
+    for _ in 0..3 {
+        let before = clipboard_win::raw::seq_num();
+        let read = read_system_once(own.clone());
+        if clipboard_win::raw::seq_num() == before {
+            return read;
+        }
+    }
+    read_system_once(own)
+}
+
+/// One reading of the system clipboard (see [`read_system`]).
+#[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
+fn read_system_once(own: Option<OwnCopy>) -> ReadResult {
     #[cfg(windows)]
     {
         if let Some(own) = own.filter(OwnCopy::held) {
