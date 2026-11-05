@@ -346,8 +346,15 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         smooth: u32::from(!nearest),
         _pad: [0; 2],
     };
-    let callback =
-        CanvasCallback { view_key: doc_key, level: shown_level, uniforms, tiles: draws, nearest, texture_budget };
+    let callback = CanvasCallback {
+        view_key: doc_key,
+        level: shown_level,
+        uniforms,
+        tiles: draws,
+        nearest,
+        texture_budget,
+        frame: ctx.cumulative_frame_nr(),
+    };
     ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, callback));
     if prefs.border {
         let min = rect.min + view.to_screen(canvas.min.to_vec2()) / ppp;

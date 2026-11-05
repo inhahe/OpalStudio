@@ -189,6 +189,9 @@ pub struct CanvasCallback {
     pub nearest: bool,
     /// How many tile textures may be kept, at most (those drawn this frame always are).
     pub texture_budget: usize,
+    /// The frame drawn (egui's count), the same for every view drawn in it, so that what one
+    /// view draws counts as drawn in this frame when another view trims the textures.
+    pub frame: u64,
 }
 
 /// The bytes a tile texture takes: 258 × 258 pixels of four half floats.
@@ -438,7 +441,7 @@ impl CallbackTrait for CanvasCallback {
         resources: &mut CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let Some(r) = resources.get_mut::<CanvasRenderer>() else { return Vec::new() };
-        r.frame += 1;
+        r.frame = r.frame.max(self.frame);
         let frame = r.frame;
         let mut drawn = Vec::with_capacity(self.tiles.len());
         let mut instances: Vec<[f32; 4]> = Vec::with_capacity(self.tiles.len());
