@@ -129,8 +129,9 @@ not a goal.
   to report changes to the cache. Stale tiles are computed in parallel, from a thread each
   document has for its projection, on a pool of threads of their own (so a small parallel
   job of the interface's never waits behind them): the canvas asks for the view it shows and waits for it
-  only briefly (20 ms), drawing the last view done meanwhile (the previous zoom, or the
-  image before a change), so a huge image never holds up the interface. Keys name tiles and
+  only briefly (20 ms, on the frame that asks), drawing the last view done meanwhile (the
+  previous zoom, or the image before a change), so a huge image never holds up the
+  interface. Keys name tiles and
   images by weak reference (compared by address, which cannot be reused while named), and
   a layer's own tile shown as it is is held weakly too, so the cache never keeps alive
   what the document has let go of. A pyramid tile is

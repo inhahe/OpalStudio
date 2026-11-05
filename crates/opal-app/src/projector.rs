@@ -77,6 +77,8 @@ impl Shared {
 pub struct Projector {
     shared: Arc<Shared>,
     asked: Option<Request>,
+    /// The request [`shown`](Self::shown) last waited for.
+    waited: u64,
 }
 
 impl Projector {
@@ -84,7 +86,7 @@ impl Projector {
         let shared = Arc::new(Shared::default());
         let s = shared.clone();
         std::thread::Builder::new().name("projection".into()).spawn(move || run(&s)).expect("starting a thread");
-        Projector { shared, asked: None }
+        Projector { shared, asked: None, waited: 0 }
     }
 
     /// Asks for the tiles of pyramid level `level` within `rect` (canvas pixels) to be brought
@@ -110,10 +112,16 @@ impl Projector {
         self.shared.job.notify_one();
     }
 
-    /// The latest result, after waiting up to `wait` for the one last asked for; `None` if
-    /// none is done yet. Panics if an update panicked on the thread.
-    pub fn shown(&self, wait: Duration) -> Option<Arc<Shown>> {
+    /// The latest result, after waiting up to `wait` for the one last asked for, the first
+    /// time it is looked for (a frame drawn while a long update goes on then waits once,
+    /// not every frame); `None` if none is done yet. Panics if an update panicked on the
+    /// thread.
+    pub fn shown(&mut self, wait: Duration) -> Option<Arc<Shown>> {
         let asked = self.asked.as_ref().map_or(0, |a| a.serial);
+        let wait = if self.waited == asked { Duration::ZERO } else { wait };
+        if !wait.is_zero() {
+            self.waited = asked;
+        }
         let s = self.shared.lock();
         let pending = |s: &mut State| s.failed.is_none() && s.shown.as_ref().is_none_or(|r| r.serial < asked);
         let s = match self.shared.done.wait_timeout_while(s, wait, pending) {
@@ -304,6 +312,42 @@ mod tests {
         *m.lock().unwrap() = true;
         c.notify_all();
         assert!(shown.is_some(), "the projection waited for the global pool");
+    }
+
+    #[test]
+    fn a_request_not_done_is_waited_for_once() {
+        // Every projection thread held, so the update cannot be done.
+        let n = pool().current_num_threads();
+        let (started, all_started) = std::sync::mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        for _ in 0..n {
+            let (started, release) = (started.clone(), release.clone());
+            pool().spawn(move || {
+                started.send(()).unwrap();
+                let (m, c) = &*release;
+                let mut go = m.lock().unwrap();
+                while !*go {
+                    go = c.wait(go).unwrap();
+                }
+            });
+        }
+        for _ in 0..n {
+            all_started.recv().unwrap();
+        }
+        let mut p = Projector::new();
+        p.ask(&heavy_layers(), 0, &IRect::from_size(4096, 4096), Quality::Exact, None, &egui::Context::default());
+        let wait = Duration::from_millis(100);
+        let t = std::time::Instant::now();
+        let first = p.shown(wait);
+        let first_took = t.elapsed();
+        let t = std::time::Instant::now();
+        p.shown(wait);
+        let again_took = t.elapsed();
+        let (m, c) = &*release;
+        *m.lock().unwrap() = true;
+        c.notify_all();
+        assert!(first.is_none() && first_took >= wait, "the first look did not wait");
+        assert!(again_took < wait / 2, "it waited again for the same request ({again_took:?})");
     }
 
     #[test]
