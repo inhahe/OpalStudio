@@ -28,15 +28,6 @@ unused. Fine for ordinary images; a huge document panned end to end keeps all of
 memory. **Fix:** evict least recently used tiles beyond a memory budget, using the GPU
 memory query for the texture side.
 
-## Exporting and saving hold whole copies of the image in memory
-
-`crates/opal-io/src/image_files.rs` (`export`) flattens the canvas into one buffer, converts
-it to another, and hands that to the encoder; `native.rs` (`save`) shuffles every tile into
-memory before writing, and compresses them one at a time. A very large canvas therefore
-needs several times its size in memory to export, which is why the New Image dialog stops at
-30,000 pixels a side. **Fix:** stream exports row by row into the PNG and JPEG encoders, and
-compress tiles in parallel while writing them as they are produced.
-
 ## Panning a zoomed-out view recomputes the cache keys of every tile in view
 
 `crates/opal-core/src/composite.rs` (`Projection::update`). An unchanged view of an unchanged

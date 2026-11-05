@@ -500,7 +500,10 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
 Export writes PNG (8 or 16 bits) or JPEG (with quality, and the background that
 transparency is flattened onto), at the canvas's size or a chosen one: pixels or percent,
 aspect ratio locked by default, with a resampling method. Export never changes the
-document.
+document. The image is made and encoded a band of rows (a tile's height) at a time and
+streamed into the PNG or JPEG encoder, so exporting at the canvas's size holds one band,
+never the whole image; at another size it holds the canvas once more (averaged in blocks
+first when shrinking by 2 or more), which the bands are drawn from.
 
 ## Thumbnails
 
@@ -867,7 +870,9 @@ next free identifier) and `tiles/<n>.bin`, one tile each. Objects are pixel obje
 tiles and whole-pixel offset) or image objects (their tiles, frame, transform and
 sampling). A tile shared by several layers is stored once. A tile file is the tile's half
 floats byte-shuffled (all low bytes, then all high bytes), which lets deflate compress
-photos far better. Numbers are written so they read back exactly. Version 0 (pixel objects
+photos far better. Saving compresses the tiles in parallel, a batch at a time, so it holds
+a batch of them beyond the document rather than a copy of every tile. Numbers are written
+so they read back exactly. Version 0 (pixel objects
 only, a canvas at the origin) is still read; a newer version is refused with a message
 rather than misread, and so are values out of range (a transform that cannot be inverted,
 say). The editor never makes a transform a file could not hold: the transform box stops

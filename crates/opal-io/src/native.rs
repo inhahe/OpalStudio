@@ -28,15 +28,21 @@ use opal_core::tile::{Pixel, TILE_PIXELS, Tile, TileCoord};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Seek};
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::Path;
 use std::sync::Arc;
+use zip::result::ZipResult;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 pub const MIME_TYPE: &str = "application/x-opal-studio";
 pub const FORMAT_VERSION: u32 = 1;
 const TILE_BYTES: usize = TILE_PIXELS * 4 * 2;
+/// How many tiles saving compresses (in parallel) before writing them: what it holds at
+/// once beyond the document.
+const TILES_AT_ONCE: usize = 256;
+/// How many tiles one worker compresses into an archive of its own.
+const TILES_PER_PART: usize = 8;
 /// The largest `document.json` accepted.
 const MAX_JSON: usize = 256 << 20;
 
@@ -117,7 +123,6 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path) -> Result<(), IoError> {
         layers,
     };
     let json = serde_json::to_vec_pretty(&file).expect("the document serializes");
-    let shuffled: Vec<Vec<u8>> = tiles.par_iter().map(|t| shuffle(t.pixels())).collect();
 
     write_atomically(path, |out| {
         let zip_err = |e: zip::result::ZipError| IoError::io(path, std::io::Error::other(e));
@@ -129,13 +134,39 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path) -> Result<(), IoError> {
         write_all(&mut zip, MIME_TYPE.as_bytes(), path)?;
         zip.start_file("document.json", deflated).map_err(zip_err)?;
         write_all(&mut zip, &json, path)?;
-        for (i, bytes) in shuffled.iter().enumerate() {
-            zip.start_file(format!("tiles/{i}.bin"), deflated).map_err(zip_err)?;
-            write_all(&mut zip, bytes, path)?;
-        }
+        write_tiles(&mut zip, &tiles, deflated, TILES_AT_ONCE).map_err(zip_err)?;
         zip.finish().map_err(zip_err)?;
         Ok(())
     })
+}
+
+/// Writes `tiles` to `zip` as `tiles/<n>.bin`, numbered and stored in order, compressing
+/// `at_once` of them at a time in parallel: each worker compresses a few into an archive of
+/// its own, which is then copied in whole, without compressing again.
+fn write_tiles<W: Write + Seek>(
+    zip: &mut ZipWriter<W>,
+    tiles: &[Arc<Tile>],
+    options: SimpleFileOptions,
+    at_once: usize,
+) -> ZipResult<()> {
+    for (b, batch) in tiles.chunks(at_once).enumerate() {
+        let parts: Vec<Vec<u8>> = batch
+            .par_chunks(TILES_PER_PART)
+            .enumerate()
+            .map(|(k, part)| {
+                let mut w = ZipWriter::new(Cursor::new(Vec::new()));
+                for (n, t) in part.iter().enumerate() {
+                    w.start_file(format!("tiles/{}.bin", b * at_once + k * TILES_PER_PART + n), options)?;
+                    w.write_all(&shuffle(t.pixels()))?;
+                }
+                Ok(w.finish()?.into_inner())
+            })
+            .collect::<ZipResult<_>>()?;
+        for part in parts {
+            zip.merge_archive(ZipArchive::new(Cursor::new(part))?)?;
+        }
+    }
+    Ok(())
 }
 
 fn file_layer(layer: &Layer, numbers: &mut HashMap<*const Tile, usize>, tiles: &mut Vec<Arc<Tile>>) -> FileLayer {
@@ -606,5 +637,31 @@ mod tests {
         let big = vec![0u8; TILE_BYTES * 3];
         let err = load_from(crafted(json, &[("tiles/0.bin", &big)]), Path::new("bomb.opal")).err().expect("refused");
         assert!(err.to_string().contains("tiles/0.bin"), "{err}");
+    }
+
+    #[test]
+    fn tiles_compressed_in_batches_are_stored_in_order() {
+        let tiles: Vec<Arc<Tile>> = (0..23)
+            .map(|i| {
+                let mut t = Tile::transparent();
+                t.set(i, 7, opal_core::tile::pixel_from_f32([i as f32 / 23.0, 0.5, 0.25, 1.0]));
+                Arc::new(t)
+            })
+            .collect();
+        // Batches of one part, and batches of several (parts of 8, 8 and 4).
+        for at_once in [5, 20] {
+            let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+            let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+            write_tiles(&mut zip, &tiles, options, at_once).unwrap();
+            let mut back = ZipArchive::new(Cursor::new(zip.finish().unwrap().into_inner())).unwrap();
+            assert_eq!(back.len(), 23);
+            for (i, t) in tiles.iter().enumerate() {
+                let mut entry = back.by_index(i).unwrap();
+                assert_eq!(entry.name().unwrap(), format!("tiles/{i}.bin"), "batches of {at_once}");
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).unwrap();
+                assert!(unshuffle(&bytes) == **t, "tile {i}, batches of {at_once}");
+            }
+        }
     }
 }

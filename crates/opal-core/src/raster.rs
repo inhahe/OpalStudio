@@ -119,26 +119,30 @@ impl RasterImage {
     /// top-left corner at the canvas origin. Tiles that come out fully transparent are
     /// left out.
     pub fn from_pixels(width: u32, height: u32, pixels: &[Pixel]) -> RasterImage {
-        assert_eq!(pixels.len(), width as usize * height as usize, "buffer size");
         let mut img = RasterImage::new();
-        let area = IRect::from_size(i64::from(width), i64::from(height));
-        for c in TileCoord::covering(&area, 0) {
-            let r = c.rect(0).intersect(&area);
-            let mut tile = Tile::transparent();
-            let ox = (r.x0 - c.rect(0).x0) as u32;
-            let oy = (r.y0 - c.rect(0).y0) as u32;
-            let n = (r.x1 - r.x0) as usize;
+        img.write_rect(&IRect::from_size(i64::from(width), i64::from(height)), pixels);
+        img
+    }
+
+    /// Replaces the pixels of `rect` with `pixels`, row by row. Tiles that come out fully
+    /// transparent are removed.
+    pub fn write_rect(&mut self, rect: &IRect, pixels: &[Pixel]) {
+        let w = rect.width() as usize;
+        assert_eq!(pixels.len(), w * rect.height() as usize, "buffer size");
+        for c in TileCoord::covering(rect, 0) {
+            let tr = c.rect(0);
+            let r = tr.intersect(rect);
+            let n = r.width() as usize;
+            let tile = self.tile_mut(c);
             for y in r.y0..r.y1 {
-                let src = &pixels[y as usize * width as usize + r.x0 as usize..][..n];
-                let ty = oy as usize + (y - r.y0) as usize;
-                let start = ty * TILE_SIZE as usize + ox as usize;
+                let src = &pixels[(y - rect.y0) as usize * w + (r.x0 - rect.x0) as usize..][..n];
+                let start = (y - tr.y0) as usize * TILE_SIZE as usize + (r.x0 - tr.x0) as usize;
                 tile.pixels_mut()[start..start + n].copy_from_slice(src);
             }
-            if !tile.is_transparent() {
-                img.tiles.insert(c, Arc::new(tile));
+            if tile.is_transparent() {
+                self.tiles.remove(&c);
             }
         }
-        img
     }
 
     /// Copies the pixels of `rect` into a row-major buffer.

@@ -5,16 +5,18 @@ use crate::{IoError, write_atomically};
 use half::f16;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
-use image::{DynamicImage, ImageDecoder, ImageReader};
-use opal_core::composite::flatten;
-use opal_core::document::Document;
+use image::{DynamicImage, GenericImageView, ImageDecoder, ImageReader};
+use opal_core::composite::{composite_within, flatten};
+use opal_core::document::{Document, Layer};
 use opal_core::geom::{Affine, IRect};
 use opal_core::raster::RasterImage;
 use opal_core::resample::{self, Sampling};
-use opal_core::tile::Pixel;
+use opal_core::tile::{Pixel, TILE_SIZE};
 use rayon::prelude::*;
-use std::io::Cursor;
+use std::cell::RefCell;
+use std::io::{Cursor, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 /// An image read from a file, converted to working pixels with its top-left corner at the
 /// canvas origin.
@@ -113,113 +115,296 @@ pub struct ExportSize {
     pub sampling: Sampling,
 }
 
-/// The canvas of `doc` flattened, at the canvas's size or at `size`: the pixels row by
-/// row, with the width and height.
-pub fn flatten_canvas(doc: &Document, size: Option<&ExportSize>) -> (Vec<Pixel>, u32, u32) {
-    let canvas = doc.canvas.rect();
-    let (w, h) = (doc.canvas.width, doc.canvas.height);
-    let flat = flatten(&doc.layers, &canvas);
-    if w == 0 || h == 0 {
-        return (flat, w, h);
-    }
-    match size {
-        Some(s) if (s.width, s.height) != (w, h) => {
-            // Shrinking by a large factor: first average whole blocks, kx × ky, which leaves
-            // the resampler a factor under 2 along each axis, and so a narrow frame (below)
-            // instead of one as wide as the factor.
-            let (kx, ky) = ((w / s.width.max(1)).max(1), (h / s.height.max(1)).max(1));
-            let (flat, w, h) = if kx * ky >= 2 { shrink_blocks(&flat, w, h, kx, ky) } else { (flat, w, h) };
-            let to_size = Affine::scale(f64::from(s.width) / f64::from(w), f64::from(s.height) / f64::from(h));
-            // The canvas is the whole image: what lies past it must not bleed into the
-            // edges, and the edges must not fade out either. So the resampler gets the
-            // canvas alone, framed by copies of its edge pixels as far as its filter reaches.
-            let border = resample::reach(&to_size, &s.sampling).ceil() as u32 + 1;
-            let framed = extend_edges(&flat, w, h, border);
-            let source = RasterImage::from_pixels(w + 2 * border, h + 2 * border, &framed);
-            let b = f64::from(border);
-            let out = IRect::from_size(i64::from(s.width), i64::from(s.height));
-            let resized =
-                resample::render_image(&source, &Affine::translate(-b, -b).then(to_size), &s.sampling, Some(&out));
-            (resized.read_rect(&out), s.width, s.height)
+/// How many rows of the exported image are made at a time.
+const BAND: i64 = TILE_SIZE as i64;
+
+/// The canvas of a document as exported, at its own size or another, made a band of rows
+/// at a time from the top: a band is all of the result ever held (with, at another size,
+/// the image it is drawn from).
+pub struct Exported<'d> {
+    pub width: u32,
+    pub height: u32,
+    source: Source<'d>,
+    /// The first row not made yet.
+    next: u32,
+}
+
+enum Source<'d> {
+    /// At the canvas's size: the layers, composited a band at a time.
+    Canvas { layers: &'d [Arc<Layer>], canvas: IRect },
+    /// At another size: `image` drawn through `to_size` (its pixels to the result's).
+    Resized { image: Box<RasterImage>, to_size: Affine, sampling: Sampling },
+}
+
+impl<'d> Exported<'d> {
+    pub fn new(doc: &'d Document, size: Option<&ExportSize>) -> Exported<'d> {
+        let canvas = doc.canvas.rect();
+        let (w, h) = (doc.canvas.width, doc.canvas.height);
+        match size {
+            Some(s) if (s.width, s.height) != (w, h) && w > 0 && h > 0 => {
+                Exported { width: s.width, height: s.height, source: resized(&doc.layers, &canvas, s), next: 0 }
+            }
+            _ => Exported { width: w, height: h, source: Source::Canvas { layers: &doc.layers, canvas }, next: 0 },
         }
-        _ => (flat, w, h),
+    }
+
+    /// The next band of rows, top to bottom: its pixels row by row, `width` to a row.
+    /// `None` once every row has been made.
+    pub fn band(&mut self) -> Option<Vec<Pixel>> {
+        if self.next >= self.height {
+            return None;
+        }
+        let y0 = i64::from(self.next);
+        let px = match &self.source {
+            Source::Canvas { layers, canvas } => {
+                // Ending on the document's tile rows, so that each tile is composited once.
+                let top = canvas.y0 + y0;
+                let y1 = ((top.div_euclid(BAND) + 1) * BAND).min(canvas.y1);
+                self.next = (y1 - canvas.y0) as u32;
+                flatten(layers, &IRect::new(canvas.x0, top, canvas.x1, y1))
+            }
+            Source::Resized { image, to_size, sampling } => {
+                let y1 = (y0 + BAND).min(i64::from(self.height));
+                self.next = y1 as u32;
+                let out = IRect::new(0, y0, i64::from(self.width), y1);
+                resample::render_image(image, to_size, sampling, Some(&out)).read_rect(&out)
+            }
+        };
+        Some(px)
     }
 }
 
-/// `w × h` pixels reduced `kx` times across and `ky` times down: each result pixel is the
-/// average of the `kx × ky` block it covers (the blocks along the right and bottom edges
-/// average the pixels they hold, when the factors do not divide the size).
-fn shrink_blocks(px: &[Pixel], w: u32, h: u32, kx: u32, ky: u32) -> (Vec<Pixel>, u32, u32) {
-    let (w, h, kx, ky) = (w as usize, h as usize, kx as usize, ky as usize);
+/// What an export at another size is drawn from: the canvas composited (averaged in whole
+/// blocks first when shrinking by 2 or more, which leaves the resampler a factor under 2
+/// along each axis, and so a narrow reach), with its edge pixels copied outward as far as
+/// the filter reaches. The canvas is the whole image: what lies past it must not bleed into
+/// the edges, and the edges must not fade out either.
+fn resized<'d>(layers: &'d [Arc<Layer>], canvas: &IRect, s: &ExportSize) -> Source<'d> {
+    let (w, h) = (canvas.width() as u32, canvas.height() as u32);
+    let (kx, ky) = ((w / s.width.max(1)).max(1), (h / s.height.max(1)).max(1));
+    // The image, and where in it the canvas's pixels are.
+    let (mut image, at) = if kx * ky >= 2 {
+        let (image, sw, sh) = shrunk(layers, canvas, kx, ky);
+        (image, IRect::from_size(i64::from(sw), i64::from(sh)))
+    } else {
+        (composite_within(layers, canvas), *canvas)
+    };
+    let to_size = Affine::translate(-at.x0 as f64, -at.y0 as f64)
+        .then(Affine::scale(f64::from(s.width) / at.width() as f64, f64::from(s.height) / at.height() as f64));
+    let border = resample::reach(&to_size, &s.sampling).ceil() as i64 + 1;
+    frame_edges(&mut image, &at, border);
+    Source::Resized { image: Box::new(image), to_size, sampling: s.sampling }
+}
+
+/// The canvas averaged in blocks of `kx × ky` pixels (the blocks along the right and bottom
+/// edges average the pixels they hold, when the factors do not divide the size), placed at
+/// the origin, with its width and height. The canvas is composited a tile row at a time;
+/// the block rows a band holds whole are averaged in parallel, and one a band ends inside
+/// is summed on into the next.
+fn shrunk(layers: &[Arc<Layer>], canvas: &IRect, kx: u32, ky: u32) -> (RasterImage, u32, u32) {
+    let (w, h, kx, ky) = (canvas.width() as usize, canvas.height() as usize, kx as usize, ky as usize);
     let (sw, sh) = (w.div_ceil(kx), h.div_ceil(ky));
-    let rows: Vec<Vec<Pixel>> = (0..sh)
-        .into_par_iter()
-        .map(|j| {
-            (0..sw)
-                .map(|i| {
-                    let mut acc = [0.0f32; 4];
-                    let (x1, y1) = (((i + 1) * kx).min(w), ((j + 1) * ky).min(h));
-                    for y in j * ky..y1 {
-                        for p in &px[y * w + i * kx..y * w + x1] {
-                            for c in 0..4 {
-                                acc[c] += p[c].to_f32();
-                            }
-                        }
+    // Adds the rows `rows` to the block sums `acc`.
+    let sum = |acc: &mut [[f32; 4]], rows: &[Pixel]| {
+        for row in rows.chunks_exact(w) {
+            for (i, a) in acc.iter_mut().enumerate() {
+                for p in &row[i * kx..((i + 1) * kx).min(w)] {
+                    for c in 0..4 {
+                        a[c] += p[c].to_f32();
                     }
-                    let n = ((x1 - i * kx) * (y1 - j * ky)) as f32;
-                    acc.map(|v| f16::from_f32(v / n))
+                }
+            }
+        }
+    };
+    // The block averages from sums over `rows` rows.
+    let average = |acc: &[[f32; 4]], rows: usize| -> Vec<Pixel> {
+        let n = |i: usize| ((((i + 1) * kx).min(w) - i * kx) * rows) as f32;
+        acc.iter().enumerate().map(|(i, a)| a.map(|v| f16::from_f32(v / n(i)))).collect()
+    };
+    let mut out = RasterImage::new();
+    // A block row begun in an earlier band, and how many of its rows are summed.
+    let mut acc = vec![[0.0f32; 4]; sw];
+    let mut summed = 0;
+    // Finished block rows not yet written, from result row `written`.
+    let mut done: Vec<Pixel> = Vec::new();
+    let mut written = 0;
+    let mut y = 0;
+    while y < h {
+        let top = canvas.y0 + y as i64;
+        let y1 = (((top.div_euclid(BAND) + 1) * BAND - canvas.y0) as usize).min(h);
+        let px = flatten(layers, &IRect::new(canvas.x0, top, canvas.x1, canvas.y0 + y1 as i64));
+        let rows = |r0: usize, r1: usize| &px[(r0 - y) * w..(r1 - y) * w];
+        let mut r = y;
+        if summed > 0 {
+            let block_end = ((r / ky + 1) * ky).min(h);
+            let end = block_end.min(y1);
+            sum(&mut acc, rows(r, end));
+            summed += end - r;
+            r = end;
+            if r == block_end {
+                done.extend(average(&acc, summed));
+                acc.fill([0.0; 4]);
+                summed = 0;
+            }
+        }
+        if summed == 0 {
+            let whole = if y1 == h { (y1 - r).div_ceil(ky) } else { (y1 - r) / ky };
+            let blocks: Vec<Vec<Pixel>> = (0..whole)
+                .into_par_iter()
+                .map(|b| {
+                    let (r0, r1) = (r + b * ky, (r + (b + 1) * ky).min(h));
+                    let mut a = vec![[0.0f32; 4]; sw];
+                    sum(&mut a, rows(r0, r1));
+                    average(&a, r1 - r0)
                 })
-                .collect()
-        })
-        .collect();
-    (rows.concat(), sw as u32, sh as u32)
+                .collect();
+            blocks.into_iter().for_each(|b| done.extend(b));
+            r = (r + whole * ky).min(h);
+            if r < y1 {
+                sum(&mut acc, rows(r, y1));
+                summed = y1 - r;
+            }
+        }
+        let ready = done.len() / sw;
+        if ready >= TILE_SIZE as usize || (y1 == h && ready > 0) {
+            out.write_rect(&IRect::new(0, written as i64, sw as i64, (written + ready) as i64), &done);
+            written += ready;
+            done.clear();
+        }
+        y = y1;
+    }
+    (out, sw as u32, sh as u32)
 }
 
-/// `w × h` pixels with `border` more on every side, each a copy of the nearest edge pixel.
-fn extend_edges(px: &[Pixel], w: u32, h: u32, border: u32) -> Vec<Pixel> {
-    let (w, h, b) = (w as usize, h as usize, border as usize);
-    let ew = w + 2 * b;
-    let mut out = Vec::with_capacity(ew * (h + 2 * b));
-    for y in 0..h + 2 * b {
-        let row = &px[y.saturating_sub(b).min(h - 1) * w..][..w];
-        out.extend(std::iter::repeat_n(row[0], b));
-        out.extend_from_slice(row);
-        out.extend(std::iter::repeat_n(row[w - 1], b));
+/// Copies the pixels along the edges of `rect` in `image` outward, `border` deep on every
+/// side (the corners from the corner pixels).
+fn frame_edges(image: &mut RasterImage, rect: &IRect, border: i64) {
+    let (x0, y0, x1, y1) = (rect.x0, rect.y0, rect.x1 - 1, rect.y1 - 1);
+    for y in y0..=y1 {
+        let (left, right) = (image.pixel(x0, y), image.pixel(x1, y));
+        for b in 1..=border {
+            image.set_pixel(x0 - b, y, left);
+            image.set_pixel(x1 + b, y, right);
+        }
     }
-    out
+    for x in x0 - border..=x1 + border {
+        let (top, bottom) = (image.pixel(x, y0), image.pixel(x, y1));
+        for b in 1..=border {
+            image.set_pixel(x, y0 - b, top);
+            image.set_pixel(x, y1 + b, bottom);
+        }
+    }
 }
 
 /// Flattens the canvas of `doc`, at its own size or at `size`, and writes it to `path`
-/// (atomically).
+/// (atomically). The image is made and encoded a band of rows at a time, the next band made
+/// while the encoder compresses this one, so a canvas exported at its own size is never
+/// held whole.
 pub fn export(doc: &Document, path: &Path, format: &ExportFormat, size: Option<&ExportSize>) -> Result<(), IoError> {
-    let (pixels, w, h) = flatten_canvas(doc, size);
-    let encode_err = |e: image::ImageError| IoError::Encode { path: path.to_owned(), message: e.to_string() };
-    let img = match format {
-        ExportFormat::Png { sixteen_bit: false } => {
-            DynamicImage::ImageRgba8(image::RgbaImage::from_raw(w, h, pixels_to_rgba8(&pixels)).expect("buffer size"))
-        }
-        ExportFormat::Png { sixteen_bit: true } => rgba16(&pixels, w, h),
-        ExportFormat::Jpeg { background, .. } => {
-            let bg = from_srgb8([background[0], background[1], background[2], 255]);
-            let rgb: Vec<u8> = pixels
+    let mut rows = Exported::new(doc, size);
+    let (width, height) = (rows.width, rows.height);
+    let encode_err = |message: String| IoError::Encode { path: path.to_owned(), message };
+    std::thread::scope(|scope| {
+        // One band waiting beside the one being encoded. An encoder that stops early drops
+        // the receiver, which stops the bands.
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        scope.spawn(move || {
+            while let Some(band) = rows.band() {
+                if tx.send(band).is_err() {
+                    break;
+                }
+            }
+        });
+        write_atomically(path, |out| match format {
+            ExportFormat::Png { sixteen_bit } => {
+                write_png(out, width, height, rx.iter(), *sixteen_bit).map_err(|e| encode_err(e.to_string()))
+            }
+            ExportFormat::Jpeg { quality, background } => {
+                let bg = from_srgb8([background[0], background[1], background[2], 255]);
+                let rows = JpegRows::new(rx.iter(), width, height, bg);
+                JpegEncoder::new_with_quality(out, (*quality).clamp(1, 100))
+                    .encode_image(&rows)
+                    .map_err(|e| encode_err(e.to_string()))
+            }
+        })
+    })
+}
+
+/// Writes a `width × height` PNG with transparency, at 8 or (`sixteen`) 16 bits a channel,
+/// from `bands` of rows, top to bottom.
+fn write_png(
+    out: impl Write,
+    width: u32,
+    height: u32,
+    bands: impl Iterator<Item = Vec<Pixel>>,
+    sixteen: bool,
+) -> Result<(), png::EncodingError> {
+    let mut encoder = png::Encoder::new(out, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(if sixteen { png::BitDepth::Sixteen } else { png::BitDepth::Eight });
+    encoder.set_compression(png::Compression::Balanced);
+    encoder.set_filter(png::Filter::Adaptive);
+    let mut writer = encoder.write_header()?;
+    let mut stream = writer.stream_writer()?;
+    for band in bands {
+        let bytes: Vec<u8> = if sixteen {
+            pixels_to_rgba16(&band).iter().flat_map(|v| v.to_be_bytes()).collect()
+        } else {
+            pixels_to_rgba8(&band)
+        };
+        stream.write_all(&bytes)?;
+    }
+    stream.finish()?;
+    writer.finish()
+}
+
+/// Bands of rows as the JPEG encoder reads them: 8-row blocks from the top, each pixel
+/// once, over an opaque background. Rows are taken from the bands as the encoder gets to
+/// them, and dropped once it has gone past.
+struct JpegRows<I> {
+    bands: RefCell<I>,
+    width: u32,
+    height: u32,
+    background: Pixel,
+    /// The rows held: from row `.0`, `width` pixels each.
+    held: RefCell<(u32, Vec<[u8; 3]>)>,
+}
+
+impl<I: Iterator<Item = Vec<Pixel>>> JpegRows<I> {
+    fn new(bands: I, width: u32, height: u32, background: Pixel) -> JpegRows<I> {
+        JpegRows { bands: RefCell::new(bands), width, height, background, held: RefCell::new((0, Vec::new())) }
+    }
+}
+
+impl<I: Iterator<Item = Vec<Pixel>>> GenericImageView for JpegRows<I> {
+    type Pixel = image::Rgb<u8>;
+
+    fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    fn get_pixel(&self, x: u32, y: u32) -> image::Rgb<u8> {
+        let w = self.width as usize;
+        let mut held = self.held.borrow_mut();
+        let (first, px) = &mut *held;
+        while y >= *first + (px.len() / w) as u32 {
+            // The encoder never goes back past the 8-row block it is in.
+            let keep = (y / 8 * 8).max(*first);
+            px.drain(..(keep - *first) as usize * w);
+            *first = keep;
+            let band = self.bands.borrow_mut().next().expect("a row within the image");
+            let bg = self.background;
+            let rgb: Vec<[u8; 3]> = band
                 .par_iter()
-                .flat_map_iter(|p| {
+                .map(|p| {
                     let [r, g, b, _] = crate::pixels::to_srgb8(over_opaque(*p, bg));
                     [r, g, b]
                 })
                 .collect();
-            DynamicImage::ImageRgb8(image::RgbImage::from_raw(w, h, rgb).expect("buffer size"))
+            px.extend(rgb);
         }
-    };
-    write_atomically(path, |out| {
-        match format {
-            ExportFormat::Png { .. } => img.write_with_encoder(PngEncoder::new(out)),
-            ExportFormat::Jpeg { quality, .. } => {
-                img.write_with_encoder(JpegEncoder::new_with_quality(out, (*quality).clamp(1, 100)))
-            }
-        }
-        .map_err(encode_err)
-    })
+        image::Rgb(px[(y - *first) as usize * w + x as usize])
+    }
 }
 
 /// `p` over the opaque pixel `bg`, both premultiplied.
@@ -233,6 +418,17 @@ fn over_opaque(p: Pixel, bg: Pixel) -> Pixel {
 mod tests {
     use super::*;
     use opal_core::document::{IdGen, Layer, Position};
+
+    /// The whole exported image at once, with its width and height.
+    fn flatten_canvas(doc: &Document, size: Option<&ExportSize>) -> (Vec<Pixel>, u32, u32) {
+        let mut rows = Exported::new(doc, size);
+        let (w, h) = (rows.width, rows.height);
+        let mut out = Vec::new();
+        while let Some(band) = rows.band() {
+            out.extend(band);
+        }
+        (out, w, h)
+    }
 
     fn temp(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("opal-io-{}", std::process::id()));
@@ -351,10 +547,14 @@ mod tests {
         use opal_core::tile::{pixel_from_f32, pixel_to_f32};
         // 3 × 1: two pixels of 0 and one of 1, in blocks of 2: [0, 0] and [1].
         let px: Vec<Pixel> = [0.0, 0.0, 1.0].iter().map(|&v| pixel_from_f32([v, v, v, 1.0])).collect();
-        let (out, w, h) = shrink_blocks(&px, 3, 1, 2, 1);
+        let mut ids = IdGen::default();
+        let mut d = Document::new(3, 1);
+        let layer = Layer::new_raster(ids.layer(), ids.object(), "l", RasterImage::from_pixels(3, 1, &px));
+        d.insert(Position { parent: None, index: 0 }, layer).unwrap();
+        let (out, w, h) = shrunk(&d.layers, &d.canvas.rect(), 2, 1);
         assert_eq!((w, h), (2, 1));
-        assert_eq!(pixel_to_f32(out[0])[0], 0.0);
-        assert_eq!(pixel_to_f32(out[1])[0], 1.0);
+        assert_eq!(pixel_to_f32(out.pixel(0, 0))[0], 0.0);
+        assert_eq!(pixel_to_f32(out.pixel(1, 0))[0], 1.0);
     }
 
     #[test]
@@ -410,5 +610,115 @@ mod tests {
     fn srgb_profiles_are_recognized() {
         assert!(looks_like_srgb(b"....desc....sRGB IEC61966-2.1"));
         assert!(!looks_like_srgb(b"....desc....Display P3"));
+    }
+
+    /// A document whose canvas does not start on a tile row and spans several bands, with
+    /// a pattern that differs from pixel to pixel (and transparency).
+    fn tall_document() -> Document {
+        use opal_core::tile::pixel_from_f32;
+        let mut ids = IdGen::default();
+        let (w, h) = (300u32, 700u32);
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                let a = 0.5 + 0.5 * ((x + y) / 1000.0);
+                pixel_from_f32([a * x / 300.0, a * y / 700.0, a * 0.3, a])
+            })
+            .collect();
+        let mut img = RasterImage::new();
+        img.write_rect(&IRect::new(20, 100, 320, 800), &px);
+        let mut d = Document::new(w, h);
+        d.canvas.x = 20;
+        d.canvas.y = 100;
+        d.insert(Position { parent: None, index: 0 }, Layer::new_raster(ids.layer(), ids.object(), "l", img)).unwrap();
+        d
+    }
+
+    #[test]
+    fn png_exports_made_in_bands_hold_the_whole_canvas() {
+        let d = tall_document();
+        let whole = flatten(&d.layers, &d.canvas.rect());
+        for sixteen_bit in [false, true] {
+            let path = temp(&format!("bands{sixteen_bit}.png"));
+            export(&d, &path, &ExportFormat::Png { sixteen_bit }, None).unwrap();
+            let back = image::open(&path).unwrap();
+            std::fs::remove_file(&path).unwrap();
+            assert_eq!((back.width(), back.height()), (300, 700));
+            if sixteen_bit {
+                assert_eq!(back.to_rgba16().into_raw(), pixels_to_rgba16(&whole));
+            } else {
+                assert_eq!(back.to_rgba8().into_raw(), pixels_to_rgba8(&whole));
+            }
+        }
+    }
+
+    #[test]
+    fn jpeg_exports_made_in_bands_match_one_encoded_whole() {
+        let d = tall_document();
+        let bg = from_srgb8([10, 200, 30, 255]);
+        let whole: Vec<u8> = flatten(&d.layers, &d.canvas.rect())
+            .iter()
+            .flat_map(|p| {
+                let [r, g, b, _] = crate::pixels::to_srgb8(over_opaque(*p, bg));
+                [r, g, b]
+            })
+            .collect();
+        let mut expected = Vec::new();
+        JpegEncoder::new_with_quality(&mut expected, 90)
+            .encode(&whole, 300, 700, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let path = temp("bands.jpg");
+        export(&d, &path, &ExportFormat::Jpeg { quality: 90, background: [10, 200, 30] }, None).unwrap();
+        let got = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(got == expected, "the banded JPEG differs from the one encoded whole");
+    }
+
+    #[test]
+    fn resized_exports_made_in_bands_match_one_drawn_whole() {
+        let d = tall_document();
+        for (w, h) in [(450, 1100), (200, 500), (40, 2)] {
+            let size = ExportSize { width: w, height: h, sampling: Sampling::default() };
+            let (banded, ..) = flatten_canvas(&d, Some(&size));
+            let Source::Resized { image, to_size, sampling } = resized(&d.layers, &d.canvas.rect(), &size) else {
+                panic!("a resized source")
+            };
+            let out = IRect::from_size(i64::from(w), i64::from(h));
+            let whole = resample::render_image(&image, &to_size, &sampling, Some(&out)).read_rect(&out);
+            assert!(banded == whole, "{w} × {h}");
+        }
+    }
+
+    #[test]
+    fn blocks_are_averaged_whole_across_bands() {
+        let d = tall_document();
+        // 700 rows from row 100: bands of 156, 256, 256 and 32 rows. Blocks of 300 rows (two
+        // whole and one of 100, each across bands), and of 3 and 7 (some across band edges).
+        for (kx, ky) in [(7, 300), (3, 3), (5, 7)] {
+            blocks_average(&d, kx, ky);
+        }
+    }
+
+    fn blocks_average(d: &Document, kx: usize, ky: usize) {
+        use opal_core::tile::pixel_to_f32;
+        let (out, sw, sh) = shrunk(&d.layers, &d.canvas.rect(), kx as u32, ky as u32);
+        assert_eq!((sw as usize, sh as usize), (300usize.div_ceil(kx), 700usize.div_ceil(ky)));
+        let whole = flatten(&d.layers, &d.canvas.rect());
+        let (last_x, last_y) = (sw as usize - 1, sh as usize - 1);
+        for (i, j) in [(0, 0), (sw as usize / 2, sh as usize / 2), (last_x, last_y), (1, 156 / ky), (2, 412 / ky)] {
+            let (x0, x1, y0, y1) = (i * kx, ((i + 1) * kx).min(300), j * ky, ((j + 1) * ky).min(700));
+            let mut sum = [0.0f64; 4];
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let p = pixel_to_f32(whole[y * 300 + x]);
+                    (0..4).for_each(|c| sum[c] += f64::from(p[c]));
+                }
+            }
+            let n = ((x1 - x0) * (y1 - y0)) as f64;
+            let got = pixel_to_f32(out.pixel(i as i64, j as i64));
+            for c in 0..4 {
+                assert!((f64::from(got[c]) - sum[c] / n).abs() < 2e-3, "{kx} × {ky}, block ({i}, {j}): {got:?}");
+            }
+        }
     }
 }

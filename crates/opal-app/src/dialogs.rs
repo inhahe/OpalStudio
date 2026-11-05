@@ -8,7 +8,7 @@ use crate::state::{AppState, Background, Confirm, ExportKind, MessageKind, NewIm
 use eframe::egui::{self, RichText, ViewportCommand};
 
 /// The largest canvas side the New Image dialog accepts (Photoshop's limit for PSD files).
-/// Exporting holds the whole canvas in memory, at 8 bytes a pixel and more.
+/// A layer filling a canvas this size holds 7.2 GB, at 8 bytes a pixel.
 pub const MAX_SIDE: u32 = 30_000;
 
 pub fn show_all(ctx: &egui::Context, st: &mut AppState) {

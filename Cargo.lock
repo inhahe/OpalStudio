@@ -2455,6 +2455,7 @@ dependencies = [
  "image",
  "opal-color",
  "opal-core",
+ "png",
  "rayon",
  "serde",
  "serde_json",
