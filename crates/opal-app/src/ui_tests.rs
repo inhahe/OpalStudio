@@ -1508,6 +1508,29 @@ fn a_view_taking_a_while_says_so() {
     h.step();
     assert!(h.query_by_label("Drawing…").is_some(), "the view taking a while did not say so");
     render(&mut h, "drawing");
+    // The sign takes no presses: a drag begun on it pans the canvas.
+    h.state_mut().state_mut().tool = crate::tools::ToolId::Hand;
+    let before = h.state().state().active().unwrap().view.offset;
+    let on_sign = h.get_by_label("Drawing…").rect().center();
+    let to = on_sign + egui::vec2(-60.0, 40.0);
+    h.hover_at(on_sign);
+    h.step();
+    h.drag_at(on_sign);
+    h.step();
+    h.hover_at(to);
+    h.step();
+    h.event(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    assert_ne!(
+        h.state().state().active().unwrap().view.offset,
+        before,
+        "a drag begun on the sign did not reach the canvas"
+    );
     drop(held);
     for _ in 0..200 {
         if h.state().state().active().unwrap().projector.behind_for().is_none() {

@@ -366,7 +366,8 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
             ui.put(at, |ui: &mut egui::Ui| {
                 ui.horizontal_centered(|ui| {
                     ui.add(egui::Spinner::new().size(14.0));
-                    ui.label("Drawing…")
+                    // Not selectable, so it takes no presses: the canvas under it does.
+                    ui.add(egui::Label::new("Drawing…").selectable(false))
                 })
                 .inner
             });
