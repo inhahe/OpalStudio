@@ -105,4 +105,27 @@ impl Writer {
     pub fn busy(&self) -> bool {
         !self.pending.is_empty()
     }
+
+    /// A save of `doc` to `failed` has failed: the saves still to be done that would give it
+    /// back that file if they failed give back `before` instead (what it had before it).
+    pub fn pass_on(&mut self, doc: DocId, failed: &PathBuf, before: &(Option<PathBuf>, String)) {
+        pass_on(self.pending.iter_mut().map(|p| &mut p.1), doc, failed, before);
+    }
+}
+
+/// [`Writer::pass_on`] for `writes`.
+pub fn pass_on<'a>(
+    writes: impl Iterator<Item = &'a mut Written>,
+    doc: DocId,
+    failed: &PathBuf,
+    before: &(Option<PathBuf>, String),
+) {
+    for w in writes {
+        if let Written::Save { doc: d, before: b, .. } = w
+            && *d == doc
+            && b.0.as_ref() == Some(failed)
+        {
+            *b = before.clone();
+        }
+    }
 }

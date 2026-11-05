@@ -633,7 +633,8 @@ impl AppState {
         if finished.iter().any(|f| f.result.is_err()) {
             self.exit_after_writes = false;
         }
-        for f in finished {
+        let mut finished = VecDeque::from(finished);
+        while let Some(f) = finished.pop_front() {
             match (f.written, f.result) {
                 (Written::Save { doc, at, path, .. }, Ok(())) => {
                     // The image may have been closed meanwhile; what was to follow still is.
@@ -651,11 +652,15 @@ impl AppState {
                     }
                 }
                 (Written::Save { doc, path, before, .. }, Err(e)) => {
-                    // The file it had before, unless it has been given another since.
-                    if let Some(d) = self.doc_mut(doc)
-                        && d.path.as_ref() == Some(&path)
-                    {
-                        (d.path, d.title) = before;
+                    // The image gets back the file it had before; if it has been given
+                    // another since, the save to that one gives this back if it fails too.
+                    match self.doc_mut(doc) {
+                        Some(d) if d.path.as_ref() == Some(&path) => (d.path, d.title) = before,
+                        Some(_) => {
+                            crate::writer::pass_on(finished.iter_mut().map(|f| &mut f.written), doc, &path, &before);
+                            self.writer.pass_on(doc, &path, &before);
+                        }
+                        None => {}
                     }
                     self.message(MessageKind::Error, "Could not save", e);
                 }

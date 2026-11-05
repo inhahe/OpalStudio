@@ -1338,3 +1338,52 @@ fn quitting_waits_for_a_close_question_on_screen() {
     h.run();
     assert_eq!(h.state().state().confirm, Some(crate::state::Confirm::Exit(vec![b])));
 }
+
+#[test]
+fn two_saves_as_that_fail_give_back_the_file_the_image_had() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 64, 64);
+    let ctx = h.ctx.clone();
+    let dir = std::env::temp_dir();
+    let a = dir.join("a.opal");
+    let nowhere = dir.join("no such folder");
+    let st = h.state_mut().state_mut();
+    let id = st.active_doc.unwrap();
+    st.active_mut().unwrap().path = Some(a.clone());
+    // Both asked for before either is reported.
+    st.save_to(id, nowhere.join("b.opal"), crate::writer::Then::Nothing, &ctx);
+    st.save_to(id, nowhere.join("c.opal"), crate::writer::Then::Nothing, &ctx);
+    until_written(&mut h);
+    let st = h.state().state();
+    assert_eq!(st.active().unwrap().path.as_ref(), Some(&a), "left with a file that was never written");
+    assert_eq!(st.messages.iter().filter(|m| m.title == "Could not save").count(), 2);
+}
+
+#[test]
+fn a_save_as_failing_while_a_later_one_is_written_passes_its_file_on() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 64, 64);
+    let ctx = h.ctx.clone();
+    let dir = std::env::temp_dir();
+    let (a, b, c) = (dir.join("a.opal"), dir.join("no such folder").join("b.opal"), dir.join("c.opal"));
+    let st = h.state_mut().state_mut();
+    let id = st.active_doc.unwrap();
+    st.active_mut().unwrap().path = Some(a.clone());
+    st.save_to(id, b.clone(), crate::writer::Then::Nothing, &ctx);
+    // Saved as c before b is reported, the save to c held until b's failure is.
+    let (job, release) = held_result(true);
+    let at = st.active().unwrap().history.current();
+    st.active_mut().unwrap().path = Some(c.clone());
+    let written = crate::writer::Written::Save { doc: id, at, path: c, before: (Some(b), "b".into()) };
+    st.writer.write(written, crate::writer::Then::Nothing, job, &ctx);
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.run();
+    }
+    assert_eq!(h.state().state().messages.len(), 1, "b's failure not reported first");
+    drop(release);
+    until_written(&mut h);
+    assert_eq!(h.state().state().active().unwrap().path.as_ref(), Some(&a));
+}
