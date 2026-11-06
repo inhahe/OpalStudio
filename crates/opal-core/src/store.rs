@@ -36,7 +36,14 @@ pub(crate) struct Slot {
     pub body: RwLock<Body>,
     /// When they were last read: the store's epoch then ([`Store::epoch`]).
     used: AtomicU64,
+    /// Where they hold anything not fully transparent, once known (see
+    /// [`content`](Self::content)): known while they are on disk too.
+    content: AtomicU64,
 }
+
+/// [`Slot::content`] not yet known, and known to be nothing.
+const UNKNOWN: u64 = u64::MAX;
+const NOTHING: u64 = u64::MAX - 1;
 
 /// A stretch of the scratch file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,8 +57,11 @@ impl Slot {
     /// room for it).
     pub fn new(data: Data) -> Arc<Slot> {
         let bytes = data.bytes();
-        let slot =
-            Arc::new(Slot { body: RwLock::new(Body::Here { data, kept: None }), used: AtomicU64::new(STORE.epoch()) });
+        let slot = Arc::new(Slot {
+            body: RwLock::new(Body::Here { data, kept: None }),
+            used: AtomicU64::new(STORE.epoch()),
+            content: AtomicU64::new(UNKNOWN),
+        });
         STORE.resident.fetch_add(bytes, Relaxed);
         {
             let mut slots = STORE.slots.lock();
@@ -99,6 +109,7 @@ impl Slot {
     pub fn write(&self) -> RwLockWriteGuard<'_, Body> {
         self.used.store(STORE.epoch(), Relaxed);
         let mut body = self.body.write();
+        self.content.store(UNKNOWN, Relaxed);
         let mut brought = 0;
         match &mut *body {
             Body::Away { region, srgb8 } => {
@@ -119,6 +130,22 @@ impl Slot {
         // Never this one, which is being changed.
         STORE.took(brought);
         body
+    }
+
+    /// The rectangle (`[x0, y0, x1, y1]` within the tile) holding the pixels that are not
+    /// fully transparent (`Some(None)`: none is), if known since they last changed.
+    pub fn content(&self) -> Option<Option<[u32; 4]>> {
+        match self.content.load(Relaxed) {
+            UNKNOWN => None,
+            NOTHING => Some(None),
+            v => Some(Some([0, 16, 32, 48].map(|s| (v >> s) as u16 as u32))),
+        }
+    }
+
+    /// Notes what [`content`](Self::content) is, as found from the pixels.
+    pub fn found_content(&self, rect: Option<[u32; 4]>) {
+        let v = rect.map_or(NOTHING, |r| r.iter().zip([0, 16, 32, 48]).map(|(&c, s)| u64::from(c) << s).sum());
+        self.content.store(v, Relaxed);
     }
 
     /// The memory the pixels take in memory, and whether they are kept at 8 bits, without
@@ -155,11 +182,13 @@ impl Drop for Slot {
 }
 
 /// The pixels in memory, and in the scratch file (where a tile brought back keeps its copy
-/// while unchanged), in bytes; and why tiles stopped being written to disk, if they did.
+/// while unchanged), in bytes; how many tiles have been read back from there; and why tiles
+/// stopped being written to disk, if they did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Status {
     pub resident: u64,
     pub on_disk: u64,
+    pub read_back: u64,
     pub trouble: Option<String>,
 }
 
@@ -168,6 +197,7 @@ pub fn status() -> Status {
     Status {
         resident: STORE.resident.load(Relaxed),
         on_disk: STORE.away.load(Relaxed),
+        read_back: STORE.loads.load(Relaxed),
         trouble: STORE.trouble.lock().clone(),
     }
 }
@@ -214,6 +244,8 @@ struct Store {
     resident: AtomicU64,
     kept: AtomicU64,
     away: AtomicU64,
+    /// How many tiles have been read back.
+    loads: AtomicU64,
     budget: AtomicU64,
     /// Advanced each time the order of tiles to take away is made: tiles read since have
     /// the latest.
@@ -242,6 +274,7 @@ static STORE: Store = Store {
     resident: AtomicU64::new(0),
     kept: AtomicU64::new(0),
     away: AtomicU64::new(0),
+    loads: AtomicU64::new(0),
     budget: AtomicU64::new(u64::MAX),
     clock: AtomicU64::new(0),
     queue: Mutex::new(Queue { order: Vec::new(), epoch: 0 }),
@@ -401,6 +434,7 @@ impl Store {
         if let Err(e) = read_at(file, data.as_bytes_mut(), region.offset) {
             panic!("pixels kept in the scratch file could not be read back, and are lost ({e})");
         }
+        self.loads.fetch_add(1, Relaxed);
         data
     }
 

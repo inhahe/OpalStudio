@@ -170,6 +170,37 @@ fn a_lower_budget_is_kept_by_the_store_s_own_thread_down_to_nine_tenths() {
 }
 
 #[test]
+fn what_a_tile_on_disk_holds_is_known_without_bringing_it_back() {
+    with_budget(2, || {
+        let dot = |n: usize| {
+            let mut t = Tile::transparent();
+            t.set(n as u32, 3, pixel_from_f32([1.0; 4]));
+            Arc::new(t)
+        };
+        let tiles: Vec<Arc<Tile>> = (0..10).map(dot).collect();
+        let empty: Vec<Arc<Tile>> = (0..4).map(|_| Arc::new(Tile::transparent())).collect();
+        // Found once (bringing each back), then kept.
+        for (n, t) in tiles.iter().enumerate() {
+            assert_eq!(t.content_rect(), Some([n as u32, 3, n as u32 + 1, 4]));
+        }
+        assert!(empty.iter().all(|t| t.is_transparent()));
+        store::settle();
+        let before = status().read_back;
+        for (n, t) in tiles.iter().enumerate() {
+            assert_eq!(t.content_rect(), Some([n as u32, 3, n as u32 + 1, 4]));
+            assert!(!t.is_transparent());
+        }
+        assert!(empty.iter().all(|t| t.is_transparent() && t.content_rect().is_none()));
+        assert_eq!(status().read_back, before, "asking brought tiles back");
+        // Changed, it is found again.
+        let mut changed = (*tiles[0]).clone();
+        assert_eq!(changed.content_rect(), Some([0, 3, 1, 4]));
+        changed.set(200, 100, pixel_from_f32([1.0; 4]));
+        assert_eq!(changed.content_rect(), Some([0, 3, 201, 101]));
+    });
+}
+
+#[test]
 fn without_a_budget_nothing_goes() {
     let _turn = TURN.lock();
     let tiles: Vec<Arc<Tile>> = (0..20).map(|n| Arc::new(tile(n))).collect();

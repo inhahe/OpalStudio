@@ -224,7 +224,11 @@ impl Reader<'_> {
 
 impl Clone for Tile {
     fn clone(&self) -> Tile {
-        Tile::of(self.reader().data().clone())
+        let copy = Tile::of(self.reader().data().clone());
+        if let Some(content) = self.slot.content() {
+            copy.slot.found_content(content);
+        }
+        copy
     }
 }
 
@@ -335,10 +339,10 @@ impl Tile {
         self.reader().read_row_f32(y, x, out);
     }
 
-    /// Whether every pixel is fully transparent.
+    /// Whether every pixel is fully transparent (known without bringing the pixels back from
+    /// disk once asked, until they change; see [`content_rect`](Self::content_rect)).
     pub fn is_transparent(&self) -> bool {
-        let r = self.reader();
-        !(0..TILE_PIXELS).any(|i| r.data().shows(i))
+        self.content_rect().is_none()
     }
 
     /// Converts the pixels to single precision, into `out` (which must hold `TILE_PIXELS`).
@@ -382,8 +386,19 @@ impl Tile {
     }
 
     /// The smallest rectangle (`[x0, y0, x1, y1]` within the tile) holding every pixel that
-    /// is not fully transparent, or `None` if there is none.
+    /// is not fully transparent, or `None` if there is none. Kept once found, until the
+    /// pixels change: an image's bounds, found again after any change to it, then cost
+    /// nothing for its tiles on disk.
     pub fn content_rect(&self) -> Option<[u32; 4]> {
+        if let Some(known) = self.slot.content() {
+            return known;
+        }
+        let found = self.find_content();
+        self.slot.found_content(found);
+        found
+    }
+
+    fn find_content(&self) -> Option<[u32; 4]> {
         let r = self.reader();
         let shows = |i: usize| r.data().shows(i);
         let n = TILE_SIZE as usize;
