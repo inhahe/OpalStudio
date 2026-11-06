@@ -13,22 +13,27 @@ pub const MAX_REDUCTION: u32 = 24;
 /// A bitmap with no edges: only tiles with content exist, at any coordinates, negative
 /// included. Cloning copies the tile map (pointers), not the pixels.
 ///
-/// An image also keeps, built when first asked for, its content bounds, a pyramid of
-/// half-size copies (for drawing it shrunk) and where one tile repeats along each row (see
-/// [`alike_under`](RasterImage::alike_under)); changing a pixel discards them.
+/// An image also keeps, built when first asked for, its content bounds and a pyramid of
+/// half-size copies (for drawing it shrunk), which changing a pixel discards; and where one
+/// tile repeats along each row (see [`alike_under`](RasterImage::alike_under)), which
+/// follows each tile changed, and which a copy shares until either changes a row of it.
 #[derive(Default)]
 pub struct RasterImage {
     tiles: HashMap<TileCoord, Arc<Tile>>,
     /// `pyramid[k - 1]` is the image halved `k` times.
     pyramid: [OnceLock<Box<Level>>; MAX_REDUCTION as usize],
     bounds: OnceLock<Option<IRect>>,
-    runs: OnceLock<Runs>,
+    runs: OnceLock<Arc<Runs>>,
 }
 
 /// The tiles of an image along each tile row, as runs of one tile repeated: by row, the
-/// runs `(x0, x1, tile's address)` in order (`x1` past the run's last tile).
-#[derive(Clone, Default)]
-struct Runs(HashMap<i32, Vec<(i32, i32, usize)>>);
+/// runs `(x0, x1, tile's address)` in order (`x1` past the run's last tile), as long as
+/// they go. Each row is shared with copies until changed.
+#[derive(Clone, Default, Debug, PartialEq)]
+struct Runs(HashMap<i32, Arc<Row>>);
+
+/// A row's runs, `(x0, x1, tile's address)`, in order.
+type Row = Vec<(i32, i32, usize)>;
 
 /// What a row of tiles holds over a span of it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -44,15 +49,46 @@ impl Runs {
     fn of(tiles: &HashMap<TileCoord, Arc<Tile>>) -> Runs {
         let mut at: Vec<(i32, i32, usize)> = tiles.iter().map(|(c, t)| (c.y, c.x, Arc::as_ptr(t) as usize)).collect();
         at.sort_unstable();
-        let mut runs = Runs::default();
+        let mut rows: HashMap<i32, Row> = HashMap::new();
         for (y, x, p) in at {
-            let row = runs.0.entry(y).or_default();
+            let row = rows.entry(y).or_default();
             match row.last_mut() {
                 Some(last) if last.1 == x && last.2 == p => last.1 = x + 1,
                 _ => row.push((x, x + 1, p)),
             }
         }
-        runs
+        Runs(rows.into_iter().map(|(y, row)| (y, Arc::new(row))).collect())
+    }
+
+    /// The tile at `c` is now the one at address `p` (`None`: none): the runs of its row
+    /// are made again around it, split and joined as they now go.
+    fn set(&mut self, c: TileCoord, p: Option<usize>) {
+        let x = c.x;
+        let row = Arc::make_mut(self.0.entry(c.y).or_default());
+        // The runs holding `x`, or ending or starting next to it.
+        let (lo, hi) = (row.partition_point(|r| r.1 < x), row.partition_point(|r| r.0 <= x + 1));
+        let mut pieces: Vec<(i32, i32, usize)> = Vec::with_capacity(hi - lo + 1);
+        for &(a, b, q) in &row[lo..hi] {
+            if a < b.min(x) {
+                pieces.push((a, b.min(x), q));
+            }
+            if b > a.max(x + 1) {
+                pieces.push((a.max(x + 1), b, q));
+            }
+        }
+        pieces.extend(p.map(|p| (x, x + 1, p)));
+        pieces.sort_unstable();
+        let mut joined: Vec<(i32, i32, usize)> = Vec::with_capacity(pieces.len());
+        for r in pieces {
+            match joined.last_mut() {
+                Some(last) if last.1 == r.0 && last.2 == r.2 => last.1 = r.1,
+                _ => joined.push(r),
+            }
+        }
+        row.splice(lo..hi, joined);
+        if row.is_empty() {
+            self.0.remove(&c.y);
+        }
     }
 
     /// What `row` holds over `x0..x1`.
@@ -144,11 +180,19 @@ impl RasterImage {
         RasterImage::default()
     }
 
-    /// Forgets what was derived from the pixels, which are about to change.
+    /// Forgets what was derived from the pixels, which are about to change. The runs of
+    /// tiles are kept, and told of each tile placed ([`placed`](Self::placed)).
     fn changed(&mut self) {
         self.pyramid = Default::default();
         self.bounds = OnceLock::new();
-        self.runs = OnceLock::new();
+    }
+
+    /// The tile map holds a new tile at `c` (or none): the runs follow, if built.
+    fn placed(&mut self, c: TileCoord) {
+        let p = self.tiles.get(&c).map(|t| Arc::as_ptr(t) as usize);
+        if let Some(runs) = self.runs.get_mut() {
+            Arc::make_mut(runs).set(c, p);
+        }
     }
 
     /// Whether the tiles under `area` (pixels) are alike: one tile at every place, or none
@@ -174,7 +218,7 @@ impl RasterImage {
     }
 
     fn runs(&self) -> &Runs {
-        self.runs.get_or_init(|| Runs::of(&self.tiles))
+        self.runs.get_or_init(|| Arc::new(Runs::of(&self.tiles)))
     }
 
     fn alike_one_by_one(&self, [x0, y0, x1, y1]: [i32; 4]) -> bool {
@@ -200,7 +244,11 @@ impl RasterImage {
     /// shared with another image or history state.
     pub fn tile_mut(&mut self, c: TileCoord) -> &mut Tile {
         self.changed();
-        Arc::make_mut(self.tiles.entry(c).or_insert_with(|| Arc::new(Tile::transparent())))
+        // This image's own first, so that the runs know where it is; changed after, it is
+        // still one tile of its own there.
+        Arc::make_mut(self.tiles.entry(c).or_insert_with(|| Arc::new(Tile::transparent())));
+        self.placed(c);
+        Arc::get_mut(self.tiles.get_mut(&c).expect("placed")).expect("this image's own")
     }
 
     /// Sets or removes the tile at `c`.
@@ -214,6 +262,7 @@ impl RasterImage {
                 self.tiles.remove(&c);
             }
         }
+        self.placed(c);
     }
 
     /// Every tile, in no particular order.
@@ -256,6 +305,7 @@ impl RasterImage {
     /// Removes tiles that are entirely transparent.
     pub fn prune_transparent(&mut self) {
         self.tiles.retain(|_, t| !t.is_transparent());
+        self.runs = OnceLock::new();
     }
 
     /// An image of `area` all pixel `p`. Tiles alike are one tile (those `area` covers
@@ -374,7 +424,7 @@ impl RasterImage {
                 tile.pixels_mut()[start..start + n].copy_from_slice(src);
             }
             if tile.is_transparent() {
-                self.tiles.remove(&c);
+                self.set_tile(c, None);
             }
         }
     }
@@ -676,6 +726,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_runs_follow_each_tile_changed_as_if_made_again() {
+        let white = Arc::new(Tile::filled(pixel_from_f32([1.0; 4])));
+        let blue = Arc::new(Tile::filled(pixel_from_f32([0.0, 0.0, 1.0, 1.0])));
+        let mut img = RasterImage::filled(&IRect::from_size(256 * 12, 256 * 3), pixel_from_f32([1.0; 4]));
+        img.set_tile(TileCoord::new(20, 1), Some(white.clone()));
+        let _ = img.runs();
+        // Placed, removed, changed and put back, across a row, at its ends and past them.
+        let steps: Vec<(i32, i32, u8)> = vec![
+            (5, 0, 1),
+            (6, 0, 1),
+            (4, 0, 1),
+            (5, 0, 0),
+            (0, 0, 2),
+            (11, 0, 2),
+            (12, 0, 0),
+            (13, 0, 0),
+            (-1, 1, 0),
+            (0, 1, 3),
+            (5, 1, 3),
+            (19, 1, 0),
+            (21, 1, 1),
+            (20, 1, 2),
+            (3, 7, 1),
+            (3, 7, 2),
+            (4, 7, 1),
+            (6, 2, 3),
+            (6, 2, 0),
+            (7, 2, 2),
+            (8, 2, 2),
+            (9, 2, 2),
+            (8, 2, 1),
+        ];
+        let shared = img.clone();
+        for (x, y, what) in steps {
+            let c = TileCoord::new(x, y);
+            match what {
+                0 => img.set_tile(c, Some(white.clone())),
+                1 => img.set_tile(c, Some(blue.clone())),
+                2 => img.set_tile(c, None),
+                _ => img.tile_mut(c).set(1, 1, pixel_from_f32([0.5; 4])),
+            }
+            assert_eq!(**img.runs.get().expect("kept"), Runs::of(&img.tiles), "after {what} at {c:?}");
+        }
+        assert_eq!(**shared.runs.get().expect("shared"), Runs::of(&shared.tiles), "a copy's runs changed");
+        img.set_tile(TileCoord::new(2, 2), Some(Arc::new(Tile::transparent())));
+        img.prune_transparent();
+        assert!(img.tile(TileCoord::new(2, 2)).is_none());
+        assert_eq!(*img.runs(), Runs::of(&img.tiles));
     }
 
     #[test]
