@@ -325,9 +325,11 @@ impl RasterImage {
             let key = [part.x0 - r.x0, part.y0 - r.y0, part.x1 - r.x0, part.y1 - r.y0];
             let tile = made.entry(key).or_insert_with(|| {
                 let mut t = Tile::transparent();
-                for y in key[1]..key[3] {
-                    for x in key[0]..key[2] {
-                        t.set(x as u32, y as u32, p);
+                {
+                    let mut px = t.pixels_mut();
+                    for y in key[1]..key[3] {
+                        let row = y as usize * TILE_SIZE as usize;
+                        px[row + key[0] as usize..row + key[2] as usize].fill(p);
                     }
                 }
                 Arc::new(t)
@@ -374,7 +376,8 @@ impl RasterImage {
                     return None;
                 }
                 let flat = px.iter().all(|p| *p == px[0]);
-                Some((c, if flat { Made::Flat(px[0]) } else { Made::Own(Tile::from_srgb8(px)) }))
+                let flat = flat.then_some(px[0]);
+                Some((c, flat.map_or_else(|| Made::Own(Tile::from_srgb8(px)), Made::Flat)))
             })
             .collect();
         let mut flat: HashMap<[u8; 4], Arc<Tile>> = HashMap::new();
@@ -422,10 +425,14 @@ impl RasterImage {
             let r = tr.intersect(rect);
             let n = r.width() as usize;
             let tile = self.tile_mut(c);
-            for y in r.y0..r.y1 {
-                let src = &pixels[(y - rect.y0) as usize * w + (r.x0 - rect.x0) as usize..][..n];
-                let start = (y - tr.y0) as usize * TILE_SIZE as usize + (r.x0 - tr.x0) as usize;
-                tile.pixels_mut()[start..start + n].copy_from_slice(src);
+            {
+                // Taken once a tile: each taking locks it, and may make room for it.
+                let mut px = tile.pixels_mut();
+                for y in r.y0..r.y1 {
+                    let src = &pixels[(y - rect.y0) as usize * w + (r.x0 - rect.x0) as usize..][..n];
+                    let start = (y - tr.y0) as usize * TILE_SIZE as usize + (r.x0 - tr.x0) as usize;
+                    px[start..start + n].copy_from_slice(src);
+                }
             }
             if tile.is_transparent() {
                 self.set_tile(c, None);
