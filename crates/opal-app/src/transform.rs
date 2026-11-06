@@ -248,6 +248,11 @@ impl Session {
                 // necessarily on, the pointer), and it is what snaps.
                 let at = start.apply(grabbed);
                 let to = [at[0] + input.pointer[0] - drag.from[0], at[1] + input.pointer[1] - drag.from[1]];
+                // Not onto a line through the held point: that would squash the box flat.
+                let h = start.apply(held);
+                let off = |lines: &[f64], v: f64| lines.iter().copied().filter(|t| (t - v).abs() >= 0.5).collect();
+                let lines = SnapTargets { xs: off(&targets.xs, h[0]), ys: off(&targets.ys, h[1]) };
+                let targets = &lines;
                 let d0 = [grabbed[0] - held[0], grabbed[1] - held[1]];
                 let ratio = |num: f64, den: f64| if den.abs() < 1e-12 { 1.0 } else { num / den };
                 let locked = input.aspect_locked != input.shift;
@@ -271,7 +276,6 @@ impl Session {
                     } else {
                         ratio(d[0], d0[0])
                     };
-                    let h = start.apply(held);
                     let s = snap_along(h, [at[0] - h[0], at[1] - h[1]], s, targets, tol);
                     match (corner || locked, k % 2) {
                         (true, _) => (s, s),
@@ -1027,6 +1031,15 @@ mod tests {
         let (m, g) = wide.dragged(&far, &on([2000.0, 20.0]), &SnapTargets { xs: vec![], ys: vec![23.0] });
         assert!(close(m.apply([1000.0, 10.0]), [2000.0, 20.0]), "{:?}", m.apply([1000.0, 10.0]));
         assert!(g.ys.is_empty());
+
+        // Shrunk toward the held corner, which lies on lines of its own: not flattened onto them.
+        let at_origin = SnapTargets { xs: vec![0.0, 500.0], ys: vec![0.0, 500.0] };
+        let near = Drag { handle: Handle::Corner(2), from: [100.0, 50.0], start: s.current };
+        for aspect_locked in [true, false] {
+            let (m, g) = s.dragged(&near, &DragInput { aspect_locked, ..on([4.0, 2.0]) }, &at_origin);
+            assert!(close(m.apply([100.0, 50.0]), [4.0, 2.0]), "locked {aspect_locked}: {:?}", m.apply([100.0, 50.0]));
+            assert_eq!((g.xs, g.ys), (vec![], vec![]));
+        }
 
         // An edge moves one way only: it snaps that way, and shows no line it does not touch.
         for aspect_locked in [false, true] {

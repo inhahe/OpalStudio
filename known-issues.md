@@ -16,6 +16,25 @@ convert from the embedded profile into the working space on import.
 `crates/opal-app/src/gpu_memory.rs`. **Fix:** query `VK_EXT_memory_budget` through wgpu's
 Vulkan backend (and Metal's `recommendedMaxWorkingSetSize`) on other platforms.
 
+## Drawn at a level, Nearest softens a stretch along an axis that another axis shrinks
+
+`crates/opal-core/src/composite.rs` (`at_level`). Where the view draws an image object at
+the level shown (for its cost, or during a drag), an image drawn with Nearest that is
+shrunk there is drawn with Bilinear from its pyramid, which averages as reducing full
+resolution would. Shrunk along one axis and enlarged along the other (scaled 8 × 0.25, at
+a level), that also softens the enlarged pixels, which reducing would keep hard; point
+sampling would instead drop whole rows of the shrunk ones. **Fix:** draw Nearest at a
+level by area: each pixel the average of the source pixels its footprint covers, which is
+point sampling where enlarged and averaging where shrunk, as reducing full resolution is.
+
+## An edit to a huge image finds its content bounds again over every tile
+
+`crates/opal-core/src/raster.rs` (`content_bounds`). Changing a pixel forgets the image's
+content bounds, and the next asker finds them again from every tile: 8 ms for a
+300,000-pixel canvas (1.4 million tiles), on every edit, which painting will make on every
+stroke. **Fix:** find them from the runs of tiles (each row's first and last tile, at a
+lookup a row), asking only the tiles along the edge for their content.
+
 ## The scratch drive's free space is only known on Windows
 
 `crates/opal-app/src/memory.rs` (`disk_free`). Elsewhere it is not known, and none is

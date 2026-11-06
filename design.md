@@ -185,18 +185,22 @@ not a goal.
   no tiles beneath a uniform block: a huge, mostly blank canvas costs about what the
   screen shows (a 300,000-pixel white canvas shown whole: 17 ms after an edit, 10 MB).
   Zoomed out, where the image objects' full-resolution tiles in view (the tiles each
-  crosses) would together take more than half the cache's budget (1 GB without one), the
+  crosses, or, where its image's tiles leave much of it empty, those its runs of tiles
+  cross) would together take more than half the cache's budget (1 GB without one), the
   largest of them, until the rest fit, have the tiles they draw into drawn at the level
   shown instead, as a preview draws them (each object from its own copy at the level: a
   pixel object's reduced tiles, an image object's pyramid with its own sampling, never
   point-sampled when shrunk), kept while their key holds. An object drawn so stays so
   until the rest would fit in half that, so that panning or zooming near the limit does
   not switch it back and forth, making all of it in view at full resolution each time.
-  The reduced tiles those tiles read stay, at that level alone; when a pixel object's
-  image changes, those over none of the tiles the change touched are kept, so an edit
-  beneath makes again only the reduced tiles over what it changed (each from full
-  resolution). So an image object across a huge canvas costs the tiles shown
-  too (one across a 300,000-pixel canvas shown whole: 85 ms, 5 ms an edit). Those tiles
+  The reduced tiles those tiles read stay, at that level alone, kept by image (so layers
+  showing one image share them); when a pixel object's image changes, its new image's
+  start from its last one's, but for those over a tile the change touched (told apart by
+  the two images' rows of tiles, which an edit shares where it leaves them alone), so an
+  edit beneath makes again only the reduced tiles over what it changed, each from full
+  resolution. So an image object across a huge canvas costs the tiles shown
+  too (one across a 300,000-pixel canvas shown whole: 90 ms; 6 ms when its opacity
+  changes, 30 ms when a pixel of the canvas beneath does). Those tiles
   look very slightly different from reducing full resolution where layers overlap, and a
   pixel layer beneath them, off the level's pixel grid, slightly softer; everywhere else
   the view is exact. The cache
@@ -545,7 +549,8 @@ Editable content does not mean recomputing everything on each change.
 - **Previews first:** while something is dragged (the transform box, the Move tool), the
   tiles it changes are drawn at the resolution on screen, so the drag costs what the
   screen holds rather than what the image does. Pixel layers are reduced only under those
-  tiles, and where a layer repeats one tile its reduced tile is that tile halved, made
+  tiles (kept at the level shown for the drag's length, as it comes back over them, and
+  none beneath), and where a layer repeats one tile its reduced tile is that tile halved, made
   once a level, with nothing beneath it reduced (a drag over a 300,000-pixel white canvas
   shown whole: 23 ms a frame); image objects are drawn through their transform with their
   own resampling, never point-sampled when shrunk. Tiles the drag leaves alone stay exact,

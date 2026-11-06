@@ -142,57 +142,50 @@ fn at_level(o: &Object, level: u32) -> (&Arc<RasterImage>, Affine, Sampling) {
     }
 }
 
-/// Reduced copies of pixel objects' tiles, made for the tiles drawn at their level (see
+/// Reduced copies of pixel objects' images, made for the tiles drawn at their level (see
 /// [`Quality::Preview`], [`costly_image_tiles`]) alone, so their cost and memory follow the
-/// screen. Kept by object, so that when an object's image changes, those over the tiles the
-/// change left alone stay.
+/// screen. Kept by image, so objects showing one image share them; when an object's image
+/// changes, the copies of its new image start from those of its last, but for the tiles
+/// over what changed.
 #[derive(Default, Debug)]
 struct Reduced {
-    objects: HashMap<ObjectId, Copies>,
+    /// By image (its address: each holds its image, so the address cannot be reused).
+    images: HashMap<usize, Copies>,
+    /// For each pixel object, the image (by address) its copies were last made of.
+    last: HashMap<ObjectId, usize>,
     /// For each stored tile repeated over an area (by address): it halved from four
     /// copies of itself, by level, as far as asked.
     halved: HashMap<usize, Vec<Option<Arc<Tile>>>>,
 }
 
-/// One pixel object's reduced tiles.
-#[derive(Default, Debug)]
+/// One image's reduced tiles.
+#[derive(Debug)]
 struct Copies {
-    /// The image they are of, held so that the next can be told from it tile by tile.
-    image: Option<Arc<RasterImage>>,
+    image: Arc<RasterImage>,
     /// By level, and tile at that level; `None` where nothing is.
     tiles: HashMap<(u32, TileCoord), Option<Arc<Tile>>>,
 }
 
 impl Copies {
-    /// Makes these the copies of `image`, letting go of those over a tile in which it and
-    /// the image they were of differ (an edit leaves the tiles it does not change as they
-    /// were, so this is what it changed).
-    fn of(&mut self, image: &Arc<RasterImage>) {
-        if let Some(old) = &self.image {
-            if Arc::ptr_eq(old, image) {
-                return;
-            }
-            // The places where one holds a tile the other does not.
-            let not_in = |other: &RasterImage, c: TileCoord, t: &Arc<Tile>| {
-                other.tile(c).is_none_or(|u| !Arc::ptr_eq(t, u)).then_some(c)
-            };
-            let changed: Vec<TileCoord> = (image.tiles().filter_map(|(c, t)| not_in(old, c, t)))
-                .chain(old.tiles().filter_map(|(c, t)| not_in(image, c, t)))
-                .collect();
-            let levels: HashSet<u32> = self.tiles.keys().map(|(l, _)| *l).collect();
-            let stale: HashSet<(u32, TileCoord)> = levels
-                .iter()
-                .flat_map(|&l| changed.iter().map(move |&c| (l, (0..l).fold(c, |c, _| c.parent()))))
-                .collect();
-            self.tiles.retain(|k, _| !stale.contains(k));
+    /// These copies, carried over to `image`: but for those over a tile in which it and
+    /// the image they are of differ (an edit replaces only the tiles it changes, so these
+    /// are what it changed).
+    fn carried_to(&self, image: &Arc<RasterImage>) -> Copies {
+        let mut tiles = self.tiles.clone();
+        if !tiles.is_empty() {
+            let changed = image.differences(&self.image);
+            tiles.retain(|&(l, c), _| {
+                let (x0, x1, y0, y1) = (c.x << l, (c.x + 1) << l, c.y << l, (c.y + 1) << l);
+                !changed.iter().any(|(&y, spans)| (y0..y1).contains(&y) && spans.iter().any(|s| s.0 < x1 && s.1 > x0))
+            });
         }
-        self.image = Some(image.clone());
+        Copies { image: image.clone(), tiles }
     }
 
     /// Tile `c` of level `level` (0: the image's own), if made and with content.
-    fn get<'a>(&'a self, image: &'a Arc<RasterImage>, level: u32, c: TileCoord) -> Option<&'a Arc<Tile>> {
+    fn get(&self, level: u32, c: TileCoord) -> Option<&Arc<Tile>> {
         if level == 0 {
-            return image.tile(c);
+            return self.image.tile(c);
         }
         self.tiles.get(&(level, c))?.as_ref()
     }
@@ -200,38 +193,57 @@ impl Copies {
 
 impl Reduced {
     /// Keeps, of what was made, what `reads` says the view reads again: for each pixel
-    /// object, its tiles at `level`; nothing beneath, and nothing of other objects.
+    /// object's image, its tiles at `level`; nothing beneath, and nothing of other images.
     fn keep_only(&mut self, level: u32, reads: &[(ObjectId, Arc<RasterImage>, HashSet<TileCoord>)]) {
-        let reads: HashMap<ObjectId, &HashSet<TileCoord>> = reads.iter().map(|(id, _, r)| (*id, r)).collect();
-        self.objects.retain(|id, copies| {
-            let Some(keep) = reads.get(id) else { return false };
+        let mut keep: HashMap<usize, HashSet<TileCoord>> = HashMap::new();
+        for (_, image, r) in reads {
+            keep.entry(Arc::as_ptr(image) as usize).or_default().extend(r);
+        }
+        self.images.retain(|image, copies| {
+            let Some(keep) = keep.get(image) else { return false };
             copies.tiles.retain(|(l, c), _| *l == level && keep.contains(c));
             true
         });
+        let objects: HashSet<ObjectId> = reads.iter().map(|r| r.0).collect();
+        self.last.retain(|id, _| objects.contains(id));
         self.halved.clear();
     }
 
-    /// Tile `c` of object `id`'s image `image` reduced to `level`, if it was made (by
-    /// [`make`](Self::make), for that image) and has content.
-    fn get<'a>(&'a self, id: ObjectId, image: &'a Arc<RasterImage>, level: u32, c: TileCoord) -> Option<&'a Arc<Tile>> {
+    /// Keeps, of what was made, the tiles at `level`: what the view at that level may read
+    /// again, nothing beneath.
+    fn keep_level(&mut self, level: u32) {
+        for copies in self.images.values_mut() {
+            copies.tiles.retain(|(l, _), _| *l == level);
+        }
+        self.halved.clear();
+    }
+
+    /// Tile `c` of `image` reduced to `level`, if it was made and has content.
+    fn get<'a>(&'a self, image: &'a Arc<RasterImage>, level: u32, c: TileCoord) -> Option<&'a Arc<Tile>> {
         if level == 0 {
             return image.tile(c);
         }
-        let copies = self.objects.get(&id)?;
-        debug_assert!(copies.image.as_ref().is_some_and(|i| Arc::ptr_eq(i, image)), "read before it was made");
-        copies.get(image, level, c)
+        self.images.get(&(Arc::as_ptr(image) as usize))?.get(level, c)
     }
 
-    /// Makes object `id`'s level-`level` tiles `need` of its image `image`, and the finer
+    /// Makes the level-`level` tiles `need` of object `id`'s image `image`, and the finer
     /// ones they are made from, each from the four below it, but for those it has (see
-    /// [`Copies::of`]). From the top down, a tile over an area where the image has one
-    /// stored tile repeated (or none) is that tile halved to its level, made once a level,
-    /// with nothing made beneath it. So a reduced copy of a large uniform area costs a tile
-    /// a level, not every tile beneath (as an exact view's uniform blocks).
+    /// [`Copies::carried_to`]). From the top down, a tile over an area where the image has
+    /// one stored tile repeated (or none) is that tile halved to its level, made once a
+    /// level, with nothing made beneath it. So a reduced copy of a large uniform area costs
+    /// a tile a level, not every tile beneath (as an exact view's uniform blocks).
     fn make(&mut self, id: ObjectId, image: &Arc<RasterImage>, level: u32, need: HashSet<TileCoord>) {
-        let Reduced { objects, halved } = self;
-        let copies = objects.entry(id).or_default();
-        copies.of(image);
+        let key = Arc::as_ptr(image) as usize;
+        if !self.images.contains_key(&key) {
+            let copies = match self.last.get(&id).and_then(|k| self.images.get(k)) {
+                Some(last) => last.carried_to(image),
+                None => Copies { image: image.clone(), tiles: HashMap::new() },
+            };
+            self.images.insert(key, copies);
+        }
+        self.last.insert(id, key);
+        let Reduced { images, halved, .. } = self;
+        let copies = images.get_mut(&key).expect("made above");
         let mut wanted = vec![HashSet::new(); level as usize + 1];
         wanted[level as usize] = need;
         for l in (1..=level).rev() {
@@ -261,7 +273,7 @@ impl Reduced {
         for l in 1..=level {
             let items: Vec<(TileCoord, [Option<Arc<Tile>>; 4])> = std::mem::take(&mut wanted[l as usize])
                 .into_iter()
-                .map(|c| (c, c.children().map(|k| copies.get(image, l - 1, k).cloned())))
+                .map(|c| (c, c.children().map(|k| copies.get(l - 1, k).cloned())))
                 .collect();
             copies.tiles.extend(reduce_shared(items).into_iter().map(|(c, t)| ((l, c), t)));
         }
@@ -356,7 +368,7 @@ fn level_tile<'o>(o: &'o Object, c: TileCoord, level: u32, reduced: &Reduced) ->
         ObjectKind::Pixels(p) => {
             let mut local = RasterImage::new();
             for rc in TileCoord::covering(&reduced_area(p, level, c), 0) {
-                if let Some(t) = reduced.get(o.id, &p.image, level, rc) {
+                if let Some(t) = reduced.get(&p.image, level, rc) {
                     local.set_tile(rc, Some(t.clone()));
                 }
             }
@@ -619,11 +631,12 @@ struct AtLevel {
 /// What the view of the level-`level` tiles over `outer` draws at the level rather than
 /// exactly: the visible image objects whose full-resolution tiles there (the level-0 tiles
 /// each can draw into, [`tiles_reached`]) would cost too much, and the tiles at the level
-/// they draw into. They are chosen largest first, until the others together would take no
-/// more than `limit` bytes; then those of `before` (what the view chose last) too, while
-/// the others would take more than half that. So panning or zooming near the limit does
-/// not switch an object back and forth, making all of it in view at full resolution each
-/// time it switches. At level 0 nothing is: that is the image itself.
+/// they draw into. Those of `before` (what the view chose last) stay chosen; others are
+/// chosen too, largest first, while the rest would together take more than `limit` bytes;
+/// then the chosen go again, smallest first, while the rest would still fit in half that.
+/// So panning or zooming near the limit does not switch objects back and forth, making all
+/// of one in view at full resolution each time it switches. At level 0 nothing is: that is
+/// the image itself.
 fn costly_image_tiles(
     layers: &[Arc<Layer>],
     level: u32,
@@ -643,15 +656,21 @@ fn costly_image_tiles(
     });
     // Largest first, then by id, so that the same costs choose the same objects.
     costs.sort_unstable_by(|a, b| b.cmp(a));
-    let mut rest = costs.iter().fold(0u64, |sum, (cost, _)| sum.saturating_add(*cost));
-    for (only_before, enough) in [(false, limit), (true, limit / 2)] {
-        for &(cost, id) in &costs {
-            if rest <= enough {
-                break;
-            }
-            if (!only_before || before.contains(&id)) && at.objects.insert(id) {
-                rest -= cost;
-            }
+    let sum = |costs: &mut dyn Iterator<Item = u64>| costs.fold(0u64, u64::saturating_add);
+    at.objects = costs.iter().map(|c| c.1).filter(|id| before.contains(id)).collect();
+    let mut rest = sum(&mut costs.iter().filter(|c| !at.objects.contains(&c.1)).map(|c| c.0));
+    for &(cost, id) in &costs {
+        if rest <= limit {
+            break;
+        }
+        if at.objects.insert(id) {
+            rest = rest.saturating_sub(cost);
+        }
+    }
+    for &(cost, id) in costs.iter().rev() {
+        if at.objects.contains(&id) && rest.saturating_add(cost) <= limit / 2 {
+            at.objects.remove(&id);
+            rest = rest.saturating_add(cost);
         }
     }
     for_each_visible_object(layers, &mut |o| {
@@ -667,12 +686,24 @@ fn costly_image_tiles(
 }
 
 /// How many level-0 tiles within `outer` image object `i` can draw into: those the content
-/// of its image crosses, carried by its transform, with its filter's reach. (It is
-/// convex, so each row of tiles it crosses, it crosses in one run.)
+/// of its image crosses, carried by its transform, with its filter's reach; or, if fewer,
+/// those each unbroken run of its tiles along a row crosses, together (where its tiles
+/// leave much of its bounds empty), counting a tile two runs cross twice.
 fn tiles_reached(i: &ImageObject, outer: &IRect) -> u64 {
     let Some(content) = i.image.content_bounds() else { return 0 };
     let reach = resample::reach(&i.transform, &i.sampling);
-    let quad = content.to_f().expand(reach).corners().map(|p| i.transform.apply(p));
+    let crossed = |r: FRect| tiles_crossed(&r.expand(reach).corners().map(|p| i.transform.apply(p)), outer);
+    let t = f64::from(TILE_SIZE);
+    let runs = i.image.spans().into_iter().fold(0u64, |n, (y, x0, x1)| {
+        let r = FRect::new(f64::from(x0) * t, f64::from(y) * t, f64::from(x1) * t, f64::from(y + 1) * t);
+        n.saturating_add(crossed(r))
+    });
+    crossed(content.to_f()).min(runs)
+}
+
+/// How many level-0 tiles within `outer` the convex quadrilateral `quad` crosses. (Being
+/// convex, it crosses each row of tiles in one run.)
+fn tiles_crossed(quad: &[[f64; 2]; 4], outer: &IRect) -> u64 {
     let size = i64::from(TILE_SIZE);
     let t = size as f64;
     let (top, bottom) = quad.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p[1]), b.max(p[1])));
@@ -1407,6 +1438,8 @@ impl Projection {
                 let coords = self.update_exact(layers, level, &outer, &at.tiles);
                 self.restore(layers, level, coords.iter().copied());
                 self.draw_at_level(layers, level, &at.tiles);
+                // Of the reduced tiles, those the tiles drawn at the level read stay.
+                self.reduced.keep_only(level, &reduced_reads(layers, level, &at.tiles));
                 self.shown(level, coords.iter().chain(&at.tiles))
             }
             Quality::Preview => self.update_preview(layers, level, &outer),
@@ -1470,13 +1503,15 @@ impl Projection {
         // The dirty ones, drawn for the drag, and those costly image objects draw into, as
         // an exact update draws them: each where its key changed since it last was.
         self.draw_at_level(layers, level, &at_level);
+        // The reduced tiles at the level stay for the drag's length (it comes back over the
+        // same ones); those beneath, made to make them, go.
+        self.reduced.keep_level(level);
         self.shown(level, coords.iter().chain(&at_level))
     }
 
     /// Draws the level-`level` tiles `tiles` at that level, each object from its own copy
     /// at the level (a pixel object's reduced tiles, an image object's pyramid with its
-    /// own sampling: see [`at_level`]), those whose key changed since they last were. Of
-    /// the reduced tiles, those `tiles` read stay, and nothing beneath them.
+    /// own sampling: see [`at_level`]), those whose key changed since they last were.
     fn draw_at_level(&mut self, layers: &[Arc<Layer>], level: u32, tiles: &HashSet<TileCoord>) {
         let token = |o: &Object, c: TileCoord| level_token(o, c, level);
         let top = &self.levels[level as usize];
@@ -1492,7 +1527,6 @@ impl Projection {
         if !stale.is_empty() {
             self.draw_stale(layers, level, stale);
         }
-        self.reduced.keep_only(level, &reduced_reads(layers, level, tiles));
     }
 
     /// [`draw_at_level`](Self::draw_at_level) for the tiles `stale`, each with its key.
@@ -1854,12 +1888,17 @@ mod tests {
     use crate::document::{Document, IdGen, LayerId, Position};
     use crate::tile::{pixel_from_f32, pixel_to_f32};
 
-    /// Every reduced tile `p` keeps: its object, level and place, and the tile.
-    fn reduced_tiles(p: &Projection) -> Vec<(ObjectId, u32, TileCoord, Option<Arc<Tile>>)> {
-        let each = |(id, copies): (&ObjectId, &Copies)| {
-            copies.tiles.iter().map(move |((l, c), t)| (*id, *l, *c, t.clone())).collect::<Vec<_>>()
+    /// Every reduced tile `p` keeps: its image (by address), level and place, and the tile.
+    fn reduced_tiles(p: &Projection) -> Vec<(usize, u32, TileCoord, Option<Arc<Tile>>)> {
+        let each = |(image, copies): (&usize, &Copies)| {
+            copies.tiles.iter().map(move |((l, c), t)| (*image, *l, *c, t.clone())).collect::<Vec<_>>()
         };
-        p.reduced.objects.iter().flat_map(each).collect()
+        p.reduced.images.iter().flat_map(each).collect()
+    }
+
+    /// An image's address, as [`reduced_tiles`] names it.
+    fn address(image: &Arc<RasterImage>) -> usize {
+        Arc::as_ptr(image) as usize
     }
 
     fn solid(rect: IRect, rgba: PixelF32) -> RasterImage {
@@ -2358,7 +2397,7 @@ mod tests {
             pixel_to_f32(tiles[&c].get(((x >> 2) % 256) as u32, ((y >> 2) % 256) as u32))
         };
         let exact: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 2, &view, Quality::Exact).into_iter().collect();
-        assert!(p.reduced.objects.is_empty(), "the exact update keeps reduced tiles");
+        assert!(p.reduced.images.is_empty(), "the exact update keeps reduced tiles");
         for (bx, by) in [(0, 0), (5, 9), (15, 15), (15, 0), (8, 3)] {
             let (x, y) = (offset[0] + bx * 64 + 32, offset[1] + by * 64 + 32);
             assert!(close(at(&preview, x, y), colour(bx, by)), "block ({bx}, {by}): {:?}", at(&preview, x, y));
@@ -2389,12 +2428,12 @@ mod tests {
         o.offset = [1001, 999];
         p.update(&d.layers, 3, &view, Quality::Preview);
         let kept = reduced_tiles(&p);
-        assert!(kept.iter().all(|k| k.0 != sticker_id), "the sticker was reduced for a drag far from it");
-        assert!(kept.iter().any(|k| k.0 == big_id));
+        assert!(kept.iter().all(|k| k.0 != address(&sticker)), "the sticker was reduced for a drag far from it");
+        assert!(kept.iter().any(|k| k.0 == address(&big)));
         // Below the level shown, only tiles with some of the image under them are made.
         let mut r = Reduced::default();
         r.make(big_id, &big, 3, TileCoord::covering(&view, 3).collect());
-        for &(l, c) in r.objects[&big_id].tiles.keys() {
+        for &(l, c) in r.images[&address(&big)].tiles.keys() {
             assert!(l == 3 || !c.rect(l).intersect(&IRect::from_size(600, 600)).is_empty(), "{l} {c:?}");
         }
     }
@@ -2924,7 +2963,7 @@ mod tests {
             for (id, image, reads) in reduced_reads(&d.layers, 3, &shown.iter().map(|s| s.0).collect()) {
                 r.make(id, &image, 3, reads);
             }
-            (shown, r.objects.values().map(|c| c.tiles.len()).sum::<usize>())
+            (shown, r.images.values().map(|c| c.tiles.len()).sum::<usize>())
         };
         let (one, made) = scene(true);
         let (copies, made_from_copies) = scene(false);
@@ -2958,7 +2997,7 @@ mod tests {
         for (id, image, reads) in reduced_reads(&d.layers, 4, &tiles) {
             r.make(id, &image, 4, reads);
         }
-        let all: Vec<&Option<Arc<Tile>>> = r.objects.values().flat_map(|c| c.tiles.values()).collect();
+        let all: Vec<&Option<Arc<Tile>>> = r.images.values().flat_map(|c| c.tiles.values()).collect();
         let made: HashSet<usize> = all.iter().filter_map(|t| t.as_ref()).map(|t| Arc::as_ptr(t) as usize).collect();
         assert!(all.len() > 40, "{} reduced", all.len());
         assert!(made.len() <= 16, "{} reduced tiles made, not shared", made.len());
@@ -3108,19 +3147,30 @@ mod tests {
         let mut ids = IdGen::default();
         let mut d = Document::new(8192, 8192);
         add(&mut d, &mut ids, shared(IRect::from_size(8192, 8192), [1.0; 4]).0);
+        // A larger and a smaller.
         let pic = Arc::new(picture(512));
-        for x in [2048.0, 6144.0] {
+        for (x, scale) in [(2048.0, 6.0), (6144.0, 5.0)] {
             let layer =
-                picture_layer(&mut ids, pic.clone(), about_centre(512, 0.0, 6.0, [x, 4096.0]), Sampling::default());
+                picture_layer(&mut ids, pic.clone(), about_centre(512, 0.0, scale, [x, 4096.0]), Sampling::default());
             let index = d.layers.len();
             d.insert(Position { parent: None, index }, layer).unwrap();
         }
         let all = IRect::from_size(8192, 8192);
-        let [a, b] = [1, 2].map(|k| tiles_reached(image_of(&d, k).0, &all) * TILE_BYTES);
-        let chosen = |limit: u64| costly_image_tiles(&d.layers, 3, &all, limit, &HashSet::new()).objects.len();
-        assert_eq!(chosen(a + b), 0);
-        assert_eq!(chosen(a + b - 1), 1, "together over the limit: one drawn at the level, the other exactly");
-        assert_eq!(chosen(a.max(b) - 1), 2);
+        let ([a, b], [big, small]) =
+            ([1, 2].map(|k| tiles_reached(image_of(&d, k).0, &all) * TILE_BYTES), [1, 2].map(|k| image_of(&d, k).1));
+        assert!(a > b);
+        let chosen = |limit: u64, before: &[ObjectId]| {
+            costly_image_tiles(&d.layers, 3, &all, limit, &before.iter().copied().collect()).objects
+        };
+        assert_eq!(chosen(a + b, &[]), HashSet::new());
+        assert_eq!(
+            chosen(a + b - 1, &[]),
+            HashSet::from([big]),
+            "together over the limit: the larger drawn at the level"
+        );
+        assert_eq!(chosen(b - 1, &[]), HashSet::from([big, small]));
+        // The smaller chosen last time is enough: it stays, and the larger is not switched.
+        assert_eq!(chosen(a + b - 1, &[small]), HashSet::from([small]));
     }
 
     #[test]
@@ -3161,6 +3211,30 @@ mod tests {
                 assert!(crossed * 10 < boxed * 7, "{crossed} of the {boxed} its bounds hold");
             }
         }
+
+        // An image of two tiles far apart, enlarged: about what the two cross, never less,
+        // not what lies between them.
+        let mut sparse = RasterImage::new();
+        for c in [TileCoord::new(0, 0), TileCoord::new(5, 3)] {
+            sparse.set_tile(c, Some(Arc::new(Tile::filled(pixel_from_f32([0.2, 0.4, 0.6, 1.0])))));
+        }
+        let frame = sparse.content_bounds().unwrap();
+        let transform = Affine::rotate(0.3).then(Affine::scale(4.0, 4.0)).then(Affine::translate(300.0, -200.0));
+        let i = ImageObject { frame, image: Arc::new(sparse), transform, sampling: Sampling::default() };
+        let reach = resample::reach(&i.transform, &i.sampling);
+        let quads: Vec<[[f64; 2]; 4]> = i
+            .image
+            .tiles()
+            .map(|(c, _)| c.rect(0).to_f().expand(reach).corners().map(|p| i.transform.apply(p)))
+            .collect();
+        let crossed = TileCoord::covering(&outer, 0)
+            .filter(|c| quads.iter().any(|q| overlap(q, &c.rect(0).to_f())))
+            .count() as u64;
+        let bounds = resample::footprint(&i.image, &i.transform, &i.sampling).unwrap();
+        let boxed = TileCoord::covering(&bounds.intersect(&outer), 0).count() as u64;
+        let reached = tiles_reached(&i, &outer);
+        assert!(reached >= crossed && reached <= 2 * crossed, "{reached} counted, {crossed} crossed");
+        assert!(reached * 3 < boxed, "{reached} counted, of the {boxed} its bounds hold");
     }
 
     #[test]
@@ -3222,30 +3296,15 @@ mod tests {
             p.set_budget(Some(4 * TILE_BYTES));
             p.update(&d.layers, 2, rect, Quality::Exact).into_iter().collect()
         }
-        // A photograph of 2 × 2 tiles at level 2, half seen through a picture across the
-        // canvas, which is drawn at the level.
-        let size: i64 = 4096;
-        let mut ids = IdGen::default();
-        let mut d = Document::new(size as u32, size as u32);
-        let (photo, photo_object) = (ids.layer(), ids.object());
-        let pixels = PixelObject { image: Arc::new(picture(2048)), offset: [0, 0] };
-        let object = Object { id: photo_object, kind: ObjectKind::Pixels(pixels) };
-        d.insert(Position { parent: None, index: 0 }, Layer::with_objects(photo, "photo", vec![object])).unwrap();
-        let over = picture_layer(
-            &mut ids,
-            Arc::new(picture(512)),
-            about_centre(512, 0.2, 10.0, [2048.0, 2048.0]),
-            Sampling::default(),
-        );
-        let over_layer = over.id;
-        d.insert(Position { parent: None, index: 1 }, over).unwrap();
-        d.layer_mut(over_layer).unwrap().opacity = 0.5;
-        let all = IRect::from_size(size, size);
+        // A photograph of 2 × 2 tiles at level 2, under a picture drawn at the level.
+        let (mut d, photo_image) = photo_under_picture(1);
+        let photo = d.layers[0].id;
+        let all = IRect::from_size(4096, 4096);
         let mut p = Projection::new();
         view(&mut p, &d, &all);
         assert!(!p.costly.is_empty());
         let before = reduced_tiles(&p);
-        assert!(before.iter().all(|t| t.0 == photo_object && t.1 == 2), "kept tiles beneath the level shown");
+        assert!(before.iter().all(|t| t.0 == address(&photo_image) && t.1 == 2), "kept tiles beneath the level shown");
 
         // One pixel of the photograph's first tile changed.
         let LayerContent::Objects(objects) = &mut d.layer_mut(photo).unwrap().content else { panic!() };
@@ -3253,7 +3312,7 @@ mod tests {
         Arc::make_mut(&mut o.image).set_pixel(10, 10, pixel_from_f32([1.0, 0.0, 0.0, 1.0]));
         let shown = view(&mut p, &d, &all);
         let after = reduced_tiles(&p);
-        let at = |tiles: &[(ObjectId, u32, TileCoord, Option<Arc<Tile>>)], x: i32, y: i32| {
+        let at = |tiles: &[(usize, u32, TileCoord, Option<Arc<Tile>>)], x: i32, y: i32| {
             tiles.iter().find(|t| t.2 == TileCoord::new(x, y)).and_then(|t| t.3.clone()).expect("a reduced tile")
         };
         assert!(!Arc::ptr_eq(&at(&before, 0, 0), &at(&after, 0, 0)), "the tile over the edit was not made again");
@@ -3274,6 +3333,79 @@ mod tests {
         let part = reduced_tiles(&p);
         assert!(!part.is_empty() && part.len() < after.len());
         assert!(part.iter().all(|t| t.2.x <= 1 && t.2.y <= 1), "{:?}", part.iter().map(|t| t.2).collect::<Vec<_>>());
+    }
+
+    /// A document 4096 pixels square of a photograph 2048 pixels square at its top-left,
+    /// shown by `copies` pixel objects of one image, and a picture across it all, seen
+    /// through, turned; and the photograph's image.
+    fn photo_under_picture(copies: usize) -> (Document, Arc<RasterImage>) {
+        let mut ids = IdGen::default();
+        let mut d = Document::new(4096, 4096);
+        let photo = Arc::new(picture(2048));
+        for k in 0..copies {
+            let pixels = PixelObject { image: photo.clone(), offset: [0, 0] };
+            let object = Object { id: ids.object(), kind: ObjectKind::Pixels(pixels) };
+            d.insert(Position { parent: None, index: k }, Layer::with_objects(ids.layer(), "photo", vec![object]))
+                .unwrap();
+        }
+        let place = about_centre(512, 0.2, 10.0, [2048.0, 2048.0]);
+        let over = picture_layer(&mut ids, Arc::new(picture(512)), place, Sampling::default());
+        let over_layer = over.id;
+        d.insert(Position { parent: None, index: copies }, over).unwrap();
+        d.layer_mut(over_layer).unwrap().opacity = 0.5;
+        (d, photo)
+    }
+
+    #[test]
+    fn objects_showing_one_image_share_its_reduced_tiles() {
+        let (d, photo) = photo_under_picture(2);
+        let mut p = Projection::new();
+        p.set_budget(Some(4 * TILE_BYTES));
+        p.update(&d.layers, 2, &IRect::from_size(4096, 4096), Quality::Exact);
+        assert!(!p.costly.is_empty());
+        let images: HashSet<usize> = reduced_tiles(&p).iter().map(|t| t.0).collect();
+        assert_eq!(images, HashSet::from([address(&photo)]), "each object reduced it apart");
+    }
+
+    #[test]
+    fn a_drag_keeps_the_reduced_tiles_at_the_level_for_its_length() {
+        // A small picture dragged across a layer of 4 × 4 tiles at level 2, from its
+        // top-left, through the middle, to the far corner.
+        let mut ids = IdGen::default();
+        let mut d = Document::new(4096, 4096);
+        let photo = Arc::new(shared(IRect::from_size(4096, 4096), [0.3, 0.5, 0.7, 1.0]).0);
+        let pixels = PixelObject { image: photo.clone(), offset: [0, 0] };
+        let object = Object { id: ids.object(), kind: ObjectKind::Pixels(pixels) };
+        d.insert(Position { parent: None, index: 0 }, Layer::with_objects(ids.layer(), "photo", vec![object])).unwrap();
+        let sticker =
+            picture_layer(&mut ids, Arc::new(picture(64)), Affine::translate(100.0, 100.0), Sampling::default());
+        let sticker_layer = sticker.id;
+        d.insert(Position { parent: None, index: 1 }, sticker).unwrap();
+        let all = IRect::from_size(4096, 4096);
+        let mut p = Projection::new();
+        p.update(&d.layers, 2, &all, Quality::Exact);
+        let place = |d: &mut Document, x: f64| {
+            let LayerContent::Objects(objects) = &mut d.layer_mut(sticker_layer).unwrap().content else { panic!() };
+            let ObjectKind::Image(i) = &mut objects[0].kind else { panic!() };
+            i.transform = Affine::translate(x, x);
+        };
+        // Through the middle, which reads the layer's reduced tile (2, 1); then to the far
+        // corner, where neither its old place nor its new one reads that.
+        place(&mut d, 1100.0);
+        p.update(&d.layers, 2, &all, Quality::Preview);
+        let first = reduced_tiles(&p);
+        place(&mut d, 3100.0);
+        p.update(&d.layers, 2, &all, Quality::Preview);
+        let later = reduced_tiles(&p);
+        let tile = |v: &[(usize, u32, TileCoord, Option<Arc<Tile>>)]| {
+            v.iter().find(|t| t.2 == TileCoord::new(2, 1)).and_then(|t| t.3.clone())
+        };
+        let (a, b) = (tile(&first).expect("read in the middle"), tile(&later));
+        assert!(b.is_some_and(|b| Arc::ptr_eq(&a, &b)), "the tiles it left were let go during the drag");
+        assert!(later.iter().all(|t| t.1 == 2), "tiles beneath the level kept");
+        // Let go of: exact again, and nothing at the level drawn, nothing kept.
+        p.update(&d.layers, 2, &all, Quality::Exact);
+        assert!(reduced_tiles(&p).is_empty());
     }
 
     #[test]
@@ -3312,7 +3444,6 @@ mod tests {
     }
 
     #[test]
-
     fn dropped_uniform_tiles_are_made_again_from_the_layers() {
         let mut ids = IdGen::default();
         let size: i64 = 256 * 16;

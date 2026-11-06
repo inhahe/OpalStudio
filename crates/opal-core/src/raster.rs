@@ -45,6 +45,24 @@ enum Span {
     Mixed,
 }
 
+/// The spans `[x0, x1)` where rows `a` and `b` hold different tiles, joined where they meet.
+fn row_differences(a: &Row, b: &Row) -> Vec<(i32, i32)> {
+    // Between two neighbouring ends of runs, each row holds one tile throughout, or none.
+    let mut cuts: Vec<i32> = a.iter().chain(b).flat_map(|&(x0, x1, _)| [x0, x1]).collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut out: Vec<(i32, i32)> = Vec::new();
+    for w in cuts.windows(2) {
+        if Runs::at(a, w[0]) != Runs::at(b, w[0]) {
+            match out.last_mut() {
+                Some(last) if last.1 == w[0] => last.1 = w[1],
+                _ => out.push((w[0], w[1])),
+            }
+        }
+    }
+    out
+}
+
 impl Runs {
     fn of(tiles: &HashMap<TileCoord, Arc<Tile>>) -> Runs {
         let mut at: Vec<(i32, i32, usize)> = tiles.iter().map(|(c, t)| (c.y, c.x, Arc::as_ptr(t) as usize)).collect();
@@ -89,6 +107,11 @@ impl Runs {
         if row.is_empty() {
             self.0.remove(&c.y);
         }
+    }
+
+    /// The tile `row` holds at `x` (its address), if any.
+    fn at(row: &[(i32, i32, usize)], x: i32) -> Option<usize> {
+        row.get(row.partition_point(|r| r.1 <= x)).filter(|r| r.0 <= x).map(|r| r.2)
     }
 
     /// What `row` holds over `x0..x1`.
@@ -271,6 +294,49 @@ impl RasterImage {
 
     fn runs(&self) -> &Runs {
         self.runs.get_or_init(|| Arc::new(Runs::of(&self.tiles)))
+    }
+
+    /// Where the image has tiles: by tile row, the spans `[x0, x1)` of tile columns along
+    /// which they run unbroken, as `(row, x0, x1)`. Asked of the runs, at a step a run.
+    pub fn spans(&self) -> Vec<(i32, i32, i32)> {
+        let mut out: Vec<(i32, i32, i32)> = Vec::new();
+        for (&y, row) in &self.runs().0 {
+            for &(x0, x1, _) in row.iter() {
+                match out.last_mut() {
+                    Some(last) if last.0 == y && last.2 == x0 => last.2 = x1,
+                    _ => out.push((y, x0, x1)),
+                }
+            }
+        }
+        out
+    }
+
+    /// Where `self` and `other` hold different tiles (by identity: an edit replaces the
+    /// tiles it changes and keeps the others): by tile row, the spans `[x0, x1)` of tile
+    /// columns. Asked of the two images' runs, whose rows an edit left alone are shared
+    /// between an image and its edited copy, so the cost follows the rows that changed.
+    pub fn differences(&self, other: &RasterImage) -> HashMap<i32, Vec<(i32, i32)>> {
+        let (a, b) = (self.runs(), other.runs());
+        let mut out = HashMap::new();
+        let none = Row::new();
+        let mut differ = |y: i32, ra: &Row, rb: &Row| {
+            let spans = row_differences(ra, rb);
+            if !spans.is_empty() {
+                out.insert(y, spans);
+            }
+        };
+        for (&y, ra) in &a.0 {
+            match b.0.get(&y) {
+                Some(rb) if Arc::ptr_eq(ra, rb) => {}
+                rb => differ(y, ra, rb.map_or(&none, |r| r)),
+            }
+        }
+        for (&y, rb) in &b.0 {
+            if !a.0.contains_key(&y) {
+                differ(y, &none, rb);
+            }
+        }
+        out
     }
 
     fn alike_one_by_one(&self, [x0, y0, x1, y1]: [i32; 4]) -> bool {
@@ -902,6 +968,28 @@ mod tests {
         img.prune_transparent();
         assert!(img.tile(TileCoord::new(2, 2)).is_none());
         assert_eq!(*img.runs(), Runs::of(&img.tiles));
+    }
+
+    #[test]
+    fn two_images_differ_where_they_hold_different_tiles() {
+        let blue = Arc::new(Tile::filled(pixel_from_f32([0.0, 0.0, 1.0, 1.0])));
+        let old = RasterImage::filled(&IRect::from_size(256 * 12, 256 * 3), pixel_from_f32([1.0; 4]));
+        let _ = old.runs();
+        // An edited copy, as a layer is edited: a tile changed, two placed side by side, one
+        // removed, one placed far off.
+        let mut new = old.clone();
+        new.tile_mut(TileCoord::new(3, 0)).set(1, 1, pixel_from_f32([0.5; 4]));
+        new.set_tile(TileCoord::new(5, 1), Some(blue.clone()));
+        new.set_tile(TileCoord::new(6, 1), Some(blue.clone()));
+        new.set_tile(TileCoord::new(11, 2), None);
+        new.set_tile(TileCoord::new(-4, 9), Some(blue));
+        let want = HashMap::from([(0, vec![(3, 4)]), (1, vec![(5, 7)]), (2, vec![(11, 12)]), (9, vec![(-4, -3)])]);
+        assert_eq!(new.differences(&old), want);
+        assert_eq!(old.differences(&new), want);
+        // With runs made afresh from the tiles, sharing no row with the other's: the same.
+        let fresh = RasterImage { tiles: new.tiles.clone(), ..RasterImage::new() };
+        assert_eq!(fresh.differences(&old), want);
+        assert!(old.differences(&old.clone()).is_empty());
     }
 
     #[test]
