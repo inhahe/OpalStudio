@@ -29,6 +29,8 @@ pub enum Pane {
     Layers,
     History,
     ToolSettings,
+    /// What scripts run from the editor print.
+    Console,
 }
 
 pub struct OpalApp {
@@ -488,6 +490,9 @@ impl OpalApp {
         // The active document is the one on screen: a document a command made active has
         // its tab brought to the front; otherwise, if the tab shown changed some other way,
         // the active document follows it.
+        if std::mem::take(&mut self.st.show_console) {
+            show_pane(&mut self.tree.tiles, Pane::Console);
+        }
         let reveal = std::mem::take(&mut self.st.reveal);
         let shown = shown_docs(&self.tree.tiles);
         if let Some(id) = reveal.filter(|id| self.st.doc(*id).is_some()) {
@@ -724,8 +729,12 @@ impl eframe::App for OpalApp {
         self.save_settings_if_due(&ctx);
         self.st.poll_copies();
         self.st.poll_writes(ctx.input(|i| i.pointer.any_down()));
+        self.st.console.poll(&ctx);
         // After the writes, whose answers it passes on.
         if let Some(server) = &mut self.server {
+            if std::mem::take(&mut self.st.let_scripts_in) {
+                server.let_in();
+            }
             let busy = self.st.scripts_wait(ctx.input(|i| i.pointer.any_down()));
             server.serve(&mut self.st, &ctx, busy);
         } else if self.server_waits {
@@ -843,7 +852,8 @@ fn default_tree(st: &AppState) -> egui_tiles::Tree<Pane> {
     let tool_tabs = tiles.insert_tab_tile(vec![tool]);
     let layers = tiles.insert_pane(Pane::Layers);
     let history = tiles.insert_pane(Pane::History);
-    let lh = tiles.insert_tab_tile(vec![layers, history]);
+    let console = tiles.insert_pane(Pane::Console);
+    let lh = tiles.insert_tab_tile(vec![layers, history, console]);
     let mut right = egui_tiles::Linear::new(egui_tiles::LinearDir::Vertical, vec![tool_tabs, lh]);
     right.shares.set_share(tool_tabs, 0.35);
     right.shares.set_share(lh, 0.65);
@@ -871,6 +881,7 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
             Pane::Layers => format!("{}  Layers", icons::LAYER).into(),
             Pane::History => format!("{}  History", icons::HISTORY).into(),
             Pane::ToolSettings => format!("{}  Tool settings", icons::OPTIONS).into(),
+            Pane::Console => format!("{}  Console", icons::CONSOLE).into(),
         }
     }
 
@@ -889,6 +900,7 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
             Pane::ToolSettings => inset(ui, &mut |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| panels::tool_settings_panel(ui, self.st));
             }),
+            Pane::Console => inset(ui, &mut |ui| crate::console::console_panel(ui, self.st)),
         }
         UiResponse::None
     }
@@ -969,8 +981,11 @@ fn start_server(st: &mut AppState, ctx: &egui::Context) -> (Option<crate::server
         st.notify("Another Opal Studio is open: scripts and assistants connect to that one.");
         return (None, true);
     }
-    match crate::server::Server::start(file, ctx.clone()) {
-        Ok(server) => (Some(server), false),
+    match crate::server::Server::start(file.clone(), ctx.clone()) {
+        Ok(server) => {
+            st.scripts_file = Some(file);
+            (Some(server), false)
+        }
         Err(e) => {
             st.message(
                 crate::state::MessageKind::Warning,
@@ -1001,7 +1016,8 @@ impl OpalApp {
         let ask = now - asked >= ASK_EVERY;
         self.server_looked = (now, if ask { now } else { asked });
         let gone = !file.exists() || (ask && !crate::server::is_running(&file));
-        if gone && let Ok(server) = crate::server::Server::start(file, ctx.clone()) {
+        if gone && let Ok(server) = crate::server::Server::start(file.clone(), ctx.clone()) {
+            self.st.scripts_file = Some(file);
             self.server = Some(server);
             self.server_waits = false;
             self.st.notify("The other Opal Studio has closed: scripts and assistants now connect to this one.");

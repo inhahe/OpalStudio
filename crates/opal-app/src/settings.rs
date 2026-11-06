@@ -34,6 +34,11 @@ pub enum Kind {
     Curve {
         periodic: bool,
     },
+    /// A line of text (a command, a path), which must not be empty; `hint` is shown in the
+    /// box when it is.
+    Text {
+        hint: &'static str,
+    },
 }
 
 /// A default value that can be written in a `static` table.
@@ -45,6 +50,7 @@ pub enum Init {
     Color([u8; 4]),
     #[cfg_attr(not(test), expect(dead_code, reason = "first used by the feather falloff setting in milestone 2"))]
     Curve(&'static [[f64; 2]], Interpolation),
+    Text(&'static str),
 }
 
 /// A setting's value.
@@ -55,6 +61,7 @@ pub enum Value {
     Choice(String),
     Color([u8; 4]),
     Curve(Curve),
+    Text(String),
 }
 
 /// The declaration of one setting.
@@ -82,6 +89,7 @@ impl Def {
             (Init::Color(c), _) => Value::Color(c),
             (Init::Curve(pts, interp), Kind::Curve { periodic }) => Value::Curve(Curve::new(pts, interp, periodic)),
             (Init::Curve(pts, interp), _) => Value::Curve(Curve::new(pts, interp, false)),
+            (Init::Text(t), _) => Value::Text(t.to_owned()),
         }
     }
 
@@ -92,6 +100,7 @@ impl Def {
             (Kind::Float { min, max, .. }, Value::Float(f)) => (min..=max).contains(f),
             (Kind::Choice(opts), Value::Choice(c)) => opts.iter().any(|(id, _)| id == c),
             (Kind::Curve { periodic }, Value::Curve(c)) => c.is_periodic() == periodic,
+            (Kind::Text { .. }, Value::Text(t)) => !t.is_empty() && t.trim() == t,
             _ => false,
         }
     }
@@ -154,6 +163,13 @@ impl Settings {
         match self.get(key) {
             Value::Color([r, g, b, a]) => Color32::from_rgba_unmultiplied(r, g, b, a),
             v => panic!("setting {key:?} is not a color: {v:?}"),
+        }
+    }
+
+    pub fn text(&self, key: &str) -> String {
+        match self.get(key) {
+            Value::Text(t) => t,
+            v => panic!("setting {key:?} is not text: {v:?}"),
         }
     }
 
@@ -301,6 +317,25 @@ fn setting_row(ui: &mut egui::Ui, settings: &mut Settings, def: &'static Def, pa
             r
         }
         (Value::Curve(curve), _) => curve_editor::curve_editor(ui, curve, &curve_editor::Options::small(def.key)),
+        (Value::Text(t), Kind::Text { hint }) => {
+            // Typed into a copy kept while the box has the focus: the setting takes it whenever
+            // it is not empty, so clearing the box to type anew leaves the setting as it was,
+            // and a box left empty shows the setting again.
+            let id = ui.make_persistent_id(("text setting", def.key));
+            let mut typed = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| t.clone());
+            let r = ui
+                .add(egui::TextEdit::singleline(&mut typed).hint_text(hint).desired_width(220.0))
+                .labelled_by(label_id);
+            if r.has_focus() {
+                ui.data_mut(|d| d.insert_temp(id, typed.clone()));
+            } else {
+                ui.data_mut(|d| d.remove::<String>(id));
+            }
+            if r.changed() && !typed.trim().is_empty() {
+                *t = typed.trim().to_owned();
+            }
+            r
+        }
         _ => unreachable!("setting {} has a value of the wrong kind", def.key),
     };
     let response = response.on_hover_text(&tip);
@@ -335,6 +370,7 @@ fn describe(def: &Def, v: &Value) -> String {
         }
         (Value::Color([r, g, b, _]), _) => format!("#{r:02x}{g:02x}{b:02x}"),
         (Value::Curve(c), _) => format!("a curve of {} points", c.points().len()),
+        (Value::Text(t), _) => t.clone(),
         _ => "?".to_owned(),
     }
 }
@@ -398,6 +434,30 @@ mod tests {
         assert!(s.is_changed("c"));
         assert_eq!(s.curve("c"), edited);
         assert!(!CURVE_DEFS[0].accepts(&Value::Curve(Curve::identity())), "a curve that does not wrap is refused");
+    }
+
+    static TEXT_DEFS: &[Def] = &[Def {
+        key: "t",
+        label: "T",
+        help: "",
+        section: "s",
+        kind: Kind::Text { hint: "python" },
+        default: Init::Text("python"),
+        advanced: false,
+    }];
+
+    #[test]
+    fn a_text_setting_is_never_blank() {
+        let mut s = Settings::new(TEXT_DEFS);
+        assert_eq!(s.text("t"), "python");
+        s.set("t", Value::Text("C:/venv/Scripts/python.exe".into()));
+        assert_eq!(s.text("t"), "C:/venv/Scripts/python.exe");
+        let d = &TEXT_DEFS[0];
+        assert!(!d.accepts(&Value::Text(String::new())) && !d.accepts(&Value::Text("  ".into())));
+        assert!(!d.accepts(&Value::Text(" python".into())), "kept trimmed");
+        // Saved blank by hand: skipped on loading.
+        let skipped = s.load_map(&BTreeMap::from([("t".to_owned(), Value::Text(String::new()))]));
+        assert_eq!(skipped, ["t"]);
     }
 
     #[test]

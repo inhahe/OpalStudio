@@ -9,6 +9,7 @@ mod canvas;
 mod clipboard;
 mod commands;
 mod config;
+mod console;
 mod crop;
 mod curve_editor;
 mod dialogs;

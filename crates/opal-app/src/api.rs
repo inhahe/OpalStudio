@@ -266,7 +266,7 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             LAYER,
             Param { name: "name", kind: Kind::Text, help: "Its new name.", otherwise: Otherwise::Required },
         ],
-        Paste | PasteInPlace | Transform | Preferences | Exit | ZoomIn | ZoomOut | ZoomFit | Zoom100
+        Paste | PasteInPlace | Transform | Preferences | Exit | RunScript | ZoomIn | ZoomOut | ZoomFit | Zoom100
         | ToggleOffCanvas | ToggleTheme | ToggleRibbon | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts
         | About | WidgetGallery => return None,
     })

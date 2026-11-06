@@ -4,7 +4,7 @@ use crate::settings::{Def, Init, Kind, Settings};
 use opal_core::resample::{Method, Sampling};
 
 pub const SECTIONS: &[&str] =
-    &["Interface", "Canvas", "Navigation", "History", "Memory", "Transform", "Resize", "Export"];
+    &["Interface", "Canvas", "Navigation", "History", "Memory", "Transform", "Resize", "Export", "Scripting"];
 
 /// The resampling methods, as a setting's choices.
 const METHODS: &[(&str, &str)] =
@@ -429,6 +429,17 @@ pub static PREFS: &[Def] = &[
         section: "Export",
         kind: Kind::Bool,
         default: Init::Bool(false),
+        advanced: false,
+    },
+    Def {
+        key: "scripting.python",
+        label: "Python",
+        help: "The Python that Run Script runs scripts with (and opal-studio --headless, unless \
+               told another): a command on the PATH, such as python or py, or the full path of \
+               a python.exe, such as a virtual environment's, to have its packages.",
+        section: "Scripting",
+        kind: Kind::Text { hint: "python" },
+        default: Init::Text("python"),
         advanced: false,
     },
 ];

@@ -18,6 +18,7 @@ pub enum Cmd {
     Close,
     Preferences,
     Exit,
+    RunScript,
     Undo,
     Redo,
     Copy,
@@ -100,7 +101,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 55] = [
+    pub const ALL: [Cmd; 56] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -109,6 +110,7 @@ impl Cmd {
         Cmd::Close,
         Cmd::Preferences,
         Cmd::Exit,
+        Cmd::RunScript,
         Cmd::Undo,
         Cmd::Redo,
         Cmd::Copy,
@@ -216,6 +218,17 @@ impl Cmd {
                 const { &[ctrl(Key::Comma)] },
             ),
             Cmd::Exit => i("Exit", icons::CLOSE, "Quit Opal Studio.", "Offers to save unsaved changes first.", &[]),
+            Cmd::RunScript => i(
+                "Run Script",
+                icons::SCRIPT,
+                "Run a Python script that drives Opal Studio.",
+                "Asks for a .py file and runs it, in its own folder, with the Python named in \
+                 Preferences › Scripting. What it prints shows in the Console panel, which can \
+                 stop it, and what it changes in an image becomes one step of history, which \
+                 one Undo takes back. Scripts use the opal package; python/API.md lists what \
+                 they can call.",
+                &[],
+            ),
             Cmd::Undo => i(
                 "Undo",
                 icons::UNDO,
@@ -612,6 +625,13 @@ pub static RIBBON: &[Tab] = &[
                 cmds: &[Cmd::New, Cmd::Open, Cmd::Save, Cmd::SaveAs, Cmd::Export, Cmd::Close],
             },
             Group {
+                name: "Scripts",
+                description: "Running Python scripts that drive Opal Studio. What they print \
+                              shows in the Console panel.",
+                large: 1,
+                cmds: &[Cmd::RunScript],
+            },
+            Group {
                 name: "Application",
                 description: "Settings for Opal Studio itself.",
                 large: 1,
@@ -776,6 +796,11 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup | CopyMerged
         | StampVisible | ResizeCanvas | CropToContent => needs_doc(),
         Paste | PasteInPlace => Ok(()),
+        RunScript => match (&st.scripts_file, st.console.running()) {
+            (None, _) => Err(crate::console::NOT_SERVING.to_owned()),
+            (_, Some(name)) => Err(format!("{name} is running: stop it in the Console panel first.")),
+            _ => Ok(()),
+        },
         Copy | GroupLayers => selection(st).map(|_| ()),
         Transform | Rasterize => {
             let (d, sel) = selection(st)?;

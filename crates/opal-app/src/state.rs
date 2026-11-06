@@ -152,6 +152,15 @@ pub struct AppState {
     pub images_made: Vec<(u64, std::sync::mpsc::Receiver<Result<serde_json::Value, String>>)>,
     /// Whether the window should come to the front (a file was handed to it to open).
     pub raise_window: bool,
+    /// Scripts run from the editor, and what they printed.
+    pub console: crate::console::Console,
+    /// The connection file of this editor's server, which scripts it runs connect through;
+    /// `None` while it serves none (another editor does).
+    pub scripts_file: Option<PathBuf>,
+    /// Whether the Console panel should come to the front (a script was started).
+    pub show_console: bool,
+    /// Whether scripts shut out should be let in again (the user started one).
+    pub let_scripts_in: bool,
     /// For each copy on its way to the clipboard, in order, the call it answers, if any.
     pub copies_answered: VecDeque<Option<u64>>,
     pub confirm: Option<Confirm>,
@@ -250,6 +259,10 @@ impl AppState {
             answered: Vec::new(),
             images_made: Vec::new(),
             raise_window: false,
+            console: crate::console::Console::default(),
+            scripts_file: None,
+            show_console: false,
+            let_scripts_in: false,
             copies_answered: VecDeque::new(),
             confirm: None,
             new_image: None,
@@ -431,6 +444,7 @@ impl AppState {
                 self.request_close(id);
             }
             Cmd::Preferences => self.prefs_open = true,
+            Cmd::RunScript => self.run_script_dialog(ctx),
             Cmd::Exit => self.exit_requested = true,
             Cmd::Undo => {
                 self.active_mut().expect("available").undo();

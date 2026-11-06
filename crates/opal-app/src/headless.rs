@@ -9,7 +9,6 @@ use crate::state::AppState;
 use eframe::egui;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::process::Command;
 
 /// Where the `opal` package is: beside the executable (as the folder it is built into holds
 /// it), or in the source tree it was built from.
@@ -22,22 +21,23 @@ pub fn package_dir() -> Option<PathBuf> {
     source.join("opal").is_dir().then_some(source)
 }
 
-/// The command line after `--headless`: the Python to use, the script, and its arguments.
+/// The command line after `--headless`: the Python to use (if `--python` or `OPAL_PYTHON`
+/// names one; otherwise the preference's), the script, and its arguments.
 #[derive(Debug)]
 struct Run {
-    python: OsString,
+    python: Option<OsString>,
     script: OsString,
     args: Vec<OsString>,
 }
 
 fn parse(mut given: Vec<OsString>) -> Result<Run, String> {
-    let mut python = std::env::var_os("OPAL_PYTHON").unwrap_or_else(|| "python".into());
+    let mut python = std::env::var_os("OPAL_PYTHON");
     if given.first().is_some_and(|a| a == "--python") {
         given.remove(0);
         if given.is_empty() {
             return Err("--python needs the Python to run the script with.".to_owned());
         }
-        python = given.remove(0);
+        python = Some(given.remove(0));
     }
     if given.is_empty() {
         return Err("usage: opal-studio --headless [--python PATH] script.py [arguments…]".to_owned());
@@ -80,19 +80,11 @@ pub fn run(given: Vec<OsString>) -> i32 {
             return 1;
         }
     };
-    let mut command = Command::new(&run.python);
-    command.arg(&run.script).args(&run.args).env("OPAL_STUDIO_API", &file);
-    if let Some(package) = package_dir() {
-        let mut path = std::env::split_paths(&std::env::var_os("PYTHONPATH").unwrap_or_default()).collect::<Vec<_>>();
-        path.insert(0, package);
-        if let Ok(joined) = std::env::join_paths(path) {
-            command.env("PYTHONPATH", joined);
-        }
-    }
-    let mut child = match command.spawn() {
+    let python = run.python.clone().unwrap_or_else(|| st.prefs.text("scripting.python").into());
+    let mut child = match crate::console::script_command(&python, &run.script, &run.args, &file).spawn() {
         Ok(child) => child,
         Err(e) => {
-            eprintln!("{} could not be run: {e}", run.python.to_string_lossy());
+            eprintln!("{} could not be run: {e}", python.to_string_lossy());
             return 1;
         }
     };
@@ -126,7 +118,10 @@ mod tests {
     #[test]
     fn the_command_line_names_the_python_the_script_and_its_arguments() {
         let run = parse(vec!["--python".into(), "py3".into(), "go.py".into(), "a".into(), "--b".into()]).unwrap();
-        assert_eq!((run.python, run.script, run.args), ("py3".into(), "go.py".into(), vec!["a".into(), "--b".into()]));
+        assert_eq!(
+            (run.python, run.script, run.args),
+            (Some("py3".into()), "go.py".into(), vec!["a".into(), "--b".into()])
+        );
         assert!(parse(vec![]).unwrap_err().contains("usage"));
         assert!(parse(vec!["--python".into()]).unwrap_err().contains("needs"));
         assert!(package_dir().is_some_and(|d| d.join("opal").join("__init__.py").is_file()));
