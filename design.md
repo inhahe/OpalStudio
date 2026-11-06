@@ -201,7 +201,7 @@ not a goal.
   edit beneath makes again only the reduced tiles over what it changed, each from full
   resolution. So an image object across a huge canvas costs the tiles shown
   too (one across a 300,000-pixel canvas shown whole: 90 ms; 6 ms when its opacity
-  changes, 30 ms when a pixel of the canvas beneath does). Those tiles
+  changes, 25 ms when a pixel of the canvas beneath does). Those tiles
   look very slightly different from reducing full resolution where layers overlap, and a
   pixel layer beneath them, off the level's pixel grid, slightly softer; everywhere else
   the view is exact. The cache

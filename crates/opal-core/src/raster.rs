@@ -631,17 +631,56 @@ impl RasterImage {
         if let Some(b) = self.bounds.get() {
             return *b;
         }
-        let b = self
-            .tiles
-            .par_iter()
-            .filter_map(|(c, t)| {
-                let [x0, y0, x1, y1] = t.content_rect()?;
-                let o = c.rect(0);
-                Some(IRect::new(o.x0 + i64::from(x0), o.y0 + i64::from(y0), o.x0 + i64::from(x1), o.y0 + i64::from(y1)))
-            })
-            .reduce_with(|a, b| a.union(&b));
+        let b = self.bounds_along_the_edge().unwrap_or_else(|| self.bounds_of_every_tile());
         let _ = self.bounds.set(b);
         b
+    }
+
+    /// Where tile `c`'s content lies, in pixels; `None` for none (or no tile).
+    fn content_at(&self, c: TileCoord) -> Option<IRect> {
+        let [x0, y0, x1, y1] = self.tiles.get(&c)?.content_rect()?;
+        let o = c.rect(0);
+        Some(IRect::new(o.x0 + i64::from(x0), o.y0 + i64::from(y0), o.x0 + i64::from(x1), o.y0 + i64::from(y1)))
+    }
+
+    /// [`content_bounds`](Self::content_bounds), asking every tile.
+    fn bounds_of_every_tile(&self) -> Option<IRect> {
+        self.tiles.par_iter().filter_map(|(c, _)| self.content_at(*c)).reduce_with(|a, b| a.union(&b))
+    }
+
+    /// [`content_bounds`](Self::content_bounds) from the runs of tiles, if they are built
+    /// (an edit keeps them, and forgets the bounds): the content's edge lies in the
+    /// outermost tiles, those of the first and last columns and rows, so only those are
+    /// asked (each run's tile once, a run being one tile repeated). `None`, for asking every
+    /// tile, without the runs, or if all of the outermost tiles on one side are empty (the
+    /// edge then lies further in).
+    fn bounds_along_the_edge(&self) -> Option<Option<IRect>> {
+        let rows = &self.runs.get()?.0;
+        let (Some(top), Some(bottom)) = (rows.keys().min(), rows.keys().max()) else { return Some(None) };
+        let first = rows.values().filter_map(|r| r.first()).map(|r| r.0).min()?;
+        let last = rows.values().filter_map(|r| r.last()).map(|r| r.1 - 1).max()?;
+        let union = |a: Option<IRect>, b: Option<IRect>| match (a, b) {
+            (Some(a), Some(b)) => Some(a.union(&b)),
+            (a, b) => a.or(b),
+        };
+        // Each side from its own tiles alone, which no tile further in can pass.
+        let mut sides = [None; 4];
+        for (&y, row) in rows {
+            if row.first().is_some_and(|r| r.0 == first) {
+                sides[0] = union(sides[0], self.content_at(TileCoord::new(first, y)));
+            }
+            if row.last().is_some_and(|r| r.1 - 1 == last) {
+                sides[1] = union(sides[1], self.content_at(TileCoord::new(last, y)));
+            }
+        }
+        for (side, y) in [(2, *top), (3, *bottom)] {
+            for &(x, _, _) in rows[&y].iter() {
+                sides[side] = union(sides[side], self.content_at(TileCoord::new(x, y)));
+            }
+        }
+        let [left, right, upper, lower] = sides;
+        let (left, right, upper, lower) = (left?, right?, upper?, lower?);
+        Some(Some(IRect::new(left.x0, upper.y0, right.x1, lower.y1)))
     }
 
     /// The image halved `k` times: each pixel the average of a 2^k × 2^k block, so pixel
@@ -968,6 +1007,45 @@ mod tests {
         img.prune_transparent();
         assert!(img.tile(TileCoord::new(2, 2)).is_none());
         assert_eq!(*img.runs(), Runs::of(&img.tiles));
+    }
+
+    #[test]
+    fn content_bounds_found_along_the_edge_are_those_of_every_tile() {
+        let every = |img: &RasterImage| RasterImage { tiles: img.tiles.clone(), ..RasterImage::new() }.content_bounds();
+        let mut img = RasterImage::filled(&IRect::from_size(256 * 10, 256 * 6), pixel_from_f32([1.0; 4]));
+        let _ = img.runs();
+        let red = pixel_from_f32([1.0, 0.0, 0.0, 1.0]);
+        let clear = || Some(Arc::new(Tile::transparent()));
+        // Widened by a pixel far off on each side, narrowed again, a column removed, an
+        // outermost tile emptied, then all of them on one side, then a row added below.
+        type Step = Box<dyn Fn(&mut RasterImage)>;
+        let steps: Vec<Step> = vec![
+            Box::new(move |i| i.set_pixel(-300, 700, red)),
+            Box::new(move |i| i.set_pixel(5000, -10, red)),
+            Box::new(move |i| i.set_pixel(1300, 9000, red)),
+            // A new top row of two tiles apart, the higher pixel in the second.
+            Box::new(move |i| {
+                i.set_pixel(100, -600, red);
+                i.set_pixel(2000, -700, red);
+            }),
+            Box::new(|i| i.set_tile(TileCoord::new(-2, 2), None)),
+            Box::new(|i| i.set_tile(TileCoord::new(19, -1), None)),
+            Box::new(|i| i.set_tile(TileCoord::new(5, 35), None)),
+            Box::new(|i| (0..6).for_each(|y| i.set_tile(TileCoord::new(0, y), None))),
+            Box::new(move |i| i.set_tile(TileCoord::new(9, 3), clear())),
+            Box::new(move |i| (0..6).for_each(|y| i.set_tile(TileCoord::new(9, y), clear()))),
+            Box::new(move |i| i.set_pixel(1000, 2000, red)),
+        ];
+        for (k, step) in steps.iter().enumerate() {
+            step(&mut img);
+            assert!(img.runs.get().is_some(), "the runs were let go");
+            let all = every(&img);
+            assert_eq!(img.content_bounds(), all, "after step {k}");
+            // Found along the edge, but where all of the last column is empty (from step 9).
+            let along = img.bounds_along_the_edge();
+            assert_eq!(along, (k < 9).then_some(all), "after step {k}, found along the edge");
+        }
+        assert_eq!(RasterImage::new().content_bounds(), None);
     }
 
     #[test]

@@ -16,14 +16,6 @@ convert from the embedded profile into the working space on import.
 `crates/opal-app/src/gpu_memory.rs`. **Fix:** query `VK_EXT_memory_budget` through wgpu's
 Vulkan backend (and Metal's `recommendedMaxWorkingSetSize`) on other platforms.
 
-## An edit to a huge image finds its content bounds again over every tile
-
-`crates/opal-core/src/raster.rs` (`content_bounds`). Changing a pixel forgets the image's
-content bounds, and the next asker finds them again from every tile: 8 ms for a
-300,000-pixel canvas (1.4 million tiles), on every edit, which painting will make on every
-stroke. **Fix:** find them from the runs of tiles (each row's first and last tile, at a
-lookup a row), asking only the tiles along the edge for their content.
-
 ## The scratch drive's free space is only known on Windows
 
 `crates/opal-app/src/memory.rs` (`disk_free`). Elsewhere it is not known, and none is
