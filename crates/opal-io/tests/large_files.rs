@@ -209,6 +209,53 @@ fn huge_white_canvas() {
     std::fs::remove_file(path).unwrap();
 }
 
+/// An image object across a large white canvas, shown whole, edited and dragged: the
+/// canvas `OPAL_SIDE` pixels a side (20,000 if not given).
+#[test]
+#[ignore]
+fn image_object_across_a_large_canvas() {
+    use opal_core::composite::{Projection, Quality};
+    use opal_core::document::{ImageObject, Object, ObjectKind};
+    use opal_core::geom::{Affine, IRect};
+    use opal_core::resample::Sampling;
+    let side: u32 = std::env::var("OPAL_SIDE").ok().and_then(|s| s.parse().ok()).unwrap_or(20_000);
+    let (mut d, mut ids) = white(side);
+    // A picture's worth of distinct pixels, scaled to cover the canvas.
+    let px: Vec<_> = (0..1024 * 1024)
+        .map(|i| pixel_from_f32([(i % 251) as f32 / 251.0, 0.5, (i % 97) as f32 / 97.0, 1.0]))
+        .collect();
+    let image = ImageObject {
+        image: Arc::new(RasterImage::from_pixels(1024, 1024, &px)),
+        frame: IRect::from_size(1024, 1024),
+        transform: Affine::scale(f64::from(side) / 1024.0, f64::from(side) / 1024.0),
+        sampling: Sampling::default(),
+    };
+    let object = Object { id: ids.object(), kind: ObjectKind::Image(image) };
+    d.insert(Position { parent: None, index: 1 }, Layer::with_objects(ids.layer(), "picture", vec![object])).unwrap();
+    let whole = IRect::from_size(i64::from(side), i64::from(side));
+    // The level at which the canvas fits in about a thousand pixels.
+    let level = (f64::from(side) / 1024.0).log2().ceil().max(1.0) as u32;
+    let mut p = Projection::new();
+    p.set_budget(Some(1 << 30));
+    measure(&format!("{side}-pixel canvas under a picture, shown whole at level {level}"), || {
+        p.update(&d.layers, level, &whole, Quality::Exact);
+    });
+    d.layer_mut(d.layers[1].id).unwrap().opacity = 0.7;
+    measure("Its opacity changed", || {
+        p.update(&d.layers, level, &whole, Quality::Exact);
+    });
+    let id = d.layers[1].id;
+    let opal_core::document::LayerContent::Objects(objects) = &mut d.layer_mut(id).unwrap().content else { panic!() };
+    let ObjectKind::Image(i) = &mut objects[0].kind else { panic!() };
+    i.transform = i.transform.then(Affine::translate(500.0, 300.0));
+    measure("Dragged (a preview)", || {
+        p.update(&d.layers, level, &whole, Quality::Preview);
+    });
+    measure("Let go of (exact again)", || {
+        p.update(&d.layers, level, &whole, Quality::Exact);
+    });
+}
+
 /// Opening a large PNG: more than 512 MiB once decoded.
 #[test]
 #[ignore]

@@ -21,14 +21,16 @@ Vulkan backend (and Metal's `recommendedMaxWorkingSetSize`) on other platforms.
 `crates/opal-core/src/composite.rs` (`Plan::of`, `uniform_block`). Zoomed out, a block is
 made at its level from one tile when its pixel objects repeat one tile, but never where an
 image object reaches, whose pixels differ at every place: beneath one, the exact view
-composites every level-0 tile and reduces them (an image pasted and scaled over a
-300,000-pixel canvas, shown whole: about 1.4 million tiles keyed, hundreds of MB, a
-second an edit). The exact view is defined as full resolution reduced, so this is the cost
-of that definition. **Fix, needing a decision:** let the exact view draw image objects at
-the level shown, from the image's own pyramid with its own sampling, as previews already
-do (which differs slightly from reducing full resolution); `Occupancy` would then give the
-tiles image objects cover at each level directly (`TileCoord::covering(r ∩ outer, l)`)
-rather than lifting a level-0 list.
+composites every level-0 tile, of 512 KB each, and reduces them. An image scaled across a
+300,000-pixel canvas and shown whole is 1.4 million such tiles, some 700 GB: more than any
+computer holds, so that view cannot be shown at all; across a 20,000-pixel canvas, 6,100
+tiles and 3 GB (see `image_object_across_a_large_canvas` in `large_files.rs`). The exact
+view is defined as full resolution reduced, so this is the cost of that definition.
+**Fix, needing a decision:** let the exact view draw image objects at the level shown, from
+the image's own pyramid with its own sampling, as previews already do (which differs
+slightly from reducing full resolution); the plan would then skip those tiles and list
+image objects by rectangle rather than every tile beneath. Built on the branch
+`image-objects-at-zoom`.
 
 ## The scratch drive's free space is only known on Windows
 
