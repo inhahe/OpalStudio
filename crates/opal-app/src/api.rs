@@ -494,7 +494,9 @@ impl AppState {
         let notice = self.notice.clone();
         // The image and layers the user had, to put back if the command is refused (it
         // makes those it names the active ones).
-        let view = (self.active_doc, self.docs.iter().map(|d| (d.id, d.selection_state())).collect::<Vec<_>>());
+        let view = method
+            .cmd
+            .map(|_| (self.active_doc, self.docs.iter().map(|d| (d.id, d.selection_state())).collect::<Vec<_>>()));
         let reply = match method.cmd {
             Some(cmd) => self.carry_out(cmd, method.params, &args, ctx),
             None if method.name == "image" => self.image_by_args(&args, ctx),
@@ -522,8 +524,9 @@ impl AppState {
             }
             other => other,
         };
-        if method.cmd.is_some() && matches!(reply, Reply::Now(Err(_))) {
-            let (active, selections) = view;
+        if let Some((active, selections)) = view
+            && matches!(reply, Reply::Now(Err(_)))
+        {
             for (id, s) in selections {
                 if let Some(d) = self.doc_mut(id) {
                     d.set_selection_state(s);

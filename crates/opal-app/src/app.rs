@@ -977,14 +977,14 @@ fn welcome(ui: &mut egui::Ui, st: &mut AppState) {
 /// serves scripts already (which they connect to, until it goes).
 fn start_server(st: &mut AppState, ctx: &egui::Context) -> (Option<crate::server::Server>, bool) {
     let Some(file) = crate::server::connection_file() else { return (None, false) };
-    if crate::server::is_running(&file) {
-        st.notify("Another Opal Studio is open: scripts and assistants connect to that one.");
-        return (None, true);
-    }
     match crate::server::Server::start(file.clone(), ctx.clone()) {
         Ok(server) => {
             st.scripts_file = Some(file);
             (Some(server), false)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            st.notify("Another Opal Studio is open: scripts and assistants connect to that one.");
+            (None, true)
         }
         Err(e) => {
             st.message(
@@ -1015,8 +1015,10 @@ impl OpalApp {
         let Some(file) = crate::server::connection_file() else { return };
         let ask = now - asked >= ASK_EVERY;
         self.server_looked = (now, if ask { now } else { asked });
-        let gone = !file.exists() || (ask && !crate::server::is_running(&file));
-        if gone && let Ok(server) = crate::server::Server::start(file.clone(), ctx.clone()) {
+        // Starting asks the other editor first (without waiting), and fails while it is there.
+        if (ask || !file.exists())
+            && let Ok(server) = crate::server::Server::start(file.clone(), ctx.clone())
+        {
             self.st.scripts_file = Some(file);
             self.server = Some(server);
             self.server_waits = false;

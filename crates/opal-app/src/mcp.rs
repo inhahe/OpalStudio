@@ -78,8 +78,13 @@ impl Caller for Pipe {
 }
 
 /// The tools: each method of the API but `methods` (which the tool list is), with a JSON
-/// Schema of its parameters.
-pub fn tools() -> Value {
+/// Schema of its parameters. Made once.
+pub fn tools() -> &'static Value {
+    static TOOLS: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    TOOLS.get_or_init(made_tools)
+}
+
+fn made_tools() -> Value {
     let tools: Vec<Value> = describe()
         .as_array()
         .expect("a list")

@@ -1059,7 +1059,8 @@ server. Both rest on one language-neutral API.
   `api.json` is, and every 15 asks the first, which may have ended without removing it),
   and one started with files hands them to the first, over a `hello` with `files` (which
   may only open them, and is let in even while scripts are shut out), lets it come to the
-  front, and quits. Commands that need the transform box (Paste, Transform) and those of
+  front, and quits; an editor that is quitting refuses every hello, so the new one opens
+  them itself. Commands that need the transform box (Paste, Transform) and those of
   the view and panels are not callable yet, or at all.
 - **Python package** `opal-studio` (module `opal`): connects to the running editor or starts
   a headless one (`opal-studio --headless script.py` for batch work). *Built:* headless mode

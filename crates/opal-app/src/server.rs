@@ -16,7 +16,7 @@ use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -81,6 +81,8 @@ struct Shared {
     strangers: AtomicUsize,
     /// The number the next script run gets.
     runs: AtomicU64,
+    /// Whether the user has asked to quit: hellos are refused.
+    quitting: AtomicBool,
     ctx: egui::Context,
     /// Where the pipe's name and the token are written, and the pipe's name.
     file: PathBuf,
@@ -107,36 +109,64 @@ fn new_token() -> std::io::Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// What a connection file says: the pipe the editor listens on, the token a hello must
+/// give, and the editor's process.
+struct ConnectionInfo {
+    pipe: String,
+    token: String,
+    pid: Option<u32>,
+}
+
+/// Reads connection file `file`; why not, if it cannot be.
+fn read_connection_file(file: &Path) -> Result<ConnectionInfo, String> {
+    let text = std::fs::read_to_string(file).map_err(|_| "Opal Studio is not running: start it first.".to_owned())?;
+    let info: Value = serde_json::from_str(&text).map_err(|e| format!("{} is not readable: {e}", file.display()))?;
+    match (info["pipe"].as_str(), info["token"].as_str()) {
+        (Some(pipe), Some(token)) => Ok(ConnectionInfo {
+            pipe: pipe.to_owned(),
+            token: token.to_owned(),
+            pid: info["pid"].as_u64().and_then(|p| u32::try_from(p).ok()),
+        }),
+        _ => Err(format!("{} does not name a pipe and a token.", file.display())),
+    }
+}
+
 /// What came of saying hello to the editor a connection file tells of.
 pub enum Hello {
     /// It answered: the connection, past hello.
     Answered(BufReader<Stream>),
     /// No editor is there to answer: why not.
     Nobody(String),
-    /// An editor answered, but refused: its reason.
+    /// An editor is there, but refused (or was too busy to answer): its reason.
     Refused(String),
 }
+
+/// How many times a busy pipe is tried, 25 ms apart, before giving up.
+const CONNECT_TRIES: usize = 20;
 
 /// Connects to the editor connection file `file` tells of, and says hello with its token, as
 /// a connection that only opens files if `files_only`.
 pub fn say_hello(file: &Path, files_only: bool) -> Hello {
-    let Ok(text) = std::fs::read_to_string(file) else {
-        return Hello::Nobody("Opal Studio is not running: start it first.".to_owned());
-    };
-    let info: Value = match serde_json::from_str(&text) {
-        Ok(info) => info,
-        Err(e) => return Hello::Nobody(format!("{} is not readable: {e}", file.display())),
-    };
-    let (Some(pipe), Some(token)) = (info["pipe"].as_str(), info["token"].as_str()) else {
-        return Hello::Nobody(format!("{} does not name a pipe and a token.", file.display()));
-    };
+    match read_connection_file(file) {
+        Ok(info) => hello_to(&info, files_only, CONNECT_TRIES),
+        Err(why) => Hello::Nobody(why),
+    }
+}
+
+/// [`say_hello`] to the editor `info` tells of, trying its pipe `tries` times while it is
+/// busy.
+fn hello_to(info: &ConnectionInfo, files_only: bool, tries: usize) -> Hello {
     let gone = || Hello::Nobody("Opal Studio is not running (its pipe is gone): start it again.".to_owned());
-    let Some(name) = pipe.rsplit(['\\', '/']).next().and_then(|n| n.to_ns_name::<GenericNamespaced>().ok()) else {
+    let Some(name) = info.pipe.rsplit(['\\', '/']).next().and_then(|n| n.to_ns_name::<GenericNamespaced>().ok()) else {
         return gone();
     };
-    let Some(stream) = connect(name) else { return gone() };
+    let stream = match connect(name, tries) {
+        Ok(stream) => stream,
+        Err(Unconnected::Absent) => return gone(),
+        Err(Unconnected::Busy) => return Hello::Refused("Opal Studio is busy: try again in a moment.".to_owned()),
+    };
     let mut conn = BufReader::new(stream);
-    let mut params = json!({ "token": token });
+    let mut params = json!({ "token": info.token });
     if files_only {
         params["files"] = json!(true);
     }
@@ -161,31 +191,43 @@ pub fn say_hello(file: &Path, files_only: bool) -> Hello {
     }
 }
 
-/// Connects to pipe `name`, trying again for a moment while it is busy (accepting another
-/// client, it has no instance free); `None` if no editor is there.
-pub fn connect(name: interprocess::local_socket::Name<'_>) -> Option<Stream> {
-    for _ in 0..20 {
-        match Stream::connect(name.borrow()) {
-            Ok(s) => return Some(s),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(25)),
-        }
-    }
-    None
+/// Why a pipe could not be connected to.
+enum Unconnected {
+    /// No one listens on it.
+    Absent,
+    /// It was busy each time it was tried (accepting another client, it had no instance
+    /// free): someone listens on it.
+    Busy,
 }
 
-/// Whether an editor is running as `file` tells (one answers, even if it refuses).
+/// Connects to pipe `name`, trying it `tries` times, 25 ms apart, while it is busy.
+fn connect(name: interprocess::local_socket::Name<'_>, tries: usize) -> Result<Stream, Unconnected> {
+    for tried in 1..=tries {
+        match Stream::connect(name.borrow()) {
+            Ok(s) => return Ok(s),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Unconnected::Absent),
+            Err(_) if tried < tries => std::thread::sleep(Duration::from_millis(25)),
+            Err(_) => {}
+        }
+    }
+    Err(Unconnected::Busy)
+}
+
+/// Whether an editor is running as `file` tells: one answers (even if it refuses), or its
+/// pipe is busy. Asked without waiting, so that the interface thread can ask.
 pub fn is_running(file: &Path) -> bool {
-    !matches!(say_hello(file, true), Hello::Nobody(_))
+    read_connection_file(file).is_ok_and(|info| !matches!(hello_to(&info, true, 1), Hello::Nobody(_)))
 }
 
 /// Hands `files` to the editor already running (as `file` tells), to be opened there, and
 /// lets it come to the front; whether one was. Each goes as a notification, carried out but
 /// not answered (what opening it has to say is told there), so that this process need not
-/// wait for a dialog the user has open there.
+/// wait for a dialog the user has open there. An editor that is quitting refuses them, and
+/// this process opens them itself.
 pub fn hand_to_running(file: &Path, files: &[PathBuf]) -> bool {
-    let Hello::Answered(mut conn) = say_hello(file, true) else { return false };
-    allow_to_front(file);
+    let Ok(info) = read_connection_file(file) else { return false };
+    let Hello::Answered(mut conn) = hello_to(&info, true, CONNECT_TRIES) else { return false };
+    allow_to_front(info.pid);
     for f in files {
         let path = std::path::absolute(f).unwrap_or_else(|_| f.clone());
         let open = json!({ "jsonrpc": "2.0", "method": "open", "params": { "path": path.display().to_string() } });
@@ -196,16 +238,11 @@ pub fn hand_to_running(file: &Path, files: &[PathBuf]) -> bool {
     true
 }
 
-/// Lets the editor running as `file` tells bring its window to the front: Windows lets only
-/// the program the user is working in hand that on.
-fn allow_to_front(file: &Path) {
+/// Lets the editor's process `pid` bring its window to the front: Windows lets only the
+/// program the user is working in hand that on.
+fn allow_to_front(pid: Option<u32>) {
     #[cfg(windows)]
-    if let Some(pid) = std::fs::read_to_string(file)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|info| info["pid"].as_u64())
-        .and_then(|pid| u32::try_from(pid).ok())
-    {
+    if let Some(pid) = pid {
         // SAFETY: AllowSetForegroundWindow takes a process id and has no other
         // preconditions; failing, it only leaves the window where it is.
         unsafe {
@@ -213,16 +250,20 @@ fn allow_to_front(file: &Path) {
         }
     }
     #[cfg(not(windows))]
-    let _ = file;
+    let _ = pid;
 }
 
 impl Server {
-    /// Starts listening on a pipe of this process's own, then writes its name and a new
-    /// token to `file` (the user's [`connection_file`], or another, for tests). Fails if an
-    /// editor already running answers on the pipe `file` names: scripts reach the first.
+    /// Starts listening on a pipe of this process's own, and writes its name and a new token
+    /// to `file` (the user's [`connection_file`], or another, for tests). Fails, with
+    /// [`std::io::ErrorKind::AddrInUse`], if an editor already running answers on the pipe
+    /// `file` names: scripts reach the first.
     pub fn start(file: PathBuf, ctx: egui::Context) -> std::io::Result<Server> {
         if is_running(&file) {
-            return Err(std::io::Error::other("another Opal Studio is running, which scripts connect to"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                "another Opal Studio is running, which scripts connect to",
+            ));
         }
         // This process's own (a test makes several servers).
         static SERVERS: AtomicU64 = AtomicU64::new(0);
@@ -231,22 +272,30 @@ impl Server {
         let listener = ListenerOptions::new().name(name.as_str().to_ns_name::<GenericNamespaced>()?).create_sync()?;
         let pipe = if cfg!(windows) { format!(r"\\.\pipe\{name}") } else { name.clone() };
         let (send, requests) = channel();
+        let token = new_token()?;
         let shared = Arc::new(Shared {
             requests: send,
-            clients: Mutex::new(Clients { token: new_token()?, shut_out: false, generation: 0, connected: 0 }),
+            clients: Mutex::new(Clients { token: token.clone(), shut_out: false, generation: 0, connected: 0 }),
             strangers: AtomicUsize::new(0),
             runs: AtomicU64::new(0),
+            quitting: AtomicBool::new(false),
             ctx,
             file,
             pipe,
         });
+        // Told before the listener's thread starts, so that a failure leaves nothing behind
+        // (the pipe takes connections already, which wait for it).
+        if let Some(dir) = shared.file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        write_connection_file(&shared, &token)?;
         let listening = shared.clone();
-        std::thread::Builder::new().name("api listener".into()).spawn(move || {
+        let listen = move || {
             for conn in listener.incoming() {
                 // A failure to accept is waited out, not spun on (one that lasts would
                 // otherwise take a core for the life of the editor).
                 let Ok(conn) = conn else {
-                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    std::thread::sleep(Duration::from_millis(250));
                     continue;
                 };
                 if listening.strangers.load(Ordering::Relaxed) >= MAX_STRANGERS {
@@ -261,12 +310,11 @@ impl Server {
                     listening.strangers.fetch_sub(1, Ordering::Relaxed);
                 }
             }
-        })?;
-        // Told once there is someone listening.
-        if let Some(dir) = shared.file.parent() {
-            std::fs::create_dir_all(dir)?;
+        };
+        if let Err(e) = std::thread::Builder::new().name("api listener".into()).spawn(listen) {
+            let _ = std::fs::remove_file(&shared.file);
+            return Err(e);
         }
-        write_connection_file(&shared)?;
         Ok(Server { shared, requests, later: HashMap::new() })
     }
 
@@ -280,17 +328,19 @@ impl Server {
     /// token, and shuts scripts out until [`let_in`](Self::let_in): a client that reads the
     /// connection file again (as the MCP shim does) cannot come straight back.
     pub fn disconnect_all(&self) {
-        let token = new_token();
         {
             let mut c = self.shared.clients.lock().expect("not poisoned");
             c.generation += 1;
             c.connected = 0;
             c.shut_out = true;
-            if let Ok(token) = token {
-                c.token = token;
-            }
         }
-        let _ = write_connection_file(&self.shared);
+        // The new token is kept only once the file holds it: one it did not get would leave
+        // every client, even let in again, with a token that is not the editor's.
+        if let Ok(token) = new_token()
+            && write_connection_file(&self.shared, &token).is_ok()
+        {
+            self.shared.clients.lock().expect("not poisoned").token = token;
+        }
         self.shared.ctx.request_repaint();
     }
 
@@ -315,6 +365,8 @@ impl Server {
     /// makes many calls a frame, not one.
     pub fn serve(&mut self, st: &mut AppState, ctx: &egui::Context, busy: bool) {
         let quitting = st.exit_requested || st.exit_after_writes;
+        // Told to those saying hello, which are refused meanwhile.
+        self.shared.quitting.store(quitting, Ordering::Relaxed);
         if !busy || quitting {
             let generation = self.shared.clients.lock().expect("not poisoned").generation;
             let until = Instant::now() + SERVE_FOR;
@@ -350,11 +402,16 @@ impl Server {
         }
     }
 
-    /// The next request, if one comes before `until` and within [`NEXT_WITHIN`]. Looked for
-    /// again and again rather than slept for: a wait shorter than the system timer's tick
-    /// (15.6 ms on Windows, unless some program asks for finer) lasts the whole tick.
+    /// The next request, if it is not yet `until` and one comes within [`NEXT_WITHIN`] (but
+    /// no later than `until`). Looked for again and again rather than slept for: a wait
+    /// shorter than the system timer's tick (15.6 ms on Windows, unless some program asks for
+    /// finer) lasts the whole tick.
     fn next_before(&self, until: Instant) -> Option<Request> {
-        let until = until.min(Instant::now() + NEXT_WITHIN);
+        let now = Instant::now();
+        if now >= until {
+            return None;
+        }
+        let until = until.min(now + NEXT_WITHIN);
         loop {
             if let Ok(r) = self.requests.try_recv() {
                 return Some(r);
@@ -370,21 +427,16 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         // Told no more, unless the file has become another's.
-        let mine = std::fs::read_to_string(&self.shared.file)
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-            .is_some_and(|info| {
-                info["token"].as_str() == Some(self.shared.clients.lock().expect("not poisoned").token.as_str())
-            });
+        let token = self.shared.clients.lock().expect("not poisoned").token.clone();
+        let mine = read_connection_file(&self.shared.file).is_ok_and(|info| info.token == token);
         if mine {
             let _ = std::fs::remove_file(&self.shared.file);
         }
     }
 }
 
-/// Writes the pipe's name and the token to the connection file.
-fn write_connection_file(shared: &Shared) -> std::io::Result<()> {
-    let token = shared.clients.lock().expect("not poisoned").token.clone();
+/// Writes the pipe's name and `token` to the connection file.
+fn write_connection_file(shared: &Shared, token: &str) -> std::io::Result<()> {
     let info = json!({ "pipe": shared.pipe, "token": token, "pid": std::process::id(), "protocol": PROTOCOL });
     write_private(&shared.file, info.to_string().as_bytes())
 }
@@ -488,6 +540,9 @@ fn answer_hello(
     script: &mut Option<(u64, String)>,
 ) -> Result<Value, (i64, String)> {
     let files_only = params.get("files").and_then(Value::as_bool) == Some(true);
+    if shared.quitting.load(Ordering::Relaxed) {
+        return Err((NOT_ALLOWED, "The editor is closing.".to_owned()));
+    }
     let mut c = shared.clients.lock().expect("not poisoned");
     if params.get("token").and_then(Value::as_str) != Some(c.token.as_str()) {
         return Err((NOT_ALLOWED, "The token is not this editor's.".to_owned()));
@@ -715,6 +770,68 @@ mod tests {
         assert!(flood.send(&"x".repeat(STRANGER_LINE * 4)).is_none(), "an endless line was read");
         drop(server);
         assert!(!file.exists());
+    }
+
+    #[test]
+    fn a_frame_ends_however_fast_the_calls_come() {
+        let file = std::env::temp_dir().join(format!("opal-api-flood-{}.json", std::process::id()));
+        let mut server = Server::start(file.clone(), egui::Context::default()).unwrap();
+        let (pipe, token) = info(&file);
+        let mut st = AppState::new();
+        let ctx = egui::Context::default();
+        // Scripts calling as fast as they can, several at once, with calls that take longer to
+        // carry out than to make: whenever one is carried out, another is already waiting.
+        let calls: Vec<_> = (0..8)
+            .map(|_| {
+                let mut client = Client::connect(&pipe);
+                client.send(&hello_line(&token)).unwrap();
+                std::thread::spawn(move || {
+                    for i in 0..300 {
+                        client.send(&format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"methods"}}"#)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        let (mut frames, mut longest) = (0, Duration::ZERO);
+        while !calls.iter().all(|c| c.is_finished()) {
+            let t = Instant::now();
+            server.serve(&mut st, &ctx, false);
+            longest = longest.max(t.elapsed());
+            frames += 1;
+        }
+        calls.into_iter().for_each(|c| c.join().unwrap());
+        // Each frame stops after its few milliseconds, to be drawn.
+        assert!(longest < Duration::from_millis(100), "a frame took {longest:?} ({frames} frames)");
+    }
+
+    #[test]
+    fn an_editor_quitting_refuses_hellos_so_files_open_elsewhere() {
+        let file = std::env::temp_dir().join(format!("opal-api-quit-{}.json", std::process::id()));
+        let mut server = Server::start(file.clone(), egui::Context::default()).unwrap();
+        let mut st = AppState::new();
+        st.exit_requested = true;
+        server.serve(&mut st, &egui::Context::default(), false);
+        assert!(is_running(&file), "it is still there");
+        let photo = std::env::temp_dir().join("opal-api-photo.png");
+        assert!(!hand_to_running(&file, &[photo]), "handed to an editor that will not open it");
+        st.exit_requested = false;
+        server.serve(&mut st, &egui::Context::default(), false);
+        assert!(matches!(say_hello(&file, false), Hello::Answered(_)), "still refused once it was not quitting");
+    }
+
+    #[test]
+    fn a_disconnect_keeps_the_token_the_file_could_not_be_given() {
+        let file = std::env::temp_dir().join(format!("opal-api-locked-{}.json", std::process::id()));
+        let server = Server::start(file.clone(), egui::Context::default()).unwrap();
+        let (pipe, old) = info(&file);
+        // The file cannot be written (a folder is in its place).
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        server.disconnect_all();
+        server.let_in();
+        let back = Client::connect(&pipe).send(&hello_line(&old)).unwrap();
+        std::fs::remove_dir(&file).unwrap();
+        assert!(back.get("result").is_some(), "the token became one no client can have: {back}");
     }
 
     #[test]
@@ -949,6 +1066,15 @@ with opal.connect() as editor:
         refused = str(e)
     # A relative path, against the current folder.
     os.chdir(pathlib.Path(sys.argv[1]).parent)
+    # A connection file without a token: said so, as the package's own error.
+    bad = pathlib.Path(sys.argv[1]).with_suffix(".json")
+    bad.write_text("{}", encoding="utf-8")
+    try:
+        opal.connect(bad)
+        raise SystemExit("connected without a token")
+    except opal.OpalError as e:
+        assert "pipe and a token" in str(e), e
+    bad.unlink()
     exported = editor.export(path=pathlib.Path(sys.argv[1]).name)
     editor.close(document=doc, discard=True)
     left = editor.documents()

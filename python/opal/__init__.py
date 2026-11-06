@@ -160,11 +160,12 @@ class Editor:
             hello = self.call("hello", token=token, **({"script": script} if script else {}))
             if hello.get("protocol") != PROTOCOL:
                 raise OpalError(f"The editor speaks protocol {hello.get('protocol')}, this package {PROTOCOL}.")
-        except OpalError:
+            self._methods = {m["name"]: m for m in self.call("methods")}
+        except BaseException:
+            # Not connected after all: nothing is left open.
             self._pipe.close()
             raise
         self.version = hello.get("editor")
-        self._methods = {m["name"]: m for m in self.call("methods")}
 
     def call(self, method: str, **params: Any) -> Any:
         """Calls ``method`` with ``params``; returns what it gives back."""
@@ -219,4 +220,8 @@ def connect(file: str | os.PathLike | None = None, *, script: str | None = _RUNN
         info = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise OpalError(f"Opal Studio is not running (there is no {path}).") from None
+    except ValueError as e:
+        raise OpalError(f"{path} is not readable: {e}") from None
+    if not isinstance(info, dict) or not isinstance(info.get("pipe"), str) or not isinstance(info.get("token"), str):
+        raise OpalError(f"{path} does not name a pipe and a token.")
     return Editor(info["pipe"], info["token"], _running_script() if script is _RUNNING else script)
