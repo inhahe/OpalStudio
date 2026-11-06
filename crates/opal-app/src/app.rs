@@ -65,6 +65,8 @@ impl OpalApp {
             config::load(&mut st);
         }
         st.apply_prefs(&cc.egui_ctx);
+        // Before any file is opened, so that its tiles may go to disk.
+        st.apply_tile_budget();
         let mut gpu_memory = None;
         if let Some(rs) = cc.wgpu_render_state.as_ref() {
             CanvasRenderer::install(rs);
