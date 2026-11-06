@@ -4,5 +4,7 @@
 # ML model weights are downloaded at run time, never committed
 /models/
 *.onnx
-/opal-studio.exe
-/opal-studio.old.exe
+/opal-studio*.exe
+
+# Images made for trying the application out
+/test-images/
