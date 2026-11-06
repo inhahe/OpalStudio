@@ -67,6 +67,12 @@ impl std::fmt::Display for Short {
 }
 
 impl Free {
+    /// As measured before `bytes`, held now, were taken: for work whose need counts them
+    /// (an image file decoded from bytes already read).
+    pub fn counting(self, bytes: u64) -> Free {
+        Free { memory: self.memory.saturating_add(bytes), ..self }
+    }
+
     /// `bytes` of memory, and nothing going to disk.
     pub const fn memory(bytes: u64) -> Free {
         Free { memory: bytes, reclaimable: 0, disk: 0, resident: 0 }
@@ -130,5 +136,7 @@ mod tests {
         assert_eq!(free.cap(0), 1300);
         assert_eq!(free.cap(200), 1100);
         assert_eq!(free.cap(5000), 0, "no more than nothing");
+        // Measured with bytes held that the work's need counts: as if before they were taken.
+        assert_eq!(free.counting(50).memory, 350);
     }
 }

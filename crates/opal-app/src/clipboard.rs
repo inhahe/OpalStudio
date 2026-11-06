@@ -502,7 +502,9 @@ fn read_windows_formats() -> Result<Option<Pasted>, String> {
         (png, files, jpeg)
     };
     let decoded = |bytes: Vec<u8>, as_file: &str| {
-        imported(image_files::import_bytes(&bytes, std::path::Path::new(as_file), crate::memory::free()), false)
+        // Measured with the bytes held, which the need counts.
+        let free = crate::memory::free().map(|f| f.counting(bytes.len() as u64));
+        imported(image_files::import_bytes(&bytes, std::path::Path::new(as_file), free), false)
     };
     if let Some(b) = png
         && let Some(p) = decoded(b, "clipboard.png")?

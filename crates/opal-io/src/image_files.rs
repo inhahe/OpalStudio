@@ -37,7 +37,9 @@ pub fn import(path: &Path, free: Option<Free>) -> Result<Imported, IoError> {
 }
 
 /// Like [`import`], from bytes already in memory; `path` is used only in messages. Refused
-/// before it is decoded if it would need more memory than `free` (if known) allows.
+/// before it is decoded if it would need more memory than `free` (if known) allows, which,
+/// as the need counts the bytes, should be measured before they were read (see
+/// [`Free::counting`]).
 pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<Free>) -> Result<Imported, IoError> {
     let decode_err = |e: image::ImageError| IoError::Decode { path: path.to_owned(), message: e.to_string() };
     let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(|e| IoError::io(path, e))?;
