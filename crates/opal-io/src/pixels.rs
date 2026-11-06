@@ -21,8 +21,19 @@ pub fn from_srgb8(p: [u8; 4]) -> Pixel {
 
 /// A 16-bit sRGB pixel with straight alpha.
 pub fn from_srgb16([r, g, b, a]: [u16; 4]) -> Pixel {
-    let d = |v: u16| srgb_decode(f64::from(v) / 65535.0) as f32;
-    premultiply(d(r), d(g), d(b), f32::from(a) / 65535.0)
+    let d = srgb16_table();
+    premultiply(d[r as usize], d[g as usize], d[b as usize], f32::from(a) / 65535.0)
+}
+
+/// Each 16-bit sRGB value decoded to linear light: an image's every sample is one, and the
+/// decoding (a power) costs far more than the lookup.
+fn srgb16_table() -> &'static [f32] {
+    static TABLE: std::sync::OnceLock<Box<[f32]>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| (0..=u16::MAX).map(srgb16_decoded).collect())
+}
+
+fn srgb16_decoded(v: u16) -> f32 {
+    srgb_decode(f64::from(v) / 65535.0) as f32
 }
 
 /// The straight-alpha, sRGB-encoded color of a working pixel, each channel in 0–1. Colors
@@ -65,6 +76,17 @@ pub fn pixels_to_rgba16(px: &[Pixel]) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_16_bit_value_decodes_as_its_power_gives() {
+        let t = srgb16_table();
+        assert_eq!(t.len(), 65536);
+        assert!((0..=u16::MAX).all(|v| t[v as usize].to_bits() == srgb16_decoded(v).to_bits()));
+        assert_eq!(
+            from_srgb16([65535, 0, 32768, 65535]),
+            [f16::ONE, f16::ZERO, f16::from_f32(srgb16_decoded(32768)), f16::ONE]
+        );
+    }
 
     #[test]
     fn every_8_bit_value_round_trips() {

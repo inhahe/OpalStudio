@@ -124,22 +124,45 @@ impl Runs {
     }
 }
 
-/// A pixel as a tile stores it, for building images of either kind (see
+/// A pixel as a tile of either kind stores it, for building images of it (see
 /// `RasterImage::tiled`).
-trait Alpha {
+trait TilePixel: Copy + Send + Sync {
+    /// The clear pixel.
+    const CLEAR: Self;
+    type Bits: std::hash::Hash + Eq;
+    /// Its bits as stored: alike exactly when the pixels are, down to the sign of a zero.
+    fn bits(&self) -> Self::Bits;
     /// Whether it is not fully transparent.
     fn shows(&self) -> bool;
+    /// A tile of `TILE_PIXELS` of them, row by row.
+    fn tile(px: Vec<Self>) -> Tile;
 }
 
-impl Alpha for Pixel {
+impl TilePixel for Pixel {
+    const CLEAR: Pixel = [f16::ZERO; 4];
+    type Bits = [u16; 4];
+    fn bits(&self) -> [u16; 4] {
+        self.map(f16::to_bits)
+    }
     fn shows(&self) -> bool {
-        self[3] != f16::ZERO
+        crate::tile::shows(self)
+    }
+    fn tile(px: Vec<Pixel>) -> Tile {
+        Tile::from_pixels(px)
     }
 }
 
-impl Alpha for [u8; 4] {
+impl TilePixel for [u8; 4] {
+    const CLEAR: [u8; 4] = [0; 4];
+    type Bits = [u8; 4];
+    fn bits(&self) -> [u8; 4] {
+        *self
+    }
     fn shows(&self) -> bool {
-        self[3] != 0
+        crate::tile::shows_srgb8(self)
+    }
+    fn tile(px: Vec<[u8; 4]>) -> Tile {
+        Tile::from_srgb8(px)
     }
 }
 
@@ -372,8 +395,7 @@ impl RasterImage {
     /// Tiles all clear are left out, and those of one pixel value throughout (a flat
     /// background) are one tile for each value.
     pub fn from_rows(width: u32, height: u32, row: impl Fn(usize, usize, &mut [Pixel]) + Sync) -> RasterImage {
-        let clear = [f16::ZERO; 4];
-        RasterImage::tiled(width, height, clear, row, |p| p.map(f16::to_bits), Tile::from_pixels)
+        RasterImage::tiled(width, height, row)
     }
 
     /// Builds an image from `width × height` 8-bit sRGB pixels with straight alpha, row by
@@ -390,23 +412,12 @@ impl RasterImage {
     /// [`from_rows`](Self::from_rows) for 8-bit sRGB pixels with straight alpha, kept at 8
     /// bits.
     pub fn from_srgb8_rows(width: u32, height: u32, row: impl Fn(usize, usize, &mut [[u8; 4]]) + Sync) -> RasterImage {
-        RasterImage::tiled(width, height, [0; 4], row, |p| *p, Tile::from_srgb8)
+        RasterImage::tiled(width, height, row)
     }
 
-    /// The image `row` gives (see [`from_rows`](Self::from_rows)), each tile's pixels (`clear`
-    /// past the image's edges) made a tile by `make`, those alike throughout found by `key`.
-    fn tiled<P, K>(
-        width: u32,
-        height: u32,
-        clear: P,
-        row: impl Fn(usize, usize, &mut [P]) + Sync,
-        key: impl Fn(&P) -> K,
-        make: impl Fn(Vec<P>) -> Tile + Sync,
-    ) -> RasterImage
-    where
-        P: Copy + PartialEq + Send + Sync + Alpha,
-        K: std::hash::Hash + Eq,
-    {
+    /// The image `row` gives (see [`from_rows`](Self::from_rows)), of tiles of pixels `P`
+    /// (clear past the image's edges).
+    fn tiled<P: TilePixel>(width: u32, height: u32, row: impl Fn(usize, usize, &mut [P]) + Sync) -> RasterImage {
         let (w, h) = (width as usize, height as usize);
         let n = TILE_SIZE as usize;
         let coords: Vec<TileCoord> = TileCoord::covering(&IRect::from_size(w as i64, h as i64), 0).collect();
@@ -421,22 +432,25 @@ impl RasterImage {
             .filter_map(|c| {
                 let r = c.rect(0);
                 let (x0, x1) = (r.x0 as usize, (r.x1 as usize).min(w));
-                let mut px = vec![clear; TILE_PIXELS];
+                let mut px = vec![P::CLEAR; TILE_PIXELS];
                 for y in r.y0 as usize..(r.y1 as usize).min(h) {
                     row(y, x0, &mut px[(y - r.y0 as usize) * n..][..x1 - x0]);
                 }
                 if !px.iter().any(|p| p.shows()) {
                     return None;
                 }
-                let flat = px.iter().all(|p| *p == px[0]).then_some(px[0]);
-                Some((c, flat.map_or_else(|| Made::Own(make(px)), Made::Flat)))
+                let first = px[0].bits();
+                let flat = px.iter().all(|p| p.bits() == first).then_some(px[0]);
+                Some((c, flat.map_or_else(|| Made::Own(P::tile(px)), Made::Flat)))
             })
             .collect();
-        let mut flat: HashMap<K, Arc<Tile>> = HashMap::new();
+        let mut flat: HashMap<P::Bits, Arc<Tile>> = HashMap::new();
         let mut img = RasterImage::new();
         for (c, made) in made {
             let tile = match made {
-                Made::Flat(p) => flat.entry(key(&p)).or_insert_with(|| Arc::new(make(vec![p; TILE_PIXELS]))).clone(),
+                Made::Flat(p) => {
+                    flat.entry(p.bits()).or_insert_with(|| Arc::new(P::tile(vec![p; TILE_PIXELS]))).clone()
+                }
                 Made::Own(t) => Arc::new(t),
             };
             img.tiles.insert(c, tile);
@@ -787,6 +801,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn an_image_built_from_pixels_shares_flat_tiles_leaves_clear_ones_out_and_keeps_every_bit() {
+        // 3 × 2 tiles: the first column clear, the last flat, the middle each pixel its own,
+        // with zeros of both signs; and one flat tile alike but for a zero's sign.
+        let (w, h) = (256 * 3, 256 * 2);
+        let flat = pixel_from_f32([0.5, 0.0, 0.25, 1.0]);
+        let mut minus = flat;
+        minus[1] = f16::NEG_ZERO;
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                match x / 256 {
+                    0 => [f16::ZERO; 4],
+                    1 => [
+                        f16::from_f32(x as f32 / 1000.0),
+                        if y % 2 == 0 { f16::NEG_ZERO } else { f16::ZERO },
+                        f16::ONE,
+                        f16::ONE,
+                    ],
+                    _ if y >= 256 && x == 600 && y == 300 => minus,
+                    _ => flat,
+                }
+            })
+            .collect();
+        let img = RasterImage::from_pixels(w as u32, h as u32, &px);
+        let mut want = RasterImage::new();
+        let all = IRect::from_size(w as i64, h as i64);
+        want.write_rect(&all, &px);
+        let bits = |p: &[Pixel]| p.iter().map(|p| p.map(f16::to_bits)).collect::<Vec<_>>();
+        assert_eq!(bits(&img.read_rect(&all)), bits(&px), "every bit, both zeros kept");
+        let coords = |i: &RasterImage| i.tiles().map(|(c, _)| c).collect::<HashSet<TileCoord>>();
+        assert_eq!(coords(&img), coords(&want), "the clear tiles left out, and only those");
+        let (top, bottom) = (img.tile(TileCoord::new(2, 0)).unwrap(), img.tile(TileCoord::new(2, 1)).unwrap());
+        assert!(!Arc::ptr_eq(top, bottom), "a tile alike but for a zero's sign was taken as flat");
+        let (w2, h2) = (256 * 2, 256);
+        let two = RasterImage::from_pixels(w2 as u32, h2 as u32, &vec![flat; w2 * h2]);
+        let (a, b) = (two.tile(TileCoord::new(0, 0)).unwrap(), two.tile(TileCoord::new(1, 0)).unwrap());
+        assert!(Arc::ptr_eq(a, b), "flat tiles of one value are one tile");
     }
 
     #[test]

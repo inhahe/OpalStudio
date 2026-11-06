@@ -160,8 +160,8 @@ impl Data {
     /// Whether pixel `i` (row by row) is not fully transparent.
     fn shows(&self, i: usize) -> bool {
         match self {
-            Data::Wide(px) => px[i][3] != f16::ZERO,
-            Data::Srgb8(px) => px[i][3] != 0,
+            Data::Wide(px) => shows(&px[i]),
+            Data::Srgb8(px) => shows_srgb8(&px[i]),
         }
     }
 
@@ -312,7 +312,7 @@ impl Tile {
 
     /// A tile filled with one pixel value.
     pub fn filled(p: Pixel) -> Tile {
-        let content = (p[3] != f16::ZERO).then_some([0, 0, TILE_SIZE, TILE_SIZE]);
+        let content = shows(&p).then_some([0, 0, TILE_SIZE, TILE_SIZE]);
         Tile::holding(Data::Wide(vec![p; TILE_PIXELS].into_boxed_slice()), content)
     }
 
@@ -422,6 +422,16 @@ impl Tile {
         self.slot.found_content(found);
         found
     }
+}
+
+/// Whether a working pixel is not fully transparent.
+pub(crate) fn shows(p: &Pixel) -> bool {
+    p[3] != f16::ZERO
+}
+
+/// Whether an 8-bit pixel kept so is not fully transparent.
+pub(crate) fn shows_srgb8(p: &[u8; 4]) -> bool {
+    p[3] != 0
 }
 
 /// An 8-bit sRGB pixel with straight alpha, as PNG and JPEG store them, as a working pixel:
