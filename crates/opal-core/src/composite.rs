@@ -711,6 +711,31 @@ impl PartialEq for Token {
     }
 }
 
+impl Eq for Token {}
+
+/// Hashed as compared: the kind, its numbers, and the addresses it names.
+impl std::hash::Hash for Token {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        std::mem::discriminant(self).hash(h);
+        match self {
+            Token::Layer(o) | Token::Group(o) => o.hash(h),
+            Token::Tile(t) => t.as_ptr().hash(h),
+            Token::Shifted { phase, tiles } => {
+                phase.hash(h);
+                for t in tiles {
+                    t.as_ref().map(Weak::as_ptr).hash(h);
+                }
+            }
+            Token::Image { image, transform, sampling } => {
+                image.as_ptr().hash(h);
+                transform.hash(h);
+                sampling.hash(h);
+            }
+            Token::End => {}
+        }
+    }
+}
+
 /// The token for what object `o` shows in tile `c`, if it can show anything there.
 fn object_token(o: &Object, c: TileCoord) -> Option<Token> {
     match &o.kind {
@@ -839,14 +864,7 @@ fn uniform_key(layers: &[Arc<Layer>], c: TileCoord, level: u32) -> Key {
 /// copies of itself, as the pyramid makes it from such tiles. A block a level up then costs
 /// one halving, not all of them again from level 0.
 #[derive(Debug, Default)]
-struct Chains(Vec<Chain>);
-
-/// A key's tiles in [`Chains`], by level.
-#[derive(Debug)]
-struct Chain {
-    key: Vec<Token>,
-    tiles: Vec<Option<Arc<Tile>>>,
-}
+struct Chains(HashMap<Vec<Token>, Vec<Option<Arc<Tile>>>>);
 
 /// The tiles an exact update makes at each level up to the one shown, from the top down:
 /// where `layers` cover a block uniformly ([`uniform_block`]) its tile is made at its
@@ -947,22 +965,14 @@ fn uniform_tiles<'k>(
     todo: impl Iterator<Item = (TileCoord, &'k Key)>,
     chains: &mut Chains,
 ) -> HashMap<TileCoord, Option<Arc<Tile>>> {
-    let mut by_key: Vec<(&'k Vec<Token>, Vec<TileCoord>)> = Vec::new();
+    let mut by_key: HashMap<&'k [Token], Vec<TileCoord>> = HashMap::new();
     for (c, key) in todo {
         let Key::Uniform(tokens) = key else { unreachable!("a uniform key") };
-        match by_key.iter_mut().find(|(k, _)| *k == tokens) {
-            Some((_, at)) => at.push(c),
-            None => by_key.push((tokens, vec![c])),
-        }
+        by_key.entry(tokens.as_slice()).or_default().push(c);
     }
     // Each key's chain, taken out to be carried up to the level in parallel.
-    let work: Vec<_> = by_key
-        .into_iter()
-        .map(|(tokens, at)| {
-            let had = chains.0.iter().position(|c| c.key == *tokens);
-            (tokens, at, had.map(|i| chains.0.swap_remove(i).tiles).unwrap_or_default())
-        })
-        .collect();
+    let work: Vec<_> =
+        by_key.into_iter().map(|(tokens, at)| (tokens, at, chains.0.remove(tokens).unwrap_or_default())).collect();
     let done: Vec<_> = work
         .into_par_iter()
         .map(|(tokens, at, mut chain)| {
@@ -984,7 +994,7 @@ fn uniform_tiles<'k>(
     for (tokens, at, chain) in done {
         let tile = &chain[level as usize];
         made.extend(at.into_iter().map(|c| (c, tile.clone())));
-        chains.0.push(Chain { key: tokens.clone(), tiles: chain });
+        chains.0.insert(tokens.to_vec(), chain);
     }
     made
 }
@@ -2569,6 +2579,11 @@ mod tests {
         let exact: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 4, &all, Quality::Exact).into_iter().collect();
         assert_eq!(exact.len(), 16);
         let over_dot = TileCoord::new(5000 >> 12, 9000 >> 12);
+        let blocks: HashSet<*const Tile> =
+            exact.iter().filter(|(c, _)| **c != over_dot).map(|(_, t)| Arc::as_ptr(t)).collect();
+        // Each key's tile is made once an update: the three blocks beside the dot's were made
+        // by the update before, the twelve others by this one.
+        assert_eq!(blocks.len(), 2, "a tile made for each block alike, not one for them all");
         // Dragged on: a preview keys the level-0 tiles an exact update would make alone,
         // and keeps the blocks, which nothing changed.
         image_mut(&mut d, white).set_pixel(5001, 9000, red);
