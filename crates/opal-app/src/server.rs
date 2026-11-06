@@ -972,6 +972,11 @@ mod tests {
         let probe = mute.clone();
         std::thread::spawn(move || told.send(is_running(&probe)));
         assert_eq!(asked.recv_timeout(Duration::from_secs(1)), Ok(true), "waited on an editor that never answers");
+        // The probe may have come and gone before the listener began to wait (on a busy
+        // computer), which then waits for another: give it one, or the join would wait
+        // forever. (If it took the probe's, this finds no pipe to connect to, or one no one
+        // takes; either way it is let go.)
+        let _ = Stream::connect(name.as_str().to_ns_name::<GenericNamespaced>().unwrap());
         let _ = held.join();
         std::fs::remove_file(&mute).ok();
     }
