@@ -31,6 +31,7 @@ fn with_budget(tiles: u64, f: impl FnOnce()) {
         }
     }
     let _turn = TURN.lock();
+    store::settle();
     assert_eq!(status().resident, 0, "a test left tiles behind");
     set_budget(Some(tiles * TILE));
     let _lift = Lift;
@@ -124,6 +125,47 @@ fn tiles_read_in_parallel_while_others_go_and_come_all_read_right() {
         let more: Vec<Arc<Tile>> = (200..400).into_par_iter().map(|n| Arc::new(tile(n))).collect();
         assert!(more.par_iter().enumerate().all(|(n, t)| is(t, n + 200)));
         assert!(status().resident <= 16 * TILE + 32 * TILE, "memory ran far past the budget");
+    });
+}
+
+#[test]
+fn changing_tiles_on_disk_keeps_memory_within_the_budget() {
+    with_budget(3, || {
+        let mut tiles: Vec<Arc<Tile>> = (0..12).map(|n| Arc::new(tile(n))).collect();
+        assert!(status().on_disk >= 8 * TILE);
+        for (n, t) in tiles.iter_mut().enumerate() {
+            Arc::make_mut(t).set(0, 0, pixel_from_f32([1.0; 4]));
+            assert!(status().resident <= 3 * TILE, "changing tile {n} took memory past the budget");
+        }
+        for (n, t) in tiles.iter().enumerate() {
+            assert!(is(t, n) && t.get(0, 0) == pixel_from_f32([1.0; 4]));
+        }
+    });
+}
+
+/// Waits up to a few seconds for `done`.
+fn eventually(done: impl Fn() -> bool) -> bool {
+    let start = std::time::Instant::now();
+    while !done() {
+        if start.elapsed() > std::time::Duration::from_secs(5) {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    true
+}
+
+#[test]
+fn a_lower_budget_is_kept_by_the_store_s_own_thread_down_to_nine_tenths() {
+    with_budget(1000, || {
+        let tiles: Vec<Arc<Tile>> = (0..40).map(|n| Arc::new(tile(n))).collect();
+        assert_eq!(status().on_disk, 0);
+        set_budget(Some(20 * TILE));
+        assert!(eventually(|| status().resident <= 18 * TILE), "{} tiles still in memory", status().resident / TILE);
+        assert!(status().on_disk >= 22 * TILE);
+        for (n, t) in tiles.iter().enumerate() {
+            assert!(is(t, n));
+        }
     });
 }
 

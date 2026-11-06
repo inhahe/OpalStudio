@@ -129,13 +129,21 @@ not a goal.
 - **Tiles go to disk past a budget** (`opal_core::store`): the pixels of open images may
   take a share of the computer's memory (Preferences › Memory, 60% by default); past it,
   the tiles read least recently go to a scratch file in the temporary folder (deleted when
-  the program ends) and come back when next read. Room is made on the thread that took
-  memory past the budget (down to nine tenths of it), so memory never runs ahead of it,
-  and a tile being read or changed never goes meanwhile (each tile's pixels sit behind a
-  read-write lock; loops over many rows hold a tile's `Reader` once). A tile brought back
-  keeps its copy on disk while unchanged, so it can go again without being written. The
-  status bar says how much is on disk; if writing there fails (a full disk), tiles stop
-  going, and the user is told once.
+  the program ends) and come back when next read. A thread taking memory past the budget
+  sends as much as it took to disk itself, so memory never runs ahead of the budget
+  however fast tiles are made; a thread of the store's own takes memory down to nine
+  tenths of it, so that a lower budget, or a tile brought back by the interface, never
+  holds up the thread that crossed it. The order is kept in a queue, made by sorting the
+  tiles by when each was last read (read once each, as tiles read meanwhile change it) and
+  made again when used up, skipping tiles read since. A tile being read or changed never
+  goes meanwhile (each tile's pixels sit behind a read-write lock, which a thread may read
+  more than once, as one image's tiles may all be one; loops over many rows hold a tile's
+  `Reader` once). A tile brought back keeps its copy on disk while unchanged, so it can go
+  again without being written. The scratch file is kept in blocks the size of a tile of
+  working pixels, each holding one or two 8-bit tiles, so space let go by either kind
+  serves the other; blocks let go at its end are given back to the disk. The status bar
+  says how much is on disk; if writing there fails (a full disk), tiles are no longer
+  written, those with a copy there still go, and the user is told once.
 - **Compositing.** The CPU reference compositor flattens the layers into the
   **projection**, cached per tile, with a pyramid of half-size levels for zoomed-out views.
   A cached tile keeps the list of what produced it: source tiles (as pointers, with the
