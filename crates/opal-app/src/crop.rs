@@ -67,10 +67,12 @@ impl CropBox {
         [[-w, -h], [w, -h], [w, h], [-w, h]].map(|p| m.apply(p))
     }
 
-    /// The box as numbers: its top-left corner from `origin` (the canvas's), its size, and
-    /// its angle in degrees.
-    pub fn numbers(&self, origin: [f64; 2]) -> crate::transform::Params {
-        let [x, y] = self.corners()[0];
+    /// The box as numbers: its point `at` (see [`box_fields::POINTS`]), turned with it, from
+    /// `origin` (the canvas's corner), its size, and its angle in degrees.
+    ///
+    /// [`box_fields::POINTS`]: crate::box_fields::POINTS
+    pub fn numbers(&self, origin: [f64; 2], at: [f64; 2]) -> crate::transform::Params {
+        let [x, y] = self.frame().apply([(at[0] - 0.5) * self.size[0], (at[1] - 0.5) * self.size[1]]);
         crate::transform::Params {
             x: x - origin[0],
             y: y - origin[1],
@@ -81,11 +83,12 @@ impl CropBox {
         }
     }
 
-    /// The box `p` describes, as [`numbers`](Self::numbers) gives it.
-    pub fn from_numbers(p: &crate::transform::Params, origin: [f64; 2]) -> CropBox {
+    /// The box `p` describes, as [`numbers`](Self::numbers) gives it for the point `at`: so
+    /// a size or angle typed scales and turns the box about that point.
+    pub fn from_numbers(p: &crate::transform::Params, origin: [f64; 2], at: [f64; 2]) -> CropBox {
         let angle = p.angle.to_radians();
-        // From the top-left corner to the center, turned with the box.
-        let [dx, dy] = Affine::rotate(angle).apply([p.width * 0.5, p.height * 0.5]);
+        // From the point to the center, turned with the box.
+        let [dx, dy] = Affine::rotate(angle).apply([(0.5 - at[0]) * p.width, (0.5 - at[1]) * p.height]);
         let center = [p.x + origin[0] + dx, p.y + origin[1] + dy];
         CropBox { center, size: [p.width, p.height], angle }
     }
@@ -465,7 +468,7 @@ pub fn canvas_crop(
     let x = (cx - 80.0).clamp(rect.left() + 4.0, (rect.right() - 170.0).max(rect.left() + 4.0));
     let y = (lowest + 12.0).clamp(rect.top() + 4.0, rect.bottom() - 40.0);
     let mut choice = None;
-    egui::Area::new(egui::Id::unique(("crop-toolbar", id.0)))
+    let bar = egui::Area::new(egui::Id::unique(("crop-toolbar", id.0)))
         .order(egui::Order::Foreground)
         .fixed_pos(Pos2::new(x, y))
         .show(&ctx, |ui| {
@@ -509,14 +512,13 @@ pub fn canvas_crop(
     st.box_numbers = numbers;
     if numbers && st.doc(id).is_some_and(|d| d.crop.is_some()) {
         let panel = egui::Id::unique(("crop-numbers", id.0));
-        crate::box_fields::panel_by(&ctx, panel, rect, Pos2::new(x, y), TOOLBAR_HEIGHT, |ui| {
+        // Beside the box and its toolbar, covering neither.
+        let around = [corners.as_slice(), &[bar.response.rect.min, bar.response.rect.max]].concat();
+        crate::box_fields::panel_by(&ctx, panel, rect, &around, |ui| {
             crate::box_fields::crop(ui, st, id, "crop-by-box");
         });
     }
 }
-
-/// About how tall a box's toolbar is, to place what goes beside it.
-pub(crate) const TOOLBAR_HEIGHT: f32 = 34.0;
 
 #[cfg(test)]
 mod tests {
@@ -541,15 +543,20 @@ mod tests {
     fn a_box_s_numbers_are_its_turned_top_left_corner_size_and_angle() {
         let b = CropBox { center: [50.0, 40.0], size: [60.0, 20.0], angle: std::f64::consts::FRAC_PI_6 };
         let origin = [10.0, -5.0];
-        let p = b.numbers(origin);
+        let p = b.numbers(origin, [0.0, 0.0]);
         let [x, y] = b.corners()[0];
         assert!(close([p.x, p.y], [x - 10.0, y + 5.0]), "{p:?}");
         assert!((p.angle - 30.0).abs() < 1e-9 && p.width == 60.0 && p.height == 20.0);
-        let back = CropBox::from_numbers(&p, origin);
+        let back = CropBox::from_numbers(&p, origin, [0.0, 0.0]);
         assert!(close(back.center, b.center) && (back.angle - b.angle).abs() < 1e-12, "{back:?}");
         // Typing a new angle turns it about that corner, which stays where it was.
-        let turned = CropBox::from_numbers(&crate::transform::Params { angle: -45.0, ..p }, origin);
+        let turned = CropBox::from_numbers(&crate::transform::Params { angle: -45.0, ..p }, origin, [0.0, 0.0]);
         assert!(close(turned.corners()[0], b.corners()[0]), "{turned:?}");
+        // At its center: the center is given, and a size typed keeps it where it is.
+        let p = b.numbers(origin, [0.5, 0.5]);
+        assert!(close([p.x, p.y], [40.0, 45.0]), "{p:?}");
+        let wider = CropBox::from_numbers(&crate::transform::Params { width: 90.0, ..p }, origin, [0.5, 0.5]);
+        assert!(close(wider.center, b.center) && wider.size == [90.0, 20.0], "{wider:?}");
     }
 
     #[test]

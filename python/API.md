@@ -125,6 +125,7 @@ Paste the image on the clipboard, then place and size it.
 | `height` | length | The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is. |
 | `angle` | number | The box's angle, in degrees clockwise, about its top-left corner. From -360.0 to 360.0. Default: as it is. |
 | `fit` | `stretch`, `inside`, `cover` | With both width and height given: stretch it to them; or keep its proportions and fit it inside them, or make it cover them, centered on them. Default: "stretch". |
+| `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left". |
 | `into_active` | bool | Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false. |
 | `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
 
@@ -141,6 +142,7 @@ Paste where the copy came from.
 | `height` | length | The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is. |
 | `angle` | number | The box's angle, in degrees clockwise, about its top-left corner. From -360.0 to 360.0. Default: as it is. |
 | `fit` | `stretch`, `inside`, `cover` | With both width and height given: stretch it to them; or keep its proportions and fit it inside them, or make it cover them, centered on them. Default: "stretch". |
+| `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left". |
 | `into_active` | bool | Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false. |
 | `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
 
@@ -159,6 +161,7 @@ Place an image file into this image, then position and size it.
 | `height` | length | The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is. |
 | `angle` | number | The box's angle, in degrees clockwise, about its top-left corner. From -360.0 to 360.0. Default: as it is. |
 | `fit` | `stretch`, `inside`, `cover` | With both width and height given: stretch it to them; or keep its proportions and fit it inside them, or make it cover them, centered on them. Default: "stretch". |
+| `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left". |
 | `into_active` | bool | Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false. |
 | `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
 
@@ -176,6 +179,7 @@ Move, scale and rotate the selected layers with a box.
 | `height` | length | The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is. |
 | `angle` | number | The box's angle, in degrees clockwise, about its top-left corner. From -360.0 to 360.0. Default: as it is. |
 | `fit` | `stretch`, `inside`, `cover` | With both width and height given: stretch it to them; or keep its proportions and fit it inside them, or make it cover them, centered on them. Default: "stretch". |
+| `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left". |
 | `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
 
 ### `new_layer`
@@ -431,6 +435,7 @@ Crops the image to a rectangle of its canvas, which may be turned: the canvas be
 | `height` | length | The rectangle's height. From 1.0 to 300000.0 pixels. Default: the canvas's. |
 | `angle` | number | The rectangle's angle, in degrees clockwise, about its top-left corner. From -360.0 to 360.0. Default: 0. |
 | `delete` | bool | Remove the pixels outside the new canvas, rather than keep them for later. Default: the Crop tool's Delete cropped pixels. |
+| `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the rectangle x and y give, and what the angle turns it about. Default: "top-left". |
 | `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
 
 ### `set_preference`

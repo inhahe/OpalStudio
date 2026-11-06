@@ -227,7 +227,7 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen
     let y = (lowest + 12.0).clamp(rect.top() + 4.0, rect.bottom() - 40.0);
     let mut action = None;
     let mut numbers = st.box_numbers;
-    egui::Area::new(egui::Id::unique(("transform-toolbar", id.0)))
+    let bar = egui::Area::new(egui::Id::unique(("transform-toolbar", id.0)))
         .order(egui::Order::Foreground)
         .fixed_pos(Pos2::new(x, y))
         .show(ctx, |ui| {
@@ -295,7 +295,9 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen
     st.box_numbers = numbers;
     if numbers {
         let panel = egui::Id::unique(("transform-numbers", id.0));
-        crate::box_fields::panel_by(ctx, panel, rect, Pos2::new(x, y), crate::crop::TOOLBAR_HEIGHT, |ui| {
+        // Beside the box and its toolbar, covering neither.
+        let around = [screen.corners.as_slice(), &[bar.response.rect.min, bar.response.rect.max]].concat();
+        crate::box_fields::panel_by(ctx, panel, rect, &around, |ui| {
             crate::box_fields::transform(ui, st, id, "transform-by-box");
         });
     }

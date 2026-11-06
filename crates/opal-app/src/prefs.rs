@@ -398,6 +398,16 @@ pub static PREFS: &[Def] = &[
         advanced: false,
     },
     Def {
+        key: "transform.reference",
+        label: "Reference point",
+        help: "Which point of the transform and crop boxes their position fields give (and scripts' x and \
+               y, by default), and what a size or angle typed there scales and turns the box about.",
+        section: "Transform",
+        kind: Kind::Choice(&crate::box_fields::POINTS),
+        default: Init::Choice("top-left"),
+        advanced: false,
+    },
+    Def {
         key: "transform.snapping",
         label: "Snapping",
         help: "While dragging, edges and centers snap to the canvas's and to other layers'. Alt \

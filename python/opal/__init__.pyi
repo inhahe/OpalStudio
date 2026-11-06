@@ -92,7 +92,7 @@ class Editor:
 
         document: The image, by id. Default: the active image.
         """
-    def paste(self, *, document: int | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", into_active: bool = False, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+    def paste(self, *, document: int | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", into_active: bool = False, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
         """Paste the image on the clipboard, then place and size it.
 
         document: The image, by id. Default: the active image; with none open, the paste becomes a new image.
@@ -102,10 +102,11 @@ class Editor:
         height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
         angle: The box's angle, in degrees clockwise, about its top-left corner. From -360.0 to 360.0. Default: as it is.
         fit: With both width and height given: stretch it to them; or keep its proportions and fit it inside them, or make it cover them, centered on them. Default: "stretch".
+        anchor: Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left".
         into_active: Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false.
         unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
-    def paste_in_place(self, *, document: int | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", into_active: bool = False, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+    def paste_in_place(self, *, document: int | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", into_active: bool = False, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
         """Paste where the copy came from.
 
         document: The image, by id. Default: the active image; with none open, the paste becomes a new image.
@@ -115,10 +116,11 @@ class Editor:
         height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
         angle: The box's angle, in degrees clockwise, about its top-left corner. From -360.0 to 360.0. Default: as it is.
         fit: With both width and height given: stretch it to them; or keep its proportions and fit it inside them, or make it cover them, centered on them. Default: "stretch".
+        anchor: Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left".
         into_active: Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false.
         unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
-    def place(self, *, document: int | None = None, path: str | os.PathLike[str], name: str | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", into_active: bool = False, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+    def place(self, *, document: int | None = None, path: str | os.PathLike[str], name: str | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", into_active: bool = False, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
         """Place an image file into this image, then position and size it.
 
         document: The image, by id. Default: the active image.
@@ -130,10 +132,11 @@ class Editor:
         height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
         angle: The box's angle, in degrees clockwise, about its top-left corner. From -360.0 to 360.0. Default: as it is.
         fit: With both width and height given: stretch it to them; or keep its proportions and fit it inside them, or make it cover them, centered on them. Default: "stretch".
+        anchor: Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left".
         into_active: Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false.
         unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
-    def transform(self, *, document: int | None = None, layers: list[int] | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+    def transform(self, *, document: int | None = None, layers: list[int] | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
         """Move, scale and rotate the selected layers with a box.
 
         document: The image, by id. Default: the active image.
@@ -144,6 +147,7 @@ class Editor:
         height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
         angle: The box's angle, in degrees clockwise, about its top-left corner. From -360.0 to 360.0. Default: as it is.
         fit: With both width and height given: stretch it to them; or keep its proportions and fit it inside them, or make it cover them, centered on them. Default: "stretch".
+        anchor: Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left".
         unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
     def new_layer(self, *, document: int | None = None, name: str | None = None) -> Any:
@@ -329,7 +333,7 @@ class Editor:
         """
     def preferences(self) -> Any:
         """Every preference: for each, its key, label, section, help, value and default, and what it takes (its range or choices). set_preference changes them."""
-    def crop(self, *, document: int | None = None, x: float | str = 0, y: float | str = 0, width: float | str | None = None, height: float | str | None = None, angle: float = 0, delete: bool | None = None, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+    def crop(self, *, document: int | None = None, x: float | str = 0, y: float | str = 0, width: float | str | None = None, height: float | str | None = None, angle: float = 0, delete: bool | None = None, anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
         """Crops the image to a rectangle of its canvas, which may be turned: the canvas becomes the rectangle, and if it was turned, everything turns the other way, so its contents come out upright. Only the canvas moves (enlarging it again brings back what was cropped away), unless delete says.
 
         document: The image, by id. Default: the active image.
@@ -339,6 +343,7 @@ class Editor:
         height: The rectangle's height. From 1.0 to 300000.0 pixels. Default: the canvas's.
         angle: The rectangle's angle, in degrees clockwise, about its top-left corner. From -360.0 to 360.0. Default: 0.
         delete: Remove the pixels outside the new canvas, rather than keep them for later. Default: the Crop tool's Delete cropped pixels.
+        anchor: Which point of the rectangle x and y give, and what the angle turns it about. Default: "top-left".
         unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
     def set_preference(self, *, key: str, value: Any | None = None) -> Any:

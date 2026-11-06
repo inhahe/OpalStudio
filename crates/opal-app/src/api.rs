@@ -220,6 +220,13 @@ const BOX_FIT: Param = Param {
            them, or make it cover them, centered on them.",
     otherwise: Otherwise::Value("\"stretch\""),
 };
+const BOX_ANCHOR: Param = Param {
+    name: "anchor",
+    kind: Kind::Choice(&ANCHOR_NAMES),
+    help: "Which point of the box x and y give, and what a size or angle given scales and turns it about (a \
+           rectangle given with width and height is placed by its same point).",
+    otherwise: Otherwise::Value("\"top-left\""),
+};
 const INTO_ACTIVE: Param = Param {
     name: "into_active",
     kind: Kind::Bool,
@@ -229,8 +236,15 @@ const INTO_ACTIVE: Param = Param {
 
 /// Where Resize Canvas puts the old canvas in the new, by name, row by row: the one at `i` is
 /// at `[i % 3, i / 3]` (left, center, right; top, middle, bottom).
-const ANCHOR_NAMES: &[&str] =
-    &["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"];
+const ANCHOR_NAMES: [&str; 9] = {
+    let mut ids = [""; 9];
+    let mut i = 0;
+    while i < ids.len() {
+        ids[i] = crate::box_fields::POINTS[i].0;
+        i += 1;
+    }
+    ids
+};
 
 /// A margin Resize Canvas adds on one side (`side`).
 const fn margin(side: &'static str) -> Param {
@@ -350,7 +364,7 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             CANVAS_HEIGHT,
             Param {
                 name: "anchor",
-                kind: Kind::Choice(ANCHOR_NAMES),
+                kind: Kind::Choice(&ANCHOR_NAMES),
                 help: "Where the old canvas sits in the new.",
                 otherwise: Otherwise::Now("the center"),
             },
@@ -413,6 +427,7 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             BOX_HEIGHT,
             BOX_ANGLE,
             BOX_FIT,
+            BOX_ANCHOR,
             INTO_ACTIVE,
             UNIT,
         ],
@@ -436,10 +451,11 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             BOX_HEIGHT,
             BOX_ANGLE,
             BOX_FIT,
+            BOX_ANCHOR,
             INTO_ACTIVE,
             UNIT,
         ],
-        Transform => &[DOCUMENT, LAYERS, BOX_X, BOX_Y, BOX_WIDTH, BOX_HEIGHT, BOX_ANGLE, BOX_FIT, UNIT],
+        Transform => &[DOCUMENT, LAYERS, BOX_X, BOX_Y, BOX_WIDTH, BOX_HEIGHT, BOX_ANGLE, BOX_FIT, BOX_ANCHOR, UNIT],
         Preferences | Exit | RunScript | ConnectAssistant | ZoomIn | ZoomOut | ZoomFit | Zoom100 | ToggleOffCanvas
         | ToggleTheme | ToggleRibbon | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts | About
         | WidgetGallery => return None,
@@ -612,6 +628,12 @@ const CHANGES: &[(&str, &str, &[Param])] = &[
                 kind: Kind::Bool,
                 help: "Remove the pixels outside the new canvas, rather than keep them for later.",
                 otherwise: Otherwise::Now("the Crop tool's Delete cropped pixels"),
+            },
+            Param {
+                name: "anchor",
+                kind: Kind::Choice(&ANCHOR_NAMES),
+                help: "Which point of the rectangle x and y give, and what the angle turns it about.",
+                otherwise: Otherwise::Value("\"top-left\""),
             },
             UNIT,
         ],
@@ -1076,6 +1098,11 @@ pub struct BoxArgs {
     pub height: Option<f64>,
     pub angle: Option<f64>,
     pub fit: Fit,
+    /// The point of the box (and of a rectangle given) that `x` and `y` give, and that a
+    /// size or angle scales and turns about (see [`box_fields::POINTS`]).
+    ///
+    /// [`box_fields::POINTS`]: crate::box_fields::POINTS
+    pub at: [f64; 2],
 }
 
 /// How a box given both a width and a height takes them.
@@ -1104,12 +1131,14 @@ impl BoxArgs {
                 Some("cover") => Fit::Cover,
                 _ => Fit::Stretch,
             },
+            at: crate::box_fields::point(args.text("anchor").unwrap_or("top-left")),
         }
     }
 
-    /// The box `p` (as the document has it) with these put in; `corner` is the canvas's
-    /// top-left corner. A box fitted to a width and height is centered on the rectangle
-    /// they make, turned with it about its corner.
+    /// The box `p` (as the document has it, its position that of the point [`at`](Self::at))
+    /// with these put in; `corner` is the canvas's top-left corner. A box fitted to a width
+    /// and height is centered on the rectangle they make, which is placed by the same point
+    /// and turned with the box.
     pub fn applied(&self, p: &crate::transform::Params, corner: [f64; 2]) -> crate::transform::Params {
         let (w, h) = match (self.width, self.height) {
             (Some(w), Some(h)) => match self.fit {
@@ -1125,9 +1154,10 @@ impl BoxArgs {
             (None, None) => (p.width, p.height),
         };
         let angle = self.angle.unwrap_or(p.angle);
-        // From the rectangle's corner to the box's, along the rectangle's sides.
+        // From the rectangle's point to the box's, along the rectangle's sides: the box is
+        // centered on the rectangle, so its point is nearer the center by what it lacks.
         let (dx, dy) = match (self.width, self.height) {
-            (Some(bw), Some(bh)) => ((bw - w) * 0.5, (bh - h) * 0.5),
+            (Some(bw), Some(bh)) => ((0.5 - self.at[0]) * (bw - w), (0.5 - self.at[1]) * (bh - h)),
             _ => (0.0, 0.0),
         };
         // (A mirrored box's height runs the other way from its corner.)
@@ -1142,6 +1172,24 @@ impl BoxArgs {
             mirrored: p.mirrored,
         }
     }
+}
+
+/// Puts the transform box open on `d` where `place` says (see [`BoxArgs::applied`]), or
+/// says why it cannot go there (past what an image file can hold), leaving it as it was.
+pub(crate) fn place_box(d: &mut crate::doc::DocState, place: &BoxArgs) -> Result<(), String> {
+    let canvas = d.doc().canvas.rect();
+    let corner = [canvas.x0 as f64, canvas.y0 as f64];
+    let s = d.transform.as_ref().expect("a box is open");
+    let p = s.params_at(place.at);
+    let q = place.applied(&p, corner);
+    let m = s.edited(&p, &q, place.at);
+    d.set_box(m, None);
+    if d.transform.as_ref().is_some_and(|s| s.current != m) {
+        return Err("That would put it past what an image file can hold: give a smaller size, or a place nearer \
+                    the canvas."
+            .to_owned());
+    }
+    Ok(())
 }
 
 /// `value` with `notes` added to its "notes", if there are any.
@@ -1715,19 +1763,12 @@ impl AppState {
     /// can hold, or there is no layer to go into.
     pub(crate) fn apply_box(&mut self, place: &BoxArgs, into_active: bool) -> Result<Value, String> {
         let d = self.active_mut().expect("a box is open");
-        let s = d.transform.as_ref().expect("a box is open");
         let canvas = d.doc().canvas.rect();
         let corner = [canvas.x0 as f64, canvas.y0 as f64];
-        let p = s.params();
-        let q = place.applied(&p, corner);
-        let m = s.edited(&p, &q);
-        let paste = s.paste.clone();
-        d.set_box(m, None);
-        if d.transform.as_ref().is_some_and(|s| s.current != m) {
+        let paste = d.transform.as_ref().expect("a box is open").paste.clone();
+        if let Err(why) = place_box(d, place) {
             d.cancel_transform();
-            return Err("That would put it past what an image file can hold: give a smaller size, or a place \
-                        nearer the canvas."
-                .to_owned());
+            return Err(why);
         }
         if into_active {
             match paste {
@@ -1740,7 +1781,7 @@ impl AppState {
             }
         }
         let s = d.transform.as_ref().expect("still open");
-        let b = s.params();
+        let b = s.params_at(place.at);
         let (kind, layer) = (s.kind, s.targets[0].layer);
         d.notice = None;
         d.commit_pending();
@@ -1778,7 +1819,8 @@ impl AppState {
             angle: args.number("angle"),
             mirrored: false,
         };
-        let b = crate::crop::CropBox::from_numbers(&p, [c.x as f64, c.y as f64]);
+        let at = crate::box_fields::point(args.text("anchor").unwrap_or("top-left"));
+        let b = crate::crop::CropBox::from_numbers(&p, [c.x as f64, c.y as f64], at);
         if b.canvas() != c || b.angle.abs() > 1e-9 || delete {
             d.crop_to(&b, delete, sampling).map_err(|why| format!("crop: {why}"))?;
         }
@@ -3044,6 +3086,13 @@ mod tests {
         let t = now(&mut st, "transform", json!({ "angle": 90 })).unwrap();
         assert_eq!((t["box"]["x"].clone(), t["box"]["angle"].clone()), (json!(-50.0), json!(90.0)));
         assert_eq!(t["layers"], json!([layer]));
+        // Given at its center, a box is placed by its center, and turns about it.
+        let centered = json!({ "layers": [layer], "x": 50, "y": 50, "width": 40, "anchor": "center" });
+        let t = now(&mut st, "transform", centered).unwrap();
+        assert_eq!((t["box"]["x"].clone(), t["box"]["y"].clone()), (json!(50.0), json!(50.0)), "{t}");
+        let t = now(&mut st, "transform", json!({ "angle": 45, "anchor": "center" })).unwrap();
+        let (x, y) = (t["box"]["x"].as_f64().unwrap(), t["box"]["y"].as_f64().unwrap());
+        assert!((x - 50.0).abs() < 1e-9 && (y - 50.0).abs() < 1e-9, "it did not turn about its center: {t}");
         // Into the active layer, if it can take it; else refused, and no box left open.
         now(&mut st, "new_group", json!({})).unwrap();
         let refused = now(&mut st, "place", json!({ "path": path, "into_active": true })).unwrap_err();
@@ -3179,6 +3228,18 @@ mod tests {
         // 60 × 30 down the 60 × 60 square turned a quarter, 15 to the left of its corner.
         let (x, y, w, h) = applied(BoxArgs { fit: Fit::Inside, angle: Some(90.0), ..both.clone() });
         assert!((x - 85.0).abs() < 1e-9 && (y - 200.0).abs() < 1e-9 && (w, h) == (60.0, 30.0), "{x}, {y}");
+        // Given by its center, the rectangle and the box fitted into it share it.
+        let center = BoxArgs {
+            x: Some(50.0),
+            y: Some(50.0),
+            width: Some(60.0),
+            height: Some(60.0),
+            at: [0.5, 0.5],
+            ..BoxArgs::default()
+        };
+        let q =
+            BoxArgs { fit: Fit::Inside, ..center }.applied(&crate::transform::Params { x: 0.0, y: 0.0, ..p }, corner);
+        assert_eq!((q.x, q.y, q.width, q.height), (150.0, 250.0, 60.0, 30.0));
         // Mirrored, the box runs up from its corner, and is centered on the rectangle so.
         let mirrored = crate::transform::Params { mirrored: true, ..p };
         let q = BoxArgs { fit: Fit::Inside, ..both }.applied(&mirrored, corner);

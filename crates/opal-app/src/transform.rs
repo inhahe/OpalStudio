@@ -164,11 +164,18 @@ impl Session {
         self.frame.corners().map(|p| self.current.apply(p))
     }
 
+    /// The box as numbers, its position that of its top-left corner.
     pub fn params(&self) -> Params {
+        self.params_at([0.0, 0.0])
+    }
+
+    /// The box as numbers, its position that of the point `at` of it (see
+    /// [`box_fields::POINTS`](crate::box_fields::POINTS)), turned with it.
+    pub fn params_at(&self, at: [f64; 2]) -> Params {
         let m = &self.current;
         let sx = m.a.hypot(m.b);
         let sy = m.determinant() / sx;
-        let [x, y] = m.apply([self.frame.x0, self.frame.y0]);
+        let [x, y] = m.apply(self.point(at));
         Params {
             x,
             y,
@@ -179,21 +186,27 @@ impl Session {
         }
     }
 
-    /// The box with the numbers changed from `before` (what [`params`](Self::params) said)
-    /// to `after`, as changes to its transform: the size by scaling along the frame's own
-    /// sides, the angle by turning about its top-left corner, then the corner moved to the
-    /// position. So whatever the transform holds besides (a shear, after a resize that
-    /// stretched a turned image) stays.
-    pub fn edited(&self, before: &Params, after: &Params) -> Affine {
-        let corner = [self.frame.x0, self.frame.y0];
+    /// The point `at` of the frame (fractions of its width and height from its top-left
+    /// corner), in the frame's own coordinates.
+    fn point(&self, at: [f64; 2]) -> [f64; 2] {
+        [self.frame.x0 + at[0] * self.frame.width(), self.frame.y0 + at[1] * self.frame.height()]
+    }
+
+    /// The box with the numbers changed from `before` (what [`params_at`](Self::params_at)
+    /// said for the point `at`) to `after`, as changes to its transform: the size by scaling
+    /// along the frame's own sides about that point, the angle by turning about it, then the
+    /// point moved to the position. So whatever the transform holds besides (a shear, after a
+    /// resize that stretched a turned image) stays.
+    pub fn edited(&self, before: &Params, after: &Params, at: [f64; 2]) -> Affine {
+        let pivot = self.point(at);
         let ratio = |a: f64, b: f64| if b > 0.0 { (a / b).max(MIN_SCALE) } else { 1.0 };
         let (kx, ky) = (ratio(after.width, before.width), ratio(after.height, before.height));
-        let mut m = Affine::scale(kx, ky).about(corner[0], corner[1]).then(self.current);
+        let mut m = Affine::scale(kx, ky).about(pivot[0], pivot[1]).then(self.current);
         if after.angle != before.angle {
-            let [x, y] = m.apply(corner);
+            let [x, y] = m.apply(pivot);
             m = m.then(Affine::rotate((after.angle - before.angle).to_radians()).about(x, y));
         }
-        let [x, y] = m.apply(corner);
+        let [x, y] = m.apply(pivot);
         m.then(Affine::translate(after.x - x, after.y - y))
     }
 
@@ -955,7 +968,7 @@ mod tests {
         let m = Affine::rotate(0.4).then(Affine::scale(0.5, 1.0));
         let s = session(FRect::new(0.0, 0.0, 100.0, 50.0), m);
         let p = s.params();
-        let wider = s.edited(&p, &Params { width: p.width * 2.0, ..p });
+        let wider = s.edited(&p, &Params { width: p.width * 2.0, ..p }, [0.0, 0.0]);
         // Only the frame's top edge doubles: the left edge stays as it was.
         let left = |m: Affine| {
             [m.apply([0.0, 50.0])[0] - m.apply([0.0, 0.0])[0], m.apply([0.0, 50.0])[1] - m.apply([0.0, 0.0])[1]]
@@ -1097,7 +1110,7 @@ mod tests {
     fn params_round_trip_and_fit_keeps_inside_the_canvas() {
         let s = session(FRect::new(0.0, 0.0, 300.0, 100.0), Affine::IDENTITY);
         let p = Params { x: 20.0, y: 30.0, width: 150.0, height: 75.0, angle: 30.0, mirrored: false };
-        let mut s2 = session(s.frame, s.edited(&s.params(), &p));
+        let mut s2 = session(s.frame, s.edited(&s.params(), &p, [0.0, 0.0]));
         let q = s2.params();
         for (a, b) in [(p.x, q.x), (p.y, q.y), (p.width, q.width), (p.height, q.height), (p.angle, q.angle)] {
             assert!((a - b).abs() < 1e-9, "{p:?} vs {q:?}");
