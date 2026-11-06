@@ -31,8 +31,9 @@ const BODY: usize = 1 << 20;
 const CONNECTIONS: usize = 16;
 /// How many sessions are kept; past that, the one used longest ago goes.
 const SESSIONS: usize = 32;
-/// How long a connection may wait between requests, or take over one, before it is closed.
-const IDLE: Duration = Duration::from_secs(30);
+/// How long a connection may wait for a request and take to send it (its every byte, however
+/// they trickle in), before it is closed.
+const IDLE: Duration = if cfg!(test) { Duration::from_secs(1) } else { Duration::from_secs(30) };
 
 /// The port served on by default.
 pub const PORT: u16 = 47860;
@@ -102,6 +103,7 @@ fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>, Unreadable
         return Err(Unreadable(Some(400), "The method is not a word."));
     }
     let mut headers = HashMap::new();
+    let mut lines = 0;
     loop {
         let Some(line) = read_line(reader)? else {
             return Err(Unreadable(None, "The connection ended in the headers."));
@@ -109,7 +111,8 @@ fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>, Unreadable
         if line.is_empty() {
             break;
         }
-        if headers.len() == HEADERS {
+        lines += 1;
+        if lines > HEADERS {
             return Err(Unreadable(Some(431), "There are too many headers."));
         }
         let Some((name, value)) = line.split_once(':') else {
@@ -290,14 +293,33 @@ impl Drop for HttpServer {
     }
 }
 
-/// Serves one connection: request after request, while it is kept alive.
+/// A connection read against a deadline for the whole request: each read waits no longer
+/// than what is left, so that a client trickling bytes cannot hold a place for ever.
+struct Timed {
+    conn: TcpStream,
+    until: Instant,
+}
+
+impl Read for Timed {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.conn.set_read_timeout(Some(left))?;
+        self.conn.read(buf)
+    }
+}
+
+/// Serves one connection: request after request, while it is kept alive, each waited for
+/// and read within [`IDLE`].
 fn serve(conn: TcpStream, shared: &Shared) {
-    let _ = conn.set_read_timeout(Some(IDLE));
     let _ = conn.set_write_timeout(Some(IDLE));
     let _ = conn.set_nodelay(true);
     let Ok(mut out) = conn.try_clone() else { return };
-    let mut reader = BufReader::new(conn);
+    let mut reader = BufReader::new(Timed { conn, until: Instant::now() });
     loop {
+        reader.get_mut().until = Instant::now() + IDLE;
         let request = match read_request(&mut reader) {
             Ok(Some(request)) => request,
             Ok(None) | Err(Unreadable(None, _)) => return,
@@ -317,10 +339,13 @@ fn serve(conn: TcpStream, shared: &Shared) {
     }
 }
 
-/// Whether `given` (an `Authorization` header) is the bearer token `token`, compared in
-/// the same time however much of it matches.
+/// Whether `given` (an `Authorization` header) is the bearer token `token` (the scheme's
+/// name in any case), compared in the same time however much of it matches.
 fn token_matches(given: Option<&String>, token: &str) -> bool {
-    let Some(given) = given.and_then(|g| g.strip_prefix("Bearer ")) else { return false };
+    let Some(given) = given.filter(|g| g.get(..7).is_some_and(|s| s.eq_ignore_ascii_case("bearer "))).map(|g| &g[7..])
+    else {
+        return false;
+    };
     given.len() == token.len() && given.bytes().zip(token.bytes()).fold(0, |d, (a, b)| d | (a ^ b)) == 0
 }
 
@@ -566,6 +591,39 @@ mod tests {
         for (raw, want) in cases {
             assert_eq!(exchange(port, &raw).0, want, "{raw:.80}");
         }
+    }
+
+    #[test]
+    fn a_client_trickling_its_request_or_repeating_a_header_is_cut_off() {
+        let server = HttpServer::start(0, TOKEN.to_owned(), || Box::new(Echo)).unwrap();
+        let port = server.port();
+        // A header line now and then, never ending the request.
+        let mut conn = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        conn.write_all(format!("POST /mcp HTTP/1.1\r\nHost: localhost:{port}\r\n").as_bytes()).unwrap();
+        let started = Instant::now();
+        let mut cut = false;
+        while started.elapsed() < Duration::from_secs(4) {
+            std::thread::sleep(Duration::from_millis(200));
+            if conn.write_all(b"X-A: b\r\n").is_err() {
+                cut = true;
+                break;
+            }
+        }
+        let mut rest = Vec::new();
+        let _ = conn.set_read_timeout(Some(Duration::from_secs(1)));
+        cut |= conn.read_to_end(&mut rest).is_ok();
+        assert!(cut && started.elapsed() < Duration::from_secs(4), "held for {:?}", started.elapsed());
+        // The same header line over and over counts as many lines.
+        let many = format!("POST /mcp HTTP/1.1\r\nHost: localhost:{port}\r\n{}\r\n", "X-A: b\r\n".repeat(HEADERS + 1));
+        assert_eq!(exchange(port, &many).0, 431);
+        // The scheme's name in any case.
+        let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+        let lower = format!(
+            "POST /mcp HTTP/1.1\r\nHost: localhost:{port}\r\nAuthorization: bearer {TOKEN}\r\n\
+             Content-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{init}",
+            init.len()
+        );
+        assert_eq!(exchange(port, &lower).0, 200);
     }
 
     #[test]

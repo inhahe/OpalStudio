@@ -1033,19 +1033,28 @@ server. Both rest on one language-neutral API.
   image as shown or of one layer alone (as if shown, at full opacity), as `srgb8` (bytes),
   `srgb16` (16-bit values) or `linear` (32-bit floats in linear light), always red, green,
   blue and alpha, straight, little-endian, row by row. It composites and converts on a
-  thread of its own, into a named section of shared memory (the user's own, named
-  `Local\opal-pixels-<pid>-<random>`) that the answer names, kept until the caller releases it
-  (`release_pixels`) or for a minute; or, with `shared` false (and on systems without
-  shared memory yet), into the answer in base64. `put_pixels` takes them back the same two
-  ways (shared memory the caller made, opened for reading and checked to hold what is
-  said, or base64, within a request's 1 MB): as a new layer above the active one, placed at
-  `x`, `y` of the canvas, or into a pixel layer, replacing its pixels there (refused for a
-  locked layer or one that is not of pixels alone), as one history state. The Python
-  package wraps both as numpy arrays (`editor.pixels()`, `editor.put_pixels(array)`, the
-  format from the array's type: `uint8`, `uint16` or floats; three channels taken as
-  opaque), opening the memory before releasing it; these and `release_pixels` are left out
-  of the generated stubs (written by hand) and of the MCP tools (an assistant sees an
-  image through `image`).
+  thread of its own (its parallel work in the background pool), into a named section of
+  shared memory (the user's own, named `Local\opal-pixels-<pid>-<random>`) that the answer
+  names, kept until the caller releases it (`release_pixels`, which asks nothing of a
+  section already gone) or for a minute; or, with `shared` false (and always on systems
+  without shared memory yet), into the answer in base64. `put_pixels` takes them back the
+  same two ways (shared memory the caller made, opened for reading and checked to hold what
+  is said, or base64, within a request's 1 MB), read and made into tiles on a thread of its
+  own (8-bit ones kept at 8 bits, for a new layer), then put in on the interface thread when
+  the user is not busy, as a call waits (refused once they have asked to quit), as the call's
+  script run if it was one: as a new layer above the active one, placed at `x`, `y` of the
+  canvas, or into a layer holding nothing yet or pixels alone in one object, replacing them
+  there (refused for a locked layer, a group, or one holding an image or several objects),
+  as one history state. Linear values that are not numbers are taken as 0, and those past a
+  half float's range as its largest (as infinity, compositing would make them NaN). The
+  Python package wraps both as numpy arrays (`editor.pixels()`, `editor.put_pixels(array)`,
+  the format from the array's type, by kind and size whatever its byte order: `uint8`,
+  `uint16` or floats; three channels taken as opaque). It opens the editor's memory by
+  `OpenFileMapping`, so that memory it cannot see (another Windows session's) is an error,
+  not an empty section of its own, before releasing it. Where there is no shared memory, it
+  sends a band of rows a request, each within the 1 MB, the first making the layer. These
+  and `release_pixels` are left out of the generated stubs (written by hand) and of the MCP
+  tools (an assistant sees an image through `image`).
 - **Carrying out a call.** Between frames, as the interface would, without a dialog (a
   frame goes on with the calls that follow one another for a few milliseconds, looking for
   the next rather than sleeping, since a sleep shorter than the timer's tick lasts the
@@ -1129,9 +1138,10 @@ server. Both rest on one language-neutral API.
   smuggling and header injection): request and header lines ended by CR LF, with no control
   characters, at most 8 KB and 64 of them; bodies framed by `Content-Length` alone, at most
   1 MB (`Transfer-Encoding` is refused, and so is a framing header given twice); at most 16
-  connections at once, each closed after 30 seconds idle. A request is refused unless its
+  connections at once, each given 30 seconds to send a request, every byte of it (however
+  they trickle in), and closed past that. A request is refused unless its
   `Host` is `127.0.0.1` or `localhost` at the port, its `Origin` (if any) the same, and it
-  gives `Authorization: Bearer` with the token from `mcp-http-token.txt` beside `api.json`:
+  gives `Authorization: Bearer` (the scheme's name in any case) with the token from `mcp-http-token.txt` beside `api.json`:
   made the first time and kept from one start to the next, so a client is set up once
   (Connect an Assistant can make a new one, which refuses clients given the old). Connect an
   Assistant (File › Scripts) shows what to put in a client's settings for either: the

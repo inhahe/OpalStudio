@@ -120,6 +120,8 @@ impl Mapping {
         // SAFETY: asks about the view just mapped, into `info`, which is its size.
         let told = unsafe { VirtualQuery(Some(view.Value), &mut info, size_of::<MEMORY_BASIC_INFORMATION>()) };
         let mapping = Mapping { handle, view, len };
+        // To the page: a section a few bytes short of `len` passes, its last page read as
+        // the zeros it holds past its end, which is no harm.
         if told == 0 || info.RegionSize < len {
             return Err(format!("The shared memory called {name} holds less than the {len} bytes said."));
         }

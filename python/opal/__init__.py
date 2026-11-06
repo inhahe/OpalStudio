@@ -96,6 +96,14 @@ def _numpy() -> Any:
     return numpy
 
 
+#: Whether pixels pass through shared memory (on Windows alone, yet); otherwise in the
+#: connection's lines.
+_SHARED = sys.platform == "win32"
+
+#: The most pixel bytes sent in one request where they cannot go through shared memory:
+#: in base64, with the rest of the request, within the 1 MB a request may be.
+_BAND = 700_000
+
 #: The numpy type of each pixel format's values (little-endian, as the editor gives them).
 _DTYPES = {"srgb8": "u1", "srgb16": "<u2", "linear": "<f4"}
 
@@ -141,7 +149,7 @@ class _Pipe:
             self._file = sock
             self._recv = sock.recv
             self._send = sock.sendall
-        self._pending = b""
+        self._pending = bytearray()
 
     def exchange(self, message: dict) -> dict:
         """Sends ``message`` and returns the reply to it. Replies to earlier messages still
@@ -150,13 +158,16 @@ class _Pipe:
         try:
             self._send(line)
             while True:
-                while b"\n" not in self._pending:
-                    chunk = self._recv(65536)
+                # Looked for in what came last alone: an answer can be many megabytes.
+                looked = 0
+                while (end := self._pending.find(b"\n", looked)) < 0:
+                    looked = len(self._pending)
+                    chunk = self._recv(1 << 20)
                     if not chunk:
                         raise OpalError("The editor closed the connection.")
                     self._pending += chunk
-                line, self._pending = self._pending.split(b"\n", 1)
-                reply = json.loads(line)
+                reply = json.loads(self._pending[:end])
+                del self._pending[: end + 1]
                 # A reply with no id is to a line the editor could not read: this one.
                 if reply.get("id") in (message.get("id"), None):
                     return reply
@@ -224,17 +235,25 @@ class Editor:
         np = _numpy()
         given = dict(document=document, layer=layer, width=width, height=height)
         params = {k: v for k, v in given.items() if v is not None}
-        shared = sys.platform == "win32"
-        got = self.call("pixels", x=x, y=y, format=format, shared=shared, **params)
+        got = self.call("pixels", x=x, y=y, format=format, shared=_SHARED, **params)
         dtype = _DTYPES[got["format"]]
         shape = (got["height"], got["width"], 4)
         if "shm" in got:
+            import _winapi
             import mmap
 
+            try:
+                # Opened as it is, or not at all: by its name alone, mmap would make an empty
+                # one where it cannot see the editor's (another Windows session's).
+                held = _winapi.OpenFileMapping(_winapi.FILE_MAP_READ, False, got["shm"])
+            except OSError as e:
+                self.call("release_pixels", shm=got["shm"])
+                raise OpalError(f"The pixels' shared memory could not be opened: {e}") from None
             try:
                 # Opened before it is released: the editor's goes, this one stays.
                 view = mmap.mmap(-1, got["bytes"], tagname=got["shm"])
             finally:
+                _winapi.CloseHandle(held)
                 self.call("release_pixels", shm=got["shm"])
             return np.frombuffer(view, dtype=dtype).reshape(shape)
         return np.frombuffer(base64.b64decode(got["data"]), dtype=dtype).reshape(shape).copy()
@@ -257,11 +276,12 @@ class Editor:
         a = np.asarray(pixels)
         if a.ndim != 3 or a.shape[2] not in (3, 4):
             raise OpalError(f"Pixels are height × width × 4 (or 3), not {' × '.join(map(str, a.shape))}.")
-        if a.dtype == np.uint8:
+        # By kind and size, whatever the byte order (FITS data is big-endian, say).
+        if a.dtype.kind == "u" and a.dtype.itemsize == 1:
             format, dtype, opaque = "srgb8", np.uint8, 255
-        elif a.dtype == np.uint16:
+        elif a.dtype.kind == "u" and a.dtype.itemsize == 2:
             format, dtype, opaque = "srgb16", np.uint16, 65535
-        elif np.issubdtype(a.dtype, np.floating):
+        elif a.dtype.kind == "f":
             format, dtype, opaque = "linear", np.float32, 1.0
         else:
             raise OpalError(f"Pixels are uint8, uint16 or floats, not {a.dtype}.")
@@ -271,7 +291,7 @@ class Editor:
         height, width = a.shape[:2]
         params = dict(width=width, height=height, x=x, y=y, format=format)
         params.update({k: v for k, v in dict(document=document, layer=layer, name=name).items() if v is not None})
-        if sys.platform == "win32":
+        if _SHARED:
             import mmap
             import secrets
 
@@ -282,9 +302,23 @@ class Editor:
                 # The view must go before the memory can be closed.
                 del target
                 got = self.call("put_pixels", shm=tag, **params)
-        else:
-            got = self.call("put_pixels", data=base64.b64encode(a.tobytes()).decode("ascii"), **params)
-        return got["layer"]
+            return got["layer"]
+        # Elsewhere, in the connection's lines, at most 1 MB a request: a band of rows at a
+        # time, the first making the layer (if one is to be made), the rest going into it.
+        row = width * a.dtype.itemsize * 4
+        rows = _BAND // row
+        if rows == 0:
+            raise OpalError(f"Rows of {width} such pixels are too long to send on this system: send narrower ones.")
+        into = layer
+        for top in range(0, height, rows):
+            band = a[top : top + rows]
+            data = base64.b64encode(band.tobytes()).decode("ascii")
+            part = dict(params, height=band.shape[0], y=y + top)
+            if into is not None:
+                part["layer"] = into
+                part.pop("name", None)
+            into = self.call("put_pixels", data=data, **part)["layer"]
+        return into
 
     def __getattr__(self, name: str):
         methods = self.__dict__.get("_methods", {})

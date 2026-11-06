@@ -330,7 +330,8 @@ const QUERIES: &[(&str, &str, &[Param])] = &[
             Param {
                 name: "shared",
                 kind: Kind::Bool,
-                help: "In shared memory (on Windows), which the answer names as shm, rather than in the answer.",
+                help: "In shared memory, which the answer names as shm, rather than in the answer (on Windows: \
+                       elsewhere they always come in the answer).",
                 otherwise: Otherwise::Value("true"),
             },
         ],
@@ -477,7 +478,8 @@ impl PixelFormat {
     }
 
     /// The pixels `bytes` holds in this format. A linear value that is not a number is
-    /// taken as 0, and alpha is kept within 0 to 1.
+    /// taken as 0, one past a half float's range as its largest, and alpha is kept within 0
+    /// to 1.
     fn read(self, bytes: &[u8]) -> Vec<Pixel> {
         use half::f16;
         use rayon::prelude::*;
@@ -495,22 +497,110 @@ impl PixelFormat {
                         if f.is_finite() { f } else { 0.0 }
                     };
                     let a = v(3).clamp(0.0, 1.0);
-                    if a == 0.0 {
-                        [f16::ZERO; 4]
-                    } else {
-                        [f16::from_f32(v(0) * a), f16::from_f32(v(1) * a), f16::from_f32(v(2) * a), f16::from_f32(a)]
-                    }
+                    // Within what a half float holds: past it, infinity, which compositing
+                    // over turns to NaN (infinity times zero).
+                    let channel = |i: usize| f16::from_f32((v(i) * a).clamp(-f16::MAX.to_f32(), f16::MAX.to_f32()));
+                    if a == 0.0 { [f16::ZERO; 4] } else { [channel(0), channel(1), channel(2), f16::from_f32(a)] }
                 }
             })
             .collect()
     }
 }
 
-/// What a method made off the interface thread answers with, and the shared memory to keep
-/// until the caller has opened it, if any.
+/// What a method made off the interface thread answers with; the shared memory to keep until
+/// the caller has opened it, if any; and, for a change, what is left to do on the interface
+/// thread, whose result is the answer instead.
 pub struct Made {
     answer: Value,
     keep: Option<(String, crate::shared_memory::Mapping)>,
+    finish: Option<Finish>,
+}
+
+/// What a change made ready off the interface thread does on it: its answer.
+pub type Finish = Box<dyn FnOnce(&mut AppState) -> Result<Value, String> + Send>;
+
+/// Pixels to put in, made ready: as a new layer's image (at the canvas's origin), or the
+/// pixels themselves, to go into a layer.
+enum Content {
+    Image(Box<RasterImage>),
+    Pixels(Vec<Pixel>),
+}
+
+/// Whether pixels can go into layer `target` of `doc`: one that is not locked and holds
+/// nothing yet or pixels alone, in one object.
+fn pixels_go_into(doc: &opal_core::document::Document, target: LayerId) -> Result<(), String> {
+    let layer = doc.layer(target).ok_or_else(|| format!("There is no layer {} in the image.", target.0))?;
+    if layer.locked {
+        return Err(format!("\"{}\" is locked. Unlock it first.", layer.name));
+    }
+    match &layer.content {
+        LayerContent::Objects(objects) if objects.is_empty() => Ok(()),
+        LayerContent::Objects(objects) if objects.len() == 1 && matches!(objects[0].kind, ObjectKind::Pixels(_)) => {
+            Ok(())
+        }
+        LayerContent::Group(_) => Err(format!("\"{}\" is a group: put them in a layer of it.", layer.name)),
+        LayerContent::Objects(_) => Err(format!(
+            "\"{}\" holds an image or several objects, which pixels do not go into: put them in a new layer.",
+            layer.name
+        )),
+    }
+}
+
+/// Puts `content` into image `id` (made ready by `put_pixels`), at `rect` of the canvas: as
+/// a new layer above the active one (called `name`), or into layer `target`, replacing its
+/// pixels there; as made by script run `script`, if the call was. The layer's id.
+fn put_pixels_now(
+    st: &mut AppState,
+    id: DocId,
+    target: Option<LayerId>,
+    rect: IRect,
+    content: Content,
+    name: Option<String>,
+    script: Option<u64>,
+) -> Result<Value, String> {
+    let d = st.doc_mut(id).ok_or("The image was closed before the pixels could be put in.")?;
+    // The call's run, as when it was carried out (its changes join the run's).
+    let before = std::mem::replace(&mut d.script, script);
+    let into = (|| match (target, content) {
+        (None, Content::Image(image)) => {
+            let pos = AppState::above_active(d);
+            let mut made = None;
+            d.apply("Put pixels", |doc, ids| {
+                let name = name.unwrap_or_else(|| format!("Layer {}", crate::layer_ops::count_layers(doc) + 1));
+                let mut layer = Layer::new_raster(ids.layer(), ids.object(), name, *image);
+                if let LayerContent::Objects(objects) = &mut layer.content
+                    && let ObjectKind::Pixels(p) = &mut objects[0].kind
+                {
+                    p.offset = [rect.x0, rect.y0];
+                }
+                made = Some(layer.id);
+                doc.insert(pos, layer)
+            })
+            .map_err(|e| e.to_string())?;
+            Ok(made.expect("added"))
+        }
+        (Some(target), Content::Pixels(pixels)) => {
+            pixels_go_into(d.doc(), target)?;
+            d.apply("Put pixels", |doc, ids| {
+                let l = doc.layer_mut(target).ok_or(opal_core::document::TreeError::NoSuchLayer(target))?;
+                let LayerContent::Objects(objects) = &mut l.content else { unreachable!("checked") };
+                if objects.is_empty() {
+                    let mut image = RasterImage::new();
+                    image.write_rect(&rect, &pixels);
+                    objects.push(opal_core::document::Object::pixels(ids.object(), image));
+                } else if let ObjectKind::Pixels(p) = &mut objects[0].kind {
+                    let local = rect.translate(-p.offset[0], -p.offset[1]);
+                    Arc::make_mut(&mut p.image).write_rect(&local, &pixels);
+                }
+                Ok::<(), opal_core::document::TreeError>(())
+            })
+            .map_err(|e| e.to_string())?;
+            Ok(target)
+        }
+        _ => unreachable!("an image is made for a new layer, pixels for one there"),
+    })();
+    d.script = before;
+    into.map(|layer| json!({ "layer": layer.0 }))
 }
 
 /// The methods clients give in their own way, not as they are: the list of methods itself,
@@ -735,7 +825,7 @@ impl AppState {
             Some(cmd) => self.carry_out(cmd, method.params, &args, ctx),
             None if method.name == "image" => self.image_by_args(&args, ctx),
             None if method.name == "pixels" => self.pixels_by_args(&args, ctx),
-            None if method.name == "put_pixels" => Reply::Now(self.put_pixels_by_args(&args)),
+            None if method.name == "put_pixels" => self.put_pixels_by_args(&args, ctx),
             None => Reply::Now(self.answer(&method.name, &args)),
         };
         // What would have been told in a dialog comes back with the reply instead: an error,
@@ -837,11 +927,9 @@ impl AppState {
             }
             "methods" => Ok(describe()),
             "release_pixels" => {
-                let name = args.text("shm").expect("required");
-                match self.shared_out.remove(name) {
-                    Some(_) => Ok(json!({})),
-                    None => Err(format!("There is no shared memory {name} to release.")),
-                }
+                // Whether or not it is still kept (it goes by itself after a while).
+                self.shared_out.remove(args.text("shm").expect("required"));
+                Ok(json!({}))
             }
             _ => unreachable!("every query is answered (but `image`, by image_by_args)"),
         }
@@ -1118,7 +1206,11 @@ impl AppState {
             let mut memory = crate::memory::Allowance::now();
             memory.take(opal_io::image_files::export_memory(&doc, size.as_ref()))?;
             let png = opal_io::image_files::png_in_memory(&doc, size.as_ref(), Some(crate::background::pool()))?;
-            Ok(Made { answer: json!({ "png": base64(&png), "width": width, "height": height }), keep: None })
+            Ok(Made {
+                answer: json!({ "png": base64(&png), "width": width, "height": height }),
+                keep: None,
+                finish: None,
+            })
         })
     }
 
@@ -1139,7 +1231,8 @@ impl AppState {
         let height = args.opt_int("height").unwrap_or(canvas.height());
         let rect = IRect::new(x0, y0, x0 + width, y0 + height);
         let format = PixelFormat::named(args.text("format").expect("it has a default"));
-        let shared = args.flag("shared") == Some(true);
+        // Elsewhere, there is no shared memory yet: always in the answer.
+        let shared = cfg!(windows) && args.flag("shared") == Some(true);
         let count = rect.width() as u64 * rect.height() as u64;
         let bytes = count * format.bytes_per_pixel() as u64;
         self.off_thread("pixels", ctx, move || {
@@ -1150,108 +1243,92 @@ impl AppState {
             // The pixels read, and what they are written to (in base64, a third more again).
             let written = if shared { bytes } else { bytes + bytes.div_ceil(3) * 4 };
             memory.take(crate::memory::Need::at_once(count * 8 + written))?;
-            let flat = crate::background::pool().install(|| opal_core::composite::composite_within(&layers, &rect));
-            let pixels = flat.read_rect(&rect);
-            drop(flat);
+            // The work in parallel goes to the background pool, not the interface thread's.
+            let pool = crate::background::pool();
+            let pixels = pool.install(|| opal_core::composite::flatten(&layers, &rect));
             let mut answer = json!({ "width": rect.width(), "height": rect.height(), "format": format.name() });
             if shared {
                 let name = crate::shared_memory::new_name();
                 let mut mapping = crate::shared_memory::Mapping::create(&name, len)?;
-                format.write(&pixels, mapping.bytes_mut());
+                pool.install(|| format.write(&pixels, mapping.bytes_mut()));
                 answer["shm"] = json!(name);
                 answer["bytes"] = json!(len);
-                Ok(Made { answer, keep: Some((name, mapping)) })
+                Ok(Made { answer, keep: Some((name, mapping)), finish: None })
             } else {
                 let mut out = vec![0u8; len];
-                format.write(&pixels, &mut out);
+                pool.install(|| format.write(&pixels, &mut out));
                 answer["data"] = json!(base64(&out));
-                Ok(Made { answer, keep: None })
+                Ok(Made { answer, keep: None, finish: None })
             }
         })
     }
 
-    /// Puts the pixels `args` gives into an image (the `put_pixels` change): the layer they
-    /// went into.
-    fn put_pixels_by_args(&mut self, args: &Args) -> Result<Value, String> {
-        let id = self.which(args)?;
+    /// Puts the pixels `args` gives into an image (the `put_pixels` change): read and made
+    /// tiles on a thread of its own, then put in on this one, when the user is not busy (see
+    /// [`answers_while`](Self::answers_while)); its answer, the layer they went into.
+    fn put_pixels_by_args(&mut self, args: &Args, ctx: &egui::Context) -> Reply {
+        let now = |r: Result<Value, String>| Reply::Now(r);
+        let id = match self.which(args) {
+            Ok(id) => id,
+            Err(why) => return now(Err(why)),
+        };
+        let d = self.doc(id).expect("found");
+        let target = args.layer();
+        // Asked again once the pixels are ready: the layer may have changed meanwhile.
+        if let Some(t) = target
+            && let Err(why) = pixels_go_into(d.doc(), t)
+        {
+            return now(Err(why));
+        }
         let (width, height) = (args.int("width"), args.int("height"));
         let format = PixelFormat::named(args.text("format").expect("it has a default"));
         let count = width as u64 * height as u64;
-        let len = usize::try_from(count * format.bytes_per_pixel() as u64)
-            .map_err(|_| "put_pixels: that is more than this computer can hold.".to_owned())?;
-        // What they are read into, and the tiles they become.
-        let mut memory = crate::memory::Allowance::now();
-        memory.take(crate::memory::Need::at_once(count * 16))?;
-        let pixels = match (args.text("shm"), args.text("data")) {
-            (Some(name), None) => format.read(&crate::shared_memory::Mapping::open(name, len)?.bytes()[..len]),
-            (None, Some(data)) => {
-                let raw = unbase64(data).ok_or("put_pixels: data is not base64.")?;
-                if raw.len() != len {
-                    return Err(format!(
-                        "put_pixels: data holds {} bytes, not the {len} of {width} × {height} {} pixels.",
-                        raw.len(),
-                        format.name()
-                    ));
-                }
-                format.read(&raw)
-            }
-            _ => return Err("put_pixels: give the pixels in shm or in data, one of them.".to_owned()),
+        let Ok(len) = usize::try_from(count * format.bytes_per_pixel() as u64) else {
+            return now(Err("put_pixels: that is more than this computer can hold.".to_owned()));
         };
-        let d = self.doc_mut(id).expect("found");
+        let source = match (args.text("shm"), args.text("data")) {
+            (Some(name), None) => Ok(name.to_owned()),
+            (None, Some(data)) => Err(data.to_owned()),
+            _ => return now(Err("put_pixels: give the pixels in shm or in data, one of them.".to_owned())),
+        };
         let canvas = d.doc().canvas.rect();
-        let at = [canvas.x0 + args.int("x"), canvas.y0 + args.int("y")];
-        let into = match args.layer() {
-            None => {
-                let pos = AppState::above_active(d);
-                let name = args.text("name").map(str::to_owned);
-                let mut image = RasterImage::from_pixels(width as u32, height as u32, &pixels);
-                image.prune_transparent();
-                let mut made = None;
-                d.apply("Put pixels", |doc, ids| {
-                    let name = name.unwrap_or_else(|| format!("Layer {}", crate::layer_ops::count_layers(doc) + 1));
-                    let mut layer = Layer::new_raster(ids.layer(), ids.object(), name, image);
-                    if let LayerContent::Objects(objects) = &mut layer.content
-                        && let ObjectKind::Pixels(p) = &mut objects[0].kind
-                    {
-                        p.offset = at;
-                    }
-                    made = Some(layer.id);
-                    doc.insert(pos, layer)
-                })
-                .map_err(|e| e.to_string())?;
-                made.expect("added")
-            }
-            Some(target) => {
-                let layer =
-                    d.doc().layer(target).ok_or_else(|| format!("There is no layer {} in the image.", target.0))?;
-                if layer.locked {
-                    return Err(format!("\"{}\" is locked. Unlock it first.", layer.name));
+        let rect = IRect::new(canvas.x0 + args.int("x"), canvas.y0 + args.int("y"), 0, 0);
+        let rect = IRect::new(rect.x0, rect.y0, rect.x0 + width, rect.y0 + height);
+        let name = args.text("name").map(str::to_owned);
+        let script = d.script;
+        let (w, h) = (width as u32, height as u32);
+        self.off_thread("put", ctx, move || {
+            // What they are read into, and the tiles they become.
+            let mut memory = crate::memory::Allowance::now();
+            memory.take(crate::memory::Need::at_once(count * 16))?;
+            let pool = crate::background::pool();
+            let made = |bytes: &[u8]| match (target, format) {
+                // Kept at 8 bits, as an 8-bit image file's pixels are.
+                (None, PixelFormat::Srgb8) => {
+                    Content::Image(Box::new(RasterImage::from_srgb8(w, h, bytemuck::cast_slice(bytes))))
                 }
-                let one_of_pixels = matches!(&layer.content,
-                    LayerContent::Objects(objects) if objects.len() == 1 && matches!(objects[0].kind, ObjectKind::Pixels(_)));
-                if !one_of_pixels {
-                    return Err(format!(
-                        "\"{}\" is not a layer of pixels alone: rasterize it first, or put them in a new layer.",
-                        layer.name
-                    ));
+                (None, _) => {
+                    Content::Image(Box::new(RasterImage::from_pixels(w, h, &pool.install(|| format.read(bytes)))))
                 }
-                let rect = IRect::new(at[0], at[1], at[0] + width, at[1] + height);
-                d.apply("Put pixels", |doc, _| {
-                    let l = doc.layer_mut(target).ok_or(opal_core::document::TreeError::NoSuchLayer(target))?;
-                    if let LayerContent::Objects(objects) = &mut l.content
-                        && let ObjectKind::Pixels(p) = &mut objects[0].kind
-                    {
-                        let image = Arc::make_mut(&mut p.image);
-                        image.write_rect(&rect.translate(-p.offset[0], -p.offset[1]), &pixels);
-                        image.prune_transparent();
+                (Some(_), _) => Content::Pixels(pool.install(|| format.read(bytes))),
+            };
+            let content = match source {
+                Ok(shm) => made(&crate::shared_memory::Mapping::open(&shm, len)?.bytes()[..len]),
+                Err(data) => {
+                    let raw = unbase64(&data).ok_or("put_pixels: data is not base64.")?;
+                    if raw.len() != len {
+                        return Err(format!(
+                            "put_pixels: data holds {} bytes, not the {len} of {width} × {height} {} pixels.",
+                            raw.len(),
+                            format.name()
+                        ));
                     }
-                    Ok::<(), opal_core::document::TreeError>(())
-                })
-                .map_err(|e| e.to_string())?;
-                target
-            }
-        };
-        Ok(json!({ "layer": into.0 }))
+                    made(&raw)
+                }
+            };
+            let finish: Finish = Box::new(move |st| put_pixels_now(st, id, target, rect, content, name, script));
+            Ok(Made { answer: Value::Null, keep: None, finish: Some(finish) })
+        })
     }
 
     /// Runs `make` (making the answer to a call that does `what`) on a thread of its own:
@@ -1277,24 +1354,34 @@ impl AppState {
         Reply::Later(n)
     }
 
+    /// [`answers_while`](Self::answers_while) the user is not busy.
+    #[cfg(test)]
+    pub fn answers(&mut self) -> Vec<(u64, Result<Value, String>)> {
+        self.answers_while(false, false)
+    }
+
     /// The answers to calls whose writes, copies to the clipboard, images or pixels have
     /// finished since asked last, by number. Shared memory pixels were put in is kept until
-    /// the caller releases it, or for a minute.
-    pub fn answers(&mut self) -> Vec<(u64, Result<Value, String>)> {
+    /// the caller releases it, or for a minute. A change made ready off this thread is made
+    /// once the user is not `busy` (as a call waits then), and refused once `quitting`.
+    pub fn answers_while(&mut self, busy: bool, quitting: bool) -> Vec<(u64, Result<Value, String>)> {
         let mut answered = std::mem::take(&mut self.answered);
         let shared_out = &mut self.shared_out;
+        let finishing = &mut self.finishing;
         shared_out.retain(|_, (_, since)| since.elapsed() < KEEP_SHARED);
-        self.made.retain(|(n, made)| match made.try_recv() {
-            Ok(result) => {
-                answered.push((
-                    *n,
-                    result.map(|made| {
-                        if let Some((name, mapping)) = made.keep {
-                            shared_out.insert(name, (mapping, std::time::Instant::now()));
-                        }
-                        made.answer
-                    }),
-                ));
+        self.made.retain_mut(|(n, made)| match made.try_recv() {
+            Ok(Ok(made)) => {
+                if let Some((name, mapping)) = made.keep {
+                    shared_out.insert(name, (mapping, std::time::Instant::now()));
+                }
+                match made.finish {
+                    Some(finish) => finishing.push_back((*n, finish)),
+                    None => answered.push((*n, Ok(made.answer))),
+                }
+                false
+            }
+            Ok(Err(why)) => {
+                answered.push((*n, Err(why)));
                 false
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => true,
@@ -1303,6 +1390,12 @@ impl AppState {
                 false
             }
         });
+        while (quitting || !busy)
+            && let Some((n, finish)) = self.finishing.pop_front()
+        {
+            let result = if quitting { Err("The editor is closing.".to_owned()) } else { finish(self) };
+            answered.push((n, result));
+        }
         answered
     }
 
@@ -1777,7 +1870,25 @@ mod tests {
         let group = now(&mut st, "new_group", json!({})).unwrap()["layer"].as_u64().unwrap();
         let err =
             call(&mut st, "put_pixels", json!({ "layer": group, "width": 1, "height": 1, "data": base64(&[0; 4]) }));
-        assert!(err.unwrap_err().contains("not a layer of pixels"));
+        assert!(err.unwrap_err().contains("is a group"));
+        // Into a layer with nothing in it yet, as new_layer makes one.
+        let empty = now(&mut st, "new_layer", json!({ "name": "Empty" })).unwrap()["layer"].as_u64().unwrap();
+        let fill = json!({ "layer": empty, "x": 1, "y": 0, "width": 1, "height": 1, "data": one([5, 6, 7, 255]) });
+        assert_eq!(call(&mut st, "put_pixels", fill).unwrap()["layer"].as_u64(), Some(empty));
+        let got = call(&mut st, "pixels", json!({ "layer": empty, "x": 1, "width": 1, "height": 1, "shared": false }));
+        assert_eq!(unbase64(got.unwrap()["data"].as_str().unwrap()).unwrap(), [5, 6, 7, 255]);
+        // Linear light past a half float's range: its largest, not infinity.
+        let bright: Vec<u8> = [1e5f32, 0.5, 0.5, 1.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let put = json!({ "width": 1, "height": 1, "format": "linear", "data": base64(&bright) });
+        let hdr = call(&mut st, "put_pixels", put).unwrap()["layer"].as_u64().unwrap();
+        let back = call(
+            &mut st,
+            "pixels",
+            json!({ "layer": hdr, "width": 1, "height": 1, "format": "linear", "shared": false }),
+        );
+        let back = unbase64(back.unwrap()["data"].as_str().unwrap()).unwrap();
+        let red = f32::from_le_bytes(back[0..4].try_into().unwrap());
+        assert_eq!(red, half::f16::MAX.to_f32(), "{red}");
         let neither = call(&mut st, "put_pixels", json!({ "width": 1, "height": 1 }));
         assert!(neither.unwrap_err().contains("one of them"));
         // A layer alone, as an image.
@@ -1798,7 +1909,8 @@ mod tests {
         assert!(opened.bytes().iter().all(|&b| b == 255), "a white canvas");
         now(&mut st, "release_pixels", json!({ "shm": name })).unwrap();
         assert!(st.shared_out.is_empty());
-        assert!(now(&mut st, "release_pixels", json!({ "shm": name })).unwrap_err().contains("no shared memory"));
+        // Again, or after it went by itself: no harm.
+        assert!(now(&mut st, "release_pixels", json!({ "shm": name })).is_ok());
         // Given through shared memory the caller made.
         let given = crate::shared_memory::new_name();
         let mut made = crate::shared_memory::Mapping::create(&given, 4).unwrap();
@@ -1810,6 +1922,43 @@ mod tests {
         assert_eq!(unbase64(back["data"].as_str().unwrap()).unwrap(), [10, 20, 30, 255]);
         let missing = json!({ "width": 1, "height": 1, "shm": "Local\\opal-no-such-memory" });
         assert!(call(&mut st, "put_pixels", missing).unwrap_err().contains("no shared memory"));
+    }
+
+    #[test]
+    fn pixels_made_ready_wait_to_go_in_while_the_user_is_busy() {
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 4, "height": 4 })).unwrap();
+        let layers = |st: &AppState| st.active().unwrap().doc().layers.len();
+        let before = layers(&st);
+        let put = |st: &mut AppState| {
+            let given = args(json!({ "width": 1, "height": 1, "data": base64(&[1, 2, 3, 255]) }));
+            match st.call("put_pixels", &given, &egui::Context::default()) {
+                Reply::Later(n) => n,
+                Reply::Now(r) => panic!("answered at once: {r:?}"),
+            }
+        };
+        let n = put(&mut st);
+        // Made ready, but the user busy: held, not put in.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while st.finishing.is_empty() && std::time::Instant::now() < until {
+            assert!(st.answers_while(true, false).is_empty());
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!((st.finishing.len(), layers(&st)), (1, before), "put in while the user was busy");
+        let answered = st.answers_while(false, false);
+        assert!(matches!(answered.as_slice(), [(m, Ok(_))] if *m == n), "{answered:?}");
+        assert_eq!(layers(&st), before + 1);
+        // Once the user has asked to quit: refused.
+        let n = put(&mut st);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut answered = Vec::new();
+        while answered.is_empty() && std::time::Instant::now() < until {
+            answered = st.answers_while(true, true);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(matches!(answered.as_slice(), [(m, Err(why))] if *m == n && why.contains("closing")), "{answered:?}");
+        assert_eq!(layers(&st), before + 1);
     }
 
     #[test]

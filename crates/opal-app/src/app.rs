@@ -753,7 +753,6 @@ impl eframe::App for OpalApp {
         }
         self.st.poll_paste(ctx.input(|i| i.pointer.any_down()));
         self.st.thumbs.end_frame();
-        self.st.apply_tile_budget();
         // What operations on documents asked to say.
         let notices: Vec<String> = self.st.docs.iter_mut().filter_map(|d| d.notice.take()).collect();
         for n in notices {
@@ -1020,19 +1019,24 @@ impl OpalApp {
         if (serving && !renew) || (!serving && self.mcp_http_failed == Some(port)) {
             return;
         }
-        // The old one goes first, freeing its port.
-        (self.mcp_http, self.st.mcp_http) = (None, None);
         let (Some(token_file), Some(api)) = (crate::mcp_http::token_file(), self.st.scripts_file.clone()) else {
             return;
         };
-        let started = crate::mcp_http::token(&token_file, renew).and_then(|token| {
-            let server = crate::mcp_http::HttpServer::start(port, token.clone(), move || {
-                Box::new(crate::mcp::pipe_to(api.clone()))
-            })?;
-            Ok((server, token))
-        });
-        match started {
-            Ok((server, token)) => {
+        // The token first: if a new one cannot be made, the one served stays.
+        let token = match crate::mcp_http::token(&token_file, renew) {
+            Ok(token) => token,
+            Err(e) => {
+                self.mcp_http_failed = Some(port);
+                let why = format!("Its token could not be kept in {}: {e}", token_file.display());
+                let title = if serving { "No new MCP token was made" } else { "MCP over HTTP is not served" };
+                return self.st.message(crate::state::MessageKind::Warning, title, why);
+            }
+        };
+        // The old server goes first, freeing its port.
+        (self.mcp_http, self.st.mcp_http) = (None, None);
+        let new_caller = move || -> Box<dyn crate::mcp::Caller + Send> { Box::new(crate::mcp::pipe_to(api.clone())) };
+        match crate::mcp_http::HttpServer::start(port, token.clone(), new_caller) {
+            Ok(server) => {
                 self.st.mcp_http = Some((port, token));
                 (self.mcp_http, self.mcp_http_failed) = (Some(server), None);
             }

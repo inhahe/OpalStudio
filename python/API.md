@@ -396,7 +396,7 @@ The pixels of an image, as shown, or of one layer alone, within a rectangle of t
 | `width` | int | The rectangle's width, in pixels. From 1 to 300000. Default: the canvas's. |
 | `height` | int | The rectangle's height, in pixels. From 1 to 300000. Default: the canvas's. |
 | `format` | `srgb8`, `srgb16`, `linear` | How each pixel is given, row by row from the top left, red, green, blue and alpha (straight, not premultiplied): srgb8 as bytes in sRGB; srgb16 as 16-bit values in sRGB, little-endian; linear as 32-bit floats in linear light, little-endian. Default: "srgb8". |
-| `shared` | bool | In shared memory (on Windows), which the answer names as shm, rather than in the answer. Default: true. |
+| `shared` | bool | In shared memory, which the answer names as shm, rather than in the answer (on Windows: elsewhere they always come in the answer). Default: true. |
 
 ### `release_pixels`
 

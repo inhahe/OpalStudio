@@ -53,5 +53,8 @@ shared memory (`shm_open` and `mmap`, through `rustix`), which Python reaches th
 `crates/opal-app/src/server.rs` (`read_first_line`, and the socket's permissions). The
 non-Windows path of the hello deadline uses the socket's receive timeout and has never been
 built; the Unix socket lives in the abstract namespace, which any local user can connect to
-(the token still keeps them out). Waits on a non-Windows build. **Fix:** build and test it
-there; consider a socket file in the user's runtime folder (mode 0600) instead.
+(the token still keeps them out). And `is_running` takes an editor that crashed, leaving
+its socket file behind, for one running (a socket file would; the abstract namespace does
+not leave one). Waits on a non-Windows build. **Fix:** build and test it there; consider a
+socket file in the user's runtime folder (mode 0600) instead, connected to (not merely
+found) to tell whether an editor is there.

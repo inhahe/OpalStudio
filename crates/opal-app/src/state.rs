@@ -154,6 +154,9 @@ pub struct AppState {
     /// The shared memory holding pixels a call asked for, by name, until the caller releases
     /// it, and since when.
     pub shared_out: HashMap<String, (crate::shared_memory::Mapping, std::time::Instant)>,
+    /// Changes made ready off this thread for such calls (`put_pixels`), by number, waiting
+    /// for the user not to be busy to be made.
+    pub finishing: VecDeque<(u64, crate::api::Finish)>,
     /// Whether the window should come to the front (a file was handed to it to open).
     pub raise_window: bool,
     /// Scripts run from the editor, and what they printed.
@@ -272,6 +275,7 @@ impl AppState {
             answered: Vec::new(),
             made: Vec::new(),
             shared_out: HashMap::new(),
+            finishing: VecDeque::new(),
             raise_window: false,
             console: crate::console::Console::default(),
             scripts_file: None,
@@ -368,8 +372,9 @@ impl AppState {
     }
 
     /// What is done between frames, with or without a window: the copies and writes that
-    /// have finished reported (`pointer_held` as for [`poll_writes`](Self::poll_writes)), and
-    /// each image's history kept within the memory the preferences give it.
+    /// have finished reported (`pointer_held` as for [`poll_writes`](Self::poll_writes)),
+    /// each image's history kept within the memory the preferences give it, and the tiles'
+    /// share of memory kept to (and trouble writing them to disk told of).
     pub fn between_frames(&mut self, pointer_held: bool) {
         self.poll_copies();
         self.poll_writes(pointer_held);
@@ -377,6 +382,7 @@ impl AppState {
         for d in &mut self.docs {
             d.set_history_budget(budget);
         }
+        self.apply_tile_budget();
     }
 
     /// Lets images' tiles take the share of memory the preference says, before they go to

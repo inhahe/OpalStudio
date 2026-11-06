@@ -402,7 +402,7 @@ impl Server {
             }
             // Any left for the next frame asked for it as they came (pass_on).
         }
-        for (n, result) in st.answers() {
+        for (n, result) in st.answers_while(busy, quitting) {
             if let Some(answer) = self.later.remove(&n) {
                 let _ = answer.send(result);
             }
@@ -1131,6 +1131,16 @@ with opal.connect() as editor:
     editor.put_pixels(np.ones((1, 2, 3)), layer=put, x=0, y=2)
     assert (editor.pixels(x=0, y=2, width=2, height=1) == 255).all()
     editor.close(document=pic, discard=True)
+    # As elsewhere, with no shared memory: in the lines, a band of rows a request.
+    opal._SHARED = False
+    wide = editor.new(width=600, height=400, background="transparent")["document"]
+    big = (np.arange(600 * 400 * 4) % 251).astype(np.uint8).reshape(400, 600, 4)
+    big[..., 3] = 255
+    banded = editor.put_pixels(big, name="Banded")
+    assert (editor.pixels(layer=banded) == big).all()
+    assert len(editor.layers(document=wide)) == 2, "a layer a band"
+    opal._SHARED = True
+    editor.close(document=wide, discard=True)
     left = editor.documents()
     # Changes to an image the script leaves open, one history state once it ends.
     editor.new(width=8, height=8)

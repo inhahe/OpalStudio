@@ -12,7 +12,7 @@ use std::process::Command;
 fn main() {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let Ok(launcher) = std::env::current_exe() else { std::process::exit(1) };
-    let editor = launcher.with_file_name("opal-studio.exe");
+    let editor = launcher.with_file_name(format!("opal-studio{}", std::env::consts::EXE_SUFFIX));
     let waits = args.first().is_some_and(|a| a == "--headless" || a == "--mcp");
     let mut command = Command::new(&editor);
     command.args(&args);

@@ -81,7 +81,8 @@ fn contents(ui: &mut egui::Ui, st: &mut AppState) {
             }
         }
         (None, true) if st.scripts_file.is_none() => {
-            ui.label(RichText::new(crate::console::NOT_SERVING).color(weak));
+            let why = st.scripts_unserved.as_deref().unwrap_or(crate::console::NOT_SERVING);
+            ui.label(RichText::new(why).color(weak));
         }
         (None, true) => {
             ui.label(RichText::new("Starting… (if it does not, the port may be taken: choose another).").color(weak));
