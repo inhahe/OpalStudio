@@ -186,13 +186,15 @@ use crate::box_fields::FAR;
 const BOX_X: Param = Param {
     name: "x",
     kind: Kind::Length { min: -FAR, max: FAR },
-    help: "Where the box's top-left corner goes, from the canvas's left edge.",
+    help: "Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's left \
+           edge.",
     otherwise: Otherwise::Now("where the command puts it"),
 };
 const BOX_Y: Param = Param {
     name: "y",
     kind: Kind::Length { min: -FAR, max: FAR },
-    help: "Where the box's top-left corner goes, from the canvas's top edge.",
+    help: "Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's top \
+           edge.",
     otherwise: Otherwise::Now("where the command puts it"),
 };
 const BOX_WIDTH: Param = Param {
@@ -210,14 +212,15 @@ const BOX_HEIGHT: Param = Param {
 const BOX_ANGLE: Param = Param {
     name: "angle",
     kind: Kind::Number { min: -360.0, max: 360.0 },
-    help: "The box's angle, in degrees clockwise, about its top-left corner.",
+    help: "The box's angle, in degrees clockwise, about its anchor point.",
     otherwise: Otherwise::Now("as it is"),
 };
 const BOX_FIT: Param = Param {
     name: "fit",
     kind: Kind::Choice(&["stretch", "inside", "cover"]),
-    help: "With both width and height given: stretch it to them; or keep its proportions and fit it inside \
-           them, or make it cover them, centered on them.",
+    help: "With both width and height given: stretch it to them (along its own sides, turned as it is); or keep \
+           its proportions and fit it, as it is turned, inside the rectangle they make on the canvas (placed \
+           by its anchor point at x and y), or make it cover that rectangle, centered on it.",
     otherwise: Otherwise::Value("\"stretch\""),
 };
 const BOX_ANCHOR: Param = Param {
@@ -606,21 +609,21 @@ const CHANGES: &[(&str, &str, &[Param])] = &[
             Param {
                 name: "x",
                 kind: Kind::Length { min: -FAR, max: FAR },
-                help: "The rectangle's top-left corner, from the canvas's left edge.",
-                otherwise: Otherwise::Value("0"),
+                help: "Where the rectangle's anchor point is, from the canvas's left edge.",
+                otherwise: Otherwise::Now("where that point of the canvas is"),
             },
             Param {
                 name: "y",
                 kind: Kind::Length { min: -FAR, max: FAR },
-                help: "The rectangle's top-left corner, from the canvas's top edge.",
-                otherwise: Otherwise::Value("0"),
+                help: "Where the rectangle's anchor point is, from the canvas's top edge.",
+                otherwise: Otherwise::Now("where that point of the canvas is"),
             },
             length_side("width", "The rectangle's width.", Otherwise::Now("the canvas's")),
             length_side("height", "The rectangle's height.", Otherwise::Now("the canvas's")),
             Param {
                 name: "angle",
                 kind: Kind::Number { min: -360.0, max: 360.0 },
-                help: "The rectangle's angle, in degrees clockwise, about its top-left corner.",
+                help: "The rectangle's angle, in degrees clockwise, about its anchor point.",
                 otherwise: Otherwise::Value("0"),
             },
             Param {
@@ -1087,9 +1090,9 @@ impl Args {
     }
 }
 
-/// Where an API call puts a box, in pixels, its corner from the canvas's: each number given
-/// replaces the box's own; a side left out keeps the box's proportions if the other is
-/// given; and with both, `fit` says how they are taken.
+/// Where an API call puts a box, in pixels, its anchor point (`at`) from the canvas's
+/// corner: each number given replaces the box's own; a side left out keeps the box's
+/// proportions if the other is given; and with both, `fit` says how they are taken.
 #[derive(Clone, Debug, Default)]
 pub struct BoxArgs {
     pub x: Option<f64>,
@@ -1136,59 +1139,53 @@ impl BoxArgs {
     }
 
     /// The box `p` (as the document has it, its position that of the point [`at`](Self::at))
-    /// with these put in; `corner` is the canvas's top-left corner. A box fitted to a width
-    /// and height is centered on the rectangle they make, which is placed by the same point
-    /// and turned with the box.
+    /// with these numbers put in, its size as given, or kept in proportion; `corner` is the
+    /// canvas's top-left corner. (A fit inside or covering a rectangle is [`place_box`]'s.)
     pub fn applied(&self, p: &crate::transform::Params, corner: [f64; 2]) -> crate::transform::Params {
         let (w, h) = match (self.width, self.height) {
-            (Some(w), Some(h)) => match self.fit {
-                Fit::Stretch => (w, h),
-                fit => {
-                    let (kw, kh) = (w / p.width, h / p.height);
-                    let k = if fit == Fit::Inside { kw.min(kh) } else { kw.max(kh) };
-                    (p.width * k, p.height * k)
-                }
-            },
+            (Some(w), Some(h)) => (w, h),
             (Some(w), None) => (w, p.height * w / p.width),
             (None, Some(h)) => (p.width * h / p.height, h),
             (None, None) => (p.width, p.height),
         };
-        let angle = self.angle.unwrap_or(p.angle);
-        // From the rectangle's point to the box's, along the rectangle's sides: the box is
-        // centered on the rectangle, so its point is nearer the center by what it lacks.
-        let (dx, dy) = match (self.width, self.height) {
-            (Some(bw), Some(bh)) => ((0.5 - self.at[0]) * (bw - w), (0.5 - self.at[1]) * (bh - h)),
-            _ => (0.0, 0.0),
-        };
-        // (A mirrored box's height runs the other way from its corner.)
-        let dy = if p.mirrored { -dy } else { dy };
-        let [dx, dy] = opal_core::geom::Affine::rotate(angle.to_radians()).apply([dx, dy]);
         crate::transform::Params {
-            x: self.x.map_or(p.x, |x| corner[0] + x) + dx,
-            y: self.y.map_or(p.y, |y| corner[1] + y) + dy,
+            x: self.x.map_or(p.x, |x| corner[0] + x),
+            y: self.y.map_or(p.y, |y| corner[1] + y),
             width: w,
             height: h,
-            angle,
+            angle: self.angle.unwrap_or(p.angle),
             mirrored: p.mirrored,
         }
     }
 }
 
-/// Puts the transform box open on `d` where `place` says (see [`BoxArgs::applied`]), or
-/// says why it cannot go there (past what an image file can hold), leaving it as it was.
+/// Puts the transform box open on `d` where `place` says, or says why it cannot go there,
+/// leaving it as it was. Given both sides to fit inside or cover, the box is turned as
+/// asked, then fitted, as it is turned, into the rectangle they make on the canvas (placed
+/// by its point `at` at `x` and `y`, or at the box's own); otherwise its numbers are put in
+/// (see [`BoxArgs::applied`]).
 pub(crate) fn place_box(d: &mut crate::doc::DocState, place: &BoxArgs) -> Result<(), String> {
     let canvas = d.doc().canvas.rect();
     let corner = [canvas.x0 as f64, canvas.y0 as f64];
     let s = d.transform.as_ref().expect("a box is open");
-    let p = s.params_at(place.at);
-    let q = place.applied(&p, corner);
-    let m = s.edited(&p, &q, place.at);
-    d.set_box(m, None);
-    if d.transform.as_ref().is_some_and(|s| s.current != m) {
-        return Err("That would put it past what an image file can hold: give a smaller size, or a place nearer \
-                    the canvas."
-            .to_owned());
+    let at = place.at;
+    let p = s.params_at(at);
+    let m = match (place.fit, place.width, place.height) {
+        (Fit::Inside | Fit::Cover, Some(w), Some(h)) => {
+            let turned = s.edited(&p, &crate::transform::Params { angle: place.angle.unwrap_or(p.angle), ..p }, at);
+            let x = place.x.map_or(p.x, |x| corner[0] + x) - at[0] * w;
+            let y = place.y.map_or(p.y, |y| corner[1] + y) - at[1] * h;
+            let rect = opal_core::geom::FRect::new(x, y, x + w, y + h);
+            crate::transform::fitted(turned, &s.frame, &rect, place.fit == Fit::Cover)
+        }
+        _ => s.edited(&p, &place.applied(&p, corner), at),
+    };
+    if let Some(why) = d.box_refused(&m) {
+        let mut why = why.to_owned();
+        why[..1].make_ascii_uppercase();
+        return Err(format!("{why}."));
     }
+    d.set_box(m, None);
     Ok(())
 }
 
@@ -1570,10 +1567,7 @@ impl AppState {
             }
             Cmd::ResizeCanvas => {
                 let c = self.active().expect("available").doc().canvas;
-                let anchor = args
-                    .text("anchor")
-                    .and_then(|a| ANCHOR_NAMES.iter().position(|n| *n == a))
-                    .map(|i| [(i % 3) as u8, (i / 3) as u8]);
+                let anchor = args.text("anchor").map(|a| crate::box_fields::point(a).map(|f| (f * 2.0) as u8));
                 let margins = ["left", "top", "right", "bottom"].map(|s| args.opt_number(s).map(|v| v.round() as i64));
                 let by_margins = margins.iter().any(Option::is_some);
                 if by_margins && ["width", "height", "anchor"].iter().any(|n| args.get(n).is_some()) {
@@ -1811,15 +1805,15 @@ impl AppState {
         let d = self.doc_mut(id).expect("found");
         let c = d.doc().canvas;
         let side = |name: &str, canvas: u32| args.opt_number(name).map_or(f64::from(canvas), f64::round);
+        let at = crate::box_fields::point(args.text("anchor").unwrap_or("top-left"));
         let p = crate::transform::Params {
-            x: args.number("x"),
-            y: args.number("y"),
+            x: args.opt_number("x").unwrap_or(at[0] * f64::from(c.width)),
+            y: args.opt_number("y").unwrap_or(at[1] * f64::from(c.height)),
             width: side("width", c.width),
             height: side("height", c.height),
             angle: args.number("angle"),
             mirrored: false,
         };
-        let at = crate::box_fields::point(args.text("anchor").unwrap_or("top-left"));
         let b = crate::crop::CropBox::from_numbers(&p, [c.x as f64, c.y as f64], at);
         if b.canvas() != c || b.angle.abs() > 1e-9 || delete {
             d.crop_to(&b, delete, sampling).map_err(|why| format!("crop: {why}"))?;
@@ -3086,6 +3080,16 @@ mod tests {
         let t = now(&mut st, "transform", json!({ "angle": 90 })).unwrap();
         assert_eq!((t["box"]["x"].clone(), t["box"]["angle"].clone()), (json!(-50.0), json!(90.0)));
         assert_eq!(t["layers"], json!([layer]));
+        // Turned, it is fitted as turned into the rectangle as it lies on the canvas: a
+        // quarter turn makes the 40 × 20 image 20 wide and 40 tall, 7.5 times larger inside
+        // 400 × 300, centered; its own top-left corner is then at the right.
+        let turned =
+            json!({ "layers": [layer], "x": 0, "y": 0, "width": 400, "height": 300, "angle": 90, "fit": "inside" });
+        let t = now(&mut st, "transform", turned).unwrap();
+        let b = &t["box"];
+        let close = |v: &Value, want: f64| (v.as_f64().unwrap() - want).abs() < 1e-6;
+        assert!(close(&b["x"], 275.0) && close(&b["y"], 0.0) && close(&b["width"], 300.0), "{t}");
+        assert!(close(&b["height"], 150.0) && close(&b["angle"], 90.0), "{t}");
         // Given at its center, a box is placed by its center, and turns about it.
         let centered = json!({ "layers": [layer], "x": 50, "y": 50, "width": 40, "anchor": "center" });
         let t = now(&mut st, "transform", centered).unwrap();
@@ -3221,29 +3225,7 @@ mod tests {
         );
         assert_eq!(applied(BoxArgs { height: Some(10.0), ..BoxArgs::default() }), (10.0, 20.0, 20.0, 10.0));
         let both = BoxArgs { x: Some(0.0), y: Some(0.0), width: Some(60.0), height: Some(60.0), ..BoxArgs::default() };
-        assert_eq!(applied(both.clone()), (100.0, 200.0, 60.0, 60.0));
-        assert_eq!(applied(BoxArgs { fit: Fit::Inside, ..both.clone() }), (100.0, 215.0, 60.0, 30.0));
-        assert_eq!(applied(BoxArgs { fit: Fit::Cover, ..both.clone() }), (70.0, 200.0, 120.0, 60.0));
-        // Turned, it is centered on the rectangle turned the same way about its corner:
-        // 60 × 30 down the 60 × 60 square turned a quarter, 15 to the left of its corner.
-        let (x, y, w, h) = applied(BoxArgs { fit: Fit::Inside, angle: Some(90.0), ..both.clone() });
-        assert!((x - 85.0).abs() < 1e-9 && (y - 200.0).abs() < 1e-9 && (w, h) == (60.0, 30.0), "{x}, {y}");
-        // Given by its center, the rectangle and the box fitted into it share it.
-        let center = BoxArgs {
-            x: Some(50.0),
-            y: Some(50.0),
-            width: Some(60.0),
-            height: Some(60.0),
-            at: [0.5, 0.5],
-            ..BoxArgs::default()
-        };
-        let q =
-            BoxArgs { fit: Fit::Inside, ..center }.applied(&crate::transform::Params { x: 0.0, y: 0.0, ..p }, corner);
-        assert_eq!((q.x, q.y, q.width, q.height), (150.0, 250.0, 60.0, 30.0));
-        // Mirrored, the box runs up from its corner, and is centered on the rectangle so.
-        let mirrored = crate::transform::Params { mirrored: true, ..p };
-        let q = BoxArgs { fit: Fit::Inside, ..both }.applied(&mirrored, corner);
-        assert_eq!((q.x, q.y, q.width, q.height), (100.0, 185.0, 60.0, 30.0));
+        assert_eq!(applied(both), (100.0, 200.0, 60.0, 60.0));
     }
 
     #[test]
@@ -3277,6 +3259,11 @@ mod tests {
         .unwrap();
         assert_eq!((turned["width"].as_u64(), turned["height"].as_u64()), (Some(20), Some(20)));
         assert_eq!(st.active().unwrap().history.undo_label(), Some("Crop and straighten"));
+        // By its center, with no place given: the canvas's center, so a centered crop.
+        now(&mut st, "new", json!({ "width": 200, "height": 100 })).unwrap();
+        now(&mut st, "crop", json!({ "width": 100, "height": 50, "anchor": "center" })).unwrap();
+        let c = st.active().unwrap().doc().canvas;
+        assert_eq!((c.x, c.y, c.width, c.height), (50, 25, 100, 50));
     }
 
     #[test]

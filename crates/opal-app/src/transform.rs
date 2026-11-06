@@ -186,10 +186,13 @@ impl Session {
         }
     }
 
-    /// The point `at` of the frame (fractions of its width and height from its top-left
-    /// corner), in the frame's own coordinates.
+    /// The point `at` of the box (fractions of its width and height from its top-left
+    /// corner, as [`params_at`](Self::params_at) describes the box: turned by its angle,
+    /// then mirrored along its height if it is), in the frame's own coordinates. A mirrored
+    /// frame's height runs the other way, so its points are where their names say they are.
     fn point(&self, at: [f64; 2]) -> [f64; 2] {
-        [self.frame.x0 + at[0] * self.frame.width(), self.frame.y0 + at[1] * self.frame.height()]
+        let v = if self.current.determinant() < 0.0 { 1.0 - at[1] } else { at[1] };
+        [self.frame.x0 + at[0] * self.frame.width(), self.frame.y0 + v * self.frame.height()]
     }
 
     /// The box with the numbers changed from `before` (what [`params_at`](Self::params_at)
@@ -322,40 +325,45 @@ impl Session {
         }
     }
 
-    /// The transform that fits the box inside `canvas` (or, with `fill`, makes it cover
-    /// the canvas), centered, scaled evenly from how it is now (so its angle, proportions
-    /// and any shear stay).
-    pub fn fitted(&self, canvas: &IRect, fill: bool) -> Affine {
-        let m = self.current;
-        let Some(inv) = m.inverse() else { return m };
-        let c = canvas.to_f().center();
-        let mid = m.apply(self.frame.center());
-        let half = [canvas.width() as f64 * 0.5, canvas.height() as f64 * 0.5];
-        let k = if fill {
-            // Each canvas corner, as an offset in the frame from its center, must lie within
-            // half the frame.
-            let hf = [self.frame.width() * 0.5, self.frame.height() * 0.5];
-            let k = canvas.to_f().corners().iter().fold(0.0f64, |k, &q| {
-                let a = inv.apply([mid[0] + q[0] - c[0], mid[1] + q[1] - c[1]]);
-                let o = inv.apply(mid);
-                k.max(((a[0] - o[0]) / hf[0]).abs()).max(((a[1] - o[1]) / hf[1]).abs())
-            });
-            k.max(MIN_SCALE)
-        } else {
-            // Each corner of the box, as an offset from its center, must lie within half the
-            // canvas.
-            self.corners().iter().fold(f64::INFINITY, |k, p| {
-                let d = [(p[0] - mid[0]).abs(), (p[1] - mid[1]).abs()];
-                let kx = if d[0] > 0.0 { half[0] / d[0] } else { f64::INFINITY };
-                let ky = if d[1] > 0.0 { half[1] / d[1] } else { f64::INFINITY };
-                k.min(kx).min(ky)
-            })
-        };
-        if !k.is_finite() {
-            return m;
-        }
-        m.then(Affine::translate(c[0] - mid[0], c[1] - mid[1])).then(Affine::scale(k, k).about(c[0], c[1]))
+    /// The transform that fits the box inside `rect` (the canvas, say: document pixels) or,
+    /// with `fill`, makes it cover it: see [`fitted`].
+    pub fn fitted(&self, rect: &FRect, fill: bool) -> Affine {
+        fitted(self.current, &self.frame, rect, fill)
     }
+}
+
+/// The transform that fits the box `frame` carried by `m` inside `rect` (as it lies on the
+/// canvas, turned as it is) or, with `fill`, makes it cover `rect`, centered on it, scaled
+/// evenly from how it is (so its angle, proportions and any shear stay).
+pub fn fitted(m: Affine, frame: &FRect, rect: &FRect, fill: bool) -> Affine {
+    let Some(inv) = m.inverse() else { return m };
+    let c = rect.center();
+    let mid = m.apply(frame.center());
+    let half = [rect.width() * 0.5, rect.height() * 0.5];
+    let k = if fill {
+        // Each corner of the rectangle, as an offset in the frame from its center, must lie
+        // within half the frame.
+        let hf = [frame.width() * 0.5, frame.height() * 0.5];
+        let k = rect.corners().iter().fold(0.0f64, |k, &q| {
+            let a = inv.apply([mid[0] + q[0] - c[0], mid[1] + q[1] - c[1]]);
+            let o = inv.apply(mid);
+            k.max(((a[0] - o[0]) / hf[0]).abs()).max(((a[1] - o[1]) / hf[1]).abs())
+        });
+        k.max(MIN_SCALE)
+    } else {
+        // Each corner of the box, as an offset from its center, must lie within half the
+        // rectangle.
+        frame.corners().iter().map(|&p| m.apply(p)).fold(f64::INFINITY, |k, p| {
+            let d = [(p[0] - mid[0]).abs(), (p[1] - mid[1]).abs()];
+            let kx = if d[0] > 0.0 { half[0] / d[0] } else { f64::INFINITY };
+            let ky = if d[1] > 0.0 { half[1] / d[1] } else { f64::INFINITY };
+            k.min(kx).min(ky)
+        })
+    };
+    if !k.is_finite() {
+        return m;
+    }
+    m.then(Affine::translate(c[0] - mid[0], c[1] - mid[1])).then(Affine::scale(k, k).about(c[0], c[1]))
 }
 
 fn midpoint(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
@@ -586,20 +594,33 @@ impl DocState {
         true
     }
 
+    /// Why the box cannot be put at `m`, if it cannot: it would have no size, or put an
+    /// object past what an image file can hold (see `ImageObject::transform_ok`).
+    pub fn box_refused(&self, m: &Affine) -> Option<&'static str> {
+        let s = self.transform.as_ref()?;
+        let (Some(inv), Some(_)) = (s.start.inverse(), m.inverse()) else {
+            return Some("the box would have no size");
+        };
+        let delta = inv.then(*m);
+        let ok = s.targets.iter().all(|t| ImageObject::transform_ok(&t.start.then(delta)));
+        (!ok).then_some(
+            "that would put it past what an image file can hold: give a smaller size, or a place nearer the canvas",
+        )
+    }
+
     /// Puts the box at `m`, drawing with `draft` sampling (while dragging) or the session's.
-    /// Nothing happens if that is how it already is.
+    /// Nothing happens if that is how it already is, or if it cannot go there (see
+    /// [`box_refused`](Self::box_refused)): a drag or a typed number past that leaves the
+    /// box where it was.
     pub fn set_box(&mut self, m: Affine, draft: Option<Sampling>) {
+        if self.box_refused(&m).is_some() {
+            return;
+        }
         let Some(s) = self.transform.as_mut() else { return };
-        let Some(inv) = s.start.inverse() else { return };
-        if m.inverse().is_none() || (m == s.current && draft.is_some() == s.draft) {
+        if m == s.current && draft.is_some() == s.draft {
             return;
         }
-        let delta = inv.then(m);
-        // Every object must stay where a file can hold it (see ImageObject::transform_ok);
-        // a drag or a typed number past that leaves the box where it was.
-        if !s.targets.iter().all(|t| ImageObject::transform_ok(&t.start.then(delta))) {
-            return;
-        }
+        let delta = s.start.inverse().expect("checked by box_refused").then(m);
         s.current = m;
         s.draft = draft.is_some();
         let boxed = s.sampling;
@@ -963,6 +984,34 @@ mod tests {
     }
 
     #[test]
+    fn a_mirrored_box_s_points_are_where_their_names_say() {
+        // Flipped upside down: the frame's top-left corner is at the bottom.
+        let s = session(FRect::new(0.0, 0.0, 100.0, 50.0), Affine::scale(1.0, -1.0));
+        let p = s.params_at([0.0, 0.0]);
+        assert!(p.mirrored && close([p.x, p.y], [0.0, -50.0]), "{p:?}");
+        let bottom = s.params_at([0.5, 1.0]);
+        assert!(close([bottom.x, bottom.y], [50.0, 0.0]), "{bottom:?}");
+        // Taller from its top-left corner, which stays: it grows down.
+        let m = s.edited(&p, &Params { height: 100.0, ..p }, [0.0, 0.0]);
+        let ys = [m.apply([0.0, 0.0])[1], m.apply([0.0, 50.0])[1]];
+        assert!(close([ys[0].min(ys[1]), ys[0].max(ys[1])], [-50.0, 50.0]), "{ys:?}");
+    }
+
+    #[test]
+    fn a_turned_box_is_fitted_as_it_lies_into_a_rectangle() {
+        // 100 × 50 turned a quarter: 50 wide and 100 tall, so 3 times larger inside 400 × 300.
+        let s = session(FRect::new(0.0, 0.0, 100.0, 50.0), Affine::rotate(std::f64::consts::FRAC_PI_2));
+        let m = s.fitted(&FRect::new(0.0, 0.0, 400.0, 300.0), false);
+        let corners = FRect::new(0.0, 0.0, 100.0, 50.0).corners().map(|p| m.apply(p));
+        let xs = corners.map(|c| c[0]);
+        let ys = corners.map(|c| c[1]);
+        let span = |v: [f64; 4]| {
+            [v.iter().copied().fold(f64::INFINITY, f64::min), v.iter().copied().fold(f64::NEG_INFINITY, f64::max)]
+        };
+        assert!(close(span(xs), [125.0, 275.0]) && close(span(ys), [0.0, 300.0]), "{corners:?}");
+    }
+
+    #[test]
     fn editing_a_number_keeps_a_shear() {
         // A turned image stretched one way afterwards: its frame is sheared in the document.
         let m = Affine::rotate(0.4).then(Affine::scale(0.5, 1.0));
@@ -1116,11 +1165,11 @@ mod tests {
             assert!((a - b).abs() < 1e-9, "{p:?} vs {q:?}");
         }
         let canvas = IRect::from_size(400, 400);
-        s2.current = s2.fitted(&canvas, false);
+        s2.current = s2.fitted(&canvas.to_f(), false);
         let b = FRect::bounding(&s2.corners());
         assert!(b.x0 >= -1e-6 && b.y0 >= -1e-6 && b.x1 <= 400.0 + 1e-6 && b.y1 <= 400.0 + 1e-6, "{b:?}");
         assert!((b.x1 - b.x0 - 400.0).abs() < 1e-6 || (b.y1 - b.y0 - 400.0).abs() < 1e-6, "it touches two sides");
-        s2.current = s2.fitted(&canvas, true);
+        s2.current = s2.fitted(&canvas.to_f(), true);
         let inv = s2.current.inverse().unwrap();
         for p in canvas.to_f().corners() {
             let q = inv.apply(p);

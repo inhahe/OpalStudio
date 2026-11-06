@@ -29,23 +29,42 @@ fn run(python: &str, code: &str, scratch: &Path) -> (Option<i32>, String, String
         .stderr(Stdio::piped())
         .spawn()
         .expect("ran");
+    // Read as it comes, so that neither the script nor the editor it started (which writes
+    // to the same standard error) waits on a full pipe.
+    let drain = |mut from: Box<dyn std::io::Read + Send>| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = from.read_to_string(&mut text);
+            text
+        })
+    };
+    let out = drain(Box::new(child.stdout.take().unwrap()));
+    let err = drain(Box::new(child.stderr.take().unwrap()));
     let started = Instant::now();
-    while child.try_wait().unwrap().is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
         if started.elapsed() > Duration::from_secs(60) {
             let _ = child.kill();
             panic!("the script did not end (waiting for the editor it started?)");
         }
         std::thread::sleep(Duration::from_millis(20));
-    }
-    let out = child.wait_with_output().unwrap();
-    (out.status.code(), String::from_utf8_lossy(&out.stdout).into(), String::from_utf8_lossy(&out.stderr).into())
+    };
+    (status.code(), out.join().unwrap(), err.join().unwrap())
 }
 
 /// Whether process `pid` has ended, waiting a few seconds for it to.
 fn ended(pid: u32) -> bool {
     for _ in 0..100 {
-        let list = Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output().unwrap();
-        if !String::from_utf8_lossy(&list.stdout).contains(&pid.to_string()) {
+        #[cfg(windows)]
+        let running = {
+            let list = Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output().unwrap();
+            String::from_utf8_lossy(&list.stdout).contains(&pid.to_string())
+        };
+        #[cfg(not(windows))]
+        let running = Command::new("kill").args(["-0", &pid.to_string()]).status().is_ok_and(|s| s.success());
+        if !running {
             return true;
         }
         std::thread::sleep(Duration::from_millis(50));

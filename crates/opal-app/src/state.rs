@@ -141,9 +141,6 @@ pub struct AppState {
     /// Whether the fields for a box's exact position and size are open beside the transform
     /// or crop box (see `box_fields`).
     pub box_numbers: bool,
-    /// The rectangle the transform box's fields fit it into (its top-left corner from the
-    /// canvas's, and its size), once one has been typed; the canvas until then.
-    pub fit_rect: Option<[f64; 4]>,
     /// Whether this editor has no window (`--headless`, or the one `--mcp` starts): what
     /// would be told in a dialog is printed or answered instead, and nothing waits for one.
     pub windowless: bool,
@@ -317,7 +314,6 @@ impl AppState {
             copies_answered: VecDeque::new(),
             confirm: None,
             box_numbers: false,
-            fit_rect: None,
             windowless: false,
             new_image: None,
             last_new: NewImage {

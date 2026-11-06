@@ -295,8 +295,9 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen
     st.box_numbers = numbers;
     if numbers {
         let panel = egui::Id::unique(("transform-numbers", id.0));
-        // Beside the box and its toolbar, covering neither.
-        let around = [screen.corners.as_slice(), &[bar.response.rect.min, bar.response.rect.max]].concat();
+        // Beside the box, its rotating handle and its toolbar, covering none.
+        let around =
+            [screen.corners.as_slice(), &[screen.rotate, bar.response.rect.min, bar.response.rect.max]].concat();
         crate::box_fields::panel_by(ctx, panel, rect, &around, |ui| {
             crate::box_fields::transform(ui, st, id, "transform-by-box");
         });
@@ -318,7 +319,7 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen
                 Action::Cancel => d.cancel_transform(),
                 Action::Fit(fill) => {
                     let canvas = d.doc().canvas.rect();
-                    if let Some(m) = d.transform.as_ref().map(|s| s.fitted(&canvas, fill)) {
+                    if let Some(m) = d.transform.as_ref().map(|s| s.fitted(&canvas.to_f(), fill)) {
                         d.set_box(m, None);
                     }
                 }

@@ -633,10 +633,14 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   the fields, a preference: its top-left corner unless another is chosen), turned with
   it, from the canvas's corner; a size typed scales along the box's own sides about that
   point, and an angle turns about it, so the numbers typed stay as typed.
-- **Fit into a rectangle:** the transform box's fields also hold a rectangle (the canvas
-  until one is typed; at the same reference point), with *Fit inside* and *Fill*, which
-  keep the box's proportions and center it on the rectangle, and *Stretch*: what scripts'
-  `fit` does, through the same code (`api::place_box`).
+- **Fit into a rectangle:** the transform box's fields also hold a rectangle, kept per
+  image (the canvas, whatever it is then, until one is typed; at the same reference
+  point), with *Fit inside* and *Fill*, which keep the box's proportions and its turn and
+  fit it, as it lies, inside the rectangle or over it, centered (the same fitting as the
+  box's Fit and Fill buttons do with the canvas: `transform::fitted`), and *Stretch*, which
+  makes the box exactly the rectangle, upright. Scripts' `fit` goes through the same code
+  (`api::place_box`). A mirrored box's points are where their names say (its height runs
+  the other way from its frame's).
 - **Place** (File, Ctrl+Alt+O) opens the transform box on an image file, as a paste of it
   (onto a new layer named after the file; the history state is "Place").
 - **One history state:** the whole session in the box, from paste to commit, is one entry
@@ -1083,9 +1087,9 @@ server. Both rest on one language-neutral API.
   `paste` and `paste_in_place` (answered once the clipboard is read and the paste placed;
   a paste asked for again, or cancelled, before then is told so), `place` (an image file),
   and `transform`, each with the box's `x`, `y` (its top-left corner from the canvas's),
-  `width`, `height` (one alone keeps the proportions; both, with `fit`, stretch to them or
-  fit inside or cover them, centered on the rectangle they make, turned with the box), the
-  `anchor` (which point of the box, and of the rectangle, `x` and `y` give, and what a size
+  `width`, `height` (one alone keeps the proportions; both stretch the box's own sides to
+  them, or, with `fit`, fit the box, turned as it is, inside or over the rectangle they
+  make on the canvas, centered), the `anchor` (which point of the box, and of the rectangle, `x` and `y` give, and what a size
   or angle scales and turns about: the reference point's names), `angle`, and for a paste
   `into_active`; they answer with the layer and the box (at that point). What a box applies is made in the call's groups, as any change is (a script run, a
   step), the asynchronous paste's too. Changes the API alone makes: `put_pixels`, `crop` (a

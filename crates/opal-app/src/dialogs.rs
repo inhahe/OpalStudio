@@ -554,19 +554,9 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
                 lengths::side(ui, &mut spec.height, unit, ppi);
                 ui.end_row();
                 ui.label("Anchor").on_hover_text("Where the old canvas sits in the new one.");
-                egui::Grid::new("anchor").spacing([2.0, 2.0]).show(ui, |ui| {
-                    for y in 0..3u8 {
-                        for x in 0..3u8 {
-                            let on = spec.anchor == [x, y];
-                            let glyph = if on { "●" } else { "○" };
-                            if ui.add(egui::Button::new(glyph).selected(on).min_size(egui::vec2(22.0, 22.0))).clicked()
-                            {
-                                spec.anchor = [x, y];
-                            }
-                        }
-                        ui.end_row();
-                    }
-                });
+                let mut i = usize::from(spec.anchor[1]) * 3 + usize::from(spec.anchor[0]);
+                crate::box_fields::reference_grid(ui, &mut i, "canvas-anchor");
+                spec.anchor = [(i % 3) as u8, (i / 3) as u8];
                 ui.end_row();
             });
         }

@@ -160,6 +160,8 @@ pub const SERVING: &str = "serving";
 /// Serves an editor with no window, with the arguments after `--serve` (the connection
 /// file), until standard input ends and every client has gone; the process's exit code.
 pub fn serve(given: Vec<OsString>) -> i32 {
+    // What it says (a refusal, what a dialog would have said) reaches the script's terminal.
+    use_parent_console();
     let [file] = &given[..] else {
         eprintln!("usage: opal-studio --serve FILE (it serves until its standard input ends)");
         return 2;

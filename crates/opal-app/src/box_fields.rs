@@ -33,7 +33,11 @@ pub const POINTS: [(&str, &str); 9] = [
 /// The point of a box called `id` (one of [`POINTS`]), as fractions of its width and height
 /// from its top-left corner; the corner itself for any other.
 pub fn point(id: &str) -> [f64; 2] {
-    let i = POINTS.iter().position(|(p, _)| *p == id).unwrap_or(0);
+    point_at(POINTS.iter().position(|(p, _)| *p == id).unwrap_or(0))
+}
+
+/// The point `POINTS[i]`, as fractions of a box's width and height from its top-left corner.
+pub fn point_at(i: usize) -> [f64; 2] {
     [(i % 3) as f64 * 0.5, (i / 3) as f64 * 0.5]
 }
 
@@ -119,8 +123,8 @@ pub fn fields(
 }
 
 /// A 3 × 3 grid of a box's points (see [`POINTS`]), the one at `chosen` marked; clicking
-/// another chooses it.
-fn reference_grid(ui: &mut egui::Ui, chosen: &mut usize, salt: &str) {
+/// another chooses it. (Resize Canvas's anchor is chosen with it too.)
+pub fn reference_grid(ui: &mut egui::Ui, chosen: &mut usize, salt: &str) {
     egui::Grid::new(("box-reference", salt)).spacing([1.0, 1.0]).show(ui, |ui| {
         for row in 0..3 {
             for col in 0..3 {
@@ -159,7 +163,7 @@ fn set_reference(st: &mut AppState, i: usize) {
 pub fn transform(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
     let aspect = st.prefs.bool("transform.aspect_locked");
     let (mut unit, mut chosen) = (st.unit(), reference(st));
-    let at = point(POINTS[chosen].0);
+    let at = point_at(chosen);
     let Some(d) = st.doc_mut(id) else { return };
     let Some(s) = d.transform.as_ref() else { return };
     let (canvas, ppi) = (d.doc().canvas.rect(), d.doc().resolution);
@@ -178,11 +182,10 @@ pub fn transform(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
         d.set_box(m, None);
     }
     let size = [canvas.width() as f64, canvas.height() as f64];
-    if let Some(fit) = fit_into(ui, &mut st.fit_rect, size, unit, ppi, at, salt) {
-        let d = st.doc_mut(id).expect("shown above");
-        if let Err(why) = crate::api::place_box(d, &fit) {
-            st.notify(why);
-        }
+    if let Some(fit) = fit_into(ui, &mut d.fit_rect, size, unit, ppi, at, salt)
+        && let Err(why) = crate::api::place_box(d, &fit)
+    {
+        st.notify(why);
     }
     set_reference(st, chosen);
     if unit != st.unit() {
@@ -192,9 +195,9 @@ pub fn transform(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
 
 /// A rectangle to fit the transform box into (`rect`: its top-left corner from the canvas's,
 /// and its size; the canvas, `canvas` wide and tall, until one is typed), shown at the point
-/// `at` in `unit` at `ppi`, with buttons that fit the box inside it, make it fill it (each
-/// keeping its proportions, centered on it), or stretch it to it, as scripts' `fit` does.
-/// What a button asks for, as a script's arguments would.
+/// `at` in `unit` at `ppi`, with buttons that fit the box inside it or make it fill it (as
+/// it is turned, keeping its proportions, centered on it), or make it exactly the rectangle,
+/// upright, as scripts' `fit` does. What a button asks for, as a script's arguments would.
 fn fit_into(
     ui: &mut egui::Ui,
     rect: &mut Option<[f64; 4]>,
@@ -207,7 +210,7 @@ fn fit_into(
     use crate::api::{BoxArgs, Fit};
     let [x0, y0, w0, h0] = rect.unwrap_or([0.0, 0.0, canvas[0], canvas[1]]);
     let (mut x, mut y, mut w, mut h) = (x0 + at[0] * w0, y0 + at[1] * h0, w0, h0);
-    let mut fit = None;
+    let (mut fit, mut canvas_again) = (None, false);
     ui.add_space(4.0);
     egui::CollapsingHeader::new("Fit into a rectangle").id_salt(("fit-into", salt)).default_open(true).show(ui, |ui| {
         egui::Grid::new(("fit-rect", salt)).num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
@@ -231,7 +234,7 @@ fn fit_into(
             let ways = [
                 ("Fit inside", Fit::Inside, "As large as fits inside the rectangle, in its own proportions, centered."),
                 ("Fill", Fit::Cover, "As small as covers the rectangle, in its own proportions, centered."),
-                ("Stretch", Fit::Stretch, "Exactly the rectangle, its proportions changed if need be."),
+                ("Stretch", Fit::Stretch, "Exactly the rectangle, upright, its proportions changed if need be."),
             ];
             for (name, way, tip) in ways {
                 if ui.button(name).on_hover_text(tip).clicked() {
@@ -239,15 +242,21 @@ fn fit_into(
                 }
             }
             if ui.button("Canvas").on_hover_text("Make the rectangle the canvas again.").clicked() {
-                (x, y, w, h) = (at[0] * canvas[0], at[1] * canvas[1], canvas[0], canvas[1]);
+                canvas_again = true;
             }
         });
     });
     let typed = [x - at[0] * w, y - at[1] * h, w, h];
-    if typed != [x0, y0, w0, h0] {
+    if canvas_again {
+        // The canvas, whatever it is when the box is fitted to it.
+        *rect = None;
+        (x, y, w, h) = (at[0] * canvas[0], at[1] * canvas[1], canvas[0], canvas[1]);
+    } else if typed != [x0, y0, w0, h0] {
         *rect = Some(typed);
     }
-    fit.map(|fit| BoxArgs { x: Some(x), y: Some(y), width: Some(w), height: Some(h), angle: None, fit, at })
+    // Stretched, the box is exactly the rectangle typed, so upright; fitted, it keeps its turn.
+    let angle = (fit == Some(Fit::Stretch)).then_some(0.0);
+    fit.map(|fit| BoxArgs { x: Some(x), y: Some(y), width: Some(w), height: Some(h), angle, fit, at })
 }
 
 /// The crop box's fields for document `id` (its position, size and angle); what is typed
@@ -255,7 +264,7 @@ fn fit_into(
 pub fn crop(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
     let settings = st.tool_settings(crate::tools::ToolId::Crop).clone();
     let (mut unit, mut chosen) = (st.unit(), reference(st));
-    let at = point(POINTS[chosen].0);
+    let at = point_at(chosen);
     let Some(d) = st.doc_mut(id) else { return };
     let (c, ppi) = (d.doc().canvas, d.doc().resolution);
     let b = *d.crop.get_or_insert_with(|| CropBox::of(&c));

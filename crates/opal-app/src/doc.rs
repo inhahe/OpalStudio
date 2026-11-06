@@ -135,6 +135,10 @@ pub struct DocState {
     /// The Crop tool's box, while the tool is in use, and a drag on it.
     pub crop: Option<crate::crop::CropBox>,
     pub crop_drag: Option<crate::crop::CropDrag>,
+    /// The rectangle the transform box's fields fit it into (its top-left corner from the
+    /// canvas's, and its size), once one has been typed; the canvas, whatever it is then,
+    /// until then.
+    pub fit_rect: Option<[f64; 4]>,
     /// Something an operation on the document wants said in the status bar.
     pub notice: Option<String>,
     /// Whether the user has been told that history states are being dropped.
@@ -169,6 +173,7 @@ impl DocState {
             transform: None,
             moving: None,
             crop: None,
+            fit_rect: None,
             crop_drag: None,
             notice: None,
             told_dropped: false,

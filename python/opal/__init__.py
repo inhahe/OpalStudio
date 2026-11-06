@@ -228,8 +228,13 @@ class Editor:
         self._process: Any = None
         try:
             self._pipe = _Pipe(pipe)
-        except OSError:
+        except (FileNotFoundError, ConnectionRefusedError):
+            # No pipe (or socket) by that name: the editor that wrote the file has gone.
             raise _NotRunning("Opal Studio is not running (its pipe is gone): start it again.") from None
+        except OSError as e:
+            # It is there, but not to be opened by this process (another user's, say): not a
+            # reason to start another of one's own.
+            raise OpalError(f"Opal Studio's pipe could not be opened: {e}") from None
         self._ids = itertools.count(1)
         try:
             hello = self.call("hello", token=token, **({"script": script} if script else {}))

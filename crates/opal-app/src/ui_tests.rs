@@ -530,7 +530,7 @@ fn the_numbers_button_by_the_box_opens_its_fields_in_the_unit_chosen() {
     assert!(shows(&h, 0.5) >= 2, "the width is not shown in inches, by the box and in the panel");
     render(&mut h, "paste-numbers");
     // Fitted into a rectangle typed beside them, centered in it, in its own proportions.
-    h.state_mut().state_mut().fit_rect = Some([0.0, 0.0, 100.0, 100.0]);
+    h.state_mut().state_mut().active_mut().unwrap().fit_rect = Some([0.0, 0.0, 100.0, 100.0]);
     h.run();
     // (By the box, which is the last: the tool settings show the same fields.)
     h.query_all_by_label("Fit inside").last().unwrap().click();
@@ -541,10 +541,14 @@ fn the_numbers_button_by_the_box_opens_its_fields_in_the_unit_chosen() {
     h.run();
     let p = h.state().state().active().unwrap().transform.as_ref().unwrap().params();
     assert_eq!((p.x, p.y, p.width, p.height), (-12.5, 0.0, 125.0, 100.0));
-    // Its position given at its center: a size typed keeps the center where it is.
+    // Its position given at its center: filling 100 × 100 from the canvas's corner, the
+    // 125 × 100 box's top-left corner is 0.125 in left of it, and its center 0.5 in in.
+    assert!(shows(&h, -0.125) >= 1, "the top-left corner is not shown");
     h.query_all_by_label("Center").last().unwrap().click();
     h.run();
     assert_eq!(h.state().state().prefs.choice("transform.reference"), "center");
+    assert_eq!(shows(&h, -0.125), 0, "the top-left corner is still shown");
+    assert!(shows(&h, 0.5) >= 2, "the center is not shown");
     // The crop box has them too.
     h.key_press(egui::Key::Enter);
     h.state_mut().state_mut().tool = crate::tools::ToolId::Crop;
