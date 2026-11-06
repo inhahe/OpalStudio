@@ -201,22 +201,41 @@ impl Reduced {
         }
         // Made from the bottom up, each level in parallel; tiles of the same four below (an
         // edge of one tile repeated, say) are made once and shared.
-        let address = |t: &Option<Arc<Tile>>| t.as_ref().map_or(0, |t| Arc::as_ptr(t) as usize);
         for l in 1..=level {
-            let mut unique: HashMap<[usize; 4], [Option<Arc<Tile>>; 4]> = HashMap::new();
-            let mut of: Vec<(TileCoord, [usize; 4])> = Vec::new();
-            for c in std::mem::take(&mut wanted[l as usize]) {
-                let kids = c.children().map(|k| reduced_tile(tiles, image, l - 1, k).cloned());
-                let key = kids.each_ref().map(address);
-                unique.entry(key).or_insert(kids);
-                of.push((c, key));
-            }
-            let made: HashMap<[usize; 4], Option<Arc<Tile>>> = unique
-                .into_par_iter()
-                .map(|(key, kids)| (key, downsample(kids.each_ref().map(|k| k.as_deref())).map(Arc::new)))
+            let items: Vec<(TileCoord, [Option<Arc<Tile>>; 4])> = std::mem::take(&mut wanted[l as usize])
+                .into_iter()
+                .map(|c| (c, c.children().map(|k| reduced_tile(tiles, image, l - 1, k).cloned())))
                 .collect();
-            tiles.extend(of.into_iter().map(|(c, key)| ((id, l, c), made[&key].clone())));
+            tiles.extend(reduce_shared(items).into_iter().map(|(c, t)| ((id, l, c), t)));
         }
+    }
+}
+
+/// What each of `items` reduces to from its four tiles below (top-left, top-right,
+/// bottom-left, bottom-right), in parallel; those with the same four (a uniform area is full
+/// of them) reduced once, sharing the result.
+fn reduce_shared<T: Send>(items: Vec<(T, [Option<Arc<Tile>>; 4])>) -> Vec<(T, Option<Arc<Tile>>)> {
+    let address = |t: &Option<Arc<Tile>>| t.as_ref().map_or(0, |t| Arc::as_ptr(t) as usize);
+    let mut unique: HashMap<[usize; 4], [Option<Arc<Tile>>; 4]> = HashMap::new();
+    let mut of = Vec::with_capacity(items.len());
+    for (item, kids) in items {
+        let key = kids.each_ref().map(address);
+        unique.entry(key).or_insert(kids);
+        of.push((item, key));
+    }
+    let made: HashMap<[usize; 4], Option<Arc<Tile>>> = unique
+        .into_par_iter()
+        .map(|(key, kids)| (key, downsample(kids.each_ref().map(|k| k.as_deref())).map(Arc::new)))
+        .collect();
+    of.into_iter().map(|(item, key)| (item, made[&key].clone())).collect()
+}
+
+/// Carries `chain`, a tile (or none) and each next one the one before halved from four
+/// copies of itself, as reducing an area of that tile repeated makes it, up to `level`.
+fn extend_chain(chain: &mut Vec<Option<Arc<Tile>>>, level: u32) {
+    while chain.len() <= level as usize {
+        let below = chain.last().expect("the tile at level 0").as_deref();
+        chain.push(below.and_then(|t| downsample([Some(t); 4])).map(Arc::new));
     }
 }
 
@@ -224,10 +243,7 @@ impl Reduced {
 /// repeated makes it; each level's made once, kept in `halved`.
 fn halved_to(halved: &mut HashMap<usize, Vec<Option<Arc<Tile>>>>, tile: &Arc<Tile>, level: u32) -> Option<Arc<Tile>> {
     let chain = halved.entry(Arc::as_ptr(tile) as usize).or_insert_with(|| vec![Some(tile.clone())]);
-    while chain.len() <= level as usize {
-        let below = chain.last().expect("the tile itself").as_deref();
-        chain.push(below.and_then(|t| downsample([Some(t); 4])).map(Arc::new));
-    }
+    extend_chain(chain, level);
     chain[level as usize].clone()
 }
 
@@ -1010,10 +1026,7 @@ fn uniform_tiles<'k>(
                     Pixels::Empty | Pixels::Dropped => None,
                 });
             }
-            while chain.len() <= level as usize {
-                let below = chain.last().expect("a tile at level 0").as_deref();
-                chain.push(below.and_then(|t| downsample([Some(t); 4])).map(Arc::new));
-            }
+            extend_chain(&mut chain, level);
             (tokens, at, chain)
         })
         .collect();
@@ -1575,21 +1588,8 @@ impl Projection {
         let pixels = |k: TileCoord| below.get(&k).and_then(Entry::held);
         // Tiles with the same four children (a uniform image is full of them) are reduced
         // once and share the result.
-        let ptr = |t: &Option<Arc<Tile>>| t.as_ref().map_or(0, |t| Arc::as_ptr(t) as usize);
-        let mut unique: HashMap<[usize; 4], [Option<Arc<Tile>>; 4]> = HashMap::new();
-        let mut of: Vec<(TileCoord, [u64; 4], [usize; 4])> = Vec::with_capacity(stale.len());
-        for (c, kids) in stale {
-            let tiles = c.children().map(pixels);
-            let id = tiles.each_ref().map(ptr);
-            unique.entry(id).or_insert(tiles);
-            of.push((c, kids, id));
-        }
-        let reduced: HashMap<[usize; 4], Option<Arc<Tile>>> = unique
-            .into_par_iter()
-            .map(|(id, kids)| (id, downsample(kids.each_ref().map(|k| k.as_deref())).map(Arc::new)))
-            .collect();
-        for (c, kids, id) in of {
-            let tile = reduced[&id].clone();
+        let items: Vec<_> = stale.into_iter().map(|(c, kids)| ((c, kids), c.children().map(pixels))).collect();
+        for ((c, kids), tile) in reduce_shared(items) {
             let version = if tile.is_some() { self.next_version() } else { 0 };
             let pixels = tile.map_or(Pixels::Empty, Pixels::Held);
             self.levels[l].insert(c, Entry { key: Key::Pyramid(kids), pixels, version, checked: 0 });
