@@ -1,8 +1,12 @@
-//! `opal-studio --headless [--python PATH] script.py [ARGS…]`: runs a Python script against
-//! an editor with no window, for batch work (see design.md, *Scripting*). The script talks
-//! to it as to a running editor, through the `opal` package and a connection file of this
-//! run's own; the run ends with the script, with its exit code, once the files it asked for
-//! are written.
+//! Editors with no window, for batch work (see design.md, *Scripting*):
+//!
+//! - `opal-studio --headless [--python PATH] script.py [ARGS…]` runs a Python script against
+//!   one. The script talks to it as to a running editor, through the `opal` package and a
+//!   connection file of this run's own; the run ends with the script, with its exit code,
+//!   once the files it asked for are written.
+//! - `opal-studio --serve FILE` serves one on connection file `FILE` until its standard
+//!   input ends: what the `opal` package starts for a script run with no editor running,
+//!   which so ends with the script's process however that ends.
 
 use crate::server::Server;
 use crate::state::AppState;
@@ -93,11 +97,7 @@ pub fn run(given: Vec<OsString>) -> i32 {
         }
     };
     let ctx = egui::Context::default();
-    let mut st = AppState::new();
-    st.windowless = true;
-    // The user's preferences (how exports are written, the memory budgets), not saved back.
-    crate::config::load(&mut st);
-    st.apply_tile_budget();
+    let mut st = windowless_state();
     let file = std::env::temp_dir().join(format!("opal-headless-{}.json", std::process::id()));
     let mut server = match Server::start(file.clone(), ctx.clone()) {
         Ok(server) => server,
@@ -125,18 +125,75 @@ pub fn run(given: Vec<OsString>) -> i32 {
         ended.is_some() && server.clients() == 0
     });
     let status = ended.expect("served until it ended");
-    // The files asked for, written before this ends.
+    finish(st, server);
+    status.code().unwrap_or(1)
+}
+
+/// The state of an editor with no window: the user's preferences loaded (how exports are
+/// written, the memory budgets), not saved back.
+fn windowless_state() -> AppState {
+    let mut st = AppState::new();
+    st.windowless = true;
+    crate::config::load(&mut st);
+    st.apply_tile_budget();
+    st
+}
+
+/// Ends an editor with no window: once the files asked for are written, it tells what a
+/// dialog would have, and stops serving (its connection file goes).
+fn finish(mut st: AppState, server: Server) {
     while st.writer.busy() {
         st.poll_writes(false);
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     st.poll_writes(false);
-    // What would have been told in a dialog.
     for m in st.messages.drain(..) {
         eprintln!("{}: {}", m.title, m.body);
     }
     drop(server);
-    status.code().unwrap_or(1)
+}
+
+/// What `--serve` prints on its standard output once it serves, for the process that
+/// started it to wait for.
+pub const SERVING: &str = "serving";
+
+/// Serves an editor with no window, with the arguments after `--serve` (the connection
+/// file), until standard input ends and every client has gone; the process's exit code.
+pub fn serve(given: Vec<OsString>) -> i32 {
+    let [file] = &given[..] else {
+        eprintln!("usage: opal-studio --serve FILE (it serves until its standard input ends)");
+        return 2;
+    };
+    let ctx = egui::Context::default();
+    let mut st = windowless_state();
+    let mut server = match Server::start(PathBuf::from(file), ctx.clone()) {
+        Ok(server) => server,
+        Err(e) => {
+            eprintln!("The connection could not be opened: {e}");
+            return 1;
+        }
+    };
+    // Its standard input ends when the process that started it does (or lets it go).
+    let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let told = ended.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 256];
+        while std::io::Read::read(&mut std::io::stdin(), &mut buf).is_ok_and(|n| n > 0) {}
+        told.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        if writeln!(out, "{SERVING}").and_then(|()| out.flush()).is_err() {
+            // No one to tell, nor to serve.
+            return 1;
+        }
+    }
+    serve_windowless(&mut server, &mut st, &ctx, |server| {
+        ended.load(std::sync::atomic::Ordering::Relaxed) && server.clients() == 0
+    });
+    finish(st, server);
+    0
 }
 
 #[cfg(test)]

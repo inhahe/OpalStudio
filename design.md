@@ -1165,7 +1165,18 @@ server. Both rest on one language-neutral API.
   them itself. Commands of the view, the panels and the windows are not callable: all a
   script needs to make and change images is, so none needs the window.
 - **Python package** `opal-studio` (module `opal`): connects to the running editor or starts
-  a headless one (`opal-studio --headless script.py` for batch work). *Built:* headless mode
+  a headless one (`opal-studio --headless script.py` for batch work). *Built:* with no
+  editor running (no connection file, or one whose pipe has gone), `connect()` starts one
+  with no window, `opal-studio --serve FILE`, on a connection file of its own in the
+  temporary folder, waits (up to a minute) for it to print `serving`, and connects; it ends
+  when its standard input does, which the script's process holds, so it ends with the
+  script however that ends (a crash, `os._exit`), once the files asked of it are written,
+  and `disconnect` waits for that. `connect(windowless=True)` starts one even when the
+  editor is running (batch work that leaves the user's images alone); `windowless=False`,
+  or a connection file named, only connects. The program is `OPAL_STUDIO_EXE`, else the
+  one in the folder the package is in (as built and shipped), else the one last started
+  as a window, which notes its path in `program.json` beside the settings, else
+  `opal-studio` on the `PATH` (`editor_program()`). *Built:* headless mode
   runs the editor's state and its server with no window, the user's preferences loaded
   (not saved back) and applied as the window applies them between frames (the history's
   memory, the tiles'), and runs the script (with `--python`, `OPAL_PYTHON` or the Python

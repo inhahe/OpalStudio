@@ -66,7 +66,13 @@ fn main() -> eframe::Result {
     if std::env::args_os().nth(1).is_some_and(|a| a == "--headless") {
         std::process::exit(headless::run(std::env::args_os().skip(2).collect()));
     }
+    // An editor with no window for a script that started it (through the `opal` package).
+    if std::env::args_os().nth(1).is_some_and(|a| a == "--serve") {
+        std::process::exit(headless::serve(std::env::args_os().skip(2).collect()));
+    }
     let files: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
+    // For scripts to start this program with no window when it is not running.
+    config::note_program();
     // Opened from Explorer with an editor already running: they open in that one.
     if !files.is_empty()
         && let Some(file) = server::connection_file()

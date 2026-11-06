@@ -108,7 +108,10 @@ cargo test --workspace                     # all tests, interface tests included
   ends, so one undo takes it back (from an interactive Python session, or with
   `connect(script=None)`, each call is a history state of its own); `with editor.step("name"):`
   makes the calls inside it one step of their own, and `editor.history()` gives an image's
-  undo tree. Only programs of the user's own
+  undo tree. With no editor running, `opal.connect()` starts one of its own with no
+  window, which ends with the script, so `python script.py` works whether or not Opal
+  Studio is open; `connect(windowless=True)` always does, leaving your open images alone.
+  Only programs of the user's own
   can connect (through a token in the settings folder), and the status bar says when one is
   connected, with a button to disconnect it (which keeps scripts out until you let them in
   again there). Run Script (File › Scripts) runs one from the editor, with the Python set

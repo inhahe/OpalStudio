@@ -31,6 +31,23 @@ struct Saved {
     recent_scripts: Vec<PathBuf>,
 }
 
+/// Notes where this program is, in `program.json` beside the settings, for the `opal`
+/// package to start it from (with no window, for a script run while no editor is running)
+/// when it cannot find it otherwise. Written only when it changed.
+pub fn note_program() {
+    let Some(path) = settings_path().map(|p| p.with_file_name("program.json")) else { return };
+    let Ok(exe) = std::env::current_exe() else { return };
+    let Some(exe) = exe.to_str() else { return };
+    let json = serde_json::json!({ "path": exe }).to_string();
+    if std::fs::read_to_string(&path).is_ok_and(|s| s == json) {
+        return;
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = opal_io::write_atomically(&path, None, |out| opal_io::write_all(out, json.as_bytes(), &path));
+}
+
 /// Where the settings are kept: `settings.json` in the per-user configuration folder.
 pub fn settings_path() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "Opal Studio").map(|d| d.config_dir().join("settings.json"))

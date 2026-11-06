@@ -36,7 +36,9 @@ disconnects), so that one undo takes back the whole run; in an interactive sessi
 call is a step of its own.
 
 The connection is the editor's local pipe, found with its token in ``api.json`` in the
-user's settings folder; only the user's own programs can read it.
+user's settings folder; only the user's own programs can read it. With no editor running,
+``connect`` starts one of its own with no window, which ends with the script: so a script
+run as ``python script.py`` works whether or not the editor is open.
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-__all__ = ["Editor", "OpalError", "connect", "connection_file"]
+__all__ = ["Editor", "OpalError", "connect", "connection_file", "editor_program"]
 
 #: The protocol version this package speaks.
 PROTOCOL = 1
@@ -66,20 +68,51 @@ class OpalError(Exception):
         self.code = code
 
 
-def connection_file() -> Path:
-    """Where the running editor writes its pipe's name and token: ``OPAL_STUDIO_API`` if it
-    is set (as it is for a script the editor runs), otherwise the user's settings folder
-    (as the editor's `directories` crate names it; only Windows is built and tried yet)."""
-    given = os.environ.get("OPAL_STUDIO_API")
-    if given:
-        return Path(given)
+class _NotRunning(OpalError):
+    """No editor is running where the connection file says (it is not there, or its pipe has
+    gone)."""
+
+
+def _settings_folder() -> Path:
+    """The user's settings folder for Opal Studio (as the editor's `directories` crate names
+    it; only Windows is built and tried yet)."""
     if sys.platform == "win32":
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-        return base / "Opal Studio" / "config" / "api.json"
+        return base / "Opal Studio" / "config"
     if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Opal-Studio" / "api.json"
-    base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return base / "opalstudio" / "api.json"
+        return Path.home() / "Library" / "Application Support" / "Opal-Studio"
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "opalstudio"
+
+
+def connection_file() -> Path:
+    """Where the running editor writes its pipe's name and token: ``OPAL_STUDIO_API`` if it
+    is set (as it is for a script the editor runs), otherwise ``api.json`` in the user's
+    settings folder."""
+    given = os.environ.get("OPAL_STUDIO_API")
+    return Path(given) if given else _settings_folder() / "api.json"
+
+
+def editor_program() -> str | None:
+    """The Opal Studio program :func:`connect` starts with no window when no editor is
+    running: ``OPAL_STUDIO_EXE`` if it is set; else the one in the folder this package is
+    in (as it is built and shipped); else the one last started, which notes where it is in
+    the settings folder; else ``opal-studio`` on the ``PATH``. ``None`` if there is none."""
+    given = os.environ.get("OPAL_STUDIO_EXE")
+    if given:
+        return given
+    name = "opal-studio.exe" if sys.platform == "win32" else "opal-studio"
+    beside = Path(__file__).resolve().parent.parent.parent / name
+    if beside.is_file():
+        return str(beside)
+    try:
+        noted = json.loads((_settings_folder() / "program.json").read_text(encoding="utf-8")).get("path")
+        if isinstance(noted, str) and Path(noted).is_file():
+            return noted
+    except (OSError, ValueError, AttributeError):
+        pass
+    import shutil
+
+    return shutil.which(name)
 
 
 def _running_script() -> str | None:
@@ -191,10 +224,12 @@ class Editor:
     """A connection to a running Opal Studio: its methods are the editor's."""
 
     def __init__(self, pipe: str, token: str, script: str | None = None):
+        # The editor with no window this connection started, if it did (see `connect`).
+        self._process: Any = None
         try:
             self._pipe = _Pipe(pipe)
         except OSError:
-            raise OpalError("Opal Studio is not running (its pipe is gone): start it again.") from None
+            raise _NotRunning("Opal Studio is not running (its pipe is gone): start it again.") from None
         self._ids = itertools.count(1)
         try:
             hello = self.call("hello", token=token, **({"script": script} if script else {}))
@@ -371,8 +406,15 @@ class Editor:
         return method
 
     def disconnect(self) -> None:
-        """Closes the connection (``close`` is the editor's command, which closes an image)."""
+        """Closes the connection (``close`` is the editor's command, which closes an image).
+        An editor with no window that this connection started then ends, once the files
+        asked of it are written, before this returns."""
         self._pipe.close()
+        process, self._process = self._process, None
+        if process is not None:
+            process.stdin.close()
+            process.wait()
+            process.stdout.close()
 
     def __enter__(self) -> Editor:
         return self
@@ -381,21 +423,99 @@ class Editor:
         self.disconnect()
 
 
-def connect(file: str | os.PathLike | None = None, *, script: str | None = _RUNNING) -> Editor:
+def _connection(path: Path) -> dict:
+    """The pipe and token the connection file ``path`` names."""
+    try:
+        info = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise _NotRunning(f"Opal Studio is not running (there is no {path}).") from None
+    except (OSError, ValueError) as e:
+        raise OpalError(f"{path} is not readable: {e}") from None
+    if not isinstance(info, dict) or not isinstance(info.get("pipe"), str) or not isinstance(info.get("token"), str):
+        raise OpalError(f"{path} does not name a pipe and a token.")
+    return info
+
+
+#: What an editor started with ``--serve`` prints once it serves.
+_SERVING = "serving"
+
+#: Numbers this process's windowless editors' connection files apart.
+_STARTED = itertools.count()
+
+#: How long an editor started with no window may take to say it serves, in seconds.
+_START_WITHIN = 60
+
+
+def _start_windowless(script: str | None) -> Editor:
+    """Starts an editor with no window (``opal-studio --serve``) and connects to it. Its
+    standard input is this process's to hold: it ends when that closes, as it does when the
+    connection disconnects, or when this process ends, however it ends."""
+    import subprocess
+    import tempfile
+
+    program = editor_program()
+    if program is None:
+        raise OpalError(
+            "Opal Studio is not running, and its program was not found to start one with no window: "
+            "set OPAL_STUDIO_EXE to it, or start Opal Studio."
+        )
+    api = Path(tempfile.gettempdir()) / f"opal-serve-{os.getpid()}-{next(_STARTED)}.json"
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        process = subprocess.Popen(
+            [program, "--serve", str(api)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, creationflags=flags
+        )
+    except OSError as e:
+        raise OpalError(f"{program} could not be started: {e}") from None
+    # Read on a thread of its own, so that a program that never says (one too old to know
+    # --serve, say) is given up on.
+    import threading
+
+    line: list[bytes] = []
+    reader = threading.Thread(target=lambda: line.append(process.stdout.readline()), daemon=True)
+    reader.start()
+    reader.join(_START_WITHIN)
+    if reader.is_alive():
+        process.kill()
+    said = line[0].decode("utf-8", "replace").strip() if line else "it did not say it was serving in time"
+    try:
+        if said != _SERVING:
+            raise OpalError(f"{program} did not start an editor" + (f": {said}" if said else "."))
+        info = _connection(api)
+        editor = Editor(info["pipe"], info["token"], script)
+    except BaseException:
+        process.stdin.close()
+        process.wait()
+        process.stdout.close()
+        raise
+    editor._process = process
+    return editor
+
+
+def connect(
+    file: str | os.PathLike | None = None, *, script: str | None = _RUNNING, windowless: bool | None = None
+) -> Editor:
     """Connects to the editor running on this computer (as ``file``, or the user's
     :func:`connection_file`, says where).
+
+    With none running (and no ``file`` named), it starts one of its own with no window,
+    which ends when this connection disconnects, or this process ends, once the files asked
+    of it are written; :func:`editor_program` says which program. ``windowless=True``
+    starts one of its own even when the editor is running, for batch work that leaves the
+    user's images alone; ``windowless=False`` connects only to a running editor.
 
     The connection is the run of script ``script`` (by default the running script's file
     name): what it changes in each image is joined into one history state, named after it,
     when it disconnects. With ``None`` (the default in an interactive session), each call
     is a history state of its own."""
+    script = _running_script() if script is _RUNNING else script
+    if windowless:
+        return _start_windowless(script)
     path = Path(file) if file is not None else connection_file()
     try:
-        info = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        raise OpalError(f"Opal Studio is not running (there is no {path}).") from None
-    except (OSError, ValueError) as e:
-        raise OpalError(f"{path} is not readable: {e}") from None
-    if not isinstance(info, dict) or not isinstance(info.get("pipe"), str) or not isinstance(info.get("token"), str):
-        raise OpalError(f"{path} does not name a pipe and a token.")
-    return Editor(info["pipe"], info["token"], _running_script() if script is _RUNNING else script)
+        info = _connection(path)
+        return Editor(info["pipe"], info["token"], script)
+    except _NotRunning:
+        if windowless is False or file is not None:
+            raise
+    return _start_windowless(script)

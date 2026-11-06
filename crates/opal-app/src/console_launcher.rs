@@ -4,8 +4,8 @@
 //! `opal-studio --headless script.py` would come back at once, before the script had run,
 //! with no exit code to test. This small console program, which a prompt finds before the
 //! `.exe` beside it (`.COM` comes first in `PATHEXT`), runs the editor with the same
-//! arguments, on the same console: for `--headless` and `--mcp` it waits for it and ends
-//! with its exit code; for the window, it starts it and ends at once.
+//! arguments, on the same console: for `--headless`, `--mcp` and `--serve` it waits for it
+//! and ends with its exit code; for the window, it starts it and ends at once.
 
 use std::process::Command;
 
@@ -13,7 +13,7 @@ fn main() {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let Ok(launcher) = std::env::current_exe() else { std::process::exit(1) };
     let editor = launcher.with_file_name(format!("opal-studio{}", std::env::consts::EXE_SUFFIX));
-    let waits = args.first().is_some_and(|a| a == "--headless" || a == "--mcp");
+    let waits = args.first().is_some_and(|a| a == "--headless" || a == "--mcp" || a == "--serve");
     let mut command = Command::new(&editor);
     command.args(&args);
     let code = if waits {

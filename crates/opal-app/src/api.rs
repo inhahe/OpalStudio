@@ -2334,7 +2334,9 @@ mod tests {
              PROTOCOL: int\n\n\
              class OpalError(Exception):\n    code: int | None\n    def __init__(self, message: str, code: int | None = None) -> None: ...\n\n\
              def connection_file() -> Path: ...\n\
-             def connect(file: str | os.PathLike[str] | None = None, *, script: str | None = ...) -> Editor: ...\n\n\
+             def editor_program() -> str | None: ...\n\
+             def connect(file: str | os.PathLike[str] | None = None, *, script: str | None = ..., \
+             windowless: bool | None = None) -> Editor: ...\n\n\
              class Editor:\n    version: str | None\n\
              \x20   def __init__(self, pipe: str, token: str, script: str | None = None) -> None: ...\n\
              \x20   def call(self, method: str, **params: Any) -> Any: ...\n\
