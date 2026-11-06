@@ -90,7 +90,8 @@ cargo test --workspace                     # all tests, interface tests included
   state, named after it, when it ends, so one undo takes it back (from an interactive
   Python session, or with `connect(script=None)`, each call is a step of its own). Only
   programs of the user's own can connect (through a token in the settings folder), and the
-  status bar says when one is connected, with a button to disconnect it.
+  status bar says when one is connected, with a button to disconnect it (which keeps
+  scripts out until you let them in again there).
 - **Batch work.** `opal-studio --headless script.py [arguments]` runs a script against an
   editor with no window (the Python is `--python PATH`, or `OPAL_PYTHON`, or `python`), and
   ends with the script's exit code once the files it asked for are written.

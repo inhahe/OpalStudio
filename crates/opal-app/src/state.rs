@@ -148,8 +148,10 @@ pub struct AppState {
     pub next_answer: u64,
     /// The answers to such calls whose writes have finished, by number, until taken.
     pub answered: Vec<(u64, Result<serde_json::Value, String>)>,
-    /// The images being written for such calls (`image`): each one's file, and its size.
-    pub images_written: HashMap<u64, (PathBuf, u32, u32)>,
+    /// The images being made for such calls (`image`), by number: where each will come.
+    pub images_made: Vec<(u64, std::sync::mpsc::Receiver<Result<serde_json::Value, String>>)>,
+    /// Whether the window should come to the front (a file was handed to it to open).
+    pub raise_window: bool,
     /// For each copy on its way to the clipboard, in order, the call it answers, if any.
     pub copies_answered: VecDeque<Option<u64>>,
     pub confirm: Option<Confirm>,
@@ -246,7 +248,8 @@ impl AppState {
             messages: VecDeque::new(),
             next_answer: 0,
             answered: Vec::new(),
-            images_written: HashMap::new(),
+            images_made: Vec::new(),
+            raise_window: false,
             copies_answered: VecDeque::new(),
             confirm: None,
             new_image: None,

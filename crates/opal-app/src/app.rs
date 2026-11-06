@@ -44,6 +44,11 @@ pub struct OpalApp {
     /// The API's connection for scripts and assistants (not in tests); `None` if it could
     /// not be opened.
     server: Option<crate::server::Server>,
+    /// Whether another editor served scripts when this one started: this one takes over
+    /// once that one has gone (see [`OpalApp::take_over_serving`]).
+    server_waits: bool,
+    /// When this one last looked whether it could, and last asked the other one.
+    server_looked: (std::time::Instant, std::time::Instant),
 }
 
 impl OpalApp {
@@ -83,8 +88,19 @@ impl OpalApp {
         }
         let tree = default_tree(&st);
         st.opened.clear();
-        let server = persist.then(|| start_server(&mut st, &cc.egui_ctx)).flatten();
-        OpalApp { st, tree, gpu_memory, last_gpu_poll: None, alt_down: false, alt_alone: false, persist, server }
+        let (server, server_waits) = if persist { start_server(&mut st, &cc.egui_ctx) } else { (None, false) };
+        OpalApp {
+            st,
+            tree,
+            gpu_memory,
+            last_gpu_poll: None,
+            alt_down: false,
+            alt_alone: false,
+            persist,
+            server,
+            server_waits,
+            server_looked: (std::time::Instant::now(), std::time::Instant::now()),
+        }
     }
 
     /// The state, for tests.
@@ -543,27 +559,43 @@ impl OpalApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Scripts and assistants connected, and a way to send them off.
-                if let Some(server) = &self.server
-                    && let n = server.clients()
-                    && n > 0
-                {
-                    if ui
-                        .small_button("Disconnect")
-                        .on_hover_text(
-                            "Drop every connected script and assistant (each is cut off at its next request), \
-                             and make a new token, which they need to connect again.",
-                        )
-                        .clicked()
-                    {
-                        server.disconnect_all();
+                // Scripts and assistants connected, and a way to send them off; once sent off,
+                // a way to let them in again.
+                if let Some(server) = &self.server {
+                    let n = server.clients();
+                    if n > 0 {
+                        if ui
+                            .small_button("Disconnect")
+                            .on_hover_text(
+                                "Drop every connected script and assistant (each is cut off at its next \
+                                 request), and keep them out until you let them in again.",
+                            )
+                            .clicked()
+                        {
+                            server.disconnect_all();
+                        }
+                        let who = if n == 1 {
+                            "A script is connected".to_owned()
+                        } else {
+                            format!("{n} scripts are connected")
+                        };
+                        ui.label(
+                            RichText::new(format!("{}  {who}", crate::icons::INFO)).color(self.st.palette.strong_text),
+                        );
+                        ui.separator();
+                    } else if server.shut_out() {
+                        if ui
+                            .small_button("Let in")
+                            .on_hover_text("Let scripts and assistants connect again.")
+                            .clicked()
+                        {
+                            server.let_in();
+                        }
+                        ui.label(
+                            RichText::new(format!("{}  Scripts are disconnected", crate::icons::INFO)).color(weak),
+                        );
+                        ui.separator();
                     }
-                    let who =
-                        if n == 1 { "A script is connected".to_owned() } else { format!("{n} scripts are connected") };
-                    ui.label(
-                        RichText::new(format!("{}  {who}", crate::icons::INFO)).color(self.st.palette.strong_text),
-                    );
-                    ui.separator();
                 }
                 // The write under way: how far it has got, and a way to stop it.
                 if let Some((w, progress)) = self.st.writer.pending().next() {
@@ -694,8 +726,14 @@ impl eframe::App for OpalApp {
         self.st.poll_writes(ctx.input(|i| i.pointer.any_down()));
         // After the writes, whose answers it passes on.
         if let Some(server) = &mut self.server {
-            let busy = self.st.dialog_open() || ctx.input(|i| i.pointer.any_down());
+            let busy = self.st.scripts_wait(ctx.input(|i| i.pointer.any_down()));
             server.serve(&mut self.st, &ctx, busy);
+        } else if self.server_waits {
+            self.take_over_serving(&ctx);
+        }
+        if std::mem::take(&mut self.st.raise_window) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         self.st.poll_paste(ctx.input(|i| i.pointer.any_down()));
         self.st.thumbs.end_frame();
@@ -923,23 +961,50 @@ fn welcome(ui: &mut egui::Ui, st: &mut AppState) {
     });
 }
 
-/// Opens the API's connection, telling the user if it cannot be (but not that another editor
-/// already serves scripts, which they connect to).
-fn start_server(st: &mut AppState, ctx: &egui::Context) -> Option<crate::server::Server> {
-    let file = crate::server::connection_file()?;
+/// Opens the API's connection, telling the user if it cannot be; and whether another editor
+/// serves scripts already (which they connect to, until it goes).
+fn start_server(st: &mut AppState, ctx: &egui::Context) -> (Option<crate::server::Server>, bool) {
+    let Some(file) = crate::server::connection_file() else { return (None, false) };
     if crate::server::is_running(&file) {
         st.notify("Another Opal Studio is open: scripts and assistants connect to that one.");
-        return None;
+        return (None, true);
     }
     match crate::server::Server::start(file, ctx.clone()) {
-        Ok(server) => Some(server),
+        Ok(server) => (Some(server), false),
         Err(e) => {
             st.message(
                 crate::state::MessageKind::Warning,
                 "Scripts cannot connect",
                 format!("The connection for scripts and assistants could not be opened: {e}"),
             );
-            None
+            (None, false)
+        }
+    }
+}
+
+/// How often an editor waiting to serve scripts looks whether the connection file has gone
+/// (the other editor closed), and how often it asks the other editor (which may have ended
+/// without removing it).
+const LOOK_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+const ASK_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
+impl OpalApp {
+    /// Starts serving scripts once the editor that served them has gone.
+    fn take_over_serving(&mut self, ctx: &egui::Context) {
+        ctx.request_repaint_after(LOOK_EVERY);
+        let now = std::time::Instant::now();
+        let (looked, asked) = self.server_looked;
+        if now - looked < LOOK_EVERY {
+            return;
+        }
+        let Some(file) = crate::server::connection_file() else { return };
+        let ask = now - asked >= ASK_EVERY;
+        self.server_looked = (now, if ask { now } else { asked });
+        let gone = !file.exists() || (ask && !crate::server::is_running(&file));
+        if gone && let Ok(server) = crate::server::Server::start(file, ctx.clone()) {
+            self.server = Some(server);
+            self.server_waits = false;
+            self.st.notify("The other Opal Studio has closed: scripts and assistants now connect to this one.");
         }
     }
 }

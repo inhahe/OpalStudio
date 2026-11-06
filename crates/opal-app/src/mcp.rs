@@ -7,12 +7,14 @@
 //! The editor need not be running to list the tools; a tool called without it says so.
 
 use crate::api::describe;
-use interprocess::local_socket::{GenericNamespaced, Stream, prelude::*};
+use crate::server::Hello;
+use interprocess::local_socket::Stream;
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, BufReader, Write};
 
-/// The MCP version answered when the client asks for none.
-const MCP_VERSION: &str = "2025-06-18";
+/// The MCP versions this server speaks, newest first: a client asking for one of them gets
+/// it, any other the newest (and decides whether it can go on).
+const MCP_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// What carries a tool's call to the editor.
 pub trait Caller {
@@ -39,20 +41,13 @@ impl Pipe {
             .or_else(|| std::env::var_os("OPAL_STUDIO_API").map(std::path::PathBuf::from))
             .or_else(crate::server::connection_file)
             .ok_or("There is no settings folder to find the editor in.")?;
-        let text =
-            std::fs::read_to_string(&file).map_err(|_| "Opal Studio is not running: start it first.".to_owned())?;
-        let info: Value =
-            serde_json::from_str(&text).map_err(|e| format!("{} is not readable: {e}", file.display()))?;
-        let (Some(pipe), Some(token)) = (info["pipe"].as_str(), info["token"].as_str()) else {
-            return Err(format!("{} does not name a pipe and a token.", file.display()));
-        };
-        let name = pipe.rsplit(['\\', '/']).next().unwrap_or(pipe);
-        let stream = crate::server::connect(name.to_ns_name::<GenericNamespaced>().map_err(|e| e.to_string())?)
-            .ok_or_else(|| "Opal Studio is not running (its pipe is gone): start it again.".to_owned())?;
-        self.conn = Some(BufReader::new(stream));
-        let mut hello = Map::new();
-        hello.insert("token".into(), json!(token));
-        self.exchange("hello", hello).map(|_| ())
+        match crate::server::say_hello(&file, false) {
+            Hello::Answered(conn) => {
+                self.conn = Some(conn);
+                Ok(())
+            }
+            Hello::Nobody(why) | Hello::Refused(why) => Err(why),
+        }
     }
 
     fn exchange(&mut self, method: &str, params: Map<String, Value>) -> Result<Value, String> {
@@ -135,7 +130,10 @@ pub fn handle(message: &Value, caller: &mut dyn Caller) -> Option<Value> {
     let params = &message["params"];
     let result = match method {
         "initialize" => Ok(json!({
-            "protocolVersion": params["protocolVersion"].as_str().unwrap_or(MCP_VERSION),
+            "protocolVersion": params["protocolVersion"]
+                .as_str()
+                .filter(|v| MCP_VERSIONS.contains(v))
+                .unwrap_or(MCP_VERSIONS[0]),
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "opal-studio", "version": env!("CARGO_PKG_VERSION") },
             "instructions": "Drives the Opal Studio graphics editor running on this computer. Images and layers \
@@ -237,6 +235,9 @@ mod tests {
         let hello = ask(&mut editor, "initialize", json!({ "protocolVersion": "2025-03-26" }));
         assert_eq!(hello["result"]["protocolVersion"], json!("2025-03-26"));
         assert_eq!(hello["result"]["serverInfo"]["name"], json!("opal-studio"));
+        // A version it does not speak: answered with the newest it does.
+        let unknown = ask(&mut editor, "initialize", json!({ "protocolVersion": "2099-01-01" }));
+        assert_eq!(unknown["result"]["protocolVersion"], json!(MCP_VERSIONS[0]));
         assert!(handle(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }), &mut editor).is_none());
 
         let tools = ask(&mut editor, "tools/list", json!({}))["result"]["tools"].clone();
@@ -271,5 +272,27 @@ mod tests {
         let answer = ask(&mut pipe, "tools/call", json!({ "name": "documents", "arguments": {} }));
         assert_eq!(answer["result"]["isError"], json!(true));
         assert!(answer["result"]["content"][0]["text"].as_str().unwrap().contains("not running"), "{answer}");
+    }
+
+    #[test]
+    fn a_refused_hello_is_told_and_the_next_call_connects_afresh() {
+        let file = std::env::temp_dir().join(format!("opal-mcp-refused-{}.json", std::process::id()));
+        let mut server = crate::server::Server::start(file.clone(), egui::Context::default()).unwrap();
+        let mut st = AppState::new();
+        let mut pipe = Pipe { file: Some(file), ..Pipe::default() };
+        // Scripts shut out: the editor's reason, as the tool's error.
+        server.disconnect_all();
+        let refused = pipe.call("documents", Map::new()).unwrap_err();
+        assert!(refused.contains("disconnected"), "{refused}");
+        // Let in again: the next call connects (not on the connection the editor dropped).
+        server.let_in();
+        let ctx = egui::Context::default();
+        let asked = std::thread::spawn(move || pipe.call("documents", Map::new()));
+        while !asked.is_finished() {
+            server.serve(&mut st, &ctx, false);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let answer = asked.join().unwrap();
+        assert!(answer.is_ok(), "{answer:?}");
     }
 }

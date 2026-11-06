@@ -552,13 +552,53 @@ pub fn export_in(
             return Err(IoError::Unsupported { path: path.to_owned(), message });
         }
     }
-    let cancelled = || IoError::Cancelled { path: path.to_owned() };
-    let mut rows = Exported::new(doc, size, progress).ok_or_else(cancelled)?;
-    let (width, height) = (rows.width, rows.height);
     let encode_err = |message: String| IoError::Encode { path: path.to_owned(), message };
-    std::thread::scope(|scope| {
-        // One band waiting beside the one being encoded. An encoder that stops early drops
-        // the receiver, which stops the bands.
+    in_bands(doc, size, pool, progress, |width, height, bands| {
+        write_atomically(path, Some(progress), |out| match format {
+            ExportFormat::Png { sixteen_bit } => {
+                write_png(out, width, height, bands, *sixteen_bit).map_err(|e| encode_err(e.to_string()))
+            }
+            ExportFormat::Jpeg { quality, background } => {
+                let bg = from_srgb8([background[0], background[1], background[2], 255]);
+                let rows = JpegRows::new(bands, width, height, bg);
+                JpegEncoder::new_with_quality(out, (*quality).clamp(1, 100))
+                    .encode_image(&rows)
+                    .map_err(|e| encode_err(e.to_string()))
+            }
+        })
+    })
+    .unwrap_or_else(|| Err(IoError::Cancelled { path: path.to_owned() }))
+}
+
+/// The canvas of `doc`, at its own size or at `size`, as an 8-bit PNG file's bytes, made
+/// as [`export_in`] makes a file (compositing in `pool`).
+pub fn png_in_memory(
+    doc: &Document,
+    size: Option<&ExportSize>,
+    pool: Option<&rayon::ThreadPool>,
+) -> Result<Vec<u8>, String> {
+    in_bands(doc, size, pool, &Progress::default(), |width, height, bands| {
+        let mut out = Vec::new();
+        write_png(&mut out, width, height, bands, false).map(|()| out).map_err(|e| e.to_string())
+    })
+    .unwrap_or_else(|| Err("cancelled".to_owned()))
+}
+
+/// Makes the canvas of `doc` (at `size`) a band of rows at a time, top to bottom, on a
+/// thread of its own that gives its parallel work to `pool` (rayon's global pool if
+/// `None`), and hands `take` the image's width and height and the bands as they come, each
+/// told to `progress` as it is taken. One band waits beside the one being taken; a `take`
+/// that stops early stops the bands. `None` if cancelled before it began.
+fn in_bands<R>(
+    doc: &Document,
+    size: Option<&ExportSize>,
+    pool: Option<&rayon::ThreadPool>,
+    progress: &Progress,
+    take: impl FnOnce(u32, u32, &mut dyn Iterator<Item = Vec<Pixel>>) -> R,
+) -> Option<R> {
+    let mut rows = Exported::new(doc, size, progress)?;
+    let (width, height) = (rows.width, rows.height);
+    Some(std::thread::scope(|scope| {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         scope.spawn(move || {
             let mut make = move || {
@@ -573,20 +613,9 @@ pub fn export_in(
                 None => make(),
             }
         });
-        let bands = rx.iter().inspect(|band| progress.advance(band.len() as u64));
-        write_atomically(path, Some(progress), |out| match format {
-            ExportFormat::Png { sixteen_bit } => {
-                write_png(out, width, height, bands, *sixteen_bit).map_err(|e| encode_err(e.to_string()))
-            }
-            ExportFormat::Jpeg { quality, background } => {
-                let bg = from_srgb8([background[0], background[1], background[2], 255]);
-                let rows = JpegRows::new(bands, width, height, bg);
-                JpegEncoder::new_with_quality(out, (*quality).clamp(1, 100))
-                    .encode_image(&rows)
-                    .map_err(|e| encode_err(e.to_string()))
-            }
-        })
-    })
+        let mut bands = rx.iter().inspect(|band| progress.advance(band.len() as u64));
+        take(width, height, &mut bands)
+    }))
 }
 
 /// Writes a `width × height` PNG with transparency, at 8 or (`sixteen`) 16 bits a channel,

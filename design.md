@@ -1020,33 +1020,47 @@ server. Both rest on one language-neutral API.
 - **The protocol.** JSON-RPC 2.0, a request or response a line, over the pipe named in
   `api.json` in the user's settings folder, beside a random token (32 bytes from the
   system's generator) made at each start; the file goes when the editor closes. A
-  connection's first request is `hello` with the token; anything else first, or the wrong
-  token, is refused and the connection dropped. A command's method is its name in the
-  registry in snake case (`save_as`, `merge_down`), its parameters each with a kind (a
-  number in a range, one of some words, a path, an image's or layers' ids), and either a
-  default or what the editor holds now (`document`: the active image; `layers`: the
-  selected ones); `methods` lists them all, which is what the stubs and tools are made from.
-  Queries so far: `documents`, `layers`, `image`. A call is carried out between frames as
-  the interface would, without a dialog (a frame goes on with the calls that follow one
-  another for a few milliseconds, so a script makes thousands a second, not one a frame):
-  what one would have said comes back with it, an error or a refusal (which the interface
-  tells as information) as its failure, a warning or a status-bar notice as its `notes`; a
-  refused call leaves the user's active image and selection as they were. A `hello` may
-  name a `script` (the Python package names the script running, but not an interactive
-  session): the connection is then a script run, and once it closes, the states it made in
-  each image one after another are joined into one, labeled `Script: <name>`
-  (`History::join`: a line of them becomes its last state, in its first's place; what the
-  script undid goes with it; a state the user made, or made something from, ends a line).
-  The states stay separate while it runs, so a script's own undo takes back one step. A save, export or copy is answered once written. Paths must be
-  absolute (the Python package makes them so against the script's own folder); a save or
-  export over a file already there needs `overwrite`, and Save As adds `.opal` as its
-  dialog does. While the user has a dialog open or a button held, requests wait; once they
-  have asked to quit, they are refused. Disconnecting (the status bar) drops every client
-  and makes a new token. A line from a client is at most 1 MB (4 KB before `hello`), and at
-  most 16 connections wait to say hello at once. Scripts reach the first editor started: a
-  second one serves none, and one started with files hands them to the first to open and
-  quits. Commands that need the transform box (Paste, Transform) and those of the view and
-  panels are not callable yet, or at all.
+  connection's first request is `hello` with the token, within 5 seconds; anything else
+  first, or the wrong token, is refused and the connection dropped. A command's method is
+  its name in the registry in snake case (`save_as`, `merge_down`), its parameters each
+  with a kind (a number in a range, one of some words, text that is not blank, a path, an
+  image's or layers' ids), and either a default or what the editor holds now (`document`:
+  the active image; `layers`: the selected ones); `methods` lists them all, which is what
+  the stubs and tools are made from. Queries so far: `documents`, `layers`, `image` (made
+  in memory on a thread of its own, out of the user's sight, unlike an export).
+- **Carrying out a call.** Between frames, as the interface would, without a dialog (a
+  frame goes on with the calls that follow one another for a few milliseconds, looking for
+  the next rather than sleeping, since a sleep shorter than the timer's tick lasts the
+  tick; so a script makes thousands of calls a second, not one a frame). What a dialog
+  would have said comes back with the call: an error or a refusal (which the interface
+  tells as information) as its failure, a warning or a status-bar notice as its `notes`;
+  for a notification, which no one answers, it is told in a dialog after all. A refused
+  call leaves the user's active image and selection as they were; one that would change
+  nothing (hiding a hidden layer) records nothing. A save, export or copy is answered once
+  written. Paths must be absolute (the Python package makes them so against the current
+  folder, as Python's `open` would); a save or export over a file already there needs
+  `overwrite`, Save As adds `.opal` as its dialog does, and an export given one side gets
+  the other in proportion, refused past the largest side allowed. While the user has a
+  dialog open, a button held or a transform box open (an edit a command would commit
+  under them), calls wait; once they have asked to quit, they are refused.
+- **Script runs.** A `hello` may name a `script` (the Python package names the script
+  running, but not an interactive session): the connection is then a script run, and once
+  it closes, the states it made in each image one after another are joined into one,
+  labeled `Script: <name>` (`History::join`: a line of them becomes its last state, in its
+  first's place; what the script undid goes with it; a state the user made, or made
+  something from, ends a line). The states stay separate while it runs, so a script's own
+  undo takes back one step.
+- **Who is connected.** Disconnecting (the status bar) drops every client, refuses what
+  they asked that is still waiting, makes a new token, and shuts scripts out until the user
+  lets them in again (a client that rereads `api.json`, as the MCP shim does, cannot come
+  straight back). A line from a client is at most 1 MB (4 KB before `hello`), and at most
+  16 connections wait to say hello at once. Scripts reach the first editor started: a
+  second one serves none until the first has gone (it looks every 2 seconds whether
+  `api.json` is, and every 15 asks the first, which may have ended without removing it),
+  and one started with files hands them to the first, over a `hello` with `files` (which
+  may only open them, and is let in even while scripts are shut out), lets it come to the
+  front, and quits. Commands that need the transform box (Paste, Transform) and those of
+  the view and panels are not callable yet, or at all.
 - **Python package** `opal-studio` (module `opal`): connects to the running editor or starts
   a headless one (`opal-studio --headless script.py` for batch work). *Built:* headless mode
   runs the editor's state and its server with no window, the user's preferences loaded
@@ -1071,7 +1085,7 @@ server. Both rest on one language-neutral API.
 - **Safety.** Local connections only; clients authenticate with a random token kept in a
   file only the user can read; MCP requests with a foreign `Origin` are refused (against
   DNS rebinding). While a script or assistant is connected, the status bar says so and can
-  disconnect it.
+  disconnect it, keeping them out until the user lets them in again.
 - **Other languages** (JavaScript, Lua) can be thin clients of the same protocol later.
 
 ## Native file format

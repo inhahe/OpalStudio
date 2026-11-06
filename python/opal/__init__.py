@@ -12,7 +12,7 @@ methods: ::
 
 Each method is one of the editor's commands (named as in the editor, in snake case) or a
 query (``documents``, ``layers``, ``image``), taking its parameters by name (paths
-relative to this script's folder); ``editor.methods()``
+relative to the current folder, as Python's own ``open`` takes them); ``editor.methods()``
 lists them all, ``opal/__init__.pyi`` describes them for editors and type checkers, and
 ``API.md`` documents them. A command that fails raises :class:`OpalError` with the
 editor's reason.
@@ -123,19 +123,25 @@ class _Pipe:
         self._pending = b""
 
     def exchange(self, message: dict) -> dict:
+        """Sends ``message`` and returns the reply to it. Replies to earlier messages still
+        on their way (those of a call interrupted while it waited) are passed over."""
         line = (json.dumps(message, default=_plain) + "\n").encode("utf-8")
         try:
             self._send(line)
-            while b"\n" not in self._pending:
-                chunk = self._recv(65536)
-                if not chunk:
-                    raise OpalError("The editor closed the connection.")
-                self._pending += chunk
+            while True:
+                while b"\n" not in self._pending:
+                    chunk = self._recv(65536)
+                    if not chunk:
+                        raise OpalError("The editor closed the connection.")
+                    self._pending += chunk
+                line, self._pending = self._pending.split(b"\n", 1)
+                reply = json.loads(line)
+                # A reply with no id is to a line the editor could not read: this one.
+                if reply.get("id") in (message.get("id"), None):
+                    return reply
         except OSError:
             # A pipe the editor has dropped (it closed, or the user disconnected scripts).
             raise OpalError("The editor closed the connection.") from None
-        line, self._pending = self._pending.split(b"\n", 1)
-        return json.loads(line)
 
     def close(self) -> None:
         self._file.close()
@@ -162,7 +168,8 @@ class Editor:
 
     def call(self, method: str, **params: Any) -> Any:
         """Calls ``method`` with ``params``; returns what it gives back."""
-        # Paths go as absolute ones, against this script's folder (the editor's is another).
+        # Paths go as absolute ones, against this process's current folder (the editor's is
+        # another).
         kinds = {p["name"]: p["kind"] for p in self.__dict__.get("_methods", {}).get(method, {}).get("params", [])}
         params = {
             k: os.path.abspath(os.fspath(v)) if kinds.get(k) == "path" and v is not None else v for k, v in params.items()

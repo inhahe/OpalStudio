@@ -1,7 +1,7 @@
 //! The parameterized forms of the registry's commands, and the queries beside them: what
 //! scripts and assistants call (see design.md, *Scripting*). The API's documentation, its
 //! Python stubs and the MCP tools are generated from [`methods`], so they cannot drift from
-//! what [`AppState::call`] accepts.
+//! what [`AppState::call_from`] accepts.
 //!
 //! A command called this way does what it does from the interface, but with its parameters
 //! given instead of asked for: nothing opens a dialog, and what would have been told in one
@@ -15,7 +15,7 @@ use crate::state::{AppState, Background, MessageKind, NewImage};
 use crate::writer::Then;
 use eframe::egui;
 use opal_core::document::{Layer, LayerContent, LayerId, ObjectKind};
-use opal_io::image_files::{ExportFormat, ExportSize};
+use opal_io::image_files::ExportSize;
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -426,7 +426,7 @@ fn check_value(p: &Param, value: &Value) -> Result<(), String> {
             Some(x) => return Err(format!("\"{name}\" must lie between {min} and {max}, not {x}")),
             None => false,
         },
-        Kind::Text => value.is_string(),
+        Kind::Text => value.as_str().is_some_and(|s| !s.trim().is_empty()),
         Kind::Path => match value.as_str() {
             Some(p) if std::path::Path::new(p).is_absolute() => true,
             Some(p) => {
@@ -453,7 +453,7 @@ pub fn kind_text(kind: Kind) -> &'static str {
         Kind::Bool => "true or false",
         Kind::Int { .. } => "a whole number",
         Kind::Number { .. } => "a number",
-        Kind::Text => "text",
+        Kind::Text => "text that is not blank",
         Kind::Path => "a file's path",
         Kind::Choice(_) => "one of its words",
         Kind::Document => "an image's id",
@@ -475,7 +475,14 @@ pub enum Reply {
 impl AppState {
     /// Calls method `name` of the API with the arguments `given`: carries out the command
     /// (or answers the query) as the interface would, without asking anything.
+    #[cfg(test)]
     pub fn call(&mut self, name: &str, given: &Map<String, Value>, ctx: &egui::Context) -> Reply {
+        self.call_heard(true, name, given, ctx)
+    }
+
+    /// [`call`](Self::call); but unless `heard`, no one reads the answer (the call was a
+    /// notification), so what would have been told in a dialog is told in one after all.
+    fn call_heard(&mut self, heard: bool, name: &str, given: &Map<String, Value>, ctx: &egui::Context) -> Reply {
         let Some(method) = methods().iter().find(|m| m.name == name) else {
             return Reply::Now(Err(format!("There is no method \"{name}\".")));
         };
@@ -483,7 +490,7 @@ impl AppState {
             Ok(args) => args,
             Err(why) => return Reply::Now(Err(format!("{name}: {why}."))),
         };
-        let told = self.messages.len();
+        let told = if heard { self.messages.len() } else { usize::MAX };
         let notice = self.notice.clone();
         // The image and layers the user had, to put back if the command is refused (it
         // makes those it names the active ones).
@@ -496,7 +503,7 @@ impl AppState {
         // What would have been told in a dialog comes back with the reply instead: an error,
         // or a refusal (told as information), as the call's failure; a warning, or a notice
         // the status bar would have shown, as a note.
-        let messages: Vec<_> = self.messages.drain(told..).collect();
+        let messages: Vec<_> = self.messages.drain(told.min(self.messages.len())..).collect();
         let text = |m: &crate::state::Message| format!("{}: {}", m.title, m.body);
         let refusals: Vec<String> = messages.iter().filter(|m| m.kind != MessageKind::Warning).map(text).collect();
         let mut notes: Vec<String> = messages.iter().filter(|m| m.kind == MessageKind::Warning).map(text).collect();
@@ -529,19 +536,25 @@ impl AppState {
         reply
     }
 
-    /// [`call`](Self::call), made by script run `script` if it is one: its changes to each
-    /// image are joined into one history state when the run ends (see
-    /// [`script_ended`](Self::script_ended)).
+    /// [`call`](Self::call), made by script run `script` if it is one (its changes to each
+    /// image are joined into one history state when the run ends: see
+    /// [`script_ended`](Self::script_ended)), and `heard` unless it is a notification. A
+    /// file opened by a notification (one handed over by an editor started to open it)
+    /// brings the window to the front.
     pub fn call_from(
         &mut self,
         script: Option<u64>,
+        heard: bool,
         name: &str,
         given: &Map<String, Value>,
         ctx: &egui::Context,
     ) -> Reply {
         self.docs.iter_mut().for_each(|d| d.script = script);
-        let reply = self.call(name, given, ctx);
+        let reply = self.call_heard(heard, name, given, ctx);
         self.docs.iter_mut().for_each(|d| d.script = None);
+        if !heard && name == "open" {
+            self.raise_window = true;
+        }
         reply
     }
 
@@ -550,6 +563,13 @@ impl AppState {
     pub fn script_ended(&mut self, run: u64, name: &str) {
         let label = format!("Script: {name}");
         self.docs.iter_mut().for_each(|d| d.script_ended(run, &label));
+    }
+
+    /// Whether scripts' calls wait now: while the user has a dialog open, holds a button
+    /// (`pointer_down`), or has a transform box open, an edit in progress that a command
+    /// would commit under them.
+    pub fn scripts_wait(&self, pointer_down: bool) -> bool {
+        self.dialog_open() || pointer_down || self.docs.iter().any(|d| d.transform.is_some())
     }
 
     /// Answers query `name`.
@@ -716,6 +736,11 @@ impl AppState {
                 let wanted = args.flag(if visibility { "visible" } else { "locked" });
                 let d = self.active_mut().expect("available");
                 let ids = d.selection();
+                let flag = |l: &Layer| if visibility { l.visible } else { l.locked };
+                // Already as asked: nothing to record.
+                if wanted.is_some_and(|w| ids.iter().all(|&id| d.doc().layer(id).is_none_or(|l| flag(l) == w))) {
+                    return now(Ok(self.selection_json()));
+                }
                 let label = match (visibility, wanted) {
                     (true, Some(true)) => "Show layers",
                     (true, Some(false)) => "Hide layers",
@@ -795,6 +820,12 @@ impl AppState {
             (None, Some(h)) => (ratio(c.height, c.width, h), h as u32),
             (None, None) => (c.width, c.height),
         };
+        if width.max(height) > MAX_SIDE {
+            return Reply::Now(Err(format!(
+                "export: in proportion, that is {width} × {height} pixels, past the most a side can be \
+                 ({MAX_SIDE}): give both sides."
+            )));
+        }
         let size = ((width, height) != (c.width, c.height)).then(|| ExportSize {
             width,
             height,
@@ -812,8 +843,9 @@ impl AppState {
         Reply::Later(n)
     }
 
-    /// Writes the image `args` names, scaled to fit `max_side`, as a PNG in a file of the
-    /// call's own; the answer, once it is written, is the file's bytes (see [`answers`]).
+    /// Makes the image `args` names, scaled to fit `max_side`, as a PNG (in memory, on a
+    /// thread of its own: nothing the user sees, unlike an export); the answer, once made,
+    /// is its bytes in base64, with its size (see [`answers`]).
     ///
     /// [`answers`]: Self::answers
     fn image_by_args(&mut self, args: &Args, ctx: &egui::Context) -> Reply {
@@ -831,33 +863,46 @@ impl AppState {
             height,
             sampling: crate::prefs::sampling(&self.prefs, "export"),
         });
-        let path = std::env::temp_dir().join(format!("opal-image-{}-{}.png", std::process::id(), self.next_answer + 1));
-        let file = path.clone();
-        let reply = self.reply_after_write(|st, then| {
-            st.export_to(doc, file, ExportFormat::Png { sixteen_bit: false }, size, None, then, ctx)
-        });
-        if let Reply::Later(n) = reply {
-            self.images_written.insert(n, (path, width, height));
+        self.next_answer += 1;
+        let n = self.next_answer;
+        let (send, made) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        let make = move || {
+            // Kept while it is made, as an export's: it caps the tiles' memory.
+            let mut memory = crate::memory::Allowance::now();
+            let result = memory
+                .take(opal_io::image_files::export_memory(&doc, size.as_ref()))
+                .and_then(|()| {
+                    opal_io::image_files::png_in_memory(&doc, size.as_ref(), Some(crate::background::pool()))
+                })
+                .map(|png| json!({ "png": base64(&png), "width": width, "height": height }));
+            drop(memory);
+            let _ = send.send(result);
+            ctx.request_repaint();
+        };
+        if let Err(e) = std::thread::Builder::new().name("api image".into()).spawn(make) {
+            return Reply::Now(Err(format!("The image could not be made: {e}")));
         }
-        reply
+        self.images_made.push((n, made));
+        Reply::Later(n)
     }
 
-    /// The answers to calls whose writes (or copies to the clipboard) have finished since
-    /// asked last, by number: for an image asked for, its file's bytes (the file then goes).
+    /// The answers to calls whose writes, copies to the clipboard or images have finished
+    /// since asked last, by number.
     pub fn answers(&mut self) -> Vec<(u64, Result<Value, String>)> {
-        let answered = std::mem::take(&mut self.answered);
+        let mut answered = std::mem::take(&mut self.answered);
+        self.images_made.retain(|(n, made)| match made.try_recv() {
+            Ok(result) => {
+                answered.push((*n, result));
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                answered.push((*n, Err("The image could not be made.".to_owned())));
+                false
+            }
+        });
         answered
-            .into_iter()
-            .map(|(n, result)| match self.images_written.remove(&n) {
-                None => (n, result),
-                Some((path, width, height)) => {
-                    let read =
-                        result.and_then(|_| std::fs::read(&path).map_err(|e| format!("Could not read the image: {e}")));
-                    let _ = std::fs::remove_file(&path);
-                    (n, read.map(|png| json!({ "png": base64(&png), "width": width, "height": height })))
-                }
-            })
-            .collect()
     }
 
     fn canvas_json(&self) -> Value {
@@ -1163,6 +1208,7 @@ mod tests {
         let Reply::Later(n) = st.call("image", &args(json!({ "max_side": 100 })), &egui::Context::default()) else {
             panic!("answered at once")
         };
+        assert!(st.writer.pending().next().is_none(), "made as an export is, in the status bar");
         let mut answers = Vec::new();
         for _ in 0..500 {
             st.poll_writes(false);
@@ -1178,7 +1224,7 @@ mod tests {
         assert_eq!((got, image["width"].as_u64(), image["height"].as_u64()), (n, Some(100), Some(25)));
         // A PNG's signature, in base64.
         assert!(image["png"].as_str().unwrap().starts_with("iVBORw0KGgo"), "{image}");
-        assert!(st.images_written.is_empty(), "its file was kept");
+        assert!(st.images_made.is_empty());
     }
 
     #[test]
@@ -1193,6 +1239,58 @@ mod tests {
         assert!(err(json!({ "width": 1, "height": 5, "background": "blue" })).contains("one of white, transparent"));
         let fixed = Args::check(p, &args(json!({ "width": 1, "height": 5 }))).unwrap();
         assert_eq!(fixed.text("background"), Some("white"), "the default stands in");
+    }
+
+    #[test]
+    fn a_call_that_changes_nothing_records_nothing() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 64, "height": 32 })).unwrap();
+        let layer = now(&mut st, "new_layer", json!({ "name": "Sky" })).unwrap()["layer"].as_u64().unwrap();
+        let at = st.active().unwrap().history.current();
+        // Already visible, and not locked: no step of history, and nothing to save.
+        now(&mut st, "toggle_visible", json!({ "layers": [layer], "visible": true })).unwrap();
+        now(&mut st, "toggle_lock", json!({ "layers": [layer], "locked": false })).unwrap();
+        assert_eq!(st.active().unwrap().history.current(), at, "a step that changed nothing");
+        now(&mut st, "toggle_visible", json!({ "layers": [layer], "visible": false })).unwrap();
+        assert_ne!(st.active().unwrap().history.current(), at);
+    }
+
+    #[test]
+    fn what_cannot_be_done_as_asked_is_refused() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 10, "height": 30000 })).unwrap();
+        // The other side, in proportion, would be far past the most a side can be.
+        // (In a folder that is not there: were it not refused, the write would fail at once.)
+        let path = std::env::temp_dir().join("opal-no-such-folder").join("strip.png").display().to_string();
+        let err = now(&mut st, "export", json!({ "path": path, "width": 3000 })).unwrap_err();
+        assert!(err.contains("give both sides"), "{err}");
+        // A blank name, which the interface would never give a layer.
+        let err = now(&mut st, "new_layer", json!({ "name": "  " })).unwrap_err();
+        assert!(err.contains("not blank"), "{err}");
+        let layer = now(&mut st, "new_layer", json!({})).unwrap()["layer"].as_u64().unwrap();
+        let err = now(&mut st, "rename", json!({ "layer": layer, "name": "" })).unwrap_err();
+        assert!(err.contains("not blank"), "{err}");
+    }
+
+    #[test]
+    fn a_file_handed_over_to_open_is_told_of_here_and_brings_the_window_up() {
+        let mut st = AppState::new();
+        let missing = std::env::temp_dir().join("opal-api-no-such-file.png");
+        let given = args(json!({ "path": missing.display().to_string() }));
+        // A notification: no one hears its answer, so the user is told, as by a dialog.
+        st.call_from(None, false, "open", &given, &egui::Context::default());
+        assert!(st.messages.iter().any(|m| m.kind == MessageKind::Error), "what opening it said was lost");
+        assert!(st.raise_window);
+    }
+
+    #[test]
+    fn scripts_wait_while_a_transform_box_is_open() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 64, "height": 32 })).unwrap();
+        assert!(!st.scripts_wait(false));
+        assert!(st.scripts_wait(true), "a button held");
+        assert!(st.active_mut().unwrap().begin_transform(opal_core::resample::Sampling::default()));
+        assert!(st.scripts_wait(false), "the box is an edit in progress");
     }
 
     #[test]
