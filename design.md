@@ -550,8 +550,9 @@ Editable content does not mean recomputing everything on each change.
 - **Previews first:** while something is dragged (the transform box, the Move tool), the
   tiles it changes are drawn at the resolution on screen, so the drag costs what the
   screen holds rather than what the image does. Pixel layers are reduced only under those
-  tiles (kept at the level shown for the drag's length, as it comes back over them, and
-  none beneath), and where a layer repeats one tile its reduced tile is that tile halved, made
+  tiles (kept at the level shown for the drag's length, as it comes back over them, while
+  they fit the cache's budget beside its own tiles, and none beneath), and where a layer
+  repeats one tile its reduced tile is that tile halved, made
   once a level, with nothing beneath it reduced (a drag over a 300,000-pixel white canvas
   shown whole: 23 ms a frame); image objects are drawn through their transform with their
   own resampling (Nearest by area, as above). Tiles the drag leaves alone stay exact,
@@ -590,7 +591,9 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   until clicked again, and the snapping distance is adjustable. Moving, the box's edges
   and center snap; scaling, the corner or edge dragged does. A corner with the aspect
   kept, and an edge, can only move along one line (the diagonal, or across the edge): it
-  stops where that line crosses a snap line, if it is that near the crossing.
+  stops where that line crosses a snap line, if it is that near the crossing. A snap that
+  would leave the box thinner than the snapping distance (onto a line through the corner
+  held still) is not made.
 - **On the box:** Fit (into the canvas), Fill (cover the canvas), the aspect lock, snapping,
   Into active layer, and Commit and Cancel, also on Enter and Esc, so the box never
   lingers like GIMP's floating selection. While dragging, the box shows the size and angle.

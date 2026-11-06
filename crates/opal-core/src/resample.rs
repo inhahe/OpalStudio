@@ -200,32 +200,38 @@ pub(crate) enum Drawing {
 impl Drawing {
     /// [`render_tile`], drawn this way.
     pub(crate) fn render_tile(&self, image: &RasterImage, transform: &Affine, c: TileCoord) -> Option<Tile> {
-        match self {
-            Drawing::Sampled(s) => render_tile(image, transform, s, c),
-            Drawing::ByArea => {
-                if image.is_empty() {
-                    return None;
-                }
-                let dest = c.rect(0);
-                if let Some(g) = transform.grid_map() {
-                    return render_exact(image, &g, &dest);
-                }
-                render_filtered(image, &transform.inverse()?, Filter::Area, false, &dest)
-            }
+        if image.is_empty() {
+            return None;
+        }
+        let dest = c.rect(0);
+        if let Some(g) = transform.grid_map() {
+            return render_exact(image, &g, &dest);
+        }
+        let inv = transform.inverse()?;
+        match self.filter() {
+            None => render_nearest(image, &inv, &dest),
+            Some(f) => render_filtered(image, &inv, f, matches!(self, Drawing::Sampled(s) if s.anti_ringing), &dest),
         }
     }
 
     /// [`prepare`], for drawing this way.
     pub(crate) fn prepare(&self, image: &RasterImage, transform: &Affine) {
+        if let Some(f) = self.filter()
+            && transform.grid_map().is_none()
+            && let Some(inv) = transform.inverse()
+        {
+            image.reduced(f.level(&inv));
+        }
+    }
+
+    /// The filter it draws with, or `None` for point sampling.
+    fn filter(&self) -> Option<Filter> {
         match self {
-            Drawing::Sampled(s) => prepare(image, transform, s),
-            Drawing::ByArea => {
-                if transform.grid_map().is_none()
-                    && let Some(inv) = transform.inverse()
-                {
-                    image.reduced(pyramid_level(&inv));
-                }
-            }
+            Drawing::Sampled(s) => match s.method {
+                Method::Nearest => None,
+                m => Some(Filter::Kernel(m)),
+            },
+            Drawing::ByArea => Some(Filter::Area),
         }
     }
 
@@ -255,21 +261,37 @@ enum Filter {
     Area,
 }
 
+impl Filter {
+    /// The most the filter is widened along one axis, at the pyramid level it reads,
+    /// before a coarser level (which coarsens the other axis too) is read instead. By area
+    /// the taps cost only the footprint's own size, so it is widened as far as an
+    /// axis-aligned kernel is, however turned: an axis it enlarges stays as sharp.
+    fn cap(&self, inv: &Affine) -> f64 {
+        match self {
+            Filter::Kernel(_) => widening_cap(inv),
+            Filter::Area => MAX_WIDENING_ALIGNED,
+        }
+    }
+
+    /// The pyramid level drawing through `inv` (document to image pixels) reads: the one
+    /// just finer than the result along the less shrunk axis, or coarser if the other axis
+    /// would need the filter widened past its [`cap`](Self::cap).
+    fn level(&self, inv: &Affine) -> u32 {
+        let [fu, fv] = inv.row_norms();
+        let (su, sv) = (fu.max(1.0), fv.max(1.0));
+        let cap = self.cap(inv);
+        let mut level = su.min(sv).log2().floor().max(0.0) as u32;
+        while level < MAX_REDUCTION && su.max(sv) / f64::from(1u32 << level) > cap {
+            level += 1;
+        }
+        level.min(MAX_REDUCTION)
+    }
+}
+
 /// Draws `image` into level-0 document tile `c`, its pixels carried into the document by
 /// `transform`; `None` where nothing lands.
 pub fn render_tile(image: &RasterImage, transform: &Affine, sampling: &Sampling, c: TileCoord) -> Option<Tile> {
-    if image.is_empty() {
-        return None;
-    }
-    let dest = c.rect(0);
-    if let Some(g) = transform.grid_map() {
-        return render_exact(image, &g, &dest);
-    }
-    let inv = transform.inverse()?;
-    match sampling.method {
-        Method::Nearest => render_nearest(image, &inv, &dest),
-        m => render_filtered(image, &inv, Filter::Kernel(m), sampling.anti_ringing, &dest),
-    }
+    Drawing::Sampled(*sampling).render_tile(image, transform, c)
 }
 
 /// The image pixels that `dest` (document pixels) is drawn from through a transform that
@@ -518,7 +540,7 @@ fn render_filtered(
     };
     // How many source pixels one result pixel spans along each source axis.
     let [fu, fv] = inv.row_norms();
-    let level = pyramid_level(inv);
+    let level = filter.level(inv);
     let scale = 0.5f64.powi(level as i32);
     // Built before the working buffers are taken: building it runs on rayon, which may run
     // another tile on this thread meanwhile.
@@ -528,7 +550,7 @@ fn render_filtered(
     // A squash so extreme that the coarsest level still leaves the kernel wider than the cap
     // (one axis shrunk millions of times more than the other) is drawn with the kernel
     // capped there, aliasing a little, rather than with billions of taps.
-    let cap = widening_cap(&inv);
+    let cap = filter.cap(&inv);
     let (wu, wv) = ((fu * scale).clamp(1.0, cap), (fv * scale).clamp(1.0, cap));
     // By area, the footprint itself, however narrow (a fraction of a pixel, enlarged).
     let (au, av) = ((fu * scale).min(cap), (fv * scale).min(cap));
@@ -757,29 +779,10 @@ pub fn footprint(image: &RasterImage, transform: &Affine, sampling: &Sampling) -
     Some(IRect::covering(&transform.bounds(&content.to_f().expand(r))))
 }
 
-/// The pyramid level a filtered drawing through `inv` (document to image pixels) reads:
-/// the one just finer than the result along the less shrunk axis, or coarser if the other
-/// axis would need a kernel widened past its cap (`widening_cap`).
-fn pyramid_level(inv: &Affine) -> u32 {
-    let [fu, fv] = inv.row_norms();
-    let (su, sv) = (fu.max(1.0), fv.max(1.0));
-    let cap = widening_cap(inv);
-    let mut level = su.min(sv).log2().floor().max(0.0) as u32;
-    while level < MAX_REDUCTION && su.max(sv) / f64::from(1u32 << level) > cap {
-        level += 1;
-    }
-    level.min(MAX_REDUCTION)
-}
-
 /// Builds the pyramid level drawing `image` through `transform` will read, so tiles drawn
 /// in parallel afterwards find it ready instead of each building it.
 pub fn prepare(image: &RasterImage, transform: &Affine, sampling: &Sampling) {
-    if matches!(sampling.method, Method::Nearest) || transform.grid_map().is_some() {
-        return;
-    }
-    if let Some(inv) = transform.inverse() {
-        image.reduced(pyramid_level(&inv));
-    }
+    Drawing::Sampled(*sampling).prepare(image, transform);
 }
 
 #[cfg(test)]

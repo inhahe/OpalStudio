@@ -189,6 +189,10 @@ impl TilePixel for [u8; 4] {
     }
 }
 
+/// How many columns or rows of empty tiles finding an image's content bounds steps past, on
+/// a side, before asking every tile instead (see `RasterImage::bounds_along_the_edge`).
+const EDGE_STEPS: usize = 16;
+
 /// Up to how many tiles a question about a rectangle of them looks at each tile, rather than
 /// at the runs (which are built for it, at the cost of sorting every tile of the image).
 const LOOKED_AT_ONE_BY_ONE: i64 = 64;
@@ -312,12 +316,27 @@ impl RasterImage {
     }
 
     /// Where `self` and `other` hold different tiles (by identity: an edit replaces the
-    /// tiles it changes and keeps the others): by tile row, the spans `[x0, x1)` of tile
-    /// columns. Asked of the two images' runs, whose rows an edit left alone are shared
-    /// between an image and its edited copy, so the cost follows the rows that changed.
+    /// tiles it changes and keeps the others): by tile row, spans `[x0, x1)` of tile
+    /// columns. Asked of the two images' runs if both are built, whose rows an edit left
+    /// alone are shared between an image and its edited copy, so the cost follows the rows
+    /// that changed; otherwise tile by tile (building runs would sort every tile, and an
+    /// image made afresh shares no row with another), a span a tile.
     pub fn differences(&self, other: &RasterImage) -> HashMap<i32, Vec<(i32, i32)>> {
-        let (a, b) = (self.runs(), other.runs());
-        let mut out = HashMap::new();
+        let mut out: HashMap<i32, Vec<(i32, i32)>> = HashMap::new();
+        let (Some(a), Some(b)) = (self.runs.get(), other.runs.get()) else {
+            let mut differ = |c: TileCoord| out.entry(c.y).or_default().push((c.x, c.x + 1));
+            for (c, t) in self.tiles() {
+                if other.tile(c).is_none_or(|u| !Arc::ptr_eq(t, u)) {
+                    differ(c);
+                }
+            }
+            for (c, _) in other.tiles() {
+                if self.tile(c).is_none() {
+                    differ(c);
+                }
+            }
+            return out;
+        };
         let none = Row::new();
         let mut differ = |y: i32, ra: &Row, rb: &Row| {
             let spans = row_differences(ra, rb);
@@ -649,37 +668,56 @@ impl RasterImage {
     }
 
     /// [`content_bounds`](Self::content_bounds) from the runs of tiles, if they are built
-    /// (an edit keeps them, and forgets the bounds): the content's edge lies in the
-    /// outermost tiles, those of the first and last columns and rows, so only those are
-    /// asked (each run's tile once, a run being one tile repeated). `None`, for asking every
-    /// tile, without the runs, or if all of the outermost tiles on one side are empty (the
-    /// edge then lies further in).
+    /// (an edit keeps them, and forgets the bounds): each side of the content lies in the
+    /// outermost column (or row) of tiles on that side holding any, which no tile further
+    /// in can pass, so only those tiles are asked (each run's tile once, a run being one
+    /// tile repeated); past columns or rows whose tiles are all empty, the next one in.
+    /// `None`, for asking every tile, without the runs, or past [`EDGE_STEPS`] empty ones.
     fn bounds_along_the_edge(&self) -> Option<Option<IRect>> {
         let rows = &self.runs.get()?.0;
-        let (Some(top), Some(bottom)) = (rows.keys().min(), rows.keys().max()) else { return Some(None) };
-        let first = rows.values().filter_map(|r| r.first()).map(|r| r.0).min()?;
-        let last = rows.values().filter_map(|r| r.last()).map(|r| r.1 - 1).max()?;
+        if rows.is_empty() {
+            return Some(None);
+        }
         let union = |a: Option<IRect>, b: Option<IRect>| match (a, b) {
             (Some(a), Some(b)) => Some(a.union(&b)),
             (a, b) => a.or(b),
         };
-        // Each side from its own tiles alone, which no tile further in can pass.
-        let mut sides = [None; 4];
-        for (&y, row) in rows {
-            if row.first().is_some_and(|r| r.0 == first) {
-                sides[0] = union(sides[0], self.content_at(TileCoord::new(first, y)));
+        let column = |x: i32| {
+            rows.iter()
+                .filter(|(_, r)| Runs::at(r, x).is_some())
+                .map(|(&y, _)| self.content_at(TileCoord::new(x, y)))
+                .fold(None, union)
+        };
+        let row = |y: i32| rows[&y].iter().map(|&(x, _, _)| self.content_at(TileCoord::new(x, y))).fold(None, union);
+        // The column holding tiles next past `x`, rightward or leftward.
+        let next = |x: i32, rightward: bool| -> Option<i32> {
+            let each = rows.values().filter_map(|r| {
+                if rightward {
+                    r.get(r.partition_point(|run| run.1 <= x + 1)).map(|run| run.0.max(x + 1))
+                } else {
+                    r[..r.partition_point(|run| run.0 < x)].last().map(|run| (run.1 - 1).min(x - 1))
+                }
+            });
+            if rightward { each.min() } else { each.max() }
+        };
+        let side = |from: i32, rightward: bool| {
+            let mut x = Some(from);
+            for _ in 0..EDGE_STEPS {
+                let found = column(x?);
+                if found.is_some() {
+                    return found;
+                }
+                x = next(x?, rightward);
             }
-            if row.last().is_some_and(|r| r.1 - 1 == last) {
-                sides[1] = union(sides[1], self.content_at(TileCoord::new(last, y)));
-            }
-        }
-        for (side, y) in [(2, *top), (3, *bottom)] {
-            for &(x, _, _) in rows[&y].iter() {
-                sides[side] = union(sides[side], self.content_at(TileCoord::new(x, y)));
-            }
-        }
-        let [left, right, upper, lower] = sides;
-        let (left, right, upper, lower) = (left?, right?, upper?, lower?);
+            None
+        };
+        let first = rows.values().filter_map(|r| r.first()).map(|r| r.0).min()?;
+        let last = rows.values().filter_map(|r| r.last()).map(|r| r.1 - 1).max()?;
+        let mut ys: Vec<i32> = rows.keys().copied().collect();
+        ys.sort_unstable();
+        let upper = ys.iter().take(EDGE_STEPS).find_map(|&y| row(y))?;
+        let lower = ys.iter().rev().take(EDGE_STEPS).find_map(|&y| row(y))?;
+        let (left, right) = (side(first, true)?, side(last, false)?);
         Some(Some(IRect::new(left.x0, upper.y0, right.x1, lower.y1)))
     }
 
@@ -1035,15 +1073,17 @@ mod tests {
             Box::new(move |i| i.set_tile(TileCoord::new(9, 3), clear())),
             Box::new(move |i| (0..6).for_each(|y| i.set_tile(TileCoord::new(9, y), clear()))),
             Box::new(move |i| i.set_pixel(1000, 2000, red)),
+            // Twenty columns of empty tiles to the right: past those, every tile is asked.
+            Box::new(move |i| (10..30).for_each(|x| i.set_tile(TileCoord::new(x, 1), clear()))),
         ];
         for (k, step) in steps.iter().enumerate() {
             step(&mut img);
             assert!(img.runs.get().is_some(), "the runs were let go");
             let all = every(&img);
             assert_eq!(img.content_bounds(), all, "after step {k}");
-            // Found along the edge, but where all of the last column is empty (from step 9).
+            // Found along the edge, stepping past empty columns, unless too many.
             let along = img.bounds_along_the_edge();
-            assert_eq!(along, (k < 9).then_some(all), "after step {k}, found along the edge");
+            assert_eq!(along, (k < 11).then_some(all), "after step {k}, found along the edge");
         }
         assert_eq!(RasterImage::new().content_bounds(), None);
     }
@@ -1064,9 +1104,16 @@ mod tests {
         let want = HashMap::from([(0, vec![(3, 4)]), (1, vec![(5, 7)]), (2, vec![(11, 12)]), (9, vec![(-4, -3)])]);
         assert_eq!(new.differences(&old), want);
         assert_eq!(old.differences(&new), want);
-        // With runs made afresh from the tiles, sharing no row with the other's: the same.
+        // Without one's runs, tile by tile: the same tiles, and no runs built for it.
+        let tiles = |d: HashMap<i32, Vec<(i32, i32)>>| -> HashSet<TileCoord> {
+            let row = |(y, spans): (i32, Vec<(i32, i32)>)| {
+                spans.into_iter().flat_map(move |(a, b)| (a..b).map(move |x| TileCoord::new(x, y)))
+            };
+            d.into_iter().flat_map(row).collect()
+        };
         let fresh = RasterImage { tiles: new.tiles.clone(), ..RasterImage::new() };
-        assert_eq!(fresh.differences(&old), want);
+        assert_eq!(tiles(fresh.differences(&old)), tiles(want));
+        assert!(fresh.runs.get().is_none(), "runs built to compare");
         assert!(old.differences(&old.clone()).is_empty());
     }
 

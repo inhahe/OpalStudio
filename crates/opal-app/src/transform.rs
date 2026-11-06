@@ -248,26 +248,24 @@ impl Session {
                 // necessarily on, the pointer), and it is what snaps.
                 let at = start.apply(grabbed);
                 let to = [at[0] + input.pointer[0] - drag.from[0], at[1] + input.pointer[1] - drag.from[1]];
-                // Not onto a line through the held point: that would squash the box flat.
                 let h = start.apply(held);
-                let off = |lines: &[f64], v: f64| lines.iter().copied().filter(|t| (t - v).abs() >= 0.5).collect();
-                let lines = SnapTargets { xs: off(&targets.xs, h[0]), ys: off(&targets.ys, h[1]) };
-                let targets = &lines;
                 let d0 = [grabbed[0] - held[0], grabbed[1] - held[1]];
                 let ratio = |num: f64, den: f64| if den.abs() < 1e-12 { 1.0 } else { num / den };
                 let locked = input.aspect_locked != input.shift;
-                let (kx, ky) = if corner && !locked {
+                let p = inv.apply(to);
+                let d = [p[0] - held[0], p[1] - held[1]];
+                // The scales with the pointer where it is, and with the dragged point snapped.
+                let (unsnapped, snapped) = if corner && !locked {
                     // The dragged point goes wherever the pointer does: each coordinate snaps.
                     let (sx, _) = snap(&[to[0]], &targets.xs, tol);
                     let (sy, _) = snap(&[to[1]], &targets.ys, tol);
-                    let p = inv.apply([to[0] + sx, to[1] + sy]);
-                    (ratio(p[0] - held[0], d0[0]), ratio(p[1] - held[1], d0[1]))
+                    let q = inv.apply([to[0] + sx, to[1] + sy]);
+                    let unsnapped = (ratio(d[0], d0[0]), ratio(d[1], d0[1]));
+                    (unsnapped, (ratio(q[0] - held[0], d0[0]), ratio(q[1] - held[1], d0[1])))
                 } else {
                     // One scale moves the dragged point, along the line from the held point
                     // through it (an edge's midpoint and the one opposite share the frame's
                     // middle line, so an edge moves along it however the lock is set).
-                    let p = inv.apply(to);
-                    let d = [p[0] - held[0], p[1] - held[1]];
                     let s = if corner {
                         // The pointer projected onto the diagonal through the held point.
                         (d[0] * d0[0] + d[1] * d0[1]) / (d0[0] * d0[0] + d0[1] * d0[1]).max(1e-12)
@@ -276,13 +274,24 @@ impl Session {
                     } else {
                         ratio(d[0], d0[0])
                     };
-                    let s = snap_along(h, [at[0] - h[0], at[1] - h[1]], s, targets, tol);
-                    match (corner || locked, k % 2) {
+                    let scales = |s: f64| match (corner || locked, k % 2) {
                         (true, _) => (s, s),
                         (false, 0) => (1.0, s),
                         (false, _) => (s, 1.0),
-                    }
+                    };
+                    (scales(s), scales(snap_along(h, [at[0] - h[0], at[1] - h[1]], s, targets, tol)))
                 };
+                // Not snapped where that would leave the box thinner than the snapping
+                // distance (onto or near a line through the held point): it would squash it
+                // flat. How far the dragged point then lies from the held one, along each of
+                // the box's sides that the drag scales, in the document.
+                let side = |k: f64, axis: usize| {
+                    let length = if axis == 0 { start.a.hypot(start.b) } else { start.c.hypot(start.d) };
+                    (k * d0[axis]).abs() * length
+                };
+                let flat =
+                    |(kx, ky): (f64, f64)| (d0[0] != 0.0 && side(kx, 0) < tol) || (d0[1] != 0.0 && side(ky, 1) < tol);
+                let (kx, ky) = if flat(snapped) { unsnapped } else { snapped };
                 let keep = |k: f64| if k.abs() < MIN_SCALE { MIN_SCALE.copysign(k) } else { k };
                 let m = Affine::scale(keep(kx), keep(ky)).about(held[0], held[1]).then(start);
                 // The lines the dragged point ended on (not those it would have, when the
@@ -1032,14 +1041,30 @@ mod tests {
         assert!(close(m.apply([1000.0, 10.0]), [2000.0, 20.0]), "{:?}", m.apply([1000.0, 10.0]));
         assert!(g.ys.is_empty());
 
-        // Shrunk toward the held corner, which lies on lines of its own: not flattened onto them.
+        // Shrunk toward the held corner, which lies on lines of its own, or just past one:
+        // not flattened onto them.
         let at_origin = SnapTargets { xs: vec![0.0, 500.0], ys: vec![0.0, 500.0] };
         let near = Drag { handle: Handle::Corner(2), from: [100.0, 50.0], start: s.current };
+        let off = session(s.frame, Affine::translate(100.6, 0.0));
+        let near_off = Drag { handle: Handle::Corner(2), from: [200.6, 50.0], start: off.current };
+        let past_one = SnapTargets { xs: vec![100.0], ys: vec![] };
         for aspect_locked in [true, false] {
             let (m, g) = s.dragged(&near, &DragInput { aspect_locked, ..on([4.0, 2.0]) }, &at_origin);
             assert!(close(m.apply([100.0, 50.0]), [4.0, 2.0]), "locked {aspect_locked}: {:?}", m.apply([100.0, 50.0]));
             assert_eq!((g.xs, g.ys), (vec![], vec![]));
+            let (m, _) = off.dragged(&near_off, &DragInput { aspect_locked, ..on([103.6, 1.5]) }, &past_one);
+            let width = m.apply([100.0, 0.0])[0] - m.apply([0.0, 0.0])[0];
+            assert!((width - 3.0).abs() < 1e-6, "locked {aspect_locked}: {width} wide");
         }
+        // Turned, the dragged corner snaps onto the held corner's line all the same: that does
+        // not flatten it.
+        let turned = session(s.frame, Affine::rotate(30f64.to_radians()));
+        let start = turned.current;
+        let corner = start.apply([100.0, 50.0]);
+        let free = Drag { handle: Handle::Corner(2), from: corner, start };
+        let (m, g) = turned.dragged(&free, &DragInput { aspect_locked: false, ..on([3.0, corner[1]]) }, &at_origin);
+        assert!(m.apply([100.0, 50.0])[0].abs() < 1e-6, "{:?}", m.apply([100.0, 50.0]));
+        assert_eq!(g.xs, vec![0.0]);
 
         // An edge moves one way only: it snaps that way, and shows no line it does not touch.
         for aspect_locked in [false, true] {

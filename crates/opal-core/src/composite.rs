@@ -121,6 +121,7 @@ fn touches(image: &RasterImage, transform: &Affine, reach: f64, c: TileCoord) ->
 /// says so), but for Nearest, which is drawn by area: as reducing full resolution drawn
 /// with it averages, point sampling only where it enlarges.
 fn at_level(o: &Object, level: u32) -> (&Arc<RasterImage>, Affine, Drawing) {
+    debug_assert!(level > 0, "level 0 is drawn exactly, not at a level");
     let down = Affine::scale(0.5f64.powi(level as i32), 0.5f64.powi(level as i32));
     match &o.kind {
         ObjectKind::Pixels(p) => {
@@ -171,7 +172,14 @@ impl Copies {
             let changed = image.differences(&self.image);
             tiles.retain(|&(l, c), _| {
                 let (x0, x1, y0, y1) = (c.x << l, (c.x + 1) << l, c.y << l, (c.y + 1) << l);
-                !changed.iter().any(|(&y, spans)| (y0..y1).contains(&y) && spans.iter().any(|s| s.0 < x1 && s.1 > x0))
+                let crossed = |spans: &Vec<(i32, i32)>| spans.iter().any(|s| s.0 < x1 && s.1 > x0);
+                // Asked of the rows beneath it, or of those that changed, whichever are fewer.
+                let changed_beneath = if ((y1 - y0) as usize) <= changed.len() {
+                    (y0..y1).any(|y| changed.get(&y).is_some_and(crossed))
+                } else {
+                    changed.iter().any(|(&y, spans)| (y0..y1).contains(&y) && crossed(spans))
+                };
+                !changed_beneath
             });
         }
         Copies { image: image.clone(), tiles }
@@ -218,7 +226,16 @@ impl Reduced {
         if level == 0 {
             return image.tile(c);
         }
-        self.images.get(&(Arc::as_ptr(image) as usize))?.get(level, c)
+        let made = self.images.get(&(Arc::as_ptr(image) as usize)).and_then(|copies| copies.tiles.get(&(level, c)));
+        debug_assert!(made.is_some(), "reduced tile {c:?} of level {level} read before it was made");
+        made?.as_ref()
+    }
+
+    /// The bytes of the tiles kept, each once however many places hold it.
+    fn bytes(&self) -> u64 {
+        let tiles: HashSet<usize> =
+            self.images.values().flat_map(|c| c.tiles.values().flatten()).map(|t| Arc::as_ptr(t) as usize).collect();
+        tiles.len() as u64 * TILE_BYTES
     }
 
     /// Makes the level-`level` tiles `need` of object `id`'s image `image`, and the finer
@@ -689,12 +706,21 @@ fn tiles_reached(i: &ImageObject, outer: &IRect) -> u64 {
     let Some(content) = i.image.content_bounds() else { return 0 };
     let reach = resample::reach(&i.transform, &i.sampling);
     let crossed = |r: FRect| tiles_crossed(&r.expand(reach).corners().map(|p| i.transform.apply(p)), outer);
-    let t = f64::from(TILE_SIZE);
+    let whole = crossed(content.to_f());
+    // Holding at least half the tiles of its bounds, its runs could only cross more: then
+    // they are not walked.
+    let size = i64::from(TILE_SIZE);
+    let span = |a: i64, b: i64| ((b - 1).div_euclid(size) - a.div_euclid(size) + 1).max(0) as u64;
+    let bounds = span(content.x0, content.x1).saturating_mul(span(content.y0, content.y1));
+    if i.image.tile_count() as u64 * 2 >= bounds {
+        return whole;
+    }
+    let t = size as f64;
     let runs = i.image.spans().into_iter().fold(0u64, |n, (y, x0, x1)| {
         let r = FRect::new(f64::from(x0) * t, f64::from(y) * t, f64::from(x1) * t, f64::from(y + 1) * t);
         n.saturating_add(crossed(r))
     });
-    crossed(content.to_f()).min(runs)
+    whole.min(runs)
 }
 
 /// How many level-0 tiles within `outer` the convex quadrilateral `quad` crosses. (Being
@@ -1502,8 +1528,15 @@ impl Projection {
         // an exact update draws them: each where its key changed since it last was.
         self.draw_at_level(layers, level, &at_level);
         // The reduced tiles at the level stay for the drag's length (it comes back over the
-        // same ones); those beneath, made to make them, go.
+        // same ones), those beneath, made to make them, going; but only while they fit the
+        // budget with the cache's own tiles: past it, only those this frame reads stay.
         self.reduced.keep_level(level);
+        if self
+            .budget
+            .is_some_and(|b| (self.holders().len() as u64 * TILE_BYTES).saturating_add(self.reduced.bytes()) > b)
+        {
+            self.reduced.keep_only(level, &reduced_reads(layers, level, &at_level));
+        }
         self.shown(level, coords.iter().chain(&at_level))
     }
 
@@ -1613,6 +1646,19 @@ impl Projection {
         }
     }
 
+    /// How many entries hold each tile the cache made (by address).
+    fn holders(&self) -> HashMap<usize, usize> {
+        let mut holders: HashMap<usize, usize> = HashMap::new();
+        for cache in &self.levels {
+            for e in cache.values() {
+                if let Pixels::Held(t) = &e.pixels {
+                    *holders.entry(Arc::as_ptr(t) as usize).or_default() += 1;
+                }
+            }
+        }
+        holders
+    }
+
     /// Lets go of cached pixels while those the cache made take more than `budget`: first
     /// the tiles outside `outer` (or above level `level`), farthest from it first, then the
     /// pixels of the finer levels within it, finest first, which keep their keys and versions
@@ -1621,14 +1667,7 @@ impl Projection {
     fn trim_pixels(&mut self, level: u32, outer: &IRect, budget: u64) {
         // Each tile the cache made counts once, however many entries share it.
         let ptr = |t: &Arc<Tile>| Arc::as_ptr(t) as usize;
-        let mut holders: HashMap<usize, usize> = HashMap::new();
-        for cache in &self.levels {
-            for e in cache.values() {
-                if let Pixels::Held(t) = &e.pixels {
-                    *holders.entry(ptr(t)).or_default() += 1;
-                }
-            }
-        }
+        let mut holders = self.holders();
         let mut bytes = holders.len() as u64 * TILE_BYTES;
         if bytes <= budget {
             return;
@@ -3404,12 +3443,23 @@ mod tests {
         // Let go of: exact again, and nothing at the level drawn, nothing kept.
         p.update(&d.layers, 2, &all, Quality::Exact);
         assert!(reduced_tiles(&p).is_empty());
+
+        // On a budget they do not fit beside the cache's own tiles (each tile counted once,
+        // and this layer's are all one): only what a frame reads.
+        let mut tight = Projection::new();
+        tight.set_budget(Some(TILE_BYTES));
+        tight.update(&d.layers, 2, &all, Quality::Exact);
+        for x in [1100.0, 3100.0] {
+            place(&mut d, x);
+            tight.update(&d.layers, 2, &all, Quality::Preview);
+        }
+        assert!(tile(&reduced_tiles(&tight)).is_none(), "kept past the budget");
     }
 
-    #[test]
-    fn nearest_drawn_at_the_level_is_what_reducing_it_from_full_resolution_gives() {
-        // Stripes a pixel wide, each row its own value, stretched 8 times across and kept as
-        // tall: at level 2, enlarged one way and shrunk the other.
+    /// Stripes a pixel wide (each row its own value) drawn with Nearest, placed by
+    /// `transform` on a canvas 4096 pixels square, too costly to draw exactly: the level-2
+    /// tiles a view shows, and those reducing full resolution makes.
+    fn nearest_stripes(transform: Affine) -> (HashMap<TileCoord, Arc<Tile>>, HashMap<TileCoord, Tile>) {
         let (w, h) = (256u32, 1024u32);
         let px: Vec<Pixel> = (0..w * h)
             .map(|i| {
@@ -3421,18 +3471,21 @@ mod tests {
         let mut ids = IdGen::default();
         let mut d = Document::new(4096, 4096);
         let stripes = Arc::new(RasterImage::from_pixels(w, h, &px));
-        d.insert(
-            Position { parent: None, index: 0 },
-            picture_layer(&mut ids, stripes, Affine::scale(8.0, 1.0), nearest),
-        )
-        .unwrap();
-        let all = IRect::from_size(4096, 4096);
+        d.insert(Position { parent: None, index: 0 }, picture_layer(&mut ids, stripes, transform, nearest)).unwrap();
         let mut p = Projection::new();
         p.set_budget(Some(4 * TILE_BYTES));
-        let shown: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 2, &all, Quality::Exact).into_iter().collect();
+        let shown = p.update(&d.layers, 2, &IRect::from_size(4096, 4096), Quality::Exact).into_iter().collect();
         assert!(!p.costly.is_empty());
-        let want = from_every_tile(&d.layers, 2);
-        for (c, t) in &want[2] {
+        let mut want = from_every_tile(&d.layers, 2);
+        (shown, want.swap_remove(2))
+    }
+
+    #[test]
+    fn nearest_drawn_at_the_level_is_what_reducing_it_from_full_resolution_gives() {
+        // Stretched 8 times across and kept as tall: at level 2, enlarged one way and shrunk
+        // the other.
+        let (shown, want) = nearest_stripes(Affine::scale(8.0, 1.0));
+        for (c, t) in &want {
             let worst = shown[c]
                 .pixels()
                 .iter()
@@ -3441,7 +3494,27 @@ mod tests {
                 .fold(0.0f32, f32::max);
             assert!(worst < 0.01, "tile {c:?} is {worst} from the reduction");
         }
-        assert_eq!(shown.len(), want[2].len(), "drawn past the stripes' edge");
+        assert_eq!(shown.len(), want.len(), "drawn past the stripes' edge");
+    }
+
+    #[test]
+    fn nearest_turned_and_drawn_at_the_level_keeps_its_enlarged_axis_sharp() {
+        // Stretched across, squashed down 16 times at level 2, and turned: each stripe two
+        // level pixels wide, as reducing full resolution keeps it, not averaged with the next.
+        let place =
+            Affine::scale(8.0, 0.5).then(Affine::rotate(10f64.to_radians())).then(Affine::translate(800.0, 100.0));
+        let (shown, want) = nearest_stripes(place);
+        let (mut sum, mut n) = (0.0f32, 0usize);
+        for (c, t) in &want {
+            for (a, b) in shown[c].pixels().iter().zip(t.pixels()) {
+                if b[3].to_f32() > 0.99 {
+                    sum += (a[0].to_f32() - b[0].to_f32()).abs();
+                    n += 1;
+                }
+            }
+        }
+        let mean = sum / n as f32;
+        assert!(mean < 0.05, "{mean} from the reduction, on average");
     }
 
     #[test]
