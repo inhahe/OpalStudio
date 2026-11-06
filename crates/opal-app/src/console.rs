@@ -304,6 +304,8 @@ impl Console {
     /// thread of its own: a script on a share that does not answer would otherwise hold
     /// the window up while asked about.
     pub fn look_at_recent(&mut self, ctx: &egui::Context) {
+        // Looked at again while the panel shows, even with nothing else to draw it.
+        ctx.request_repaint_after(LOOK_EVERY);
         if self.looking.load(Ordering::Relaxed) || self.looked.is_some_and(|t| t.elapsed() < LOOK_EVERY) {
             return;
         }
@@ -311,8 +313,13 @@ impl Console {
         self.looking.store(true, Ordering::Relaxed);
         let (recent, seen, looking, ctx) = (self.recent.clone(), self.seen.clone(), self.looking.clone(), ctx.clone());
         let look = move || {
-            let found: HashMap<PathBuf, bool> =
-                recent.into_iter().map(|p| (p.is_file(), p)).map(|(t, p)| (p, t)).collect();
+            let found: HashMap<PathBuf, bool> = recent
+                .into_iter()
+                .map(|p| {
+                    let there = p.is_file();
+                    (p, there)
+                })
+                .collect();
             *seen.lock().expect("not poisoned") = found;
             looking.store(false, Ordering::Relaxed);
             ctx.request_repaint();
@@ -419,10 +426,7 @@ pub fn test_python() -> Option<String> {
 /// Why Run Script is not available in an editor that does not serve scripts.
 pub const NOT_SERVING: &str = "Another Opal Studio was open first, and scripts connect to that one: run them there.";
 
-/// A path's file name, for a button.
-fn file_name(path: &Path) -> String {
-    path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
-}
+use crate::state::file_title as file_name;
 
 /// The scripts run lately, to run one again (if `can_run`), and a way to forget them.
 fn recent_menu(ui: &mut egui::Ui, st: &mut AppState, can_run: bool) {

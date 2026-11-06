@@ -968,7 +968,7 @@ fn tile_budget(percent: f64, total: Option<u64>) -> Option<u64> {
 }
 
 /// The name a file is shown under.
-fn file_title(path: &Path) -> String {
+pub(crate) fn file_title(path: &Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 

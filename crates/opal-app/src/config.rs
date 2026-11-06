@@ -99,8 +99,12 @@ fn apply_json(st: &mut AppState, text: &str) -> Result<(), String> {
         let background = if white { Background::White } else { Background::Transparent };
         st.last_new = NewImage { width, height, background };
     }
-    if let Some(Ok(recent)) = obj.get("recent_scripts").map(|v| serde_json::from_value::<Vec<PathBuf>>(v.clone())) {
-        st.console.recent = recent.into_iter().take(crate::console::RECENT).collect();
+    // One by one: one that cannot be read is skipped, not all of them; each once.
+    let recent = obj.get("recent_scripts").and_then(serde_json::Value::as_array).into_iter().flatten();
+    for path in recent.filter_map(serde_json::Value::as_str).map(PathBuf::from) {
+        if !st.console.recent.contains(&path) && st.console.recent.len() < crate::console::RECENT {
+            st.console.recent.push(path);
+        }
     }
     Ok(())
 }
@@ -168,6 +172,10 @@ mod tests {
         assert_eq!(back.tools["zoom"].get("zoom.drag"), Some(&Value::Bool(false)));
         apply_json(&mut fresh, &json).unwrap();
         assert_eq!(fresh.console.recent, [PathBuf::from("C:/scripts/sky.py")], "the recent scripts were lost");
+        // One that cannot be read is skipped, not all; each kept once.
+        let mut odd = AppState::new();
+        apply_json(&mut odd, r#"{"recent_scripts": ["C:/a.py", null, "C:/b.py", "C:/a.py"]}"#).unwrap();
+        assert_eq!(odd.console.recent, [PathBuf::from("C:/a.py"), PathBuf::from("C:/b.py")]);
         // An empty or partial file still loads.
         let partial: Saved = serde_json::from_str("{}").unwrap();
         assert!(partial.prefs.is_empty());
