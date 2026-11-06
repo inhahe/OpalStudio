@@ -1027,7 +1027,8 @@ server. Both rest on one language-neutral API.
   default or what the editor holds now (`document`: the active image; `layers`: the
   selected ones); `methods` lists them all, which is what the stubs and tools are made from.
   Queries so far: `documents`, `layers`, `image`. A call is carried out between frames as
-  the interface would, without a dialog: what one would have said comes back with it, an
+  the interface would, without a dialog (a frame goes on with the calls that follow one
+  another for a few milliseconds, so a script makes thousands a second, not one a frame): what one would have said comes back with it, an
   error or a refusal (which the interface tells as information) as its failure, a warning
   or a status-bar notice as its `notes`; a refused call leaves the user's active image and
   selection as they were. A save, export or copy is answered once written. Paths must be

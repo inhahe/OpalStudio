@@ -29,6 +29,11 @@ const STRANGER_LINE: usize = 4 << 10;
 const CLIENT_LINE: usize = 1 << 20;
 /// How many connections may wait to say hello at once; more are dropped at once.
 const MAX_STRANGERS: usize = 16;
+/// How long a frame goes on carrying out requests that arrive while it does (a script's
+/// next call comes a moment after the last's answer), before it lets itself be drawn.
+const SERVE_FOR: std::time::Duration = std::time::Duration::from_millis(6);
+/// How long, within that, the next request is waited for.
+const NEXT_WITHIN: std::time::Duration = std::time::Duration::from_millis(1);
 
 /// A request passed to the interface thread, and where its answer goes.
 struct Request {
@@ -212,23 +217,32 @@ impl Server {
     /// files have been written. Called by the interface thread every frame; while the user
     /// is `busy` with something (a dialog, a drag) that a request could change under them,
     /// the requests wait. Once the user has asked to quit, they are refused.
+    ///
+    /// A frame that carries out a request goes on with those that arrive meanwhile, for a
+    /// few milliseconds ([`SERVE_FOR`]): a script calling one method after another then
+    /// makes many calls a frame, not one.
     pub fn serve(&mut self, st: &mut AppState, ctx: &egui::Context, busy: bool) {
         let quitting = st.exit_requested || st.exit_after_writes;
         if !busy || quitting {
-            while let Ok(r) = self.requests.try_recv() {
+            let until = std::time::Instant::now() + SERVE_FOR;
+            let mut next = self.requests.try_recv().ok();
+            while let Some(r) = next {
                 if quitting {
                     let _ = r.answer.send(Err("The editor is closing.".to_owned()));
-                    continue;
-                }
-                match st.call(&r.method, &r.params, ctx) {
-                    Reply::Now(result) => {
-                        let _ = r.answer.send(result);
+                } else {
+                    match st.call(&r.method, &r.params, ctx) {
+                        Reply::Now(result) => {
+                            let _ = r.answer.send(result);
+                        }
+                        Reply::Later(n) => {
+                            self.later.insert(n, r.answer);
+                        }
                     }
-                    Reply::Later(n) => {
-                        self.later.insert(n, r.answer);
-                    }
                 }
+                let left = until.saturating_duration_since(std::time::Instant::now());
+                next = if left.is_zero() { None } else { self.requests.recv_timeout(left.min(NEXT_WITHIN)).ok() };
             }
+            // Any left for the next frame asked for it as they came (pass_on).
         }
         for (n, result) in st.answers() {
             if let Some(answer) = self.later.remove(&n) {
@@ -460,6 +474,32 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_carries_out_the_calls_that_follow_one_another() {
+        let file = std::env::temp_dir().join(format!("opal-api-burst-{}.json", std::process::id()));
+        let mut server = Server::start(file.clone(), egui::Context::default()).unwrap();
+        let (pipe, token) = info(&file);
+        let mut st = AppState::new();
+        let ctx = egui::Context::default();
+        let mut client = Client::connect(&pipe);
+        client.send(&hello_line(&token)).unwrap();
+        let calls = std::thread::spawn(move || {
+            for i in 0..200 {
+                let r = client.send(&format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"documents"}}"#)).unwrap();
+                assert!(r.get("result").is_some(), "{r}");
+            }
+        });
+        // Frames 16 ms apart, as vsync paces them.
+        let mut frames = 0;
+        while !calls.is_finished() {
+            server.serve(&mut st, &ctx, false);
+            frames += 1;
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+        calls.join().unwrap();
+        assert!(frames < 40, "200 calls took {frames} frames");
+    }
+
+    #[test]
     fn requests_wait_while_the_user_is_busy_and_are_refused_while_quitting() {
         let file = std::env::temp_dir().join(format!("opal-api-busy-{}.json", std::process::id()));
         let mut server = Server::start(file.clone(), egui::Context::default()).unwrap();
@@ -468,8 +508,12 @@ mod tests {
         let ctx = egui::Context::default();
         let mut client = Client::connect(&pipe);
         client.send(&hello_line(&token)).unwrap();
+        // The second asked only once told to (a frame serving the first would otherwise
+        // carry it out too, before the quit).
+        let (go, told) = std::sync::mpsc::channel::<()>();
         let asked = std::thread::spawn(move || {
             let first = client.send(r#"{"jsonrpc":"2.0","id":2,"method":"documents"}"#).unwrap();
+            told.recv().unwrap();
             let second = client.send(r#"{"jsonrpc":"2.0","id":3,"method":"documents"}"#).unwrap();
             (first, second)
         });
@@ -482,6 +526,7 @@ mod tests {
         server.serve(&mut st, &ctx, false);
         // Quitting: refused.
         st.exit_requested = true;
+        go.send(()).unwrap();
         while !asked.is_finished() {
             server.serve(&mut st, &ctx, true);
             std::thread::sleep(std::time::Duration::from_millis(2));

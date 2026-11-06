@@ -11,14 +11,6 @@ its colors are off; the user is warned when the image opens. Whether a profile i
 judged from its description text. **Fix:** color management with lcms2 in milestone 5:
 convert from the embedded profile into the working space on import.
 
-## A script's calls wait for the interface's frames
-
-`crates/opal-app/src/server.rs` (`Server::serve`). The interface thread carries out the
-API's requests between frames, so each call waits for the next frame: a script calling in a
-loop makes about 60 calls a second (with vsync), whatever the calls cost. **Fix:** carry out
-requests as they arrive, waking the interface thread for them without drawing a frame (or
-let a client send a batch of calls in one request).
-
 ## GPU memory is only reported on Windows
 
 `crates/opal-app/src/gpu_memory.rs`. **Fix:** query `VK_EXT_memory_budget` through wgpu's
