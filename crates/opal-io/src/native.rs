@@ -62,7 +62,9 @@ struct FileDoc {
     layers: Vec<FileLayer>,
 }
 
+/// Read through [`LayerRead`]: see there why.
 #[derive(Serialize, Deserialize)]
+#[serde(try_from = "LayerRead")]
 struct FileLayer {
     id: LayerId,
     name: String,
@@ -73,26 +75,90 @@ struct FileLayer {
     content: FileContent,
 }
 
-#[derive(Serialize, Deserialize)]
+/// Written as it is; read through [`LayerRead`].
+#[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum FileContent {
     Objects { objects: Vec<FileObject> },
     Group { children: Vec<FileLayer> },
 }
 
+/// Read through [`ObjectRead`]: see there why.
 #[derive(Serialize, Deserialize)]
+#[serde(try_from = "ObjectRead")]
 struct FileObject {
     id: ObjectId,
     #[serde(flatten)]
     kind: FileObjectKind,
 }
 
-/// In both kinds, each entry of `tiles` is `[tile x, tile y, tile file number]`.
-#[derive(Serialize, Deserialize)]
+/// A layer as read: the fields of either kind, read plainly. Read as the flattened, tagged
+/// [`FileContent`], every layer would first be buffered whole in serde's untyped form,
+/// lists of tiles and all (at many times the bytes of the text: hundreds of megabytes for
+/// a canvas of a million tiles), to find its kind; read so, the tiles are read as they
+/// come.
+#[derive(Deserialize)]
+struct LayerRead {
+    id: LayerId,
+    name: String,
+    visible: bool,
+    locked: bool,
+    opacity: f32,
+    kind: String,
+    objects: Option<Vec<FileObject>>,
+    children: Option<Vec<FileLayer>>,
+}
+
+impl TryFrom<LayerRead> for FileLayer {
+    type Error = String;
+
+    fn try_from(l: LayerRead) -> Result<FileLayer, String> {
+        let content = match (l.kind.as_str(), l.objects, l.children) {
+            ("objects", Some(objects), _) => FileContent::Objects { objects },
+            ("group", _, Some(children)) => FileContent::Group { children },
+            (kind, ..) => return Err(format!("a layer of kind {kind:?} is unknown, or lacks what it holds")),
+        };
+        Ok(FileLayer { id: l.id, name: l.name, visible: l.visible, locked: l.locked, opacity: l.opacity, content })
+    }
+}
+
+/// An object as read: the fields of either kind, read plainly (see [`LayerRead`]).
+#[derive(Deserialize)]
+struct ObjectRead {
+    id: ObjectId,
+    kind: String,
+    tiles: Vec<[i64; 3]>,
+    #[serde(default)]
+    offset: [i64; 2],
+    frame: Option<IRect>,
+    transform: Option<Affine>,
+    sampling: Option<Sampling>,
+}
+
+impl TryFrom<ObjectRead> for FileObject {
+    type Error = String;
+
+    fn try_from(o: ObjectRead) -> Result<FileObject, String> {
+        let kind = match o.kind.as_str() {
+            // Version 0 called pixel objects `raster`, and had no offset.
+            "pixels" | "raster" => FileObjectKind::Pixels { tiles: o.tiles, offset: o.offset },
+            "image" => match (o.frame, o.transform, o.sampling) {
+                (Some(frame), Some(transform), Some(sampling)) => {
+                    FileObjectKind::Image { tiles: o.tiles, frame, transform, sampling }
+                }
+                _ => return Err("an image object lacks its frame, transform or sampling".into()),
+            },
+            kind => return Err(format!("an object of kind {kind:?} is unknown")),
+        };
+        Ok(FileObject { id: o.id, kind })
+    }
+}
+
+/// In both kinds, each entry of `tiles` is `[tile x, tile y, tile file number]`. Written
+/// as it is; read through [`ObjectRead`].
+#[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum FileObjectKind {
-    /// Version 0 called these `raster`, and had no offset.
-    #[serde(alias = "raster")]
     Pixels {
         tiles: Vec<[i64; 3]>,
         #[serde(default)]
