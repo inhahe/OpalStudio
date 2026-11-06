@@ -23,6 +23,9 @@ struct Saved {
     presets: BTreeMap<String, BTreeMap<String, Map>>,
     #[serde(default)]
     last_new: Option<(u32, u32, bool)>,
+    /// The resolution of the last new image, in pixels per inch.
+    #[serde(default)]
+    last_new_ppi: Option<f64>,
     /// The scripts run lately, the last first.
     #[serde(default)]
     recent_scripts: Vec<PathBuf>,
@@ -97,7 +100,12 @@ fn apply_json(st: &mut AppState, text: &str) -> Result<(), String> {
         obj.get("last_new").map(|v| serde_json::from_value::<(u32, u32, bool)>(v.clone()))
     {
         let background = if white { Background::White } else { Background::Transparent };
-        st.last_new = NewImage { width, height, background };
+        st.last_new = NewImage { width, height, background, resolution: opal_core::units::DEFAULT_PPI };
+    }
+    if let Some(ppi) = obj.get("last_new_ppi").and_then(serde_json::Value::as_f64)
+        && opal_core::units::valid_ppi(ppi)
+    {
+        st.last_new.resolution = ppi;
     }
     // One by one: one that cannot be read is skipped, not all of them; each once.
     let recent = obj.get("recent_scripts").and_then(serde_json::Value::as_array).into_iter().flatten();
@@ -132,6 +140,7 @@ fn saved(st: &AppState) -> Saved {
             .collect(),
         presets: st.presets.iter().map(|(t, p)| (t.info().id.to_owned(), p.clone())).collect(),
         last_new: Some((st.last_new.width, st.last_new.height, st.last_new.background == Background::White)),
+        last_new_ppi: Some(st.last_new.resolution),
         // Those JSON can hold (a path that is not Unicode would fail the whole file).
         recent_scripts: st.console.recent.iter().filter(|p| p.to_str().is_some()).cloned().collect(),
     }
@@ -162,6 +171,7 @@ mod tests {
             tools: st.tool_settings.iter().map(|(t, s)| (t.info().id.to_owned(), s.to_map())).collect(),
             presets: BTreeMap::new(),
             last_new: None,
+            last_new_ppi: None,
             recent_scripts: vec![PathBuf::from("C:/scripts/sky.py")],
         };
         let json = serde_json::to_string(&saved).unwrap();
@@ -187,13 +197,18 @@ mod tests {
         let text = r#"{
             "prefs": {"ui.theme": {"Choice": "light"}, "ui.scale": {"Gradient": [1, 2]}},
             "tools": {"zoom": {"zoom.drag": {"Bool": false}, "zoom.factor": "nonsense"}},
-            "last_new": [640, 480, false]
+            "last_new": [640, 480, false],
+            "last_new_ppi": 300
         }"#;
         apply_json(&mut st, text).unwrap();
         assert_eq!(st.prefs.choice("ui.theme"), "light");
         assert_eq!(st.prefs.f64("ui.scale"), 100.0, "the unreadable value keeps its default");
         assert!(!st.tool_settings[&ToolId::Zoom].bool("zoom.drag"));
-        assert_eq!((st.last_new.width, st.last_new.height), (640, 480));
+        assert_eq!((st.last_new.width, st.last_new.height, st.last_new.resolution), (640, 480, 300.0));
+        // A resolution out of range keeps the default.
+        let mut zero = AppState::new();
+        apply_json(&mut zero, r#"{"last_new_ppi": 0}"#).unwrap();
+        assert_eq!(zero.last_new.resolution, opal_core::units::DEFAULT_PPI);
         assert!(apply_json(&mut st, "not json").is_err());
     }
 }

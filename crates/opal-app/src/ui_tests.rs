@@ -43,6 +43,28 @@ fn the_new_image_dialog_creates_a_document() {
 }
 
 #[test]
+fn a_paper_size_makes_an_image_of_its_size_at_its_resolution() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    h.state_mut().state_mut().set_unit(opal_core::units::Unit::In);
+    h.run();
+    h.get_by_label("New").click();
+    h.run();
+    h.get_by_label("Letter").click();
+    h.run();
+    render(&mut h, "new-image-letter");
+    h.get_by_label("Create").click();
+    h.run();
+    let d = h.state().state().active().unwrap().doc();
+    assert_eq!((d.canvas.width, d.canvas.height, d.resolution), (2550, 3300, 300.0));
+    // Resize Image shows it in inches, and how large it prints.
+    h.state_mut().state_mut().queue.push(Cmd::ResizeImage);
+    h.run();
+    assert!(h.query_by_label_contains("prints 8.5 × 11 in").is_some(), "the print size is not told");
+    render(&mut h, "resize-image-inches");
+}
+
+#[test]
 fn ribbon_tabs_switch_and_commands_run() {
     let _gpu = gpu_lock();
     let mut h = harness();
@@ -50,6 +72,7 @@ fn ribbon_tabs_switch_and_commands_run() {
         width: 64,
         height: 64,
         background: crate::state::Background::Transparent,
+        resolution: opal_core::units::DEFAULT_PPI,
     });
     h.run();
     h.get_by_label("Layer").click();
@@ -87,6 +110,7 @@ fn a_white_image_draws_white_on_the_backdrop() {
         width: 400,
         height: 300,
         background: crate::state::Background::White,
+        resolution: opal_core::units::DEFAULT_PPI,
     });
     h.run();
     let img = render(&mut h, "white-canvas");
@@ -104,6 +128,7 @@ fn a_transparent_image_shows_the_checkerboard() {
         width: 400,
         height: 300,
         background: crate::state::Background::Transparent,
+        resolution: opal_core::units::DEFAULT_PPI,
     });
     h.run();
     let img = render(&mut h, "transparent-canvas");
@@ -122,6 +147,7 @@ fn content_beyond_the_canvas_is_dimmed_and_can_be_hidden() {
             width: 400,
             height: 300,
             background: crate::state::Background::Transparent,
+            resolution: opal_core::units::DEFAULT_PPI,
         });
         // A white square left of the canvas, as a layer that extends past its edge would have.
         let d = st.active_mut().unwrap();
@@ -178,6 +204,7 @@ fn render_the_main_states() {
             width: 1200,
             height: 800,
             background: crate::state::Background::White,
+            resolution: opal_core::units::DEFAULT_PPI,
         });
         st.queue.push(Cmd::NewLayer);
         st.queue.push(Cmd::NewGroup);
@@ -214,6 +241,7 @@ fn keytips_open_a_tab_and_run_a_command() {
         width: 32,
         height: 32,
         background: crate::state::Background::White,
+        resolution: opal_core::units::DEFAULT_PPI,
     });
     h.run();
     // With the keytips shown, H picks the Home tab, and N runs its New Layer.
@@ -232,7 +260,12 @@ fn keytips_open_a_tab_and_run_a_command() {
 // ---- Regression tests for the milestone 0 review ----------------------------------------
 
 fn with_image(h: &mut Harness<'static, OpalApp>, background: crate::state::Background) {
-    h.state_mut().state_mut().create_image(&crate::state::NewImage { width: 64, height: 64, background });
+    h.state_mut().state_mut().create_image(&crate::state::NewImage {
+        width: 64,
+        height: 64,
+        background,
+        resolution: opal_core::units::DEFAULT_PPI,
+    });
     h.run();
 }
 
@@ -410,6 +443,7 @@ fn image_of(h: &mut Harness<'static, OpalApp>, w: u32, ht: u32) {
         width: w,
         height: ht,
         background: crate::state::Background::White,
+        resolution: opal_core::units::DEFAULT_PPI,
     });
     h.run();
 }
@@ -441,6 +475,42 @@ fn ctrl_v_opens_the_box_and_enter_places_the_paste_as_one_state() {
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
     h.run();
     assert_eq!(h.state().state().active().unwrap().doc().layers.len(), 1, "undo takes the paste back");
+}
+
+#[test]
+fn the_numbers_button_by_the_box_opens_its_fields_in_the_unit_chosen() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    h.state_mut().state_mut().create_image(&crate::state::NewImage {
+        width: 400,
+        height: 300,
+        background: crate::state::Background::White,
+        resolution: 100.0,
+    });
+    put_on_clipboard(&mut h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
+    h.event(egui::Event::Paste(String::new()));
+    h.run();
+    let angles = |h: &Harness<'static, OpalApp>| h.query_all_by_label("Angle").count();
+    let before = angles(&h);
+    h.get_by_label(&crate::icons::NUMBERS.to_string()).click();
+    h.run();
+    assert!(h.state().state().box_numbers, "the button did not open them");
+    assert_eq!(angles(&h), before + 1, "the fields are not by the box");
+    // In inches, at the image's resolution: the paste is 0.5 in wide.
+    h.state_mut().state_mut().set_unit(opal_core::units::Unit::In);
+    h.run();
+    let shows = |h: &Harness<'static, OpalApp>, v: f64| {
+        h.query_all(egui_kittest::kittest::by().predicate(move |n| n.numeric_value() == Some(v))).count()
+    };
+    // (By the box and in the tool settings, among other numbers that happen to be 0.5.)
+    assert!(shows(&h, 0.5) >= 2, "the width is not shown in inches, by the box and in the panel");
+    render(&mut h, "paste-numbers");
+    // The crop box has them too.
+    h.key_press(egui::Key::Enter);
+    h.state_mut().state_mut().tool = crate::tools::ToolId::Crop;
+    h.run();
+    assert!(shows(&h, 4.0) >= 1, "the crop box's width is not shown");
+    render(&mut h, "crop-numbers");
 }
 
 #[test]
@@ -827,6 +897,7 @@ fn a_late_paste_waits_for_a_crop_box_changed_meanwhile() {
         box_then: None,
         crop_then: st.active().unwrap().crop,
         notice: String::new(),
+        answer: None,
     };
     let st = h.state_mut().state_mut();
     st.reading = Some(read(st));
@@ -911,6 +982,7 @@ fn read_back(st: &crate::state::AppState, result: crate::clipboard::ReadResult) 
         box_then: d.and_then(|d| d.transform.as_ref()).map(|s| s.serial),
         crop_then: d.and_then(|d| d.crop),
         notice: String::new(),
+        answer: None,
     }
 }
 
@@ -1463,6 +1535,7 @@ fn escape_cancels_a_paste_being_read_unless_a_box_takes_it() {
         box_then: None,
         crop_then: None,
         notice: String::new(),
+        answer: None,
     };
     let st = h.state_mut().state_mut();
     st.reading = Some(reading(st, rx));

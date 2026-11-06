@@ -226,6 +226,7 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen
     let x = (center_x - width * 0.5).clamp(rect.left() + 4.0, (rect.right() - width - 4.0).max(rect.left() + 4.0));
     let y = (lowest + 12.0).clamp(rect.top() + 4.0, rect.bottom() - 40.0);
     let mut action = None;
+    let mut numbers = st.box_numbers;
     egui::Area::new(egui::Id::unique(("transform-toolbar", id.0)))
         .order(egui::Order::Foreground)
         .fixed_pos(Pos2::new(x, y))
@@ -266,6 +267,7 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen
                     if b(ui, icons::SNAP, snapping, tip).clicked() {
                         action = Some(Action::Snap);
                     }
+                    crate::box_fields::toggle(ui, &mut numbers);
                     if let Some(p) = &paste {
                         ui.separator();
                         let r = ui.add_enabled(
@@ -290,6 +292,13 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen
                 });
             });
         });
+    st.box_numbers = numbers;
+    if numbers {
+        let panel = egui::Id::unique(("transform-numbers", id.0));
+        crate::box_fields::panel_by(ctx, panel, rect, Pos2::new(x, y), crate::crop::TOOLBAR_HEIGHT, |ui| {
+            crate::box_fields::transform(ui, st, id, "transform-by-box");
+        });
+    }
     let Some(action) = action else { return };
     match action {
         Action::Aspect => {
@@ -321,75 +330,25 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen
 /// The box's numbers and drawing method, in the tool settings panel.
 pub fn settings(ui: &mut egui::Ui, st: &mut AppState) {
     let palette = st.palette;
-    let aspect = st.prefs.bool("transform.aspect_locked");
-    let Some(d) = st.active_mut() else { return };
-    let Some(s) = d.transform.as_ref() else { return };
+    let Some(id) = st.active_doc else { return };
+    let Some(s) = st.doc(id).and_then(|d| d.transform.as_ref()) else { return };
+    let label = s.label();
     ui.horizontal(|ui| {
         ui.label(icon(icons::TRANSFORM, 20.0));
-        ui.heading(s.label());
+        ui.heading(label);
     });
     ui.label(
         RichText::new(
-            "Drag the box to move, a corner or edge to scale, the round handle or anywhere outside to rotate. \
-             Enter applies, Esc cancels.",
+            "Drag the box to move, a corner or edge to scale, the round handle or anywhere outside to rotate.              Enter applies, Esc cancels.",
         )
         .color(palette.weak_text),
     );
     ui.add_space(4.0);
-    let canvas = d.doc().canvas.rect();
-    let mut p = s.params();
-    let before = p;
-    let (cx, cy) = (canvas.x0 as f64, canvas.y0 as f64);
-    let mut x = p.x - cx;
-    let mut y = p.y - cy;
-    let frame = s.frame;
-    egui::Grid::new("transform-numbers").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-        ui.label("Position");
-        ui.horizontal(|ui| {
-            ui.add(egui::DragValue::new(&mut x).speed(1.0).prefix("x ").suffix(" px").max_decimals(1));
-            ui.add(egui::DragValue::new(&mut y).speed(1.0).prefix("y ").suffix(" px").max_decimals(1));
-        })
-        .response
-        .on_hover_text("Where the image's top-left corner is, from the canvas's top-left corner.");
-        ui.end_row();
-        ui.label("Size");
-        ui.horizontal(|ui| {
-            let w =
-                ui.add(egui::DragValue::new(&mut p.width).speed(1.0).range(0.01..=1e6).suffix(" px").max_decimals(1));
-            let h =
-                ui.add(egui::DragValue::new(&mut p.height).speed(1.0).range(0.01..=1e6).suffix(" px").max_decimals(1));
-            // Typing one side with the aspect ratio locked changes the other too.
-            if aspect {
-                if w.changed() {
-                    p.height = before.height * p.width / before.width;
-                } else if h.changed() {
-                    p.width = before.width * p.height / before.height;
-                }
-            }
-        });
-        ui.end_row();
-        ui.label("Scale");
-        let mut pct = p.width / frame.width() * 100.0;
-        let r = ui.add(egui::DragValue::new(&mut pct).speed(0.5).range(0.01..=1e6).suffix("%").max_decimals(2));
-        if r.changed() {
-            let k = pct / 100.0 * frame.width() / p.width;
-            p.width *= k;
-            p.height *= k;
-        }
-        ui.end_row();
-        ui.label("Angle");
-        ui.add(egui::DragValue::new(&mut p.angle).speed(0.5).range(-360.0..=360.0).suffix("°").max_decimals(2));
-        ui.end_row();
-    });
-    p.x = x + cx;
-    p.y = y + cy;
-    if p != before {
-        let m = s.edited(&before, &p);
-        d.set_box(m, None);
-    }
+    crate::box_fields::transform(ui, st, id, "transform-panel");
     ui.add_space(6.0);
     ui.label(RichText::new("Drawing").strong());
-    let s = d.transform.as_ref().expect("still open");
+    let Some(d) = st.doc_mut(id) else { return };
+    let Some(s) = d.transform.as_ref() else { return };
     let mut sampling = s.sampling;
     if sampling_ui(ui, &mut sampling, "transform") {
         d.set_box_sampling(sampling);

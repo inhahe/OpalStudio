@@ -2,10 +2,12 @@
 //! Preferences, About and the widget gallery.
 
 use crate::icons;
+use crate::lengths;
 use crate::prefs::SECTIONS;
 use crate::settings::{self, Show};
 use crate::state::{AppState, Background, Confirm, ExportKind, MessageKind, NewImage};
 use eframe::egui::{self, RichText, ViewportCommand};
+use opal_core::units::{ResolutionUnit, Unit};
 use opal_io::bytes;
 
 /// The largest canvas side (Photoshop's limit, for its large-document format). A layer
@@ -132,33 +134,67 @@ fn confirm(ctx: &egui::Context, st: &mut AppState) {
     }
 }
 
+/// A size the New Image dialog offers: its name, its width and height in `unit`, and the
+/// resolution it is made at.
+struct Preset {
+    name: &'static str,
+    size: [f64; 2],
+    unit: Unit,
+    ppi: f64,
+}
+
+const fn preset(name: &'static str, w: f64, h: f64, unit: Unit, ppi: f64) -> Preset {
+    Preset { name, size: [w, h], unit, ppi }
+}
+
+/// The sizes the New Image dialog offers, by row.
+const PRESETS: &[(&str, &[Preset])] = &[
+    (
+        "Screen",
+        &[
+            preset("HD", 1920.0, 1080.0, Unit::Px, 72.0),
+            preset("4K", 3840.0, 2160.0, Unit::Px, 72.0),
+            preset("Square", 2048.0, 2048.0, Unit::Px, 72.0),
+        ],
+    ),
+    (
+        "Paper",
+        &[
+            preset("A5", 148.0, 210.0, Unit::Mm, 300.0),
+            preset("A4", 210.0, 297.0, Unit::Mm, 300.0),
+            preset("A3", 297.0, 420.0, Unit::Mm, 300.0),
+            preset("Letter", 8.5, 11.0, Unit::In, 300.0),
+            preset("Legal", 8.5, 14.0, Unit::In, 300.0),
+            preset("Tabloid", 11.0, 17.0, Unit::In, 300.0),
+        ],
+    ),
+    (
+        "Photo",
+        &[
+            preset("4 × 6", 4.0, 6.0, Unit::In, 300.0),
+            preset("5 × 7", 5.0, 7.0, Unit::In, 300.0),
+            preset("8 × 10", 8.0, 10.0, Unit::In, 300.0),
+        ],
+    ),
+];
+
 fn new_image(ctx: &egui::Context, st: &mut AppState) {
     let Some(mut spec) = st.new_image.clone() else { return };
+    let (mut unit, mut per) = (st.unit(), st.resolution_unit());
     let mut done: Option<bool> = None;
     egui::Modal::new(egui::Id::unique("new-image")).show(ctx, |ui| {
         ui.heading("New image");
         ui.add_space(4.0);
         egui::Grid::new("new-image-grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
             ui.label("Width");
-            ui.add(egui::DragValue::new(&mut spec.width).range(1..=MAX_SIDE).suffix(" px"));
+            ui.horizontal(|ui| {
+                lengths::side(ui, &mut spec.width, unit, spec.resolution);
+                lengths::unit_menu(ui, &mut unit, "new-image-unit");
+            });
             ui.end_row();
             ui.label("Height");
-            ui.add(egui::DragValue::new(&mut spec.height).range(1..=MAX_SIDE).suffix(" px"));
-            ui.end_row();
-            ui.label("Size");
-            ui.horizontal_wrapped(|ui| {
-                for (name, w, h) in [
-                    ("HD", 1920, 1080),
-                    ("4K", 3840, 2160),
-                    ("Square", 2048, 2048),
-                    ("A4, 300 dpi", 2480, 3508),
-                    ("Letter, 300 dpi", 2550, 3300),
-                ] {
-                    if ui.small_button(name).on_hover_text(format!("{w} × {h}")).clicked() {
-                        spec.width = w;
-                        spec.height = h;
-                    }
-                }
+            ui.horizontal(|ui| {
+                lengths::side(ui, &mut spec.height, unit, spec.resolution);
                 if ui
                     .small_button(crate::theme::icon(icons::SWAP, 13.0))
                     .on_hover_text("Swap width and height")
@@ -168,6 +204,33 @@ fn new_image(ctx: &egui::Context, st: &mut AppState) {
                 }
             });
             ui.end_row();
+            ui.label("Resolution");
+            ui.horizontal(|ui| {
+                let before = spec.resolution;
+                // A size shown in a unit of length stays that size; one in pixels, those pixels.
+                if lengths::resolution(ui, &mut spec.resolution, &mut per, "new-image-ppi") && unit != Unit::Px {
+                    let id = egui::Id::unique("new-image-print");
+                    hold_print_size(ui, id, (&mut spec.width, &mut spec.height), before, spec.resolution);
+                }
+            });
+            ui.end_row();
+            for (row, presets) in PRESETS {
+                ui.label(*row);
+                ui.horizontal_wrapped(|ui| {
+                    for &Preset { name, size: [w, h], unit: in_unit, ppi } in *presets {
+                        let (pw, ph) = (preset_side(in_unit.to_px(w, ppi)), preset_side(in_unit.to_px(h, ppi)));
+                        let tip = if in_unit == Unit::Px {
+                            format!("{pw} × {ph} px")
+                        } else {
+                            format!("{w} × {h} {in_unit} at {ppi} pixels/inch: {pw} × {ph} px")
+                        };
+                        if ui.small_button(name).on_hover_text(tip).clicked() {
+                            (spec.width, spec.height, spec.resolution) = (pw, ph, ppi);
+                        }
+                    }
+                });
+                ui.end_row();
+            }
             ui.label("Background");
             ui.horizontal(|ui| {
                 ui.radio_value(&mut spec.background, Background::White, "White");
@@ -177,6 +240,8 @@ fn new_image(ctx: &egui::Context, st: &mut AppState) {
         });
         let note = size_note(spec.width, spec.height, crate::memory::free());
         ui.label(RichText::new(note).small().color(st.palette.weak_text));
+        let print = lengths::print_note(spec.width, spec.height, spec.resolution, unit, per);
+        ui.label(RichText::new(print).small().color(st.palette.weak_text));
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.button("Create").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -187,6 +252,7 @@ fn new_image(ctx: &egui::Context, st: &mut AppState) {
             }
         });
     });
+    remember_units(st, unit, per);
     match done {
         Some(true) => {
             st.new_image = None;
@@ -199,6 +265,37 @@ fn new_image(ctx: &egui::Context, st: &mut AppState) {
         Some(false) => st.new_image = None,
         None => st.new_image = Some(spec),
     }
+}
+
+/// A preset's side of `px` pixels, whole.
+fn preset_side(px: f64) -> u32 {
+    (px.round() as u32).clamp(1, MAX_SIDE)
+}
+
+/// Makes `unit` and `per` the units lengths and resolutions are shown in, if a dialog
+/// changed them.
+fn remember_units(st: &mut AppState, unit: Unit, per: ResolutionUnit) {
+    if unit != st.unit() {
+        st.set_unit(unit);
+    }
+    if per != st.resolution_unit() {
+        st.set_resolution_unit(per);
+    }
+}
+
+/// Changes `size` with the resolution, from `before` to `after` pixels per inch, so that it
+/// prints as large. It works from the print size it had when the resolution began to
+/// change (kept under `id`), not from the size made of it at each step, so that rounding to
+/// whole pixels does not add up over a drag; a size changed since is taken afresh.
+fn hold_print_size(ui: &egui::Ui, id: egui::Id, size: (&mut u32, &mut u32), before: f64, after: f64) {
+    let (w, h) = size;
+    let held: Option<([f64; 2], [u32; 2])> = ui.data(|d| d.get_temp(id));
+    let print = match held {
+        Some((print, made)) if made == [*w, *h] => print,
+        _ => [f64::from(*w) / before, f64::from(*h) / before],
+    };
+    (*w, *h) = (preset_side(print[0] * after), preset_side(print[1] * after));
+    ui.data_mut(|d| d.insert_temp(id, (print, [*w, *h])));
 }
 
 /// What the New Image dialog says of a `width × height` canvas: its pixels, and the memory
@@ -224,6 +321,7 @@ fn export(ctx: &egui::Context, st: &mut AppState) {
     let Some(mut spec) = st.export.clone() else { return };
     let mut done: Option<bool> = None;
     let palette = st.palette;
+    let (mut unit, per) = (st.unit(), st.resolution_unit());
     egui::Modal::new(egui::Id::unique("export")).show(ctx, |ui| {
         ui.heading("Export");
         ui.label(
@@ -236,9 +334,10 @@ fn export(ctx: &egui::Context, st: &mut AppState) {
             ui.radio_value(&mut spec.kind, ExportKind::Jpeg, "JPEG");
         });
         ui.add_space(4.0);
-        if let Some(c) = st.doc(spec.doc).map(|d| d.doc().canvas) {
+        if let Some((c, ppi)) = st.doc(spec.doc).map(|d| (d.doc().canvas, d.doc().resolution)) {
             egui::Grid::new("export-size").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                size_fields(ui, &mut spec.width, &mut spec.height, &mut spec.keep_aspect, (c.width, c.height));
+                let size = (&mut spec.width, &mut spec.height);
+                size_fields(ui, size, &mut spec.keep_aspect, (c.width, c.height), &mut unit, ppi);
             });
             if (spec.width, spec.height) != (c.width, c.height) {
                 ui.label(
@@ -246,9 +345,14 @@ fn export(ctx: &egui::Context, st: &mut AppState) {
                         "Resized as it is written, with the resampling below; the image itself stays as it is.",
                     )
                     .small()
-                    .color(st.palette.weak_text),
+                    .color(palette.weak_text),
                 );
             }
+            let note = format!(
+                "The file records the image's resolution. {}",
+                lengths::print_note(spec.width, spec.height, ppi, unit, per)
+            );
+            ui.label(RichText::new(note).small().color(palette.weak_text));
         }
         let changed = settings::settings_ui(ui, &mut st.prefs, Show::Section("Export"), &palette, "export");
         if changed {
@@ -275,6 +379,7 @@ fn export(ctx: &egui::Context, st: &mut AppState) {
             }
         });
     });
+    remember_units(st, unit, per);
     match done {
         Some(true) => {
             st.export = None;
@@ -287,23 +392,32 @@ fn export(ctx: &egui::Context, st: &mut AppState) {
     }
 }
 
-/// Width and height fields, in pixels and percent of `original`, kept in proportion while
-/// `keep` is set. For a two-column grid.
-fn size_fields(ui: &mut egui::Ui, w: &mut u32, h: &mut u32, keep: &mut bool, original: (u32, u32)) {
+/// Width and height fields of `size`, in `unit` at `ppi` and in percent of `original`, kept
+/// in proportion while `keep` is set, with a menu of the units. For a two-column grid.
+fn size_fields(
+    ui: &mut egui::Ui,
+    size: (&mut u32, &mut u32),
+    keep: &mut bool,
+    original: (u32, u32),
+    unit: &mut Unit,
+    ppi: f64,
+) {
+    let (w, h) = size;
     let (ow, oh) = (f64::from(original.0), f64::from(original.1));
     let before = (*w, *h);
     ui.label("Width");
     ui.horizontal(|ui| {
-        ui.add(egui::DragValue::new(w).range(1..=MAX_SIDE).suffix(" px"));
+        lengths::side(ui, w, *unit, ppi);
         let mut pct = f64::from(*w) / ow * 100.0;
         if ui.add(egui::DragValue::new(&mut pct).range(0.01..=10_000.0).suffix("%").max_decimals(2)).changed() {
             *w = ((ow * pct / 100.0).round() as u32).clamp(1, MAX_SIDE);
         }
+        lengths::unit_menu(ui, unit, "size-unit");
     });
     ui.end_row();
     ui.label("Height");
     ui.horizontal(|ui| {
-        ui.add(egui::DragValue::new(h).range(1..=MAX_SIDE).suffix(" px"));
+        lengths::side(ui, h, *unit, ppi);
         let mut pct = f64::from(*h) / oh * 100.0;
         if ui.add(egui::DragValue::new(&mut pct).range(0.01..=10_000.0).suffix("%").max_decimals(2)).changed() {
             *h = ((oh * pct / 100.0).round() as u32).clamp(1, MAX_SIDE);
@@ -344,14 +458,33 @@ fn resize_image(ctx: &egui::Context, st: &mut AppState) {
         return;
     };
     let palette = st.palette;
+    let (mut unit, mut per) = (st.unit(), st.resolution_unit());
     let mut done = None;
     egui::Modal::new(egui::Id::unique("resize-image")).show(ctx, |ui| {
         ui.heading("Resize image");
-        ui.label("Scales everything in the image to a new size.");
+        ui.label("Scales everything in the image to a new size, or gives it a new resolution.");
         ui.add_space(4.0);
         egui::Grid::new("resize-image-size").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-            size_fields(ui, &mut spec.width, &mut spec.height, &mut spec.keep_aspect, (c.width, c.height));
+            let size = (&mut spec.width, &mut spec.height);
+            size_fields(ui, size, &mut spec.keep_aspect, (c.width, c.height), &mut unit, spec.resolution);
+            ui.label("Resolution");
+            ui.horizontal(|ui| {
+                let before = spec.resolution;
+                if lengths::resolution(ui, &mut spec.resolution, &mut per, "resize-ppi") && spec.keep_print_size {
+                    let id = egui::Id::unique("resize-print");
+                    hold_print_size(ui, id, (&mut spec.width, &mut spec.height), before, spec.resolution);
+                }
+            });
+            ui.end_row();
+            ui.label("");
+            ui.checkbox(&mut spec.keep_print_size, "Keep the print size").on_hover_text(
+                "On, a new resolution changes the size in pixels with it, so the image prints as large as \
+                 before. Off, the pixels stay as they are, and the image prints larger or smaller.",
+            );
+            ui.end_row();
         });
+        let print = lengths::print_note(spec.width, spec.height, spec.resolution, unit, per);
+        ui.label(RichText::new(print).small().color(palette.weak_text));
         ui.add_space(4.0);
         if settings::settings_ui(ui, &mut st.prefs, Show::Section("Resize"), &palette, "resize") {
             st.settings_touched();
@@ -366,6 +499,7 @@ fn resize_image(ctx: &egui::Context, st: &mut AppState) {
         ui.label(RichText::new(note).small().color(palette.weak_text));
         done = ok_cancel(ui, "Resize");
     });
+    remember_units(st, unit, per);
     match done {
         Some(true) => {
             st.resize_image = None;
@@ -379,11 +513,12 @@ fn resize_image(ctx: &egui::Context, st: &mut AppState) {
 
 fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
     let Some(mut spec) = st.resize_canvas.clone() else { return };
-    let Some(c) = st.active().map(|d| d.doc().canvas) else {
+    let Some((c, ppi)) = st.active().map(|d| (d.doc().canvas, d.doc().resolution)) else {
         st.resize_canvas = None;
         return;
     };
     let palette = st.palette;
+    let mut unit = st.unit();
     let mut done = None;
     egui::Modal::new(egui::Id::unique("resize-canvas")).show(ctx, |ui| {
         ui.heading("Resize canvas");
@@ -392,6 +527,8 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
         ui.horizontal(|ui| {
             ui.radio_value(&mut spec.by_margins, false, "New size");
             ui.radio_value(&mut spec.by_margins, true, "Add to each side");
+            ui.add_space(8.0);
+            lengths::unit_menu(ui, &mut unit, "canvas-unit");
         });
         ui.add_space(4.0);
         if spec.by_margins {
@@ -399,7 +536,7 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
                 for (name, i) in [("Left", 0), ("Top", 1), ("Right", 2), ("Bottom", 3)] {
                     ui.label(name);
                     let side = i64::from(MAX_SIDE);
-                    ui.add(egui::DragValue::new(&mut spec.margins[i]).range(-side..=side).suffix(" px"));
+                    lengths::whole(ui, &mut spec.margins[i], unit, ppi, -side..=side);
                     ui.end_row();
                 }
             });
@@ -407,10 +544,10 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
         } else {
             egui::Grid::new("resize-canvas-size").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                 ui.label("Width");
-                ui.add(egui::DragValue::new(&mut spec.width).range(1..=MAX_SIDE).suffix(" px"));
+                lengths::side(ui, &mut spec.width, unit, ppi);
                 ui.end_row();
                 ui.label("Height");
-                ui.add(egui::DragValue::new(&mut spec.height).range(1..=MAX_SIDE).suffix(" px"));
+                lengths::side(ui, &mut spec.height, unit, ppi);
                 ui.end_row();
                 ui.label("Anchor").on_hover_text("Where the old canvas sits in the new one.");
                 egui::Grid::new("anchor").spacing([2.0, 2.0]).show(ui, |ui| {
@@ -430,13 +567,17 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
             });
         }
         let n = spec.canvas(&c);
-        ui.label(
-            RichText::new(format!("The canvas will be {} × {} px.", n.width, n.height))
-                .small()
-                .color(palette.weak_text),
-        );
+        let (w, h) = (f64::from(n.width), f64::from(n.height));
+        let mut size = format!("{} × {} px", n.width, n.height);
+        if unit != Unit::Px {
+            size += &format!(" ({})", lengths::show_size(w, h, unit, ppi));
+        }
+        ui.label(RichText::new(format!("The canvas will be {size}.")).small().color(palette.weak_text));
         done = ok_cancel(ui, "Resize");
     });
+    if unit != st.unit() {
+        st.set_unit(unit);
+    }
     match done {
         Some(true) => {
             st.resize_canvas = None;

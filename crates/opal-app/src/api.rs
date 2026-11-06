@@ -18,6 +18,7 @@ use opal_core::document::{Layer, LayerContent, LayerId, ObjectKind};
 use opal_core::geom::IRect;
 use opal_core::raster::RasterImage;
 use opal_core::tile::Pixel;
+use opal_core::units::{DEFAULT_PPI, MAX_PPI, MIN_PPI, Unit, parse_length};
 use opal_io::image_files::ExportSize;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
@@ -36,6 +37,13 @@ pub enum Kind {
         min: f64,
         max: f64,
     },
+    /// A length: a number in the call's `unit` (pixels unless it says), or text with a unit
+    /// of its own ("8.5in"), converted at the image's resolution; in pixels, from `min` to
+    /// `max`.
+    Length {
+        min: f64,
+        max: f64,
+    },
     Text,
     /// A file's path.
     Path,
@@ -47,6 +55,8 @@ pub enum Kind {
     Layer,
     /// Layers of the image, by id.
     Layers,
+    /// Any value: one a preference takes.
+    Any,
 }
 
 /// What a parameter left out stands for.
@@ -125,36 +135,122 @@ const fn side(name: &'static str, help: &'static str, otherwise: Otherwise) -> P
     Param { name, kind: Kind::Int { min: 1, max: SIDE }, help, otherwise }
 }
 
-const NEW_WIDTH: Param = side("width", "Its width, in pixels.", Otherwise::Required);
-const NEW_HEIGHT: Param = side("height", "Its height, in pixels.", Otherwise::Required);
-const EXPORT_WIDTH: Param = side(
-    "width",
-    "The width written, in pixels.",
-    Otherwise::Now("the canvas's, or in proportion to the height given"),
-);
-const EXPORT_HEIGHT: Param = side(
-    "height",
-    "The height written, in pixels.",
-    Otherwise::Now("the canvas's, or in proportion to the width given"),
-);
-const RESIZED_WIDTH: Param = side("width", "The new width, in pixels.", Otherwise::Required);
-const RESIZED_HEIGHT: Param = side("height", "The new height, in pixels.", Otherwise::Required);
-const CANVAS_WIDTH: Param = side("width", "The new width, in pixels.", Otherwise::Now("the canvas's"));
-const CANVAS_HEIGHT: Param = side("height", "The new height, in pixels.", Otherwise::Now("the canvas's"));
+/// A canvas side as a length (rounded to whole pixels).
+const fn length_side(name: &'static str, help: &'static str, otherwise: Otherwise) -> Param {
+    Param { name, kind: Kind::Length { min: 1.0, max: SIDE as f64 }, help, otherwise }
+}
+
+const NEW_WIDTH: Param = length_side("width", "Its width.", Otherwise::Required);
+const NEW_HEIGHT: Param = length_side("height", "Its height.", Otherwise::Required);
+const EXPORT_WIDTH: Param =
+    length_side("width", "The width written.", Otherwise::Now("the canvas's, or in proportion to the height given"));
+const EXPORT_HEIGHT: Param =
+    length_side("height", "The height written.", Otherwise::Now("the canvas's, or in proportion to the width given"));
+const RESIZED_WIDTH: Param =
+    length_side("width", "The new width.", Otherwise::Now("the canvas's, or in proportion to the height given"));
+const RESIZED_HEIGHT: Param =
+    length_side("height", "The new height.", Otherwise::Now("the canvas's, or in proportion to the width given"));
+const CANVAS_WIDTH: Param = length_side("width", "The new width.", Otherwise::Now("the canvas's"));
+const CANVAS_HEIGHT: Param = length_side("height", "The new height.", Otherwise::Now("the canvas's"));
+
+/// The units' short names, as `unit` takes them, in [`Unit::ALL`]'s order.
+const UNIT_IDS: &[&str] = &["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"];
+
+const UNIT: Param = Param {
+    name: "unit",
+    kind: Kind::Choice(UNIT_IDS),
+    help: "What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, \
+           millimeters, centimeters or meters, converted at the image's resolution. A length can also be \
+           given as text with a unit of its own: \"8.5in\", \"21 cm\".",
+    otherwise: Otherwise::Value("\"px\""),
+};
+
+const NEW_RESOLUTION: Param = Param {
+    name: "resolution",
+    kind: Kind::Number { min: MIN_PPI, max: MAX_PPI },
+    help: "Its resolution, in pixels per inch: how large its pixels print, and what lengths in other units \
+           than pixels are converted at.",
+    otherwise: Otherwise::Value("72"),
+};
+
+/// The farthest from the canvas's corner a box may be put, in pixels.
+const FAR: f64 = 1e7;
+
+const BOX_X: Param = Param {
+    name: "x",
+    kind: Kind::Length { min: -FAR, max: FAR },
+    help: "Where the box's top-left corner goes, from the canvas's left edge.",
+    otherwise: Otherwise::Now("where the command puts it"),
+};
+const BOX_Y: Param = Param {
+    name: "y",
+    kind: Kind::Length { min: -FAR, max: FAR },
+    help: "Where the box's top-left corner goes, from the canvas's top edge.",
+    otherwise: Otherwise::Now("where the command puts it"),
+};
+const BOX_WIDTH: Param = Param {
+    name: "width",
+    kind: Kind::Length { min: 0.01, max: 1e6 },
+    help: "The box's width.",
+    otherwise: Otherwise::Now("in proportion to the height given, or as it is"),
+};
+const BOX_HEIGHT: Param = Param {
+    name: "height",
+    kind: Kind::Length { min: 0.01, max: 1e6 },
+    help: "The box's height.",
+    otherwise: Otherwise::Now("in proportion to the width given, or as it is"),
+};
+const BOX_ANGLE: Param = Param {
+    name: "angle",
+    kind: Kind::Number { min: -360.0, max: 360.0 },
+    help: "The box's angle, in degrees clockwise, about its top-left corner.",
+    otherwise: Otherwise::Now("as it is"),
+};
+const BOX_FIT: Param = Param {
+    name: "fit",
+    kind: Kind::Choice(&["stretch", "inside", "cover"]),
+    help: "With both width and height given: stretch it to them; or keep its proportions and fit it inside \
+           them, or make it cover them, centered on them.",
+    otherwise: Otherwise::Value("\"stretch\""),
+};
+const INTO_ACTIVE: Param = Param {
+    name: "into_active",
+    kind: Kind::Bool,
+    help: "Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer.",
+    otherwise: Otherwise::Value("false"),
+};
 
 /// Where Resize Canvas puts the old canvas in the new, by name, row by row: the one at `i` is
 /// at `[i % 3, i / 3]` (left, center, right; top, middle, bottom).
 const ANCHOR_NAMES: &[&str] =
     &["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"];
 
+/// A margin Resize Canvas adds on one side (`side`).
+const fn margin(side: &'static str) -> Param {
+    Param {
+        name: side,
+        kind: Kind::Length { min: -(SIDE as f64), max: SIDE as f64 },
+        help: "How much to add on that side, rather than give a new size (a negative length cuts it).",
+        otherwise: Otherwise::Now("none: the width and height say"),
+    }
+}
+
+const LEFT: Param = margin("left");
+const TOP: Param = margin("top");
+const RIGHT: Param = margin("right");
+const BOTTOM: Param = margin("bottom");
+
 /// The parameters of command `cmd`, or `None` for one of the interface alone (the view,
-/// the panels, the windows), or one not callable yet (those that open the transform box).
+/// the panels, the windows). Those that open the transform box take where to put it, and
+/// apply it.
 pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
     use Cmd::*;
     Some(match cmd {
         New => &[
             NEW_WIDTH,
             NEW_HEIGHT,
+            NEW_RESOLUTION,
+            UNIT,
             Param {
                 name: "background",
                 kind: Kind::Choice(&["white", "transparent"]),
@@ -189,6 +285,7 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             },
             EXPORT_WIDTH,
             EXPORT_HEIGHT,
+            UNIT,
             OVERWRITE,
             Param {
                 name: "sixteen_bit",
@@ -225,6 +322,14 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             RESIZED_WIDTH,
             RESIZED_HEIGHT,
             Param {
+                name: "resolution",
+                kind: Kind::Number { min: MIN_PPI, max: MAX_PPI },
+                help: "The new resolution, in pixels per inch, which lengths in other units than pixels are \
+                       converted at. Given without a size, it changes no pixels: only how large they print.",
+                otherwise: Otherwise::Now("the image's"),
+            },
+            UNIT,
+            Param {
                 name: "resample",
                 kind: Kind::Bool,
                 help: "Resample the pixel layers now (smaller, but enlarging again later cannot bring \
@@ -240,8 +345,13 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
                 name: "anchor",
                 kind: Kind::Choice(ANCHOR_NAMES),
                 help: "Where the old canvas sits in the new.",
-                otherwise: Otherwise::Value("\"center\""),
+                otherwise: Otherwise::Now("the center"),
             },
+            LEFT,
+            TOP,
+            RIGHT,
+            BOTTOM,
+            UNIT,
         ],
         RotateBy => &[
             DOCUMENT,
@@ -283,9 +393,49 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             LAYER,
             Param { name: "name", kind: Kind::Text, help: "Its new name.", otherwise: Otherwise::Required },
         ],
-        Paste | PasteInPlace | Transform | Preferences | Exit | RunScript | ConnectAssistant | ZoomIn | ZoomOut
-        | ZoomFit | Zoom100 | ToggleOffCanvas | ToggleTheme | ToggleRibbon | CycleToolsPlace | ResetPanels | Search
-        | Help | Shortcuts | About | WidgetGallery => return None,
+        Paste | PasteInPlace => &[
+            Param {
+                name: "document",
+                kind: Kind::Document,
+                help: "The image, by id.",
+                otherwise: Otherwise::Now("the active image; with none open, the paste becomes a new image"),
+            },
+            BOX_X,
+            BOX_Y,
+            BOX_WIDTH,
+            BOX_HEIGHT,
+            BOX_ANGLE,
+            BOX_FIT,
+            INTO_ACTIVE,
+            UNIT,
+        ],
+        Place => &[
+            DOCUMENT,
+            Param {
+                name: "path",
+                kind: Kind::Path,
+                help: "The image file, a PNG or a JPEG, by its absolute path.",
+                otherwise: Otherwise::Required,
+            },
+            Param {
+                name: "name",
+                kind: Kind::Text,
+                help: "The new layer's name.",
+                otherwise: Otherwise::Now("the file's name"),
+            },
+            BOX_X,
+            BOX_Y,
+            BOX_WIDTH,
+            BOX_HEIGHT,
+            BOX_ANGLE,
+            BOX_FIT,
+            INTO_ACTIVE,
+            UNIT,
+        ],
+        Transform => &[DOCUMENT, LAYERS, BOX_X, BOX_Y, BOX_WIDTH, BOX_HEIGHT, BOX_ANGLE, BOX_FIT, UNIT],
+        Preferences | Exit | RunScript | ConnectAssistant | ZoomIn | ZoomOut | ZoomFit | Zoom100 | ToggleOffCanvas
+        | ToggleTheme | ToggleRibbon | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts | About
+        | WidgetGallery => return None,
     })
 }
 
@@ -365,6 +515,12 @@ const QUERIES: &[(&str, &str, &[Param])] = &[
          dropped to keep within the memory the history may use.",
         &[DOCUMENT],
     ),
+    (
+        "preferences",
+        "Every preference: for each, its key, label, section, help, value and default, and what it takes \
+         (its range or choices). set_preference changes them.",
+        &[],
+    ),
     ("methods", "Every method of the API, with its parameters: what this list is generated from.", &[]),
 ];
 
@@ -416,53 +572,111 @@ fn role_name(role: Role) -> &'static str {
 
 /// The changes the API alone makes (no command of the interface makes them): their names,
 /// what they do, and their parameters.
-const CHANGES: &[(&str, &str, &[Param])] = &[(
-    "put_pixels",
-    "Puts pixels into an image, at a place on its canvas: as a new layer above the active one, or into a pixel \
+const CHANGES: &[(&str, &str, &[Param])] = &[
+    (
+        "crop",
+        "Crops the image to a rectangle of its canvas, which may be turned: the canvas becomes the \
+         rectangle, and if it was turned, everything turns the other way, so its contents come out upright. \
+         Only the canvas moves (enlarging it again brings back what was cropped away), unless delete says.",
+        &[
+            DOCUMENT,
+            Param {
+                name: "x",
+                kind: Kind::Length { min: -FAR, max: FAR },
+                help: "The rectangle's top-left corner, from the canvas's left edge.",
+                otherwise: Otherwise::Value("0"),
+            },
+            Param {
+                name: "y",
+                kind: Kind::Length { min: -FAR, max: FAR },
+                help: "The rectangle's top-left corner, from the canvas's top edge.",
+                otherwise: Otherwise::Value("0"),
+            },
+            length_side("width", "The rectangle's width.", Otherwise::Now("the canvas's")),
+            length_side("height", "The rectangle's height.", Otherwise::Now("the canvas's")),
+            Param {
+                name: "angle",
+                kind: Kind::Number { min: -360.0, max: 360.0 },
+                help: "The rectangle's angle, in degrees clockwise, about its top-left corner.",
+                otherwise: Otherwise::Value("0"),
+            },
+            Param {
+                name: "delete",
+                kind: Kind::Bool,
+                help: "Remove the pixels outside the new canvas, rather than keep them for later.",
+                otherwise: Otherwise::Now("the Crop tool's Delete cropped pixels"),
+            },
+            UNIT,
+        ],
+    ),
+    (
+        "set_preference",
+        "Changes a preference, as the Preferences window would, or puts it back to its default. Those of \
+         scripting (what runs scripts, who may connect) are changed in the Preferences window only.",
+        &[
+            Param {
+                name: "key",
+                kind: Kind::Text,
+                help: "The preference, by its key (the preferences query lists them).",
+                otherwise: Otherwise::Required,
+            },
+            Param {
+                name: "value",
+                kind: Kind::Any,
+                help: "Its new value: true or false, a number in its range, one of its choices, a color as \
+                       [red, green, blue] or [red, green, blue, alpha] (0 to 255, sRGB), or text.",
+                otherwise: Otherwise::Now("its default"),
+            },
+        ],
+    ),
+    (
+        "put_pixels",
+        "Puts pixels into an image, at a place on its canvas: as a new layer above the active one, or into a pixel \
      layer, replacing its pixels there. They come in shared memory the caller made, or in base64.",
-    &[
-        DOCUMENT,
-        Param {
-            name: "layer",
-            kind: Kind::Layer,
-            help: "A pixel layer, by id, whose pixels they replace there.",
-            otherwise: Otherwise::Now("a new layer, above the active one"),
-        },
-        Param {
-            name: "x",
-            kind: Kind::Int { min: -SIDE, max: 2 * SIDE },
-            help: "Where their left edge goes, in pixels from the canvas's.",
-            otherwise: Otherwise::Value("0"),
-        },
-        Param {
-            name: "y",
-            kind: Kind::Int { min: -SIDE, max: 2 * SIDE },
-            help: "Where their top edge goes, in pixels from the canvas's.",
-            otherwise: Otherwise::Value("0"),
-        },
-        side("width", "How many pixels across.", Otherwise::Required),
-        side("height", "How many pixels down.", Otherwise::Required),
-        PIXEL_FORMAT,
-        Param {
-            name: "shm",
-            kind: Kind::Text,
-            help: "The shared memory holding them, by name: made by the caller, with width × height pixels.",
-            otherwise: Otherwise::Now("none: they are in data"),
-        },
-        Param {
-            name: "data",
-            kind: Kind::Text,
-            help: "The pixels in base64, if not in shared memory (a request is at most 1 MB).",
-            otherwise: Otherwise::Now("none: they are in shm"),
-        },
-        Param {
-            name: "name",
-            kind: Kind::Text,
-            help: "The new layer's name.",
-            otherwise: Otherwise::Now("a numbered one"),
-        },
-    ],
-)];
+        &[
+            DOCUMENT,
+            Param {
+                name: "layer",
+                kind: Kind::Layer,
+                help: "A pixel layer, by id, whose pixels they replace there.",
+                otherwise: Otherwise::Now("a new layer, above the active one"),
+            },
+            Param {
+                name: "x",
+                kind: Kind::Int { min: -SIDE, max: 2 * SIDE },
+                help: "Where their left edge goes, in pixels from the canvas's.",
+                otherwise: Otherwise::Value("0"),
+            },
+            Param {
+                name: "y",
+                kind: Kind::Int { min: -SIDE, max: 2 * SIDE },
+                help: "Where their top edge goes, in pixels from the canvas's.",
+                otherwise: Otherwise::Value("0"),
+            },
+            side("width", "How many pixels across.", Otherwise::Required),
+            side("height", "How many pixels down.", Otherwise::Required),
+            PIXEL_FORMAT,
+            Param {
+                name: "shm",
+                kind: Kind::Text,
+                help: "The shared memory holding them, by name: made by the caller, with width × height pixels.",
+                otherwise: Otherwise::Now("none: they are in data"),
+            },
+            Param {
+                name: "data",
+                kind: Kind::Text,
+                help: "The pixels in base64, if not in shared memory (a request is at most 1 MB).",
+                otherwise: Otherwise::Now("none: they are in shm"),
+            },
+            Param {
+                name: "name",
+                kind: Kind::Text,
+                help: "The new layer's name.",
+                otherwise: Otherwise::Now("a numbered one"),
+            },
+        ],
+    ),
+];
 
 const REGION_X: Param = Param {
     name: "x",
@@ -780,7 +994,43 @@ impl Args {
     }
 
     fn number(&self, name: &str) -> f64 {
-        self.get(name).and_then(Value::as_f64).unwrap_or_else(|| panic!("\"{name}\" was checked to be there"))
+        self.opt_number(name).unwrap_or_else(|| panic!("\"{name}\" was checked to be there"))
+    }
+
+    fn opt_number(&self, name: &str) -> Option<f64> {
+        self.get(name).and_then(Value::as_f64)
+    }
+
+    /// A canvas side, in whole pixels, if given (once [`in_pixels`](Self::in_pixels)).
+    fn side(&self, name: &str) -> Option<u32> {
+        self.opt_number(name).map(|v| (v.round() as u32).clamp(1, MAX_SIDE))
+    }
+
+    /// These arguments with each length of `params` in pixels: a number in the call's
+    /// `unit`, or text with a unit of its own, converted at `ppi` pixels per inch. Each
+    /// must then be in its parameter's range.
+    fn in_pixels(&self, params: &[Param], ppi: f64) -> Result<Args, String> {
+        let unit = self.text("unit").and_then(Unit::from_name).unwrap_or(Unit::Px);
+        let mut out = self.0.clone();
+        for p in params {
+            let (Kind::Length { min, max }, Some(v)) = (p.kind, self.get(p.name)) else { continue };
+            let (value, typed) = match v {
+                Value::String(s) => parse_length(s).expect("checked"),
+                v => (v.as_f64().expect("checked"), None),
+            };
+            let u = typed.unwrap_or(unit);
+            let px = u.to_px(value, ppi);
+            if !(min..=max).contains(&px) {
+                let given = if u == Unit::Px {
+                    format!("{px}")
+                } else {
+                    format!("{value} {u}, which is {px} pixels at {ppi} pixels per inch")
+                };
+                return Err(format!("\"{}\" must lie between {min} and {max} pixels, not {given}", p.name));
+            }
+            out.insert(p.name.to_owned(), json!(px));
+        }
+        Ok(Args(out))
     }
 
     fn flag(&self, name: &str) -> Option<bool> {
@@ -809,6 +1059,129 @@ impl Args {
     }
 }
 
+/// Where an API call puts a box, in pixels, its corner from the canvas's: each number given
+/// replaces the box's own; a side left out keeps the box's proportions if the other is
+/// given; and with both, `fit` says how they are taken.
+#[derive(Clone, Debug, Default)]
+pub struct BoxArgs {
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+    pub angle: Option<f64>,
+    pub fit: Fit,
+}
+
+/// How a box given both a width and a height takes them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Fit {
+    /// Stretched to them.
+    #[default]
+    Stretch,
+    /// As large as fits inside them, in its own proportions, centered on them.
+    Inside,
+    /// As small as covers them, in its own proportions, centered on them.
+    Cover,
+}
+
+impl BoxArgs {
+    /// The box `args` give (once in pixels).
+    fn of(args: &Args) -> BoxArgs {
+        BoxArgs {
+            x: args.opt_number("x"),
+            y: args.opt_number("y"),
+            width: args.opt_number("width"),
+            height: args.opt_number("height"),
+            angle: args.opt_number("angle"),
+            fit: match args.text("fit") {
+                Some("inside") => Fit::Inside,
+                Some("cover") => Fit::Cover,
+                _ => Fit::Stretch,
+            },
+        }
+    }
+
+    /// The box `p` (as the document has it) with these put in; `corner` is the canvas's
+    /// top-left corner. A box fitted to a width and height is centered on them before it
+    /// is turned.
+    pub fn applied(&self, p: &crate::transform::Params, corner: [f64; 2]) -> crate::transform::Params {
+        let (w, h) = match (self.width, self.height) {
+            (Some(w), Some(h)) => match self.fit {
+                Fit::Stretch => (w, h),
+                fit => {
+                    let (kw, kh) = (w / p.width, h / p.height);
+                    let k = if fit == Fit::Inside { kw.min(kh) } else { kw.max(kh) };
+                    (p.width * k, p.height * k)
+                }
+            },
+            (Some(w), None) => (w, p.height * w / p.width),
+            (None, Some(h)) => (p.width * h / p.height, h),
+            (None, None) => (p.width, p.height),
+        };
+        let (dx, dy) = match (self.width, self.height) {
+            (Some(bw), Some(bh)) => ((bw - w) * 0.5, (bh - h) * 0.5),
+            _ => (0.0, 0.0),
+        };
+        crate::transform::Params {
+            x: self.x.map_or(p.x, |x| corner[0] + x) + dx,
+            y: self.y.map_or(p.y, |y| corner[1] + y) + dy,
+            width: w,
+            height: h,
+            angle: self.angle.unwrap_or(p.angle),
+            mirrored: p.mirrored,
+        }
+    }
+}
+
+/// `value` with `notes` added to its "notes", if there are any.
+pub(crate) fn with_notes(mut value: Value, notes: Vec<String>) -> Value {
+    if !notes.is_empty()
+        && let Value::Object(fields) = &mut value
+        && let Some(list) = fields.entry("notes").or_insert_with(|| json!([])).as_array_mut()
+    {
+        list.extend(notes.into_iter().map(Value::from));
+    }
+    value
+}
+
+/// The width and height `args` give (once in pixels) for a canvas `c` wide and tall: as
+/// given, or one given and the other in proportion, or the canvas's. Refused past the
+/// largest side.
+fn sides(args: &Args, c: (u32, u32)) -> Result<(u32, u32), String> {
+    let ratio = |given: f64, a: u32, b: u32| (given * f64::from(b) / f64::from(a)).round().max(1.0);
+    let (w, h) = match (args.opt_number("width"), args.opt_number("height")) {
+        (Some(w), Some(h)) => (w.round(), h.round()),
+        (Some(w), None) => (w.round(), ratio(w, c.0, c.1)),
+        (None, Some(h)) => (ratio(h, c.1, c.0), h.round()),
+        (None, None) => (f64::from(c.0), f64::from(c.1)),
+    };
+    if w.max(h) > f64::from(MAX_SIDE) {
+        return Err(format!(
+            "in proportion, that is {w} × {h} pixels, past the most a side can be ({MAX_SIDE}): give both sides."
+        ));
+    }
+    Ok((w.max(1.0) as u32, h.max(1.0) as u32))
+}
+
+/// Whether scripts may change preference `d`: not those of scripting (what runs scripts,
+/// who may connect, which would let a script or an assistant give itself more than it
+/// has), nor curves, which are drawn.
+fn settable(d: &crate::settings::Def) -> bool {
+    d.section != "Scripting" && !matches!(d.kind, crate::settings::Kind::Curve { .. })
+}
+
+/// A setting's value as JSON: a color as [red, green, blue, alpha].
+fn setting_json(v: &crate::settings::Value) -> Value {
+    use crate::settings::Value as Set;
+    match v {
+        Set::Bool(b) => json!(b),
+        Set::Float(f) => json!(f),
+        Set::Choice(c) | Set::Text(c) => json!(c),
+        Set::Color(c) => json!(c),
+        Set::Curve(c) => serde_json::to_value(c).unwrap_or(Value::Null),
+    }
+}
+
 /// Whether `value` is of `p`'s kind and in its range.
 fn check_value(p: &Param, value: &Value) -> Result<(), String> {
     let name = p.name;
@@ -825,6 +1198,17 @@ fn check_value(p: &Param, value: &Value) -> Result<(), String> {
             Some(x) => return Err(format!("\"{name}\" must lie between {min} and {max}, not {x}")),
             None => false,
         },
+        Kind::Length { .. } => match value {
+            Value::Number(n) => n.as_f64().is_some_and(f64::is_finite),
+            Value::String(s) if parse_length(s).is_some() => true,
+            Value::String(s) => {
+                return Err(format!(
+                    "\"{name}\" must be a number, or a length with its unit (\"8.5in\", \"21 cm\"), not \"{s}\""
+                ));
+            }
+            _ => false,
+        },
+        Kind::Any => true,
         Kind::Text => value.as_str().is_some_and(|s| !s.trim().is_empty()),
         Kind::Path => match value.as_str() {
             Some(p) if std::path::Path::new(p).is_absolute() => true,
@@ -852,6 +1236,8 @@ pub fn kind_text(kind: Kind) -> &'static str {
         Kind::Bool => "true or false",
         Kind::Int { .. } => "a whole number",
         Kind::Number { .. } => "a number",
+        Kind::Length { .. } => "a number, or a length with its unit (\"8.5in\")",
+        Kind::Any => "a value",
         Kind::Text => "text that is not blank",
         Kind::Path => "a file's path",
         Kind::Choice(_) => "one of its words",
@@ -892,6 +1278,10 @@ impl AppState {
             Ok(args) => args,
             Err(why) => return Reply::Now(Err(format!("{name}: {why}."))),
         };
+        let args = match args.in_pixels(method.params, self.resolution_for(method, &args)) {
+            Ok(args) => args,
+            Err(why) => return Reply::Now(Err(format!("{name}: {why}."))),
+        };
         let told = if heard { self.messages.len() } else { usize::MAX };
         let notice = self.notice.clone();
         // The image and layers the user had, to put back if the command is refused (it
@@ -904,6 +1294,8 @@ impl AppState {
             None if method.name == "image" => self.image_by_args(&args, ctx),
             None if method.name == "pixels" => self.pixels_by_args(&args, ctx),
             None if method.name == "put_pixels" => self.put_pixels_by_args(&args, ctx),
+            None if method.name == "crop" => Reply::Now(self.crop_by_args(&args)),
+            None if method.name == "set_preference" => Reply::Now(self.set_preference(&args)),
             None => Reply::Now(self.answer(&method.name, &args)),
         };
         // What would have been told in a dialog comes back with the reply instead: an error,
@@ -993,6 +1385,7 @@ impl AppState {
                             "path": d.path.as_ref().map(|p| p.display().to_string()),
                             "width": c.width,
                             "height": c.height,
+                            "resolution": d.doc().resolution,
                             "unsaved": d.is_dirty(),
                             "active": self.active_doc == Some(d.id),
                         })
@@ -1008,6 +1401,7 @@ impl AppState {
                 Ok(history_json(d))
             }
             "methods" => Ok(describe()),
+            "preferences" => Ok(self.preferences_json()),
             "release_pixels" => {
                 // Whether or not it is still kept (it goes by itself after a while).
                 self.shared_out.remove(args.text("shm").expect("required"));
@@ -1031,7 +1425,9 @@ impl AppState {
         let now = |r: Result<Value, String>| Reply::Now(r);
         // The image and layers named become the active ones, as clicking them would make
         // them, so that the command acts on them.
-        if params.iter().any(|p| p.kind == Kind::Document) {
+        // (A paste with no image open, and none named, makes one.)
+        let pastes_anew = matches!(cmd, Cmd::Paste | Cmd::PasteInPlace) && self.active_doc.is_none();
+        if params.iter().any(|p| p.kind == Kind::Document) && !(pastes_anew && args.document().is_none()) {
             match self.which(args) {
                 Ok(id) => self.show_doc(id),
                 Err(why) => return now(Err(why)),
@@ -1050,8 +1446,9 @@ impl AppState {
                     Some("transparent") => Background::Transparent,
                     _ => Background::White,
                 };
-                let (width, height) = (args.int("width") as u32, args.int("height") as u32);
-                self.create_image(&NewImage { width, height, background });
+                let (width, height) = (args.side("width").expect("required"), args.side("height").expect("required"));
+                let resolution = args.number("resolution");
+                self.create_image(&NewImage { width, height, background, resolution });
                 now(Ok(json!({ "document": self.active_doc.expect("just made").0 })))
             }
             Cmd::Open => {
@@ -1105,11 +1502,13 @@ impl AppState {
                 None => now(Ok(json!({}))),
             },
             Cmd::ResizeImage => {
-                let spec = ResizeImage {
-                    width: args.int("width") as u32,
-                    height: args.int("height") as u32,
-                    keep_aspect: false,
+                let d = self.active().expect("available").doc();
+                let (c, resolution) = (d.canvas, args.opt_number("resolution").unwrap_or(d.resolution));
+                let (width, height) = match sides(args, (c.width, c.height)) {
+                    Ok(sides) => sides,
+                    Err(why) => return now(Err(format!("resize_image: {why}"))),
                 };
+                let spec = ResizeImage { width, height, keep_aspect: false, resolution, keep_print_size: false };
                 let resample = args.flag("resample").unwrap_or_else(|| self.prefs.bool("resize.resample"));
                 self.resize_image(&spec, resample);
                 now(Ok(self.canvas_json()))
@@ -1120,12 +1519,20 @@ impl AppState {
                     .text("anchor")
                     .and_then(|a| ANCHOR_NAMES.iter().position(|n| *n == a))
                     .map(|i| [(i % 3) as u8, (i / 3) as u8]);
+                let margins = ["left", "top", "right", "bottom"].map(|s| args.opt_number(s).map(|v| v.round() as i64));
+                let by_margins = margins.iter().any(Option::is_some);
+                if by_margins && ["width", "height", "anchor"].iter().any(|n| args.get(n).is_some()) {
+                    return now(Err(
+                        "resize_canvas: give margins (left, top, right, bottom), or a size and anchor, not both."
+                            .to_owned(),
+                    ));
+                }
                 let spec = ResizeCanvas {
-                    width: args.opt_int("width").map_or(c.width, |w| w as u32),
-                    height: args.opt_int("height").map_or(c.height, |h| h as u32),
+                    width: args.side("width").unwrap_or(c.width),
+                    height: args.side("height").unwrap_or(c.height),
                     anchor: anchor.unwrap_or([1, 1]),
-                    by_margins: false,
-                    margins: [0; 4],
+                    by_margins,
+                    margins: margins.map(|m| m.unwrap_or(0)),
                 };
                 self.resize_canvas(&spec);
                 now(Ok(self.canvas_json()))
@@ -1176,6 +1583,39 @@ impl AppState {
                 });
                 self.report(result);
                 now(Ok(self.selection_json()))
+            }
+            Cmd::Paste | Cmd::PasteInPlace => {
+                let groups = self.active().map(|d| d.groups.clone()).unwrap_or_default();
+                self.next_answer += 1;
+                let answer = crate::state::PasteAnswer {
+                    n: self.next_answer,
+                    place: BoxArgs::of(args),
+                    into_active: args.flag("into_active") == Some(true),
+                    groups,
+                };
+                let n = answer.n;
+                self.paste_answering(cmd == Cmd::PasteInPlace, Some(answer), ctx);
+                // Answered at once if the clipboard was read at once, else once it is.
+                Reply::Later(n)
+            }
+            Cmd::Place => {
+                let name = args.text("name");
+                match self.place_file(&args.path("path"), name) {
+                    Ok(warnings) => {
+                        let notes = warnings.into_iter().map(|w| format!("Placed: {w}")).collect();
+                        let into = args.flag("into_active") == Some(true);
+                        now(self.apply_box(&BoxArgs::of(args), into).map(|v| with_notes(v, notes)))
+                    }
+                    Err(why) => now(Err(format!("place: {why}"))),
+                }
+            }
+            Cmd::Transform => {
+                self.transform();
+                if self.active().is_some_and(|d| d.transform.is_none()) {
+                    // Refused, and said why.
+                    return now(Ok(json!({})));
+                }
+                now(self.apply_box(&BoxArgs::of(args), false))
             }
             Cmd::Rename => {
                 let id = self.active().and_then(|d| d.active_layer()).expect("available");
@@ -1228,26 +1668,201 @@ impl AppState {
         let format = self.export_format(kind, args.flag("sixteen_bit"), args.opt_int("quality").map(|q| q as u8));
         let doc = self.active().expect("available").doc().clone();
         let c = doc.canvas;
-        // One side given: the other in proportion, as the dialog keeps it.
-        let ratio = |a: u32, b: u32, given: i64| ((given as f64 * f64::from(b) / f64::from(a)).round() as u32).max(1);
-        let (width, height) = match (args.opt_int("width"), args.opt_int("height")) {
-            (Some(w), Some(h)) => (w as u32, h as u32),
-            (Some(w), None) => (w as u32, ratio(c.width, c.height, w)),
-            (None, Some(h)) => (ratio(c.height, c.width, h), h as u32),
-            (None, None) => (c.width, c.height),
+        let (width, height) = match sides(args, (c.width, c.height)) {
+            Ok(sides) => sides,
+            Err(why) => return Reply::Now(Err(format!("export: {why}"))),
         };
-        if width.max(height) > MAX_SIDE {
-            return Reply::Now(Err(format!(
-                "export: in proportion, that is {width} × {height} pixels, past the most a side can be \
-                 ({MAX_SIDE}): give both sides."
-            )));
-        }
         let size = ((width, height) != (c.width, c.height)).then(|| ExportSize {
             width,
             height,
             sampling: crate::prefs::sampling(&self.prefs, "export"),
         });
         self.reply_after_write(|st, then| st.export_to(doc, path, format, size, None, then, ctx))
+    }
+
+    /// The resolution lengths given to `method` with `args` are converted at: the one they
+    /// give (a new image's, a resize's), else that of the image the method acts on, else
+    /// the default.
+    fn resolution_for(&self, method: &Method, args: &Args) -> f64 {
+        if let Some(ppi) = args.opt_number("resolution") {
+            return ppi;
+        }
+        let acts_on_one = method.params.iter().any(|p| p.kind == Kind::Document);
+        let doc = acts_on_one.then(|| self.which(args).ok()).flatten().and_then(|id| self.doc(id));
+        doc.map_or(DEFAULT_PPI, |d| d.doc().resolution)
+    }
+
+    /// Puts the transform box open on the active image where `place` says, and applies it
+    /// (into the active layer, for a paste, if `into_active`). Answers with the layer it
+    /// ends on (or the selected layers, for a transform) and the box: in pixels, its corner
+    /// from the canvas's. Refused, the box cancelled, if it would go past what an image file
+    /// can hold, or there is no layer to go into.
+    pub(crate) fn apply_box(&mut self, place: &BoxArgs, into_active: bool) -> Result<Value, String> {
+        let d = self.active_mut().expect("a box is open");
+        let s = d.transform.as_ref().expect("a box is open");
+        let canvas = d.doc().canvas.rect();
+        let corner = [canvas.x0 as f64, canvas.y0 as f64];
+        let p = s.params();
+        let q = place.applied(&p, corner);
+        let m = s.edited(&p, &q);
+        let paste = s.paste.clone();
+        d.set_box(m, None);
+        if d.transform.as_ref().is_some_and(|s| s.current != m) {
+            d.cancel_transform();
+            return Err("That would put it past what an image file can hold: give a smaller size, or a place \
+                        nearer the canvas."
+                .to_owned());
+        }
+        if into_active {
+            match paste {
+                Some(p) if p.active.is_some() => d.toggle_paste_into_active(),
+                Some(_) => {
+                    d.cancel_transform();
+                    return Err("There is no plain, unlocked active layer to put it into.".to_owned());
+                }
+                None => {}
+            }
+        }
+        let s = d.transform.as_ref().expect("still open");
+        let b = s.params();
+        let (kind, layer) = (s.kind, s.targets[0].layer);
+        d.notice = None;
+        d.commit_pending();
+        let boxed = json!({
+            "x": b.x - corner[0],
+            "y": b.y - corner[1],
+            "width": b.width,
+            "height": b.height,
+            "angle": b.angle,
+        });
+        let out = if kind == crate::transform::Kind::Transform {
+            json!({ "layers": d.selection().iter().map(|l| l.0).collect::<Vec<_>>(), "box": boxed })
+        } else {
+            json!({ "layer": layer.0, "box": boxed })
+        };
+        // What applying it said (it stays an image, say), the status bar says too.
+        Ok(with_notes(out, d.notice.clone().into_iter().collect()))
+    }
+
+    /// Crops the image `args` names to the rectangle they give (see the `crop` method).
+    fn crop_by_args(&mut self, args: &Args) -> Result<Value, String> {
+        let id = self.which(args)?;
+        self.show_doc(id);
+        let delete =
+            args.flag("delete").unwrap_or_else(|| self.tool_settings(crate::tools::ToolId::Crop).bool("crop.delete"));
+        let sampling = crate::prefs::sampling(&self.prefs, "transform");
+        let d = self.doc_mut(id).expect("found");
+        let c = d.doc().canvas;
+        let side = |name: &str, canvas: u32| args.opt_number(name).map_or(f64::from(canvas), f64::round);
+        let p = crate::transform::Params {
+            x: args.number("x"),
+            y: args.number("y"),
+            width: side("width", c.width),
+            height: side("height", c.height),
+            angle: args.number("angle"),
+            mirrored: false,
+        };
+        let b = crate::crop::CropBox::from_numbers(&p, [c.x as f64, c.y as f64]);
+        if b.canvas() != c || b.angle.abs() > 1e-9 || delete {
+            d.crop_to(&b, delete, sampling).map_err(|why| format!("crop: {why}"))?;
+        }
+        // The Crop tool's box, if it had one, goes back around the new canvas.
+        d.crop = None;
+        Ok(self.canvas_json())
+    }
+
+    /// Every preference, as the `preferences` query tells them.
+    fn preferences_json(&self) -> Value {
+        use crate::settings::Kind as Setting;
+        let prefs: Vec<Value> = crate::prefs::PREFS
+            .iter()
+            .map(|d| {
+                let mut v = json!({
+                    "key": d.key,
+                    "label": d.label,
+                    "section": d.section,
+                    "help": d.help,
+                    "value": setting_json(&self.prefs.get(d.key)),
+                    "default": setting_json(&d.default_value()),
+                });
+                v["kind"] = json!(match d.kind {
+                    Setting::Bool => "bool",
+                    Setting::Float { min, max, .. } => {
+                        (v["min"], v["max"]) = (json!(min), json!(max));
+                        "number"
+                    }
+                    Setting::Choice(options) => {
+                        v["choices"] = json!(options.iter().map(|(id, _)| *id).collect::<Vec<_>>());
+                        "choice"
+                    }
+                    Setting::Color => "color",
+                    Setting::Curve { .. } => "curve",
+                    Setting::Text { .. } => "text",
+                });
+                if !settable(d) {
+                    v["settable"] = json!(false);
+                }
+                v
+            })
+            .collect();
+        json!(prefs)
+    }
+
+    /// Changes the preference `args` names, or puts it back to its default (see the
+    /// `set_preference` method).
+    fn set_preference(&mut self, args: &Args) -> Result<Value, String> {
+        use crate::settings::{Kind as Setting, Value as Set};
+        let key = args.text("key").expect("required");
+        let Some(def) = crate::prefs::PREFS.iter().find(|d| d.key == key) else {
+            return Err(format!(
+                "set_preference: there is no preference \"{key}\" (the preferences query lists them)."
+            ));
+        };
+        if !settable(def) {
+            return Err(format!(
+                "set_preference: {key} is changed in the Preferences window only{}.",
+                if def.section == "Scripting" {
+                    ": it says what runs scripts and who may connect, which no script or assistant may change"
+                } else {
+                    ""
+                }
+            ));
+        }
+        let Some(given) = args.get("value") else {
+            self.prefs.reset(key);
+            self.settings_touched();
+            return Ok(json!({ "key": key, "value": setting_json(&self.prefs.get(key)) }));
+        };
+        let value = match (def.kind, given) {
+            (Setting::Bool, Value::Bool(b)) => Some(Set::Bool(*b)),
+            (Setting::Float { .. }, Value::Number(n)) => n.as_f64().map(Set::Float),
+            (Setting::Choice(_), Value::String(s)) => Some(Set::Choice(s.clone())),
+            (Setting::Text { .. }, Value::String(s)) => Some(Set::Text(s.clone())),
+            (Setting::Color, Value::Array(a)) if matches!(a.len(), 3 | 4) => {
+                let c: Option<Vec<u8>> = a.iter().map(|x| x.as_u64().and_then(|x| u8::try_from(x).ok())).collect();
+                c.map(|c| Set::Color([c[0], c[1], c[2], c.get(3).copied().unwrap_or(255)]))
+            }
+            _ => None,
+        };
+        let Some(value) = value.filter(|v| def.accepts(v)) else {
+            let takes = match def.kind {
+                Setting::Bool => "true or false".to_owned(),
+                Setting::Float { min, max, .. } => format!("a number from {min} to {max}"),
+                Setting::Choice(options) => {
+                    format!(
+                        "one of {}",
+                        options.iter().map(|(id, _)| format!("\"{id}\"")).collect::<Vec<_>>().join(", ")
+                    )
+                }
+                Setting::Color => "[red, green, blue] or [red, green, blue, alpha], each from 0 to 255".to_owned(),
+                Setting::Text { .. } => "text that is not blank and has no spaces at either end".to_owned(),
+                Setting::Curve { .. } => unreachable!("not settable"),
+            };
+            return Err(format!("set_preference: {key} takes {takes}, not {given}."));
+        };
+        self.prefs.set(key, value);
+        self.settings_touched();
+        Ok(json!({ "key": key, "value": setting_json(&self.prefs.get(key)) }))
     }
 
     /// Starts a write with `start`, which is given what to do once it is written: answer
@@ -1482,8 +2097,8 @@ impl AppState {
     }
 
     fn canvas_json(&self) -> Value {
-        let c = self.active().expect("available").doc().canvas;
-        json!({ "width": c.width, "height": c.height })
+        let d = self.active().expect("available").doc();
+        json!({ "width": d.canvas.width, "height": d.canvas.height, "resolution": d.resolution })
     }
 
     fn selection_json(&self) -> Value {
@@ -1608,7 +2223,9 @@ pub fn describe() -> Value {
                         let mut v = json!({ "name": p.name, "kind": kind_name(p.kind), "help": p.help });
                         match p.kind {
                             Kind::Int { min, max } => (v["min"], v["max"]) = (json!(min), json!(max)),
-                            Kind::Number { min, max } => (v["min"], v["max"]) = (json!(min), json!(max)),
+                            Kind::Number { min, max } | Kind::Length { min, max } => {
+                                (v["min"], v["max"]) = (json!(min), json!(max))
+                            }
                             Kind::Choice(words) => v["choices"] = json!(words),
                             _ => {}
                         }
@@ -1634,6 +2251,8 @@ fn kind_name(kind: Kind) -> &'static str {
         Kind::Bool => "bool",
         Kind::Int { .. } => "int",
         Kind::Number { .. } => "number",
+        Kind::Length { .. } => "length",
+        Kind::Any => "any",
         Kind::Text => "text",
         Kind::Path => "path",
         Kind::Choice(_) => "choice",
@@ -1657,6 +2276,8 @@ mod tests {
             "bool" => "bool".into(),
             "int" | "document" | "layer" => "int".into(),
             "number" => "float".into(),
+            "length" => "float | str".into(),
+            "any" => "Any".into(),
             "text" => "str".into(),
             "path" => "str | os.PathLike[str]".into(),
             "layers" => "list[int]".into(),
@@ -1673,7 +2294,8 @@ mod tests {
     fn param_text(p: &Value) -> String {
         let mut text = p["help"].as_str().unwrap().to_owned();
         if let (Some(min), Some(max)) = (p.get("min"), p.get("max")) {
-            text += &format!(" From {min} to {max}.");
+            let pixels = if p["kind"] == "length" { " pixels" } else { "" };
+            text += &format!(" From {min} to {max}{pixels}.");
         }
         if let Some(d) = p.get("default") {
             text += &format!(" Default: {d}.");
@@ -1876,10 +2498,19 @@ mod tests {
     fn arguments_are_checked_against_the_parameters() {
         let p = params(Cmd::New).unwrap();
         assert!(Args::check(p, &args(json!({ "width": 10, "height": 20 }))).is_ok());
-        let err = |v| Args::check(p, &args(v)).unwrap_err();
+        // Lengths are checked once in pixels, at the image's resolution.
+        let err = |v| Args::check(p, &args(v)).and_then(|a| a.in_pixels(p, 72.0)).unwrap_err();
         assert!(err(json!({ "width": 10 })).contains("\"height\" must be given"));
         assert!(err(json!({ "width": 0, "height": 5 })).contains("between 1 and"));
-        assert!(err(json!({ "width": "ten", "height": 5 })).contains("a whole number"));
+        assert!(err(json!({ "width": "ten", "height": 5 })).contains("a length with its unit"));
+        assert!(err(json!({ "width": "5 furlongs", "height": 5 })).contains("a length with its unit"));
+        let far = err(json!({ "width": "400 ft", "height": 5 }));
+        assert!(far.contains("400 ft, which is 345600 pixels at 72 pixels per inch"), "{far}");
+        let px = |v| Args::check(p, &args(v)).and_then(|a| a.in_pixels(p, 300.0)).unwrap();
+        let sized = px(json!({ "width": "8.5in", "height": 11, "unit": "in" }));
+        assert_eq!((sized.side("width"), sized.side("height")), (Some(2550), Some(3300)));
+        let mixed = px(json!({ "width": "25.4 mm", "height": "1 pc", "unit": "in" }));
+        assert_eq!((mixed.side("width"), mixed.side("height")), (Some(300), Some(50)));
         assert!(err(json!({ "width": 1, "height": 5, "colour": 1 })).contains("not a parameter"));
         assert!(err(json!({ "width": 1, "height": 5, "background": "blue" })).contains("one of white, transparent"));
         let fixed = Args::check(p, &args(json!({ "width": 1, "height": 5 }))).unwrap();
@@ -2160,7 +2791,7 @@ mod tests {
         now(&mut st, "undo", json!({})).unwrap();
         assert_eq!(now(&mut st, "layers", json!({})).unwrap()[0]["name"], json!("Sky"));
         let canvas = now(&mut st, "resize_canvas", json!({ "width": 100, "anchor": "top-left" })).unwrap();
-        assert_eq!(canvas, json!({ "width": 100, "height": 32 }));
+        assert_eq!(canvas, json!({ "width": 100, "height": 32, "resolution": 72.0 }));
         // Refused, with the reason, and nothing left to show in a dialog.
         let err = now(&mut st, "rename", json!({ "layer": 999, "name": "x" })).unwrap_err();
         assert!(err.contains("no layer 999"), "{err}");
@@ -2173,10 +2804,13 @@ mod tests {
         assert!(err.contains("no method"), "{err}");
     }
 
-    /// Waits for the answer to call `n`, polling the writes.
+    /// Waits for the answer to call `n`, polling the writes and the pastes (not all that is
+    /// done between frames, which would give the tiles of every test in this process a
+    /// budget).
     fn later(st: &mut AppState, n: u64) -> Result<Value, String> {
         for _ in 0..1000 {
             st.poll_writes(false);
+            st.poll_paste(false);
             if let Some((_, r)) = st.answers().into_iter().find(|(m, _)| *m == n) {
                 return r;
             }
@@ -2328,5 +2962,249 @@ mod tests {
         assert_eq!(answers[0].0, n);
         assert!(answers[0].1.is_ok(), "{:?}", answers[0].1);
         assert!(!now(&mut st, "documents", json!({})).unwrap()[0]["unsaved"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn sizes_are_given_in_any_unit_at_the_image_s_resolution() {
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 8.5, "height": "11in", "unit": "in", "resolution": 300 })).unwrap();
+        let docs = now(&mut st, "documents", json!({})).unwrap();
+        let d = &docs[0];
+        assert_eq!(
+            (d["width"].as_u64(), d["height"].as_u64(), d["resolution"].as_f64()),
+            (Some(2550), Some(3300), Some(300.0))
+        );
+        // A resolution alone changes how large the pixels print, not them.
+        let c = now(&mut st, "resize_image", json!({ "resolution": 150 })).unwrap();
+        assert_eq!(c, json!({ "width": 2550, "height": 3300, "resolution": 150.0 }));
+        // Lengths are converted at the new resolution; one side keeps the proportions.
+        let c = now(&mut st, "resize_image", json!({ "width": "4in", "resolution": 100 })).unwrap();
+        assert_eq!(c, json!({ "width": 400, "height": 518, "resolution": 100.0 }));
+        // Margins, in any unit, a negative one cutting.
+        let c = now(&mut st, "resize_canvas", json!({ "left": "1in", "right": -50, "top": "0.5 in" })).unwrap();
+        assert_eq!((c["width"].as_u64(), c["height"].as_u64()), (Some(450), Some(568)));
+        assert_eq!(st.active().unwrap().doc().canvas.x, -100, "the left margin went on the left");
+        let both = now(&mut st, "resize_canvas", json!({ "left": 1, "anchor": "top" })).unwrap_err();
+        assert!(both.contains("not both"), "{both}");
+        let far = now(&mut st, "resize_image", json!({ "width": "100 yd" })).unwrap_err();
+        assert!(far.contains("100 yd, which is 360000 pixels at 100 pixels per inch"), "{far}");
+    }
+
+    /// A `w × h` PNG of one color, written to a file of its own; its path.
+    fn png_file(name: &str, w: u32, h: u32) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("opal-api-place-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        image::RgbaImage::from_pixel(w, h, image::Rgba([200, 30, 30, 255])).save(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_file_is_placed_into_a_box_given_in_any_unit_and_fitted_to_it() {
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 200, "height": 100, "resolution": 100 })).unwrap();
+        let path = png_file("strip.png", 40, 20).display().to_string();
+        // Fitted inside a 1-inch square, centered on it: plain numbers in the call's unit,
+        // the others in their own.
+        let given =
+            json!({ "path": path, "x": "0.1in", "y": "10px", "width": 1, "height": 1, "unit": "in", "fit": "inside" });
+        let placed = now(&mut st, "place", given).unwrap();
+        assert_eq!(placed["box"], json!({ "x": 10.0, "y": 35.0, "width": 100.0, "height": 50.0, "angle": 0.0 }));
+        let layer = placed["layer"].as_u64().unwrap();
+        let d = st.active().unwrap();
+        assert!(d.transform.is_none(), "the box was left open");
+        assert_eq!(d.history.undo_label(), Some("Place"));
+        assert_eq!(now(&mut st, "layers", json!({})).unwrap()[0]["name"], json!("strip"), "named after its file");
+        // Covering a rectangle, and then turned, by numbers.
+        let cover = json!({ "layers": [layer], "x": 0, "y": 0, "width": 100, "height": 100, "fit": "cover" });
+        let t = now(&mut st, "transform", cover).unwrap();
+        assert_eq!(t["box"], json!({ "x": -50.0, "y": 0.0, "width": 200.0, "height": 100.0, "angle": 0.0 }));
+        let t = now(&mut st, "transform", json!({ "angle": 90 })).unwrap();
+        assert_eq!((t["box"]["x"].clone(), t["box"]["angle"].clone()), (json!(-50.0), json!(90.0)));
+        assert_eq!(t["layers"], json!([layer]));
+        // Into the active layer, if it can take it; else refused, and no box left open.
+        now(&mut st, "new_group", json!({})).unwrap();
+        let refused = now(&mut st, "place", json!({ "path": path, "into_active": true })).unwrap_err();
+        assert!(refused.contains("no plain, unlocked active layer"), "{refused}");
+        assert!(st.active().unwrap().transform.is_none(), "the refused box was left open");
+        let missing = now(&mut st, "place", json!({ "path": format!("{path}.gone") })).unwrap_err();
+        assert!(missing.starts_with("place:"), "{missing}");
+        std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_paste_read_off_the_interface_thread_is_placed_with_no_window() {
+        // As --headless and the editor --mcp starts run it: between frames, nothing else.
+        use crate::clipboard::{Pasted, TestClipboard};
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 50, "height": 50 })).unwrap();
+        let px = vec![opal_core::tile::pixel_from_f32([0.0, 1.0, 0.0, 1.0]); 4];
+        let image = Pasted {
+            width: 2,
+            height: 2,
+            image: RasterImage::from_pixels(2, 2, &px),
+            from: None,
+            warnings: Vec::new(),
+        };
+        st.clipboard = Box::new(TestClipboard { image: Some(image), slow: true, ..Default::default() });
+        let Reply::Later(n) = st.call("paste", &args(json!({ "x": 1, "y": 2 })), &egui::Context::default()) else {
+            panic!("answered at once")
+        };
+        for _ in 0..1000 {
+            st.between_frames(false);
+            if let Some((_, placed)) = st.answers().into_iter().find(|(m, _)| *m == n) {
+                assert_eq!(
+                    (placed.clone().unwrap()["box"]["x"].clone(), placed.unwrap()["box"]["y"].clone()),
+                    (json!(1.0), json!(2.0))
+                );
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the paste was never placed");
+    }
+
+    #[test]
+    fn an_image_opened_has_its_file_s_resolution() {
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 30, "height": 20, "resolution": 240 })).unwrap();
+        let path = std::env::temp_dir().join(format!("opal-api-ppi-{}.png", std::process::id()));
+        let doc = st.active().unwrap().doc().clone();
+        opal_io::image_files::export(
+            &doc,
+            &path,
+            &opal_io::image_files::ExportFormat::Png { sixteen_bit: false },
+            None,
+        )
+        .unwrap();
+        now(&mut st, "open", json!({ "path": path.display().to_string() })).unwrap();
+        std::fs::remove_file(&path).ok();
+        let docs = now(&mut st, "documents", json!({})).unwrap();
+        assert_eq!(docs[1]["resolution"], json!(240.0), "{docs}");
+    }
+
+    #[test]
+    fn a_box_takes_the_numbers_given_and_keeps_its_proportions_for_the_rest() {
+        let p = crate::transform::Params { x: 10.0, y: 20.0, width: 40.0, height: 20.0, angle: 0.0, mirrored: false };
+        let corner = [100.0, 200.0];
+        let applied = |b: BoxArgs| {
+            let q = b.applied(&p, corner);
+            (q.x, q.y, q.width, q.height)
+        };
+        assert_eq!(applied(BoxArgs::default()), (10.0, 20.0, 40.0, 20.0));
+        assert_eq!(
+            applied(BoxArgs { x: Some(5.0), width: Some(80.0), ..BoxArgs::default() }),
+            (105.0, 20.0, 80.0, 40.0)
+        );
+        assert_eq!(applied(BoxArgs { height: Some(10.0), ..BoxArgs::default() }), (10.0, 20.0, 20.0, 10.0));
+        let both = BoxArgs { x: Some(0.0), y: Some(0.0), width: Some(60.0), height: Some(60.0), ..BoxArgs::default() };
+        assert_eq!(applied(both.clone()), (100.0, 200.0, 60.0, 60.0));
+        assert_eq!(applied(BoxArgs { fit: Fit::Inside, ..both.clone() }), (100.0, 215.0, 60.0, 30.0));
+        assert_eq!(applied(BoxArgs { fit: Fit::Cover, ..both }), (70.0, 200.0, 120.0, 60.0));
+    }
+
+    #[test]
+    fn the_image_is_cropped_to_a_rectangle_given_in_any_unit() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 200, "height": 100, "resolution": 100 })).unwrap();
+        let c = now(&mut st, "crop", json!({ "x": "0.5in", "width": "1in", "height": 50 })).unwrap();
+        assert_eq!(c, json!({ "width": 100, "height": 50, "resolution": 100.0 }));
+        let d = st.active().unwrap();
+        assert_eq!((d.doc().canvas.x, d.doc().canvas.y), (50, 0));
+        assert_eq!(d.history.undo_label(), Some("Crop"));
+        // The same rectangle again: nothing to do, no state made.
+        let before = st.active().unwrap().history.current();
+        now(&mut st, "crop", json!({})).unwrap();
+        assert_eq!(st.active().unwrap().history.current(), before, "an empty crop made a state");
+        let turned = now(&mut st, "crop", json!({ "x": 10, "y": 10, "width": 20, "height": 20, "angle": 30 })).unwrap();
+        assert_eq!((turned["width"].as_u64(), turned["height"].as_u64()), (Some(20), Some(20)));
+        assert_eq!(st.active().unwrap().history.undo_label(), Some("Crop and straighten"));
+    }
+
+    #[test]
+    fn preferences_are_told_and_changed_but_not_those_of_scripting() {
+        use crate::settings::Value as Set;
+        let mut st = AppState::new();
+        let prefs = now(&mut st, "preferences", json!({})).unwrap();
+        let find = |key: &str| prefs.as_array().unwrap().iter().find(|p| p["key"] == key).unwrap().clone();
+        let unit = find("ui.unit");
+        assert_eq!((unit["value"].clone(), unit["kind"].clone()), (json!("px"), json!("choice")));
+        assert!(unit["choices"].as_array().unwrap().contains(&json!("mm")));
+        assert_eq!(find("scripting.python")["settable"], json!(false));
+        assert_eq!(find("export.jpeg_quality")["max"], json!(100.0));
+        now(&mut st, "set_preference", json!({ "key": "ui.unit", "value": "mm" })).unwrap();
+        assert_eq!(st.unit(), Unit::Mm);
+        now(&mut st, "set_preference", json!({ "key": "export.jpeg_quality", "value": 77 })).unwrap();
+        assert_eq!(st.prefs.f64("export.jpeg_quality"), 77.0);
+        now(&mut st, "set_preference", json!({ "key": "canvas.checker_a", "value": [10, 20, 30] })).unwrap();
+        assert_eq!(st.prefs.get("canvas.checker_a"), Set::Color([10, 20, 30, 255]));
+        let set = |st: &mut AppState, key: &str, value: Value| {
+            now(st, "set_preference", json!({ "key": key, "value": value })).unwrap_err()
+        };
+        assert!(set(&mut st, "export.jpeg_quality", json!(500)).contains("a number from 1 to 100"));
+        assert!(set(&mut st, "ui.unit", json!("furlongs")).contains("one of \"px\""));
+        assert!(set(&mut st, "ui.tooltips", json!("yes")).contains("true or false"));
+        assert!(set(&mut st, "canvas.checker_a", json!([1, 2, 300])).contains("0 to 255"));
+        // Left out, a value goes back to its default.
+        now(&mut st, "set_preference", json!({ "key": "ui.unit" })).unwrap();
+        assert_eq!(st.unit(), Unit::Px);
+        // What runs scripts, and who may connect, no script or assistant may change.
+        let refused = set(&mut st, "scripting.python", json!("calc.exe"));
+        assert!(refused.contains("Preferences window only"), "{refused}");
+        assert_ne!(st.prefs.text("scripting.python"), "calc.exe");
+        assert!(set(&mut st, "scripting.mcp_http", json!(true)).contains("Preferences window only"));
+        let none = now(&mut st, "set_preference", json!({ "key": "no.such" })).unwrap_err();
+        assert!(none.contains("no preference"), "{none}");
+    }
+
+    #[test]
+    fn a_paste_is_placed_where_the_call_says_and_applied() {
+        use crate::clipboard::{Pasted, TestClipboard};
+        let ctx = egui::Context::default();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 100, "height": 100 })).unwrap();
+        let image = || {
+            let px = vec![opal_core::tile::pixel_from_f32([1.0, 0.0, 0.0, 1.0]); 200];
+            Pasted {
+                width: 20,
+                height: 10,
+                image: RasterImage::from_pixels(20, 10, &px),
+                from: None,
+                warnings: Vec::new(),
+            }
+        };
+        let clipboard = |slow| Box::new(TestClipboard { image: Some(image()), slow, ..Default::default() });
+        let call = |st: &mut AppState, name: &str, given: Value| match st.call(name, &args(given), &ctx) {
+            Reply::Later(n) => n,
+            Reply::Now(r) => panic!("{name} answered at once: {r:?}"),
+        };
+        st.clipboard = clipboard(false);
+        let n = call(&mut st, "paste", json!({ "x": 5, "y": 6, "width": 40 }));
+        let placed = later(&mut st, n).unwrap();
+        assert_eq!(placed["box"], json!({ "x": 5.0, "y": 6.0, "width": 40.0, "height": 20.0, "angle": 0.0 }));
+        assert!(st.active().unwrap().transform.is_none(), "the box was left open");
+        assert_eq!(st.active().unwrap().history.undo_label(), Some("Paste"));
+        // Read off the interface thread, it is placed once read; asked for again before
+        // then, the first is told it was replaced.
+        st.clipboard = clipboard(true);
+        let first = call(&mut st, "paste_in_place", json!({}));
+        let second = call(&mut st, "paste_in_place", json!({ "angle": 45 }));
+        assert!(later(&mut st, first).unwrap_err().contains("Another paste"));
+        assert_eq!(later(&mut st, second).unwrap()["box"]["angle"], json!(45.0));
+        // Nothing on the clipboard: the call is told so, and no dialog is left.
+        st.clipboard = Box::new(TestClipboard::default());
+        let empty = call(&mut st, "paste", json!({}));
+        assert!(later(&mut st, empty).unwrap_err().contains("holds no image"));
+        assert!(st.messages.is_empty(), "{:?}", st.messages);
+        // With no image open, a paste is a new image.
+        now(&mut st, "close", json!({ "discard": true })).unwrap();
+        st.clipboard = clipboard(false);
+        let anew = call(&mut st, "paste", json!({}));
+        let made = later(&mut st, anew).unwrap();
+        assert_eq!(made["document"].as_u64(), st.active_doc.map(|d| d.0));
+        assert_eq!(st.active().unwrap().doc().canvas.width, 20);
     }
 }

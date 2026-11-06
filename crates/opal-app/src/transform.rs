@@ -24,6 +24,8 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Paste,
+    /// A paste of an image file (Place).
+    Place,
     Transform,
 }
 
@@ -152,6 +154,7 @@ impl Session {
     pub fn label(&self) -> &'static str {
         match self.kind {
             Kind::Paste => "Paste",
+            Kind::Place => "Place",
             Kind::Transform => "Transform",
         }
     }
@@ -469,8 +472,10 @@ fn take_targets(layer: &mut Layer, sampling: Sampling, out: &mut Vec<(Target, FR
 }
 
 impl DocState {
-    /// Starts placing `pasted` on a new layer at `position`, carried into the document by
-    /// `place`. `into` is the layer it may go into instead.
+    /// Starts placing `pasted` on a new layer called `name` at `position`, carried into the
+    /// document by `place`, as a session of `kind` (a paste, or a placed file). `into` is the
+    /// layer it may go into instead.
+    #[expect(clippy::too_many_arguments, reason = "what a paste is, each its own")]
     pub fn begin_paste(
         &mut self,
         pasted: &Pasted,
@@ -478,23 +483,27 @@ impl DocState {
         sampling: Sampling,
         position: Position,
         into: Option<LayerId>,
+        kind: Kind,
+        name: &str,
     ) {
+        debug_assert!(kind != Kind::Transform, "a paste is placed, not transformed");
         self.commit_pending();
         let was_selected = self.selection_with_active_last();
         let (layer_id, object) = (self.ids.layer(), self.ids.object());
         let frame = IRect::from_size(i64::from(pasted.width), i64::from(pasted.height));
         let image = ImageObject { image: Arc::new(pasted.image.clone()), frame, transform: place, sampling };
-        let name = "Pasted image".to_owned();
+        let name = name.to_owned();
         let layer =
             Layer::with_objects(layer_id, name.clone(), vec![Object { id: object, kind: ObjectKind::Image(image) }]);
         let mut doc = self.history.doc().clone();
         if doc.insert(position, layer).is_err() {
             return;
         }
-        self.pending = Some(Pending { doc, label: "Paste".into() });
+        let label = if kind == Kind::Place { "Place" } else { "Paste" };
+        self.pending = Some(Pending { doc, label: label.into() });
         self.transform = Some(Session {
             serial: next_serial(),
-            kind: Kind::Paste,
+            kind,
             targets: vec![Target { layer: layer_id, object, start: place, was_pixels: false, own: None }],
             frame: frame.to_f(),
             start: place,

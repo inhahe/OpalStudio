@@ -36,10 +36,19 @@ cargo test --workspace                     # all tests, interface tests included
   exporting run in the background, so the window stays usable; the status bar shows how far
   they have got and can cancel them. A save that fails or is cancelled never damages the
   existing file. Drop files on the window to open them; several images open as tabs.
+- **Units and resolution.** Sizes and positions can be shown and typed in pixels,
+  points, picas, inches, feet, yards, millimeters, centimeters or meters (Preferences ›
+  Interface, or the menu beside any size): every image has a resolution (pixels per inch,
+  or per centimeter) that converts them, read from PNG and JPEG files and written back on
+  export. A length typed with a unit after it ("21 cm") is read in that unit whatever the
+  field shows. New Image has paper and photo sizes; Resize Image changes the resolution,
+  with or without changing the pixels.
 - **Paste and place.** Ctrl+V pastes an image (from Opal Studio, another program, or an
   image file copied in Explorer) into a box that moves, scales and rotates it, snapping to
   the canvas and other layers; Enter places it. A pasted image keeps its own pixels, so it
-  can be resized again later without losing quality. Paste in Place, Copy and Copy Merged;
+  can be resized again later without losing quality. The numbers button by the box (and
+  the tool settings) gives its exact position, size and angle, in any unit. Place (File)
+  puts an image file in the box the same way. Paste in Place, Copy and Copy Merged;
   pasting with nothing open makes a new image. Copies keep their full precision when pasted
   back, and on Windows reach other programs as 16-bit PNG. A large image is read in the
   background (Esc cancels it): anything started meanwhile (a dialog, a drag, another
@@ -47,7 +56,8 @@ cargo test --workspace                     # all tests, interface tests included
 - **Moving and transforming.** The Move tool drags the selected layers (clicking picks the
   layer under the pointer; right-click lists every layer there); the arrow keys nudge;
   Transform (Ctrl+T) scales and rotates layers, losslessly.
-- **The image.** The Crop tool, with aspect ratios, guides and straightening; Crop to
+- **The image.** The Crop tool, with aspect ratios, guides and straightening, and its box's
+  exact numbers by it as for the transform box; Crop to
   Content; Resize Image and Resize Canvas; quarter turns, flips and rotation by any angle.
   Cropping and resizing the canvas never delete anything unless asked to. Canvases go up
   to 300,000 pixels a side; anything that would need more memory than the computer has
@@ -87,7 +97,11 @@ cargo test --workspace                     # all tests, interface tests included
 
   Most commands can be called this way, with their settings as named parameters, as can
   the queries `documents`, `layers` and `image` (what an image looks like, as a PNG);
-  `python/API.md` lists them all. `editor.pixels()` gives an image's pixels, or a layer's,
+  `python/API.md` lists them all. Sizes and positions take any unit, at the image's
+  resolution (`editor.new(width="8.5in", height="11in", resolution=300)`); `place`,
+  `paste` and `transform` take the box's exact position and size (fitted inside or
+  covering a rectangle, if asked), `crop` a rectangle, and `preferences` and
+  `set_preference` read and change the preferences (but for those of scripting). `editor.pixels()` gives an image's pixels, or a layer's,
   as a numpy array, and `editor.put_pixels(array)` puts some in, as a new layer or into a
   layer; on Windows they pass through shared memory, so even large images move at once.
   What a script changes in an image becomes one history state, named after it, when it
@@ -104,7 +118,9 @@ cargo test --workspace                     # all tests, interface tests included
 - **Batch work.** `opal-studio --headless script.py [arguments]` runs a script against an
   editor with no window (the Python is `--python PATH`, or `OPAL_PYTHON`, or the one set in
   the preferences), and ends with the script's exit code once the files it asked for are
-  written. From a command prompt, run it as `opal-studio` (not `opal-studio.exe`), so that
+  written. As with Python itself, `-c "code"` runs code given on the command line, and `-`
+  a script read from standard input. Nothing needs the window: everything a script needs
+  (placing files, exact boxes, cropping, the preferences) has a method. From a command prompt, run it as `opal-studio` (not `opal-studio.exe`), so that
   the prompt waits for it: that finds `opal-studio.com`, which waits.
 - **AI assistants.** `opal-studio --mcp` is an MCP server for assistants whose clients
   launch their servers, its tools the same commands and queries, the image coming back as
@@ -112,7 +128,8 @@ cargo test --workspace                     # all tests, interface tests included
   `claude mcp add opal-studio -- "C:\path\to\opal-studio.exe" --mcp`. For clients that
   connect by URL, Preferences › Scripting can serve MCP over HTTP on this computer, with a
   token. Connect an Assistant (File › Scripts) shows what to put in a client's settings
-  either way. The editor itself must be running for a tool to act.
+  either way. With no editor running, `--mcp` starts one of its own with no window, and
+  says so: what it makes lasts as long as the server, so save or export it.
 
 ## Layout
 

@@ -29,6 +29,11 @@ pub struct ResizeImage {
     pub width: u32,
     pub height: u32,
     pub keep_aspect: bool,
+    /// Pixels per inch.
+    pub resolution: f64,
+    /// Whether changing the resolution in the dialog changes the pixel size with it, so that
+    /// the print size stays.
+    pub keep_print_size: bool,
 }
 
 /// The Resize Canvas dialog's fields: either a new size, with where the old canvas sits in
@@ -269,12 +274,26 @@ impl AppState {
         self.report(result);
     }
 
-    /// Scales the image to `width × height`, about the canvas's corner.
+    /// Scales the image to `width × height`, about the canvas's corner, and gives it the
+    /// resolution `spec` has. A change of resolution alone changes no pixels.
     pub(crate) fn resize_image(&mut self, spec: &ResizeImage, resample: bool) {
+        assert!(opal_core::units::valid_ppi(spec.resolution), "resolution {} out of range", spec.resolution);
         let sampling = crate::prefs::sampling(&self.prefs, "resize");
         let d = self.active_mut().expect("available");
+        let (c, ppi) = (d.doc().canvas, d.doc().resolution);
+        if (spec.width, spec.height) == (c.width, c.height) {
+            if spec.resolution != ppi {
+                let result = d.apply("Change resolution", |doc, _| {
+                    doc.resolution = spec.resolution;
+                    Ok::<(), String>(())
+                });
+                self.report(result);
+            }
+            return;
+        }
         let mut clipped = false;
         let result = d.apply("Resize image", |doc, _| {
+            doc.resolution = spec.resolution;
             let c = doc.canvas;
             let (x, y) = (c.x as f64, c.y as f64);
             let sx = f64::from(spec.width) / f64::from(c.width);
@@ -421,10 +440,24 @@ mod tests {
     fn resampling_into_more_memory_than_is_free_is_refused() {
         use crate::state::{Background, NewImage};
         let mut st = AppState::new();
-        st.create_image(&NewImage { width: 300, height: 200, background: Background::White });
+        st.create_image(&NewImage {
+            width: 300,
+            height: 200,
+            background: Background::White,
+            resolution: opal_core::units::DEFAULT_PPI,
+        });
         let before = st.active().unwrap().history.current();
-        // 300,000 × 200,000 pixels resampled would take nearly 500 GB.
-        let spec = ResizeImage { width: 300_000, height: 200_000, keep_aspect: true };
+        // 300,000 × 200,000 pixels resampled would take nearly 500 GB: more than the 64 GB
+        // pretended free (whatever this computer has, and whether its disk counts, which it
+        // does once any test in this process has given the tiles a budget).
+        let _free = crate::memory::testing::pretend_free(Some(64 << 30));
+        let spec = ResizeImage {
+            width: 300_000,
+            height: 200_000,
+            keep_aspect: true,
+            resolution: opal_core::units::DEFAULT_PPI,
+            keep_print_size: false,
+        };
         st.resize_image(&spec, true);
         assert_eq!(st.active().unwrap().history.current(), before, "resized all the same");
         let said = st.messages.back().map(|m| m.body.as_str()).unwrap_or_default();
@@ -432,6 +465,25 @@ mod tests {
         // Drawn at the new size, the pixels kept: nothing to make.
         st.resize_image(&spec, false);
         assert_eq!(st.active().unwrap().doc().canvas.width, 300_000);
+    }
+
+    #[test]
+    fn a_new_resolution_alone_changes_no_pixels() {
+        use crate::state::{Background, NewImage};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 30, height: 20, background: Background::White, resolution: 72.0 });
+        let before = st.active().unwrap().doc().layers[0].clone();
+        let spec = ResizeImage { width: 30, height: 20, keep_aspect: true, resolution: 300.0, keep_print_size: false };
+        st.resize_image(&spec, false);
+        let d = st.active().unwrap();
+        assert_eq!(d.doc().resolution, 300.0);
+        assert!(Arc::ptr_eq(&d.doc().layers[0], &before), "the layer was redrawn");
+        assert_eq!(d.history.undo_label(), Some("Change resolution"));
+        // Resized, it takes the resolution too.
+        let spec = ResizeImage { width: 60, height: 40, resolution: 150.0, ..spec };
+        st.resize_image(&spec, false);
+        let d = st.active().unwrap().doc();
+        assert_eq!((d.canvas.width, d.resolution), (60, 150.0));
     }
 
     #[test]

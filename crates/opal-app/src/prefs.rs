@@ -6,6 +6,32 @@ use opal_core::resample::{Method, Sampling};
 pub const SECTIONS: &[&str] =
     &["Interface", "Canvas", "Navigation", "History", "Memory", "Transform", "Resize", "Export", "Scripting"];
 
+/// The units of length, as a setting's choices, in [`Unit::ALL`]'s order.
+///
+/// [`Unit::ALL`]: opal_core::units::Unit::ALL
+const UNITS: &[(&str, &str)] = &[
+    ("px", "Pixels"),
+    ("pt", "Points"),
+    ("pc", "Picas"),
+    ("in", "Inches"),
+    ("ft", "Feet"),
+    ("yd", "Yards"),
+    ("mm", "Millimeters"),
+    ("cm", "Centimeters"),
+    ("m", "Meters"),
+];
+
+/// The unit lengths are shown in.
+pub fn unit(p: &Settings) -> opal_core::units::Unit {
+    opal_core::units::Unit::from_name(&p.choice("ui.unit")).unwrap_or(opal_core::units::Unit::Px)
+}
+
+/// The unit resolutions are shown in.
+pub fn resolution_unit(p: &Settings) -> opal_core::units::ResolutionUnit {
+    opal_core::units::ResolutionUnit::from_id(&p.choice("ui.resolution_unit"))
+        .unwrap_or(opal_core::units::ResolutionUnit::PerInch)
+}
+
 /// The resampling methods, as a setting's choices.
 const METHODS: &[(&str, &str)] =
     &[("nearest", "Nearest"), ("bilinear", "Bilinear"), ("bicubic", "Bicubic"), ("lanczos", "Lanczos")];
@@ -159,6 +185,24 @@ pub static PREFS: &[Def] = &[
         section: "Interface",
         kind: Kind::Float { min: 0.0, max: 3.0, decimals: 2, suffix: " s", log: false },
         default: Init::Float(0.5),
+        advanced: true,
+    },
+    Def {
+        key: "ui.unit",
+        label: "Units",
+        help: "What sizes and positions are shown in: in the New Image, Resize and Export                dialogs, and in the fields of the transform and crop boxes. Each dialog can                change it too. Units other than pixels are converted through the image's                resolution, and a length typed with a unit after it (\"2 cm\") is read in                that one.",
+        section: "Interface",
+        kind: Kind::Choice(UNITS),
+        default: Init::Choice("px"),
+        advanced: false,
+    },
+    Def {
+        key: "ui.resolution_unit",
+        label: "Resolution in",
+        help: "Whether resolutions are shown in pixels per inch or per centimeter.",
+        section: "Interface",
+        kind: Kind::Choice(&[("ppi", "Pixels/inch"), ("ppcm", "Pixels/cm")]),
+        default: Init::Choice("ppi"),
         advanced: true,
     },
     // Canvas
@@ -478,6 +522,21 @@ mod tests {
         for d in PREFS {
             assert!(SECTIONS.contains(&d.section), "{} has unknown section {}", d.key, d.section);
             assert!(d.accepts(&d.default_value()), "{}'s default does not fit its kind", d.key);
+        }
+    }
+
+    #[test]
+    fn the_unit_choices_are_the_units() {
+        use opal_core::units::{ResolutionUnit, Unit};
+        let ids: Vec<&str> = Unit::ALL.iter().map(|u| u.id()).collect();
+        assert_eq!(UNITS.iter().map(|(id, _)| *id).collect::<Vec<_>>(), ids);
+        for (id, name) in UNITS {
+            assert_eq!(Unit::from_name(id).unwrap().name(), *name);
+        }
+        let def = PREFS.iter().find(|d| d.key == "ui.resolution_unit").unwrap();
+        let crate::settings::Kind::Choice(choices) = def.kind else { panic!() };
+        for (id, name) in choices {
+            assert_eq!(ResolutionUnit::from_id(id).unwrap().name(), *name);
         }
     }
 }

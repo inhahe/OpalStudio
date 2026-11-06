@@ -580,6 +580,14 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
     if settings::settings_ui(ui, settings, Show::All, &palette, info.id) {
         st.settings_touched();
     }
+    // The crop box, in numbers.
+    if tool == crate::tools::ToolId::Crop
+        && let Some(id) = st.active_doc
+    {
+        ui.separator();
+        ui.label(RichText::new("Box").strong());
+        crate::box_fields::crop(ui, st, id, "crop-panel");
+    }
 }
 
 /// Saving the current tool's settings under a name, and applying saved ones.

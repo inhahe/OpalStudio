@@ -562,7 +562,12 @@ mod tests {
     /// An app with a `w × h` white image open.
     fn app(w: u32, h: u32) -> AppState {
         let mut st = AppState::new();
-        st.create_image(&NewImage { width: w, height: h, background: Background::White });
+        st.create_image(&NewImage {
+            width: w,
+            height: h,
+            background: Background::White,
+            resolution: opal_core::units::DEFAULT_PPI,
+        });
         st
     }
 

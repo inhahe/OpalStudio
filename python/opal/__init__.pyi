@@ -27,11 +27,13 @@ class Editor:
     def disconnect(self) -> None: ...
     def __enter__(self) -> Editor: ...
     def __exit__(self, *exc: Any) -> None: ...
-    def new(self, *, width: int, height: int, background: Literal["white", "transparent"] = "white") -> Any:
+    def new(self, *, width: float | str, height: float | str, resolution: float = 72, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px", background: Literal["white", "transparent"] = "white") -> Any:
         """Create a new image.
 
-        width: Its width, in pixels. From 1 to 300000.
-        height: Its height, in pixels. From 1 to 300000.
+        width: Its width. From 1.0 to 300000.0 pixels.
+        height: Its height. From 1.0 to 300000.0 pixels.
+        resolution: Its resolution, in pixels per inch: how large its pixels print, and what lengths in other units than pixels are converted at. From 0.01 to 1000000.0. Default: 72.
+        unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         background: What it starts filled with. Default: "white".
         """
     def open(self, *, path: str | os.PathLike[str]) -> Any:
@@ -51,13 +53,14 @@ class Editor:
         path: Where: an Opal Studio file (.opal is added unless it is there), by its absolute path.
         overwrite: Write over a file already there (otherwise that is refused). Default: false.
         """
-    def export(self, *, document: int | None = None, path: str | os.PathLike[str], width: int | None = None, height: int | None = None, overwrite: bool = False, sixteen_bit: bool | None = None, quality: int | None = None) -> Any:
+    def export(self, *, document: int | None = None, path: str | os.PathLike[str], width: float | str | None = None, height: float | str | None = None, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px", overwrite: bool = False, sixteen_bit: bool | None = None, quality: int | None = None) -> Any:
         """Save a flattened copy as PNG or JPEG.
 
         document: The image, by id. Default: the active image.
         path: Where: a .png, .jpg or .jpeg file (whose extension chooses the format), by its absolute path.
-        width: The width written, in pixels. From 1 to 300000. Default: the canvas's, or in proportion to the height given.
-        height: The height written, in pixels. From 1 to 300000. Default: the canvas's, or in proportion to the width given.
+        width: The width written. From 1.0 to 300000.0 pixels. Default: the canvas's, or in proportion to the height given.
+        height: The height written. From 1.0 to 300000.0 pixels. Default: the canvas's, or in proportion to the width given.
+        unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         overwrite: Write over a file already there (otherwise that is refused). Default: false.
         sixteen_bit: For a PNG: 16 bits a channel rather than 8. Default: the preference.
         quality: For a JPEG: its quality. From 1 to 100. Default: the preference.
@@ -87,6 +90,60 @@ class Editor:
         """Copy everything visible within the canvas to the clipboard.
 
         document: The image, by id. Default: the active image.
+        """
+    def paste(self, *, document: int | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", into_active: bool = False, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+        """Paste the image on the clipboard, then place and size it.
+
+        document: The image, by id. Default: the active image; with none open, the paste becomes a new image.
+        x: Where the box's top-left corner goes, from the canvas's left edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        y: Where the box's top-left corner goes, from the canvas's top edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        width: The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is.
+        height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
+        angle: The box's angle, in degrees clockwise, about its top-left corner. From -360.0 to 360.0. Default: as it is.
+        fit: With both width and height given: stretch it to them; or keep its proportions and fit it inside them, or make it cover them, centered on them. Default: "stretch".
+        into_active: Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false.
+        unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
+        """
+    def paste_in_place(self, *, document: int | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", into_active: bool = False, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+        """Paste where the copy came from.
+
+        document: The image, by id. Default: the active image; with none open, the paste becomes a new image.
+        x: Where the box's top-left corner goes, from the canvas's left edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        y: Where the box's top-left corner goes, from the canvas's top edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        width: The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is.
+        height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
+        angle: The box's angle, in degrees clockwise, about its top-left corner. From -360.0 to 360.0. Default: as it is.
+        fit: With both width and height given: stretch it to them; or keep its proportions and fit it inside them, or make it cover them, centered on them. Default: "stretch".
+        into_active: Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false.
+        unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
+        """
+    def place(self, *, document: int | None = None, path: str | os.PathLike[str], name: str | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", into_active: bool = False, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+        """Place an image file into this image, then position and size it.
+
+        document: The image, by id. Default: the active image.
+        path: The image file, a PNG or a JPEG, by its absolute path.
+        name: The new layer's name. Default: the file's name.
+        x: Where the box's top-left corner goes, from the canvas's left edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        y: Where the box's top-left corner goes, from the canvas's top edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        width: The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is.
+        height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
+        angle: The box's angle, in degrees clockwise, about its top-left corner. From -360.0 to 360.0. Default: as it is.
+        fit: With both width and height given: stretch it to them; or keep its proportions and fit it inside them, or make it cover them, centered on them. Default: "stretch".
+        into_active: Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false.
+        unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
+        """
+    def transform(self, *, document: int | None = None, layers: list[int] | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+        """Move, scale and rotate the selected layers with a box.
+
+        document: The image, by id. Default: the active image.
+        layers: The layers, by id. Default: the selected layers.
+        x: Where the box's top-left corner goes, from the canvas's left edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        y: Where the box's top-left corner goes, from the canvas's top edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        width: The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is.
+        height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
+        angle: The box's angle, in degrees clockwise, about its top-left corner. From -360.0 to 360.0. Default: as it is.
+        fit: With both width and height given: stretch it to them; or keep its proportions and fit it inside them, or make it cover them, centered on them. Default: "stretch".
+        unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
     def new_layer(self, *, document: int | None = None, name: str | None = None) -> Any:
         """Add an empty layer above the active one.
@@ -174,21 +231,28 @@ class Editor:
 
         document: The image, by id. Default: the active image.
         """
-    def resize_image(self, *, document: int | None = None, width: int, height: int, resample: bool | None = None) -> Any:
+    def resize_image(self, *, document: int | None = None, width: float | str | None = None, height: float | str | None = None, resolution: float | None = None, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px", resample: bool | None = None) -> Any:
         """Change the image's size, scaling everything in it.
 
         document: The image, by id. Default: the active image.
-        width: The new width, in pixels. From 1 to 300000.
-        height: The new height, in pixels. From 1 to 300000.
+        width: The new width. From 1.0 to 300000.0 pixels. Default: the canvas's, or in proportion to the height given.
+        height: The new height. From 1.0 to 300000.0 pixels. Default: the canvas's, or in proportion to the width given.
+        resolution: The new resolution, in pixels per inch, which lengths in other units than pixels are converted at. Given without a size, it changes no pixels: only how large they print. From 0.01 to 1000000.0. Default: the image's.
+        unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         resample: Resample the pixel layers now (smaller, but enlarging again later cannot bring their detail back), rather than keep their pixels and draw them at the new size. Default: the preference.
         """
-    def resize_canvas(self, *, document: int | None = None, width: int | None = None, height: int | None = None, anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "center") -> Any:
+    def resize_canvas(self, *, document: int | None = None, width: float | str | None = None, height: float | str | None = None, anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] | None = None, left: float | str | None = None, top: float | str | None = None, right: float | str | None = None, bottom: float | str | None = None, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
         """Change the canvas's size without scaling what is on it.
 
         document: The image, by id. Default: the active image.
-        width: The new width, in pixels. From 1 to 300000. Default: the canvas's.
-        height: The new height, in pixels. From 1 to 300000. Default: the canvas's.
-        anchor: Where the old canvas sits in the new. Default: "center".
+        width: The new width. From 1.0 to 300000.0 pixels. Default: the canvas's.
+        height: The new height. From 1.0 to 300000.0 pixels. Default: the canvas's.
+        anchor: Where the old canvas sits in the new. Default: the center.
+        left: How much to add on that side, rather than give a new size (a negative length cuts it). From -300000.0 to 300000.0 pixels. Default: none: the width and height say.
+        top: How much to add on that side, rather than give a new size (a negative length cuts it). From -300000.0 to 300000.0 pixels. Default: none: the width and height say.
+        right: How much to add on that side, rather than give a new size (a negative length cuts it). From -300000.0 to 300000.0 pixels. Default: none: the width and height say.
+        bottom: How much to add on that side, rather than give a new size (a negative length cuts it). From -300000.0 to 300000.0 pixels. Default: none: the width and height say.
+        unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
     def rotate_cw(self, *, document: int | None = None) -> Any:
         """Turn the whole image a quarter turn clockwise.
@@ -261,6 +325,26 @@ class Editor:
         """An image's history, a tree: each state kept (its id, what made it, when, the state before it and those after, the one redo goes to), the state it is in, the one last saved, and how many states were dropped to keep within the memory the history may use.
 
         document: The image, by id. Default: the active image.
+        """
+    def preferences(self) -> Any:
+        """Every preference: for each, its key, label, section, help, value and default, and what it takes (its range or choices). set_preference changes them."""
+    def crop(self, *, document: int | None = None, x: float | str = 0, y: float | str = 0, width: float | str | None = None, height: float | str | None = None, angle: float = 0, delete: bool | None = None, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+        """Crops the image to a rectangle of its canvas, which may be turned: the canvas becomes the rectangle, and if it was turned, everything turns the other way, so its contents come out upright. Only the canvas moves (enlarging it again brings back what was cropped away), unless delete says.
+
+        document: The image, by id. Default: the active image.
+        x: The rectangle's top-left corner, from the canvas's left edge. From -10000000.0 to 10000000.0 pixels. Default: 0.
+        y: The rectangle's top-left corner, from the canvas's top edge. From -10000000.0 to 10000000.0 pixels. Default: 0.
+        width: The rectangle's width. From 1.0 to 300000.0 pixels. Default: the canvas's.
+        height: The rectangle's height. From 1.0 to 300000.0 pixels. Default: the canvas's.
+        angle: The rectangle's angle, in degrees clockwise, about its top-left corner. From -360.0 to 360.0. Default: 0.
+        delete: Remove the pixels outside the new canvas, rather than keep them for later. Default: the Crop tool's Delete cropped pixels.
+        unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
+        """
+    def set_preference(self, *, key: str, value: Any | None = None) -> Any:
+        """Changes a preference, as the Preferences window would, or puts it back to its default. Those of scripting (what runs scripts, who may connect) are changed in the Preferences window only.
+
+        key: The preference, by its key (the preferences query lists them).
+        value: Its new value: true or false, a number in its range, one of its choices, a color as [red, green, blue] or [red, green, blue, alpha] (0 to 255, sRGB), or text. Default: its default.
         """
     def begin_step(self, *, name: str) -> Any:
         """Begins a step of history: what the calls until end_step change in each image becomes one state, called name, which one undo takes back. A step begun inside another is part of it. One left open ends when the connection does, or, on a connection that is no script run (an assistant's), before a call that comes 10 minutes or more after the last.

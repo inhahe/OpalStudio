@@ -61,11 +61,19 @@ selection core it builds on.
   a script run as one history state; headless batch mode.
 - The MCP server (local HTTP, and the `--mcp` stdio shim), returning the canvas as an image;
   the status bar's connection indicator.
+- Units and resolution (done, after S): every size and position in pixels, points, picas,
+  inches, feet, yards, millimeters, centimeters or meters at the image's resolution, read
+  from and written to PNG and JPEG; New Image's paper and photo sizes; Resize Image's
+  resolution. Exact numbers for the transform and crop boxes, by the box; Place. Nothing a
+  script needs is left to the window: `paste`, `place`, `transform` and `crop` take exact
+  boxes, the preferences can be read and set, `--headless -c` and `-` run code given
+  directly, and `--mcp` starts an editor of its own when none is running.
 
 ## 2. Selection core
 - The mask, and the blend through it that every operation uses.
 - Recipe steps and the selection panel.
-- Rectangle and ellipse; add, subtract, intersect, replace.
+- Rectangle and ellipse; add, subtract, intersect, replace. Their boxes take exact numbers
+  in any unit, by the box, as the transform and crop boxes do (`box_fields`).
 - The outline tool: freehand, anchors, curves.
 - Reshape: right-drag, red preview, Tab flips the side, R + left-drag.
 - Feather (inward, outward, centered; falloff curve), grow/shrink (round, square, diamond),

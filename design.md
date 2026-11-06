@@ -88,6 +88,20 @@ not a goal.
   the image is. Cropping and resizing the canvas move or resize that rectangle and change
   no pixels, so what falls outside can be brought back by enlarging the canvas again.
   Coordinates shown to the user count from the canvas's top-left corner.
+- **Resolution and units.** A document also has a **resolution**, in pixels per inch
+  (from 0.01 to 1,000,000; 72 unless a file or the user says otherwise): how large its
+  pixels print. Sizes are always kept in pixels; everything else is a way of showing them.
+  The user picks a **unit** (`opal_core::units`: pixels, points, picas, inches, feet, yards,
+  millimeters, centimeters, meters; Preferences › Interface, or the menu in any size
+  dialog or box's fields, which all share it) and the resolution converts it; a length
+  typed with a unit of its own ("21 cm") is read in that unit. A field writes back only
+  what the user changes, so showing a length in another unit never moves it. Resolution
+  shows as pixels per inch or per centimeter (a preference). The resolution is part of
+  the history (Resize Image changes it), read from PNG (`pHYs`) and JPEG (JFIF density,
+  else EXIF resolution) files on opening, written into PNG and JPEG exports, and kept in
+  `.opal` files. A file's per-meter or per-centimeter density reads as the round number
+  its writer most likely meant (2,835 pixels per meter is 72 ppi). Pixels are square: a
+  file whose aren't takes the resolution across, and says so.
 - A **layer** is either a **group**, holding child layers, or holds **objects**: pixel
   objects and image objects (below), and later vector paths, text, brush strokes and
   adjustments. A group composites its children by themselves first, then applies its own
@@ -603,7 +617,15 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   Into active layer, and Commit and Cancel, also on Enter and Esc, so the box never
   lingers like GIMP's floating selection. While dragging, the box shows the size and angle.
 - **Settings:** the resampling method (*Resampling*), and the numbers: position, size in
-  pixels and percent, and angle, each editable.
+  the user's unit and in percent, and angle, each editable.
+- **Exact numbers by the box:** a button on the box opens the same numbers beside it
+  (`box_fields`), so a paste can be put in a rectangle typed in any unit without leaving
+  the canvas. The crop box has the same fields and button; the selection tools' boxes will
+  take them too. The position is the box's top-left corner (turned with it) from the
+  canvas's; size scales along the box's own sides; the angle turns about that corner, so
+  the numbers typed stay as typed.
+- **Place** (File, Ctrl+Alt+O) opens the transform box on an image file, as a paste of it
+  (onto a new layer named after the file; the history state is "Place").
 - **One history state:** the whole session in the box, from paste to commit, is one entry
   ("Paste" or "Transform"). Cancel leaves the document as it was.
 - **The clipboard:** PNG first (keeping 16-bit color and transparency), then the other
@@ -637,13 +659,22 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   cropped pixels* is set. A crop box larger than the canvas enlarges it. Straightening and
   deleting cropped pixels change every layer, so they wait while a layer is locked.
 - **Crop to Content** shrinks the canvas to the visible content.
-- **Resize Image:** a size in pixels or percent (aspect ratio locked by default) and a
-  resampling method. Image objects are scaled with the canvas. Pixel objects too become
+- **Resize Image:** a size in any unit or in percent (aspect ratio locked by default), a
+  resolution, and a resampling method. A new resolution keeps the pixels and changes how
+  large they print (one history state, "Change resolution", and no pixel touched), or,
+  with *Keep the print size*, changes the pixel size with it; the size the fields show is
+  at the new resolution, and the dialog says how large the image will print. Image objects are scaled with the canvas. Pixel objects too become
   image objects, keeping their pixels (enlarging again later loses nothing), unless
   *Resample pixels* is set, which resamples them now for a smaller file; the dialog says
   which happens.
 - **Resize Canvas:** a size, with an anchor (one of nine points) for where the old canvas
-  sits in the new, or the margins to add on each side. Only the canvas changes.
+  sits in the new, or the margins to add on each side, in any unit. Only the canvas
+  changes.
+- **New Image:** a size in any unit at a resolution, with presets for screens, paper (A
+  sizes, Letter, Legal, Tabloid) and photos, the paper and photo ones at 300 ppi. Changing
+  the resolution keeps a size shown in a unit of length (the pixels follow), and one shown
+  in pixels; rounding to whole pixels is done from the size the resolution change began
+  at, so dragging the resolution does not drift.
 - **Rotate:** quarter turns either way, half a turn, flip horizontally or vertically
   (exact for pixel objects), and Rotate by an angle, which can grow the canvas to fit.
 - **The largest canvas** is 300,000 pixels a side (Photoshop's limit, for its
@@ -656,9 +687,12 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
 ## Export
 
 Export writes PNG (8 or 16 bits) or JPEG (with quality, and the background that
-transparency is flattened onto), at the canvas's size or a chosen one: pixels or percent,
-aspect ratio locked by default, with a resampling method. Export never changes the
-document. The image is made and encoded a band of rows (a tile's height) at a time and
+transparency is flattened onto), at the canvas's size or a chosen one: any unit or
+percent, aspect ratio locked by default, with a resampling method. Export never changes
+the document. The file records the document's resolution (PNG `pHYs` in pixels per
+meter; JPEG JFIF density in whole pixels per inch or per centimeter, whichever is nearer),
+unchanged when exporting at another size, so a size typed in inches is the size the file
+prints at. The image is made and encoded a band of rows (a tile's height) at a time and
 streamed into the PNG or JPEG encoder, so exporting at the canvas's size holds one band,
 never the whole image; at another size it holds the canvas once more (averaged in blocks
 first when shrinking by 2 or more; otherwise composited as one, tiles alike made once,
@@ -1024,9 +1058,24 @@ server. Both rest on one language-neutral API.
   first, or the wrong token, is refused and the connection dropped. A command's method is
   its name in the registry in snake case (`save_as`, `merge_down`), its parameters each
   with a kind (a number in a range, one of some words, text that is not blank, a path, an
-  image's or layers' ids), and either a default or what the editor holds now (`document`:
-  the active image; `layers`: the selected ones); `methods` lists them all, which is what
-  the stubs and tools are made from. Queries so far: `documents`, `layers`, `image` (of
+  image's or layers' ids, a length, any value), and either a default or what the editor
+  holds now (`document`: the active image; `layers`: the selected ones); `methods` lists
+  them all, which is what the stubs and tools are made from. A **length** (a size, a
+  position, a margin) is a number in the call's `unit` (pixels by default), or text with a
+  unit of its own (`"8.5in"`), converted once checked, before the call is carried out, at
+  the resolution the call gives (`new`, `resize_image`), else its image's, else 72 ppi;
+  its range is checked in pixels, and a refusal says what the length came to. The
+  commands that open the transform box take where to put it and apply it at once:
+  `paste` and `paste_in_place` (answered once the clipboard is read and the paste placed;
+  a paste asked for again, or cancelled, before then is told so), `place` (an image file),
+  and `transform`, each with the box's `x`, `y` (its top-left corner from the canvas's),
+  `width`, `height` (one alone keeps the proportions; both, with `fit`, stretch to them or
+  fit inside or cover them, centered), `angle`, and for a paste `into_active`; they answer
+  with the layer and the box. Changes the API alone makes: `put_pixels`, `crop` (a
+  rectangle of the canvas, which may be turned), and `set_preference` (any but those of
+  scripting, which would let a script or assistant choose what runs scripts or open the
+  editor to HTTP clients; given no value, the default). Queries so far: `documents`,
+  `preferences`, `layers`, `image` (of
   the image as shown or of one layer alone, made in memory on a thread of its own, out of
   the user's sight, unlike an export), `pixels`, and `history` (an image's history as a
   tree: each state kept, with its id, its label, when it was made, the state before it,
@@ -1072,7 +1121,9 @@ server. Both rest on one language-neutral API.
   `overwrite`, Save As adds `.opal` as its dialog does, and an export given one side gets
   the other in proportion, refused past the largest side allowed. While the user has a
   dialog open, a button held or a transform box open (an edit a command would commit
-  under them), calls wait; once they have asked to quit, they are refused.
+  under them), calls wait; once they have asked to quit, they are refused. A box a call
+  opens is applied within the call (or cancelled, with the reason, if it cannot be), so
+  none is left open for the user.
 - **Script runs.** A `hello` may name a `script` (the Python package names the script
   running, but not an interactive session): the connection is then a script run, and once
   it closes, the states it made in each image one after another are joined into one,
@@ -1107,8 +1158,8 @@ server. Both rest on one language-neutral API.
   and one started with files hands them to the first, over a `hello` with `files` (which
   may only open them, and is let in even while scripts are shut out), lets it come to the
   front, and quits; an editor that is quitting refuses every hello, so the new one opens
-  them itself. Commands that need the transform box (Paste, Transform) and those of
-  the view and panels are not callable yet, or at all.
+  them itself. Commands of the view, the panels and the windows are not callable: all a
+  script needs to make and change images is, so none needs the window.
 - **Python package** `opal-studio` (module `opal`): connects to the running editor or starts
   a headless one (`opal-studio --headless script.py` for batch work). *Built:* headless mode
   runs the editor's state and its server with no window, the user's preferences loaded
@@ -1117,7 +1168,10 @@ server. Both rest on one language-neutral API.
   preference) with the package on its `PYTHONPATH` and a connection file of the run's own.
   It ends once the script has ended and every client of the run has gone (a worker the
   script started may go on calling), with the script's exit code, once the files asked for
-  are written, printing what a dialog would have said. The editor being a windowed
+  are written, printing what a dialog would have said. The script is given to Python as
+  given, so `-c "code"` and `-` (standard input) work as they do for Python. What is done
+  between frames is the window's (writes, copies, a paste whose clipboard has been read),
+  so a script's paste is placed headless too. The editor being a windowed
   program, which a command prompt does not wait for, `opal-studio.com` beside it (the
   `opal-studio-console` binary, which a prompt finds first) runs it with the same
   arguments on the same console, waiting for `--headless` and `--mcp` and ending with
@@ -1152,7 +1206,11 @@ server. Both rest on one language-neutral API.
   `methods`, which the tool list is, and the pixels methods), each with a JSON Schema of its
   parameters, made from the registry; each call goes to the editor running on this
   computer through its pipe and token, as a script's would, and a refusal (or no editor
-  running) comes back as the tool's error text. The `image` query (the canvas, or a layer
+  running) comes back as the tool's error text. With no editor running, the shim starts
+  one of its own on the first call (an editor's state and server with no window, on a
+  thread, with a connection file of its own, as `--headless` runs them, stopped with the
+  shim) and connects to that; that call's answer says so in a text of its own, since what
+  it makes lasts only as long as the shim. The `image` query (the canvas, or a layer
   alone, as a PNG scaled to fit a size) comes back as an image. And MCP over HTTP
   (`mcp_http.rs`), off unless the preference turns it on (Preferences › Scripting, with its
   port, 47860 by default), served only by the editor that serves scripts: on 127.0.0.1
@@ -1185,8 +1243,9 @@ server. Both rest on one language-neutral API.
 ## Native file format
 
 `.opal`, version 2: a zip archive holding `mimetype` (stored first, uncompressed:
-`application/x-opal-studio`), `document.json` (the canvas rectangle, the layer tree and the
-next free identifier) and `tiles/<n>.bin` or `tiles/<n>.srgb8`, one tile each. Objects are
+`application/x-opal-studio`), `document.json` (the canvas rectangle, the resolution, the
+layer tree and the next free identifier; a file without a resolution, as files before it
+are, has 72 ppi, and versions before it ignore it, so it needed no new version) and `tiles/<n>.bin` or `tiles/<n>.srgb8`, one tile each. Objects are
 pixel objects (their tiles and whole-pixel offset) or image objects (their tiles, frame,
 transform and sampling). A tile shared by several layers is stored once. A `.bin` tile is
 the tile's half floats byte-shuffled (all low bytes, then all high bytes), which lets
@@ -1226,7 +1285,8 @@ a close question on screen to be answered.
 
 ## Settings storage
 
-Preferences, tool settings and tool presets are kept in `settings.json` in the per-user
+Preferences, tool settings and tool presets (and the last New Image's size, background and
+resolution, and the scripts run lately) are kept in `settings.json` in the per-user
 configuration folder (`%APPDATA%\Opal Studio\config` on Windows). Only values changed from
 their defaults are written, so a default changed in a later version reaches everyone who
 never changed it. Loading reads entry by entry: an unknown or unreadable entry (one written

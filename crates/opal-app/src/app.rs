@@ -663,6 +663,8 @@ impl OpalApp {
                         ));
                     ui.separator();
                 }
+                let (unit, per) = (self.st.unit(), self.st.resolution_unit());
+                let cursor = self.st.cursor_shown;
                 let Some(d) = self.st.active_mut() else { return };
                 let mut pct = d.view.zoom * 100.0;
                 let r = ui.add(
@@ -678,12 +680,27 @@ impl OpalApp {
                 }
                 r.on_hover_text("Zoom: drag or type a value");
                 ui.separator();
-                let c = d.doc().canvas;
-                ui.label(RichText::new(format!("{} × {} px", c.width, c.height)).color(weak));
+                let (c, ppi) = (d.doc().canvas, d.doc().resolution);
+                let (w, h) = (f64::from(c.width), f64::from(c.height));
+                let mut size = format!("{} × {} px", c.width, c.height);
+                if unit != opal_core::units::Unit::Px {
+                    size = format!("{} ({size})", crate::lengths::show_size(w, h, unit, ppi));
+                }
+                let print = crate::lengths::print_note(c.width, c.height, ppi, unit, per);
+                ui.label(RichText::new(size).color(weak)).on_hover_text(format!(
+                    "The canvas's size. {print} (Image › Resize Image changes the resolution; Preferences ›                      Interface, the unit sizes are shown in.)"
+                ));
                 ui.separator();
                 // Positions count from the canvas's corner, wherever cropping has put it.
-                if let Some((x, y)) = self.st.cursor_shown {
-                    ui.label(RichText::new(format!("{}, {}", x - c.x, y - c.y)).color(weak));
+                if let Some((x, y)) = cursor {
+                    let (x, y) = ((x - c.x) as f64, (y - c.y) as f64);
+                    let at = if unit == opal_core::units::Unit::Px {
+                        format!("{x}, {y}")
+                    } else {
+                        let x = crate::lengths::show(x, unit, ppi);
+                        format!("{}, {}", x.rsplit_once(' ').map_or(x.as_str(), |(n, _)| n), crate::lengths::show(y, unit, ppi))
+                    };
+                    ui.label(RichText::new(at).color(weak));
                 }
             });
         });
@@ -761,7 +778,6 @@ impl eframe::App for OpalApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
-        self.st.poll_paste(ctx.input(|i| i.pointer.any_down()));
         self.st.thumbs.end_frame();
         // What operations on documents asked to say.
         let notices: Vec<String> = self.st.docs.iter_mut().filter_map(|d| d.notice.take()).collect();

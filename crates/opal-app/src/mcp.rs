@@ -4,7 +4,10 @@
 //! each called on the editor running on this computer through its pipe, as a script would
 //! call it; `image` comes back as an image, so the assistant can see what it is doing.
 //!
-//! The editor need not be running to list the tools; a tool called without it says so.
+//! The editor need not be running: if none is when a tool is first called, this server
+//! starts one of its own, with no window, which the tools then drive (and the first call's
+//! answer says so). What it holds lasts as long as this server: a script of tools saves or
+//! exports what it makes.
 
 use crate::api::describe;
 use crate::server::Hello;
@@ -19,6 +22,12 @@ const MCP_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 /// What carries a tool's call to the editor.
 pub trait Caller {
     fn call(&mut self, method: &str, params: Map<String, Value>) -> Result<Value, String>;
+
+    /// What the caller has to say about how the last call went, once (that it started an
+    /// editor to answer it).
+    fn take_note(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// The editor's pipe, connected (with the token) when first needed, and again after it
@@ -30,21 +39,83 @@ struct Pipe {
     file: Option<std::path::PathBuf>,
     conn: Option<BufReader<Stream>>,
     next_id: u64,
+    /// Whether to start an editor of this process's own if none is running.
+    may_host: bool,
+    /// The editor this process started, once it has.
+    hosted: Option<Hosted>,
+    /// What the next answer must also say (that an editor was started).
+    note: Option<String>,
 }
 
+/// An editor with no window, run on a thread of this process, serving a connection file of
+/// its own until this is dropped.
+struct Hosted {
+    file: std::path::PathBuf,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Hosted {
+    /// Starts it, loading the user's preferences (not saved back), as `--headless` does.
+    fn start() -> Result<Hosted, String> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static HOSTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = HOSTED.fetch_add(1, Ordering::Relaxed);
+        let file = std::env::temp_dir().join(format!("opal-mcp-{}-{n}.json", std::process::id()));
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (at, stopped) = (file.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let ctx = eframe::egui::Context::default();
+            let mut st = crate::state::AppState::new();
+            crate::config::load(&mut st);
+            st.apply_tile_budget();
+            let mut server = match crate::server::Server::start(at, ctx.clone()) {
+                Ok(server) => server,
+                Err(e) => return drop(tx.send(Err(format!("An editor could not be started: {e}")))),
+            };
+            let _ = tx.send(Ok(()));
+            while !stopped.load(Ordering::Relaxed) {
+                server.serve(&mut st, &ctx, false);
+                st.between_frames(false);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
+        rx.recv().map_err(|_| "An editor could not be started.".to_owned())??;
+        Ok(Hosted { file, stop })
+    }
+}
+
+impl Drop for Hosted {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// What the first answer from an editor this server started says of it.
+const HOSTED_NOTE: &str = "No Opal Studio was running, so this server started one of its own, with no window.                            What it opens and makes lasts as long as this server: save or export what is to be kept.";
+
 impl Pipe {
-    /// Connects to the editor the connection file tells of, and says hello.
+    /// Connects to the editor the connection file tells of, and says hello; if none is
+    /// running and it may, starts one of its own and connects to that.
     fn connect(&mut self) -> Result<(), String> {
-        let file = self
-            .file
-            .clone()
-            .or_else(|| std::env::var_os("OPAL_STUDIO_API").map(std::path::PathBuf::from))
-            .or_else(crate::server::connection_file)
-            .ok_or("There is no settings folder to find the editor in.")?;
+        let file = match &self.hosted {
+            Some(h) => h.file.clone(),
+            None => self
+                .file
+                .clone()
+                .or_else(|| std::env::var_os("OPAL_STUDIO_API").map(std::path::PathBuf::from))
+                .or_else(crate::server::connection_file)
+                .ok_or("There is no settings folder to find the editor in.")?,
+        };
         match crate::server::say_hello(&file, false) {
             Hello::Answered(conn) => {
                 self.conn = Some(conn);
                 Ok(())
+            }
+            Hello::Nobody(_) if self.may_host && self.hosted.is_none() => {
+                self.hosted = Some(Hosted::start()?);
+                self.note = Some(HOSTED_NOTE.to_owned());
+                self.connect()
             }
             Hello::Nobody(why) | Hello::Refused(why) => Err(why),
         }
@@ -81,6 +152,10 @@ impl Caller for Pipe {
         }
         self.exchange(method, params)
     }
+
+    fn take_note(&mut self) -> Option<String> {
+        self.note.take()
+    }
 }
 
 /// The tools: each method of the API but those clients give in their own way
@@ -106,6 +181,9 @@ fn made_tools() -> Value {
                     "bool" => json!({ "type": "boolean" }),
                     "int" => json!({ "type": "integer", "minimum": p["min"], "maximum": p["max"] }),
                     "number" => json!({ "type": "number", "minimum": p["min"], "maximum": p["max"] }),
+                    // A number in the call's unit, or text with its own: the range is in pixels.
+                    "length" => json!({ "type": ["number", "string"] }),
+                    "any" => json!({}),
                     "text" | "path" => json!({ "type": "string" }),
                     "choice" => json!({ "type": "string", "enum": p["choices"] }),
                     "document" | "layer" => json!({ "type": "integer", "minimum": 0 }),
@@ -177,19 +255,25 @@ fn call_tool(params: &Value, caller: &mut dyn Caller) -> Result<Value, (i64, Str
         Value::Object(a) => a.clone(),
         _ => return Err((-32602, "A tool's arguments are an object.".to_owned())),
     };
-    Ok(match caller.call(name, arguments) {
+    let mut answer = match caller.call(name, arguments) {
         Ok(v) if name == "image" => json!({ "content": [
             { "type": "image", "data": v["png"], "mimeType": "image/png" },
             { "type": "text", "text": format!("{} × {} pixels", v["width"], v["height"]) },
         ] }),
         Ok(v) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).expect("JSON") }] }),
         Err(why) => json!({ "content": [{ "type": "text", "text": why }], "isError": true }),
-    })
+    };
+    if let Some(note) = caller.take_note()
+        && let Some(content) = answer["content"].as_array_mut()
+    {
+        content.push(json!({ "type": "text", "text": note }));
+    }
+    Ok(answer)
 }
 
 /// Serves MCP on standard input and output until the input ends; the process's exit code.
 pub fn run_stdio() -> i32 {
-    let mut pipe = Pipe::default();
+    let mut pipe = Pipe { may_host: true, ..Pipe::default() };
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -285,6 +369,33 @@ mod tests {
         let answer = ask(&mut pipe, "tools/call", json!({ "name": "documents", "arguments": {} }));
         assert_eq!(answer["result"]["isError"], json!(true));
         assert!(answer["result"]["content"][0]["text"].as_str().unwrap().contains("not running"), "{answer}");
+    }
+
+    #[test]
+    fn without_the_editor_this_server_starts_one_of_its_own() {
+        let missing = std::env::temp_dir().join("opal-no-editor-api.json");
+        let mut pipe = Pipe { file: Some(missing), may_host: true, ..Pipe::default() };
+        let text = |answer: &Value| answer["result"]["content"][0]["text"].as_str().unwrap().to_owned();
+        let first = ask(&mut pipe, "tools/call", json!({ "name": "documents", "arguments": {} }));
+        assert_eq!(first["result"].get("isError"), None, "{first}");
+        let said = first["result"]["content"][1]["text"].as_str().unwrap_or_default();
+        assert!(said.contains("started one of its own"), "the first answer does not say so: {first}");
+        let made =
+            ask(&mut pipe, "tools/call", json!({ "name": "new", "arguments": { "width": "2in", "height": 50 } }));
+        assert_eq!(made["result"]["content"].as_array().unwrap().len(), 1, "said again: {made}");
+        assert!(text(&made).contains("document"), "{made}");
+        let docs = ask(&mut pipe, "tools/call", json!({ "name": "documents", "arguments": {} }));
+        assert!(text(&docs).contains("\"width\": 144"), "{docs}");
+        let hosted = pipe.hosted.as_ref().unwrap().file.clone();
+        drop(pipe);
+        // Stopped with the server: its connection file goes with it.
+        for _ in 0..200 {
+            if !hosted.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!hosted.exists(), "the editor it started is still serving");
     }
 
     #[test]

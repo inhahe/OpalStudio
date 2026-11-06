@@ -56,6 +56,8 @@ pub struct NewImage {
     pub width: u32,
     pub height: u32,
     pub background: Background,
+    /// Pixels per inch.
+    pub resolution: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,6 +138,9 @@ pub struct AppState {
     pub prefs: Settings,
     pub palette: Palette,
     pub ribbon: RibbonState,
+    /// Whether the fields for a box's exact position and size are open beside the transform
+    /// or crop box (see `box_fields`).
+    pub box_numbers: bool,
     /// Commands to run once this frame's UI is done.
     pub queue: Vec<Cmd>,
     /// Documents whose tab must be created.
@@ -251,6 +256,18 @@ pub struct Reading {
     pub crop_then: Option<crate::crop::CropBox>,
     /// The status-bar notice this paste put up, taken down when it is placed.
     pub notice: String,
+    /// The API call the paste answers once it is placed, if it was one's.
+    pub answer: Option<PasteAnswer>,
+}
+
+/// An API call a paste answers: its number, where it puts the box, whether it goes into
+/// the active layer, and the call's groups (a script run, a step), which the paste's
+/// history state joins.
+pub struct PasteAnswer {
+    pub n: u64,
+    pub place: crate::api::BoxArgs,
+    pub into_active: bool,
+    pub groups: Vec<u64>,
 }
 
 impl AppState {
@@ -293,8 +310,14 @@ impl AppState {
             retry_mcp_http: false,
             copies_answered: VecDeque::new(),
             confirm: None,
+            box_numbers: false,
             new_image: None,
-            last_new: NewImage { width: 1920, height: 1080, background: Background::White },
+            last_new: NewImage {
+                width: 1920,
+                height: 1080,
+                background: Background::White,
+                resolution: opal_core::units::DEFAULT_PPI,
+            },
             export: None,
             last_export: ExportKind::Png,
             prefs_open: false,
@@ -378,12 +401,14 @@ impl AppState {
     }
 
     /// What is done between frames, with or without a window: the copies and writes that
-    /// have finished reported (`pointer_held` as for [`poll_writes`](Self::poll_writes)),
-    /// each image's history kept within the memory the preferences give it, and the tiles'
+    /// have finished reported, and a paste whose clipboard has been read placed
+    /// (`pointer_held` as for [`poll_writes`](Self::poll_writes) and
+    /// [`poll_paste`](Self::poll_paste)), each image's history kept within the memory the preferences give it, and the tiles'
     /// share of memory kept to (and trouble writing them to disk told of).
     pub fn between_frames(&mut self, pointer_held: bool) {
         self.poll_copies();
         self.poll_writes(pointer_held);
+        self.poll_paste(pointer_held);
         let budget = crate::prefs::bytes(&self.prefs, "history.memory");
         for d in &mut self.docs {
             d.set_history_budget(budget);
@@ -496,11 +521,19 @@ impl AppState {
             Cmd::CopyMerged => self.copy(true, ctx),
             Cmd::Paste => self.paste(false, ctx),
             Cmd::PasteInPlace => self.paste(true, ctx),
+            Cmd::Place => self.place_dialog(),
             Cmd::Transform => self.transform(),
             Cmd::CropToContent => self.crop_to_content(),
             Cmd::ResizeImage => {
-                let c = self.active().expect("available").doc().canvas;
-                self.resize_image = Some(ResizeImage { width: c.width, height: c.height, keep_aspect: true });
+                let doc = self.active().expect("available").doc();
+                let (c, resolution) = (doc.canvas, doc.resolution);
+                self.resize_image = Some(ResizeImage {
+                    width: c.width,
+                    height: c.height,
+                    keep_aspect: true,
+                    resolution,
+                    keep_print_size: false,
+                });
             }
             Cmd::ResizeCanvas => {
                 let c = self.active().expect("available").doc().canvas;
@@ -628,6 +661,7 @@ impl AppState {
         self.last_new = spec.clone();
         let mut ids = IdGen::default();
         let mut doc = Document::new(spec.width, spec.height);
+        doc.resolution = spec.resolution;
         let image = match spec.background {
             Background::Transparent => RasterImage::new(),
             Background::White => RasterImage::filled(
@@ -681,6 +715,9 @@ impl AppState {
                 Ok(imported) => {
                     let mut ids = IdGen::default();
                     let mut doc = Document::new(imported.width, imported.height);
+                    if let Some(ppi) = imported.resolution {
+                        doc.resolution = ppi;
+                    }
                     let layer = Layer::new_raster(ids.layer(), ids.object(), "Background", imported.image);
                     doc.insert(Position { parent: None, index: 0 }, layer).expect("an empty document takes a layer");
                     self.add_doc(title, doc, ids, "Open");
@@ -990,7 +1027,12 @@ mod budget_tests {
     #[test]
     fn between_frames_each_image_s_history_keeps_to_the_preference() {
         let mut st = AppState::new();
-        st.create_image(&NewImage { width: 8, height: 8, background: Background::White });
+        st.create_image(&NewImage {
+            width: 8,
+            height: 8,
+            background: Background::White,
+            resolution: opal_core::units::DEFAULT_PPI,
+        });
         assert_eq!(st.active().unwrap().history.budget(), u64::MAX);
         st.prefs.set("history.memory", crate::settings::Value::Float(0.5));
         // As a run with no window has it (see `headless`), as well as the window.
@@ -1006,7 +1048,12 @@ mod tests {
 
     fn app_with_image() -> AppState {
         let mut st = AppState::new();
-        st.create_image(&NewImage { width: 300, height: 200, background: Background::White });
+        st.create_image(&NewImage {
+            width: 300,
+            height: 200,
+            background: Background::White,
+            resolution: opal_core::units::DEFAULT_PPI,
+        });
         st
     }
 
@@ -1135,7 +1182,12 @@ mod tests {
     fn unavailable_commands_explain_themselves() {
         let mut st = AppState::new();
         assert_eq!(availability(&st, Cmd::Save), Err("Open or create an image first.".into()));
-        st.create_image(&NewImage { width: 10, height: 10, background: Background::Transparent });
+        st.create_image(&NewImage {
+            width: 10,
+            height: 10,
+            background: Background::Transparent,
+            resolution: opal_core::units::DEFAULT_PPI,
+        });
         assert!(availability(&st, Cmd::Undo).unwrap_err().contains("Nothing to undo"));
         assert!(availability(&st, Cmd::MergeDown).unwrap_err().contains("no layer below"));
         st.run(Cmd::ToggleLock, &ctx());
@@ -1205,7 +1257,12 @@ mod tests {
         st.run(Cmd::Rename, &ctx());
         st.renaming.as_mut().unwrap().2 = "Sky".into();
         // Another image opens, with a layer of the same identifier, before Enter.
-        st.create_image(&NewImage { width: 10, height: 10, background: Background::White });
+        st.create_image(&NewImage {
+            width: 10,
+            height: 10,
+            background: Background::White,
+            resolution: opal_core::units::DEFAULT_PPI,
+        });
         let b = st.active_doc.unwrap();
         assert_ne!(a, b);
         st.finish_rename(true);
@@ -1216,7 +1273,12 @@ mod tests {
     #[test]
     fn suggested_names_drop_the_old_extension() {
         let mut st = AppState::new();
-        st.create_image(&NewImage { width: 10, height: 10, background: Background::White });
+        st.create_image(&NewImage {
+            width: 10,
+            height: 10,
+            background: Background::White,
+            resolution: opal_core::units::DEFAULT_PPI,
+        });
         let d = st.active_mut().unwrap();
         d.title = "photo.jpg".into();
         assert_eq!(d.stem(), "photo");

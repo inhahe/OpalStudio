@@ -26,6 +26,7 @@ pub enum Cmd {
     CopyMerged,
     Paste,
     PasteInPlace,
+    Place,
     Transform,
     NewLayer,
     NewGroup,
@@ -102,7 +103,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 57] = [
+    pub const ALL: [Cmd; 58] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -119,6 +120,7 @@ impl Cmd {
         Cmd::CopyMerged,
         Cmd::Paste,
         Cmd::PasteInPlace,
+        Cmd::Place,
         Cmd::Transform,
         Cmd::NewLayer,
         Cmd::NewGroup,
@@ -290,6 +292,13 @@ impl Cmd {
                 "A copy made in Opal Studio goes back exactly where it was copied from; anything \
                  else goes at the canvas's top-left corner. Otherwise like Paste.",
                 const { &[ctrl_shift(Key::V)] },
+            ),
+            Cmd::Place => i(
+                "Place",
+                icons::PLACE,
+                "Place an image file into this image, then position and size it.",
+                "The file's image goes onto a new layer above the active one, in the transform box,                  as a paste does: drag the box, or type its exact position and size in any unit                  (the numbers button by the box). Enter or the check mark places it, Esc cancels.                  It keeps its own pixels, so it can be resized again later without losing quality.",
+                const { &[ctrl_alt(Key::O)] },
             ),
             Cmd::Transform => i(
                 "Transform",
@@ -631,9 +640,9 @@ pub static RIBBON: &[Tab] = &[
         groups: &[
             Group {
                 name: "File",
-                description: "Creating, opening, saving and exporting images.",
+                description: "Creating, opening, saving and exporting images, and placing image files                               into them.",
                 large: 3,
-                cmds: &[Cmd::New, Cmd::Open, Cmd::Save, Cmd::SaveAs, Cmd::Export, Cmd::Close],
+                cmds: &[Cmd::New, Cmd::Open, Cmd::Save, Cmd::Place, Cmd::SaveAs, Cmd::Export, Cmd::Close],
             },
             Group {
                 name: "Scripts",
@@ -805,7 +814,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         New | Open | Preferences | Exit | ConnectAssistant | ToggleOffCanvas | ToggleTheme | ToggleRibbon
         | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts | About | WidgetGallery => Ok(()),
         Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup | CopyMerged
-        | StampVisible | ResizeCanvas | CropToContent => needs_doc(),
+        | StampVisible | ResizeCanvas | CropToContent | Place => needs_doc(),
         Paste | PasteInPlace => Ok(()),
         RunScript => match (&st.scripts_file, st.console.running()) {
             (None, _) => Err(st.scripts_unserved.clone().unwrap_or_else(|| crate::console::NOT_SERVING.to_owned())),
