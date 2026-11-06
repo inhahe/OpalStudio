@@ -183,7 +183,11 @@ not a goal.
   tile, at a lookup a row) and of rectangles covering the image objects, so the view lists
   no tiles beneath a uniform block: a huge, mostly blank canvas costs about what the
   screen shows (a 300,000-pixel white canvas shown whole: 17 ms after an edit, 10 MB).
-  Under an image object every level-0 tile is still made (see `known-issues.md`). The cache
+  Zoomed out, a tile an image object reaches is drawn at the level shown instead, as a
+  preview draws it (each object from its own copy at the level: a pixel object's reduced
+  tiles, an image object's pyramid with its own sampling), and kept while its key holds:
+  so an image object across a huge canvas costs the tiles shown too, and looks very
+  slightly different from reducing full resolution where layers overlap. The cache
   may hold a set amount of memory (a preference, 2 GB by default), counting each tile it
   made once (a layer's own tile shown as it is costs nothing); past it, the tiles farthest
   from the view go first,
