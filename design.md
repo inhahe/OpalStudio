@@ -180,9 +180,10 @@ not a goal.
   made from the four below, down to level 0. Whether a block is uniform, and whether a
   tile has content under it at all, is asked of the pixel objects' own tiles (a large
   area of an index each image keeps, built on first use, of its tile rows as runs of one
-  tile, at a lookup a row) and of rectangles covering the image objects, so the view never
-  lists the tiles beneath it: a huge, mostly blank canvas costs about what the screen
-  shows (a 300,000-pixel white canvas shown whole: 17 ms after an edit, 10 MB). The cache
+  tile, at a lookup a row) and of rectangles covering the image objects, so the view lists
+  no tiles beneath a uniform block: a huge, mostly blank canvas costs about what the
+  screen shows (a 300,000-pixel white canvas shown whole: 17 ms after an edit, 10 MB).
+  Under an image object every level-0 tile is still made (see `known-issues.md`). The cache
   may hold a set amount of memory (a preference, 2 GB by default), counting each tile it
   made once (a layer's own tile shown as it is costs nothing); past it, the tiles farthest
   from the view go first,
