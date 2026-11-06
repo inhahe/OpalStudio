@@ -248,32 +248,47 @@ impl Session {
                 // necessarily on, the pointer), and it is what snaps.
                 let at = start.apply(grabbed);
                 let to = [at[0] + input.pointer[0] - drag.from[0], at[1] + input.pointer[1] - drag.from[1]];
-                let (sx, gx) = snap(&[to[0]], &targets.xs, tol);
-                let (sy, gy) = snap(&[to[1]], &targets.ys, tol);
-                let p = inv.apply([to[0] + sx, to[1] + sy]);
                 let d0 = [grabbed[0] - held[0], grabbed[1] - held[1]];
-                let d = [p[0] - held[0], p[1] - held[1]];
                 let ratio = |num: f64, den: f64| if den.abs() < 1e-12 { 1.0 } else { num / den };
                 let locked = input.aspect_locked != input.shift;
-                let (mut kx, mut ky) = match (corner, k % 2) {
-                    (true, _) => (ratio(d[0], d0[0]), ratio(d[1], d0[1])),
-                    (false, 0) => (1.0, ratio(d[1], d0[1])),
-                    (false, _) => (ratio(d[0], d0[0]), 1.0),
-                };
-                if locked {
+                let (kx, ky) = if corner && !locked {
+                    // The dragged point goes wherever the pointer does: each coordinate snaps.
+                    let (sx, _) = snap(&[to[0]], &targets.xs, tol);
+                    let (sy, _) = snap(&[to[1]], &targets.ys, tol);
+                    let p = inv.apply([to[0] + sx, to[1] + sy]);
+                    (ratio(p[0] - held[0], d0[0]), ratio(p[1] - held[1], d0[1]))
+                } else {
+                    // One scale moves the dragged point, along the line from the held point
+                    // through it (an edge's midpoint and the one opposite share the frame's
+                    // middle line, so an edge moves along it however the lock is set).
+                    let p = inv.apply(to);
+                    let d = [p[0] - held[0], p[1] - held[1]];
                     let s = if corner {
                         // The pointer projected onto the diagonal through the held point.
                         (d[0] * d0[0] + d[1] * d0[1]) / (d0[0] * d0[0] + d0[1] * d0[1]).max(1e-12)
                     } else if k % 2 == 0 {
-                        ky
+                        ratio(d[1], d0[1])
                     } else {
-                        kx
+                        ratio(d[0], d0[0])
                     };
-                    (kx, ky) = (s, s);
-                }
+                    let h = start.apply(held);
+                    let s = snap_along(h, [at[0] - h[0], at[1] - h[1]], s, targets, tol);
+                    match (corner || locked, k % 2) {
+                        (true, _) => (s, s),
+                        (false, 0) => (1.0, s),
+                        (false, _) => (s, 1.0),
+                    }
+                };
                 let keep = |k: f64| if k.abs() < MIN_SCALE { MIN_SCALE.copysign(k) } else { k };
-                let local = Affine::scale(keep(kx), keep(ky)).about(held[0], held[1]);
-                (local.then(start), Guides { xs: gx.into_iter().collect(), ys: gy.into_iter().collect() })
+                let m = Affine::scale(keep(kx), keep(ky)).about(held[0], held[1]).then(start);
+                // The lines the dragged point ended on (not those it would have, when the
+                // smallest scale stopped it short of them).
+                let c = m.apply(grabbed);
+                let on = |v: f64, lines: &[f64]| -> Vec<f64> {
+                    let hit = |t: f64| tol >= 0.0 && (t - v).abs() <= 1e-9 * t.abs().max(1.0);
+                    lines.iter().copied().find(|&t| hit(t)).into_iter().collect()
+                };
+                (m, Guides { xs: on(c[0], &targets.xs), ys: on(c[1], &targets.ys) })
             }
         }
     }
@@ -344,6 +359,29 @@ pub(crate) fn snap(values: &[f64], targets: &[f64], tol: f64) -> (f64, Option<f6
         }
     }
     best.map_or((0.0, None), |(d, t)| (d, Some(t)))
+}
+
+/// For a point at `from + s · along` that only moves along that line, as `s` changes: the
+/// `s` that puts it on the nearest of `targets`' lines within `tol` of it, measured by how
+/// far the point moves, or `s` itself when none is.
+fn snap_along(from: [f64; 2], along: [f64; 2], s: f64, targets: &SnapTargets, tol: f64) -> f64 {
+    let length = along[0].hypot(along[1]);
+    let mut best: Option<(f64, f64)> = None;
+    for (axis, lines) in [(0, &targets.xs), (1, &targets.ys)] {
+        // A line parallel to the motion is never reached (and when it is the point's line,
+        // the point is on it wherever it moves).
+        if along[axis] == 0.0 {
+            continue;
+        }
+        for &t in lines {
+            let at = (t - from[axis]) / along[axis];
+            let moved = (at - s).abs() * length;
+            if moved <= tol && best.is_none_or(|(b, _)| moved < b) {
+                best = Some((moved, at));
+            }
+        }
+    }
+    best.map_or(s, |(_, at)| at)
 }
 
 /// The lines things snap to: the canvas's edges and center, and the edges and centers of
@@ -965,6 +1003,47 @@ mod tests {
         let (m, _) = s.dragged(&drag, &DragInput { shift: true, ..input([140.0, 90.0]) }, &targets);
         let angle = m.b.atan2(m.a).to_degrees();
         assert!((angle - 30.0).abs() < 1e-9, "steps of 15°: {angle}");
+    }
+
+    #[test]
+    fn a_scaled_corner_or_edge_lands_on_the_line_it_snaps_to() {
+        let s = session(FRect::new(0.0, 0.0, 100.0, 50.0), Affine::IDENTITY);
+        let targets = SnapTargets { xs: vec![500.0], ys: vec![27.0, 242.0] };
+        let on = |p: [f64; 2]| DragInput { snapping: true, ..input(p) };
+        // The aspect kept: the corner moves along the diagonal, and stops on whichever line
+        // it is nearer along it.
+        let corner = Drag { handle: Handle::Corner(2), from: [100.0, 50.0], start: s.current };
+        let (m, g) = s.dragged(&corner, &on([497.0, 248.5]), &targets);
+        assert!(close(m.apply([100.0, 50.0]), [500.0, 250.0]), "{:?}", m.apply([100.0, 50.0]));
+        assert_eq!((g.xs, g.ys), (vec![500.0], vec![]));
+        let (m, g) = s.dragged(&corner, &on([480.0, 243.0]), &targets);
+        assert!(close(m.apply([100.0, 50.0]), [484.0, 242.0]), "{:?}", m.apply([100.0, 50.0]));
+        assert_eq!((g.xs, g.ys), (vec![], vec![242.0]));
+        assert!(close(m.apply([0.0, 0.0]), [0.0, 0.0]), "the opposite corner moved");
+        // A wide box's corner 3 pixels from a line across it: reaching that would take the
+        // corner 300 pixels along the diagonal, so it does not snap.
+        let wide = session(FRect::new(0.0, 0.0, 1000.0, 10.0), Affine::IDENTITY);
+        let far = Drag { handle: Handle::Corner(2), from: [1000.0, 10.0], start: wide.current };
+        let (m, g) = wide.dragged(&far, &on([2000.0, 20.0]), &SnapTargets { xs: vec![], ys: vec![23.0] });
+        assert!(close(m.apply([1000.0, 10.0]), [2000.0, 20.0]), "{:?}", m.apply([1000.0, 10.0]));
+        assert!(g.ys.is_empty());
+
+        // An edge moves one way only: it snaps that way, and shows no line it does not touch.
+        for aspect_locked in [false, true] {
+            let edge = Drag { handle: Handle::Edge(1), from: [100.0, 25.0], start: s.current };
+            let (m, g) = s.dragged(&edge, &DragInput { aspect_locked, ..on([497.0, 26.0]) }, &targets);
+            assert!((m.apply([100.0, 25.0])[0] - 500.0).abs() < 1e-6, "locked {aspect_locked}");
+            assert_eq!((g.xs, g.ys), (vec![500.0], vec![]), "locked {aspect_locked}");
+        }
+
+        // Turned, the edge moves at a slant, and still stops on the line.
+        let turned = session(s.frame, Affine::rotate(30f64.to_radians()));
+        let start = turned.current;
+        let edge = Drag { handle: Handle::Edge(1), from: start.apply([100.0, 25.0]), start };
+        let free = DragInput { aspect_locked: false, ..on(start.apply([590.0, 25.0])) };
+        let (m, g) = turned.dragged(&edge, &free, &targets);
+        assert!((m.apply([100.0, 25.0])[0] - 500.0).abs() < 1e-6, "{:?}", m.apply([100.0, 25.0]));
+        assert_eq!(g.xs, vec![500.0]);
     }
 
     #[test]

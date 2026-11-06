@@ -564,7 +564,10 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   rotating steps by 15° (adjustable). Dragging outside the box rotates too.
 - **Snapping** to the canvas's edges and center and to other layers' edges (later the
   selection's bounds too). Alt toggles it during a drag, a button on the box toggles it
-  until clicked again, and the snapping distance is adjustable.
+  until clicked again, and the snapping distance is adjustable. Moving, the box's edges
+  and center snap; scaling, the corner or edge dragged does. A corner with the aspect
+  kept, and an edge, can only move along one line (the diagonal, or across the edge): it
+  stops where that line crosses a snap line, if it is that near the crossing.
 - **On the box:** Fit (into the canvas), Fill (cover the canvas), the aspect lock, snapping,
   Into active layer, and Commit and Cancel, also on Enter and Esc, so the box never
   lingers like GIMP's floating selection. While dragging, the box shows the size and angle.
