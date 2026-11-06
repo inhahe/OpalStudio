@@ -222,13 +222,19 @@ fn a_cap_held_keeps_tiles_within_it_until_let_go() {
     with_budget(100, || {
         let mut tiles: Vec<Arc<Tile>> = (0..20).map(|n| Arc::new(tile(n))).collect();
         assert_eq!(status().on_disk, 0);
-        let hold = store::hold(8 * TILE);
+        let hold = store::hold(8 * TILE, 3);
         assert!(status().resident <= 8 * TILE, "holding the cap took {} tiles' worth away", status().resident / TILE);
-        // Another, wider, held meanwhile: the lower applies.
-        let wider = store::hold(50 * TILE);
+        // Another, wider, held meanwhile: the lower applies; lowered, it applies.
+        let mut wider = store::hold(50 * TILE, 0);
+        assert!(status().resident <= 8 * TILE);
+        assert_eq!(store::set_aside(), 3, "what work set aside to take in one go");
+        wider.lower(5 * TILE, 4);
+        assert_eq!(store::set_aside(), 7);
+        assert!(status().resident <= 5 * TILE, "a cap lowered took {} tiles' worth away", status().resident / TILE);
         tiles.extend((20..30).map(|n| Arc::new(tile(n))));
-        assert!(status().resident <= 8 * TILE, "tiles made under the cap went past it");
+        assert!(status().resident <= 5 * TILE, "tiles made under the cap went past it");
         drop((hold, wider));
+        assert_eq!(store::set_aside(), 0, "let go of, the caps set nothing aside");
         store::settle();
         let on_disk = status().on_disk;
         tiles.extend((30..40).map(|n| Arc::new(tile(n))));
@@ -240,11 +246,31 @@ fn a_cap_held_keeps_tiles_within_it_until_let_go() {
 }
 
 #[test]
+fn a_cap_held_takes_away_only_what_is_past_it_leaving_the_budget_to_the_store_s_thread() {
+    with_budget(1000, || {
+        let tiles: Vec<Arc<Tile>> = (0..40).map(|n| Arc::new(tile(n))).collect();
+        // The store's thread is kept from its turn while the budget is lowered and a cap
+        // above what tiles take is held: the cap takes nothing away itself.
+        let turn = store::hold_queue_for_tests();
+        set_budget(Some(10 * TILE));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(store::hold(100 * TILE, 0)).unwrap());
+        let wide = rx.recv_timeout(std::time::Duration::from_secs(2));
+        let on_disk = status().on_disk;
+        drop(turn);
+        let wide = wide.expect("a cap above what tiles take waited to take them down to the budget");
+        assert_eq!(on_disk, 0, "a cap above what tiles take took them down to the budget");
+        assert!(eventually(|| status().resident <= 10 * TILE));
+        drop((wide, tiles));
+    });
+}
+
+#[test]
 fn without_a_budget_nothing_goes() {
     let _turn = TURN.lock();
     store::settle();
     let tiles: Vec<Arc<Tile>> = (0..20).map(|n| Arc::new(tile(n))).collect();
-    let held = store::hold(TILE);
+    let held = store::hold(TILE, 0);
     assert_eq!(status().on_disk, 0, "without a budget a cap does nothing either");
     assert_eq!(store::reclaimable(), 0);
     drop((held, tiles));

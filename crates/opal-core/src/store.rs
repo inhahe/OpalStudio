@@ -222,32 +222,57 @@ pub struct Hold {
 
 /// Lets the pixels of tiles in memory take no more than `bytes` while what this returns is
 /// kept (the lowest cap held applies, and the budget, if lower; with no budget nothing
-/// does): for work whose own memory, with the tiles', must fit in what is free. Tiles past
-/// it are taken to disk at once, on the calling thread, a batch at a time.
-pub fn hold(bytes: u64) -> Hold {
+/// does): for work whose own memory, with the tiles', must fit in what is free, and which
+/// sets `aside` bytes of it to take in one go ([`set_aside`]). Tiles past the cap are taken
+/// to disk at once, on the calling thread, a batch at a time; past the budget only, they
+/// are left to the store's thread.
+pub fn hold(bytes: u64, aside: u64) -> Hold {
     let id = STORE.next_hold.fetch_add(1, Relaxed);
-    {
-        let mut holds = STORE.holds.lock();
-        holds.push((id, bytes));
-        STORE.cap.store(holds.iter().map(|h| h.1).min().unwrap_or(u64::MAX), Relaxed);
+    STORE.set_cap(|holds| holds.push(Held { id, cap: bytes, aside }));
+    let hold = Hold { id };
+    hold.take_past(bytes);
+    hold
+}
+
+/// What work holding caps has set aside to take in one go: memory measured as free may be
+/// theirs, taken or not yet.
+pub fn set_aside() -> u64 {
+    STORE.holds.lock().iter().map(|h| h.aside).sum()
+}
+
+impl Hold {
+    /// Lowers the cap held to `bytes`, the work having set `aside` bytes aside in all,
+    /// taking tiles past it to disk as [`hold`] does.
+    pub fn lower(&mut self, bytes: u64, aside: u64) {
+        let id = self.id;
+        STORE.set_cap(|holds| {
+            for h in holds.iter_mut().filter(|h| h.id == id) {
+                (h.cap, h.aside) = (h.cap.min(bytes), aside);
+            }
+        });
+        self.take_past(bytes);
     }
-    while STORE.over() {
-        let until = STORE.resident.load(Relaxed).saturating_sub(BATCH).max(STORE.limit());
-        if !STORE.take_away(|| STORE.resident.load(Relaxed) > until.max(STORE.limit())) {
-            break;
+
+    fn take_past(&self, bytes: u64) {
+        if STORE.budget.load(Relaxed) == u64::MAX {
+            return;
+        }
+        while STORE.resident.load(Relaxed) > bytes && STORE.can_go() {
+            let until = STORE.resident.load(Relaxed).saturating_sub(BATCH).max(bytes);
+            if !STORE.take_away(|| STORE.resident.load(Relaxed) > until) {
+                break;
+            }
+        }
+        if STORE.over_target() {
+            STORE.wake();
         }
     }
-    if STORE.over_target() {
-        STORE.wake();
-    }
-    Hold { id }
 }
 
 impl Drop for Hold {
     fn drop(&mut self) {
-        let mut holds = STORE.holds.lock();
-        holds.retain(|h| h.0 != self.id);
-        STORE.cap.store(holds.iter().map(|h| h.1).min().unwrap_or(u64::MAX), Relaxed);
+        let id = self.id;
+        STORE.set_cap(|holds| holds.retain(|h| h.id != id));
     }
 }
 
@@ -275,6 +300,12 @@ pub fn settle() {
     drop(STORE.queue.lock());
 }
 
+/// Keeps any thread from taking tiles away while what this returns is kept.
+#[doc(hidden)]
+pub fn hold_queue_for_tests() -> impl Drop {
+    STORE.queue.lock()
+}
+
 /// Stops tiles being written to disk, as a failure to write would.
 #[doc(hidden)]
 pub fn stop_writing_for_tests() {
@@ -293,8 +324,8 @@ struct Store {
     /// How many tiles have been read back.
     loads: AtomicU64,
     budget: AtomicU64,
-    /// The caps held ([`hold`]), by number, the lowest of them, and the next number.
-    holds: Mutex<Vec<(u64, u64)>>,
+    /// The caps held ([`hold`]), the lowest of them, and the next one's number.
+    holds: Mutex<Vec<Held>>,
     cap: AtomicU64,
     next_hold: AtomicU64,
     /// Advanced each time the order of tiles to take away is made: tiles read since have
@@ -311,6 +342,13 @@ struct Store {
     /// Set once writing to disk failed; tiles are written there no more.
     stopped: AtomicBool,
     trouble: Mutex<Option<String>>,
+}
+
+/// A cap held ([`hold`]): its number, the cap, and what its work set aside.
+struct Held {
+    id: u64,
+    cap: u64,
+    aside: u64,
 }
 
 /// The tiles to take away, least recently read last, as of epoch `epoch`.
@@ -346,6 +384,13 @@ const BATCH: u64 = 32 << 20;
 impl Store {
     fn epoch(&self) -> u64 {
         self.clock.load(Relaxed)
+    }
+
+    /// Changes the caps held with `change`, and notes the lowest.
+    fn set_cap(&self, change: impl FnOnce(&mut Vec<Held>)) {
+        let mut holds = self.holds.lock();
+        change(&mut holds);
+        self.cap.store(holds.iter().map(|h| h.cap).min().unwrap_or(u64::MAX), Relaxed);
     }
 
     /// The memory tiles may take: the budget, or the lowest cap held if lower (none without

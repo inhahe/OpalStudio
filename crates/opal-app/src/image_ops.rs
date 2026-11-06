@@ -174,15 +174,19 @@ pub(crate) struct Drawing {
     keep: IRect,
     /// Whether part of something drawn was left out.
     pub clipped: bool,
+    /// Kept while drawing: it caps the tiles' memory.
     memory: Allowance,
-    _hold: Option<opal_core::store::Hold>,
 }
 
 impl Drawing {
-    /// Drawing that keeps the part within `keep` of what reaches too far, within `memory`;
-    /// tiles past what is free now go to disk while it lasts (`memory::hold_for`).
+    /// Drawing that keeps the part within `keep` of what reaches too far, within `memory`.
     pub(crate) fn new(keep: IRect, memory: Allowance) -> Drawing {
-        Drawing { keep, clipped: false, memory, _hold: crate::memory::hold_for(0) }
+        Drawing { keep, clipped: false, memory }
+    }
+
+    /// What the drawing may still take, for more drawn as part of the same work.
+    pub(crate) fn memory(&mut self) -> &mut Allowance {
+        &mut self.memory
     }
 }
 

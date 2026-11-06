@@ -37,7 +37,7 @@ pub struct Copied {
     pub from: IRect,
     pub pixels: Vec<Pixel>,
     /// The cap on tiles' memory while the copy goes onto the clipboard (see
-    /// `memory::hold_for`): let go of with the copy, once it is there.
+    /// `memory::Allowance`): let go of with the copy, once it is there.
     pub _hold: Option<opal_core::store::Hold>,
 }
 

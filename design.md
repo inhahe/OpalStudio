@@ -129,13 +129,17 @@ not a goal.
 - **Tiles go to disk past a budget** (`opal_core::store`): the pixels of open images may
   take a share of the computer's memory (Preferences › Memory, 60% by default), and while
   work that needs memory runs (opening, pasting, copying, exporting, merging, drawing into
-  pixels), no more than they took when it began and what was free beside the work's own
-  (`store::hold`, measured then, at once): past either, the tiles read least recently go
-  to a scratch file in the temporary folder (deleted when the program ends) and come back
-  when next read. Measured once a piece of work, not every frame: tiles written to the
-  file sit in the system's cache for a while, uncounted as free, and a budget following
-  the memory free would send more after them. Outside such work the system pages as it
-  does. A thread taking memory past the limit sends as much as it took to disk itself, so
+  pixels), no more than they took when it began and what was free then, less what the work
+  takes in one go (`store::hold`, held by the memory check that admits the work, from the
+  same measure, and lowered as the work sets more aside): past either, the tiles read least
+  recently go to a scratch file in the temporary folder (deleted when the program ends) and
+  come back when next read. The sum of what tiles took and what was free stays right
+  however late the cap is applied, as tiles made since only moved memory from one to the
+  other; it is measured once a piece of work, not every frame, since tiles written to the
+  file sit in the system's cache for a while, uncounted as free, and a cap measured again
+  would send more after them. Outside such work the system pages as it does. A cap takes
+  away at once only what is past itself; past the budget alone, tiles are left to the
+  store's thread. A thread taking memory past the limit sends as much as it took to disk itself, so
   memory never runs ahead of it however fast tiles are made (bringing nothing, a tile
   changed where it lies, it neither sends nor waits); a thread of the store's own takes
   memory down a tenth below it (at most 256 MB), a batch of 32 MB at a time, asking the
@@ -472,10 +476,12 @@ curve editors.
   and says so. Within those limits, nothing is drawn into pixels that would need more
   memory than is free when the work begins, since a failed allocation ends the program
   (`opal_io::memory`, measured by the app's `memory.rs`). Work needs memory two ways: what
-  it takes in one go (a decoded file, the bitmaps of a copy, an export's bands), which must
-  fit in the memory free (the available physical memory, on Windows and Linux) together
-  with what tiles in memory going to disk could make room for, as far as the disk holds
-  them (the work holds a cap on tiles, which sends them there before it is taken); and the
+  it takes in one go (a decoded file and the file's own bytes, an `.opal` file's tile
+  places as read, the bitmaps of a copy, an export's bands), which must fit in the memory
+  free (the available physical memory, on Windows and Linux, less a twentieth of all
+  memory kept back for what estimates leave out and for the system) together with what
+  tiles in memory going to disk could make room for, as far as the disk holds them (the
+  work holds a cap on tiles, which sends them there before it is taken); and the
   tiles it makes as it goes, which may also take the disk's room (known on Windows only;
   none is counted elsewhere), since past the cap they go there as they come. Merging counts
   exactly the tiles it would make (none for those it shares), drawing into pixels exactly
@@ -999,7 +1005,8 @@ reds, then greens, blues and alphas. Version 1 (no `.srgb8` tiles) is read as we
 a batch of them beyond the document rather than a copy of every tile. Numbers are written
 so they read back exactly. `document.json` is written compactly (about 12 bytes a tile
 place) and read without serde's buffering of tagged enums (`LayerRead`, `ObjectRead`), as
-large as 256 MB or a quarter of the memory free. Version 0 (pixel objects
+large as 256 MB or a tenth of the memory free (reading takes up to ten times the text).
+Version 0 (pixel objects
 only, a canvas at the origin) is still read; a newer version is refused with a message
 rather than misread, and so are values out of range (a transform that cannot be inverted,
 say). The editor never makes a transform a file could not hold: the transform box stops

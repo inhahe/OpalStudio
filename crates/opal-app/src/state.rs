@@ -322,7 +322,7 @@ impl AppState {
     }
 
     /// Lets images' tiles take the share of memory the preference says, before they go to
-    /// disk (work that needs memory caps them lower while it runs: `memory::hold_for`); and
+    /// disk (work that needs memory caps them lower while it runs: `memory::Allowance`); and
     /// says once if they could not go.
     pub fn apply_tile_budget(&mut self) {
         let budget = tile_budget(self.prefs.f64("memory.tiles"), self.memory_total);
@@ -786,8 +786,8 @@ impl AppState {
         let job = Box::new(move |p: &_| {
             // Measured now, not when asked for: the write may have waited behind others.
             let mut memory = memory.unwrap_or_else(crate::memory::Allowance::now);
+            // Kept while exporting: it caps the tiles' memory.
             memory.take(image_files::export_memory(&doc, size.as_ref()))?;
-            let _hold = memory.hold();
             let pool = Some(crate::background::pool());
             image_files::export_in(&doc, &path, &format, size.as_ref(), pool, p).map_err(|e| e.to_string())
         });

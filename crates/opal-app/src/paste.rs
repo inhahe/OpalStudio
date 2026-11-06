@@ -51,11 +51,10 @@ impl AppState {
         if let Err(why) = crate::clipboard::check_copy(w, h).and_then(|()| memory.take(copies)) {
             return self.message(MessageKind::Info, "Copy", why);
         }
-        // Held until the copy is on the clipboard.
-        let hold = memory.hold();
         let pixels = flat.read_rect(&bounds);
         let from = bounds.translate(-canvas.x0, -canvas.y0);
-        self.clipboard.write_image(Copied { from, pixels, _hold: hold }, ctx);
+        // The cap on tiles is kept until the copy is on the clipboard.
+        self.clipboard.write_image(Copied { from, pixels, _hold: memory.into_hold() }, ctx);
     }
 
     /// Says how the copies put on the clipboard since the last frame went.

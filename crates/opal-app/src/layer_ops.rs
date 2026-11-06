@@ -156,10 +156,11 @@ impl AppState {
         let below = d.doc().siblings(pos.parent).expect("its parent exists")[pos.index - 1].id;
         let pair: Vec<Arc<Layer>> =
             d.doc().siblings(pos.parent).expect("its parent exists")[pos.index - 1..=pos.index].to_vec();
-        if let Err(why) = check_size(&pair, &d.doc().canvas.rect()) {
-            return self.message(MessageKind::Info, "Merge Down", why);
-        }
-        let _hold = crate::memory::hold_for(0);
+        // Kept while the work runs: it caps the tiles' memory.
+        let _memory = match check_size(&pair, &d.doc().canvas.rect()) {
+            Ok(memory) => memory,
+            Err(why) => return self.message(MessageKind::Info, "Merge Down", why),
+        };
         let d = self.active_mut().expect("available");
         let result = d.apply("Merge down", |doc, ids| {
             let image = composite_all(&pair);
@@ -185,10 +186,11 @@ impl AppState {
         let layers: Vec<Arc<Layer>> = sel.iter().map(|&l| Arc::new(doc.layer(l).expect("selected").clone())).collect();
         // What compositing the selected groups leaves out stays, just below the result.
         let kept: Vec<Arc<Layer>> = layers.iter().flat_map(|l| hidden_inside(l)).collect();
-        if let Err(why) = check_size(&layers, &d.doc().canvas.rect()) {
-            return self.message(MessageKind::Info, "Merge Selected", why);
-        }
-        let _hold = crate::memory::hold_for(0);
+        // Kept while the work runs: it caps the tiles' memory.
+        let _memory = match check_size(&layers, &d.doc().canvas.rect()) {
+            Ok(memory) => memory,
+            Err(why) => return self.message(MessageKind::Info, "Merge Selected", why),
+        };
         let adjacent = adjacent_siblings(doc, &sel);
         let d = self.active_mut().expect("available");
         let result = d.apply("Merge selected", |doc, ids| {
@@ -224,10 +226,11 @@ impl AppState {
     pub(crate) fn merge_visible(&mut self) {
         let d = self.active().expect("available");
         let top = d.doc().layers.clone();
-        if let Err(why) = check_size(&top, &d.doc().canvas.rect()) {
-            return self.message(MessageKind::Info, "Merge Visible", why);
-        }
-        let _hold = crate::memory::hold_for(0);
+        // Kept while the work runs: it caps the tiles' memory.
+        let _memory = match check_size(&top, &d.doc().canvas.rect()) {
+            Ok(memory) => memory,
+            Err(why) => return self.message(MessageKind::Info, "Merge Visible", why),
+        };
         let d = self.active_mut().expect("available");
         let result = d.apply("Merge visible", |doc, ids| {
             let image = composite_all(&doc.layers);
@@ -258,10 +261,11 @@ impl AppState {
         let id = d.active_layer().expect("available");
         let group = d.doc().layer(id).expect("exists").clone();
         let children = group.children().expect("a group").to_vec();
-        if let Err(why) = check_size(&children, &d.doc().canvas.rect()) {
-            return self.message(MessageKind::Info, "Merge Group", why);
-        }
-        let _hold = crate::memory::hold_for(0);
+        // Kept while the work runs: it caps the tiles' memory.
+        let _memory = match check_size(&children, &d.doc().canvas.rect()) {
+            Ok(memory) => memory,
+            Err(why) => return self.message(MessageKind::Info, "Merge Group", why),
+        };
         let d = self.active_mut().expect("available");
         let result = d.apply("Merge group", |doc, ids| {
             let image = composite_all(&children);
@@ -288,10 +292,11 @@ impl AppState {
     pub(crate) fn stamp_visible(&mut self) {
         let d = self.active().expect("available");
         let layers = d.doc().layers.clone();
-        if let Err(why) = check_size(&layers, &d.doc().canvas.rect()) {
-            return self.message(MessageKind::Info, "Stamp Visible", why);
-        }
-        let _hold = crate::memory::hold_for(0);
+        // Kept while the work runs: it caps the tiles' memory.
+        let _memory = match check_size(&layers, &d.doc().canvas.rect()) {
+            Ok(memory) => memory,
+            Err(why) => return self.message(MessageKind::Info, "Stamp Visible", why),
+        };
         let index = d.active_layer().and_then(|a| d.doc().path(a)).map_or(layers.len(), |p| p[0] + 1);
         let d = self.active_mut().expect("available");
         let result = d.apply("Stamp visible", |doc, ids| {
@@ -303,10 +308,11 @@ impl AppState {
 
     pub(crate) fn flatten(&mut self) {
         let d = self.active().expect("available");
-        if let Err(why) = check_size(&d.doc().layers.clone(), &d.doc().canvas.rect()) {
-            return self.message(MessageKind::Info, "Flatten Image", why);
-        }
-        let _hold = crate::memory::hold_for(0);
+        // Kept while the work runs: it caps the tiles' memory.
+        let _memory = match check_size(&d.doc().layers.clone(), &d.doc().canvas.rect()) {
+            Ok(memory) => memory,
+            Err(why) => return self.message(MessageKind::Info, "Flatten Image", why),
+        };
         let d = self.active_mut().expect("available");
         let result = d.apply("Flatten image", |doc, ids| {
             let image = composite_all(&doc.layers);
@@ -323,10 +329,11 @@ impl AppState {
         let sel = d.selection();
         let doc = d.doc();
         let targets: Vec<Arc<Layer>> = sel.iter().filter_map(|&l| doc.layer(l)).map(|l| Arc::new(l.clone())).collect();
-        if let Err(why) = rasterize_fits(&targets, &d.doc().canvas.rect(), Allowance::now()) {
-            return self.message(MessageKind::Info, "Rasterize", why);
-        }
-        let _hold = crate::memory::hold_for(0);
+        // Kept while the work runs: it caps the tiles' memory.
+        let _memory = match rasterize_fits(&targets, &d.doc().canvas.rect(), Allowance::now()) {
+            Ok(memory) => memory,
+            Err(why) => return self.message(MessageKind::Info, "Rasterize", why),
+        };
         let d = self.active_mut().expect("available");
         let result = d.apply("Rasterize", |doc, _| {
             for id in sel {
@@ -453,15 +460,16 @@ fn adjacent_siblings(doc: &Document, layers: &[LayerId]) -> bool {
     positions.windows(2).all(|w| w[0].parent == w[1].parent && w[0].index + 1 == w[1].index)
 }
 
-/// Refuses merging `layers` if the result would need more memory than is free.
-fn check_size(layers: &[Arc<Layer>], canvas: &IRect) -> Result<(), String> {
+/// Refuses merging `layers` if the result would need more memory than is free; else the
+/// memory measured, to keep while merging.
+fn check_size(layers: &[Arc<Layer>], canvas: &IRect) -> Result<Allowance, String> {
     fits(layers, canvas, Allowance::now())
 }
 
 /// Whether rasterizing `layers` fits in `memory`, and within `MAX_PIXELS` beyond four times
 /// `canvas` (see [`fits`]): it draws each image object in them, hidden or not, whole
 /// ([`resample::render_cost`]), and copies no pixel object.
-fn rasterize_fits(layers: &[Arc<Layer>], canvas: &IRect, mut memory: Allowance) -> Result<(), String> {
+fn rasterize_fits(layers: &[Arc<Layer>], canvas: &IRect, mut memory: Allowance) -> Result<Allowance, String> {
     let objects: Vec<&opal_core::document::Object> =
         layers.iter().flat_map(|l| l.all_objects()).filter(|o| matches!(o.kind, ObjectKind::Image(_))).collect();
     let reached = objects
@@ -474,7 +482,7 @@ fn rasterize_fits(layers: &[Arc<Layer>], canvas: &IRect, mut memory: Allowance) 
             memory.take_tiles(resample::render_cost(&i.image, &i.transform, &i.sampling, None))?;
         }
     }
-    Ok(())
+    Ok(memory)
 }
 
 /// Refuses a result of `pixels` pixels more than `MAX_PIXELS` beyond four times `canvas`:
@@ -496,7 +504,7 @@ fn within_reach(pixels: i64, canvas: &IRect) -> Result<(), String> {
 /// first, from the tiles the pixel objects hold (each once, however many share it) and the
 /// area each image object reaches, which bounds the work of finding exactly what merging
 /// would make ([`composite_cost`](opal_core::composite::composite_cost)), set aside next.
-fn fits(layers: &[Arc<Layer>], canvas: &IRect, mut memory: Allowance) -> Result<(), String> {
+fn fits(layers: &[Arc<Layer>], canvas: &IRect, mut memory: Allowance) -> Result<Allowance, String> {
     let tile = i64::from(opal_core::tile::TILE_SIZE).pow(2);
     let mut stored = std::collections::HashSet::new();
     let mut reached = 0i64;
@@ -509,7 +517,8 @@ fn fits(layers: &[Arc<Layer>], canvas: &IRect, mut memory: Allowance) -> Result<
         }
     }
     within_reach((stored.len() as i64).saturating_mul(tile).saturating_add(reached), canvas)?;
-    memory.take_tiles(opal_core::composite::composite_cost(layers, None))
+    memory.take_tiles(opal_core::composite::composite_cost(layers, None))?;
+    Ok(memory)
 }
 
 /// How many layers the document has, groups included (for naming new ones).

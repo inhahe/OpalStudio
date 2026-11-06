@@ -53,12 +53,13 @@ const BATCH: usize = 64;
 /// The largest `document.json` always accepted (see [`json_limit`]).
 const MAX_JSON: usize = 256 << 20;
 
-/// The largest `document.json` accepted, given the memory `free`: [`MAX_JSON`], or a
-/// quarter of the memory free if more (reading it takes about three times its bytes: the
-/// text, and its tile places as read), so that large documents open and a damaged or
-/// hostile file still cannot take more than there is.
+/// The largest `document.json` accepted, given the memory `free`: [`MAX_JSON`], or a tenth
+/// of the memory free if more. Reading it takes up to about ten times its bytes (`[0,0,0],`
+/// is 8 bytes of text and 24 read, in a list that may be twice that while it grows, beside
+/// the text), so large documents open and a damaged or hostile file still cannot take more
+/// than there is.
 fn json_limit(free: Option<Free>) -> usize {
-    free.map_or(MAX_JSON, |f| MAX_JSON.max(usize::try_from(f.memory / 4).unwrap_or(usize::MAX)))
+    free.map_or(MAX_JSON, |f| MAX_JSON.max(usize::try_from(f.memory / 10).unwrap_or(usize::MAX)))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -335,6 +336,7 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
     }
     let json = read_entry(&mut zip, "document.json", json_limit(free), path)?;
     let file: FileDoc = serde_json::from_slice(&json).map_err(|e| bad(format!("document.json: {e}")))?;
+    drop(json);
     if file.format != "opal-studio" {
         return Err(bad(format!("unknown format {:?}", file.format)));
     }
@@ -376,11 +378,11 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
         })
         .collect();
     // Refused before any is read if they would need more than is free: the tiles, which
-    // may go to disk as they are made; and in one go each place one goes (an entry in its
-    // image) and the batch being read.
+    // may go to disk as they are made; and in one go each place one goes (as read, and as an
+    // entry in its image) and the batch being read.
     let tiles: u64 = stored.iter().map(|s| s.2 as u64).sum();
     let batch = stored.chunks(BATCH).map(|b| b.iter().map(|s| s.2 as u64).sum()).max().unwrap_or(0);
-    let need = Need { at_once: places.saturating_mul(64).saturating_add(batch), tiles };
+    let need = Need { at_once: places.saturating_mul(24 + 64).saturating_add(batch), tiles };
     if let Some(free) = free {
         free.check(need).map_err(|short| IoError::TooLarge { path: path.to_owned(), short })?;
     }
@@ -677,11 +679,15 @@ mod tests {
         save(&doc, &ids, &path, &Progress::default()).unwrap();
         // Memory for a batch, and the tiles on disk.
         let (batch, tiles) = ((BATCH * TILE_BYTES) as u64, (100 * TILE_BYTES) as u64);
-        let opened = load(&path, Some(Free { memory: batch + 100_000, reclaimable: 0, disk: tiles }));
-        let refused = load(&path, Some(Free { memory: batch - 1, reclaimable: 0, disk: 1 << 40 }));
+        let opened = load(&path, Some(Free { memory: batch + 100_000, reclaimable: 0, disk: tiles, resident: 0 }));
+        let refused = load(&path, Some(Free { memory: batch - 1, reclaimable: 0, disk: 1 << 40, resident: 0 }));
+        // In one go: the batch, and each of the hundred places as read and as an entry.
+        let at_once = batch + 100 * (24 + 64);
+        let tight = load(&path, Some(Free { memory: at_once - 1, reclaimable: 0, disk: 1 << 40, resident: 0 }));
         std::fs::remove_file(&path).unwrap();
         assert!(opened.is_ok(), "{:?}", opened.err());
         assert!(matches!(refused, Err(IoError::TooLarge { short, .. }) if !short.disk), "{:?}", refused.err());
+        assert!(matches!(tight, Err(IoError::TooLarge { short, .. }) if short.need == at_once), "{:?}", tight.err());
     }
 
     #[test]
@@ -702,7 +708,7 @@ mod tests {
         assert!(size < 16 * 10_000, "{size} bytes for 10,000 places");
         assert_eq!(json_limit(None), MAX_JSON);
         assert_eq!(json_limit(Some(Free::memory(1 << 30))), MAX_JSON);
-        assert_eq!(json_limit(Some(Free::memory(8 << 30))), 2 << 30);
+        assert_eq!(json_limit(Some(Free::memory(20 << 30))), 2 << 30);
     }
 
     #[test]

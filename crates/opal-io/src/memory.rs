@@ -46,6 +46,8 @@ pub struct Free {
     pub reclaimable: u64,
     /// How much may go to disk in all: the room tiles have beyond `memory`.
     pub disk: u64,
+    /// What tiles took in memory when `memory` was measured (see [`cap`](Self::cap)).
+    pub resident: u64,
 }
 
 /// Why work needing more than it may have cannot be done: it would need `need` bytes, of
@@ -67,7 +69,7 @@ impl std::fmt::Display for Short {
 impl Free {
     /// `bytes` of memory, and nothing going to disk.
     pub const fn memory(bytes: u64) -> Free {
-        Free { memory: bytes, reclaimable: 0, disk: 0 }
+        Free { memory: bytes, reclaimable: 0, disk: 0, resident: 0 }
     }
 
     /// Whether `need` fits: what it takes in one go, in memory with room made by tiles going
@@ -84,13 +86,19 @@ impl Free {
         Ok(())
     }
 
-    /// For work taking `at_once` bytes in one go, while what this returns is kept: tiles may
-    /// take no more memory than they take now and the memory free leaves beside that (those
-    /// past it go to disk, the first at once), so the work's memory and theirs fit in what
-    /// is free. `self` should be measured just before.
+    /// The memory tiles may take while work taking `at_once` bytes in one go runs: what they
+    /// took when this was measured and what was free then, less that. Tiles made since moved
+    /// memory from free to taken, so the sum holds however long ago that was; what else was
+    /// taken since must be in `at_once`.
+    pub fn cap(&self, at_once: u64) -> u64 {
+        self.resident.saturating_add(self.memory).saturating_sub(at_once)
+    }
+
+    /// Holds [`cap`](Self::cap) on tiles while what this returns is kept (those past it go to
+    /// disk, the first at once), so that the work's memory and theirs fit in what was free;
+    /// what it takes in one go set aside, so that work measuring meanwhile does not count it.
     pub fn hold(&self, at_once: u64) -> opal_core::store::Hold {
-        let resident = opal_core::store::status().resident;
-        opal_core::store::hold(resident.saturating_add(self.memory).saturating_sub(at_once))
+        opal_core::store::hold(self.cap(at_once), at_once)
     }
 }
 
@@ -100,7 +108,7 @@ mod tests {
 
     #[test]
     fn what_work_takes_in_one_go_must_fit_in_memory_and_its_tiles_may_go_to_disk() {
-        let free = Free { memory: 100, reclaimable: 50, disk: 1000 };
+        let free = Free { memory: 100, reclaimable: 50, disk: 1000, resident: 0 };
         assert!(free.check(Need { at_once: 150, tiles: 950 }).is_ok());
         assert_eq!(
             free.check(Need::at_once(151)),
@@ -114,5 +122,13 @@ mod tests {
         let short = only.check(Need { at_once: 1, tiles: 100 }).unwrap_err();
         assert_eq!(short, Short { need: 101, have: 100, disk: false });
         assert!(short.to_string().contains("of memory"), "{short}");
+    }
+
+    #[test]
+    fn tiles_may_take_what_they_took_and_what_was_free_less_what_work_takes_in_one_go() {
+        let free = Free { memory: 300, reclaimable: 0, disk: 0, resident: 1000 };
+        assert_eq!(free.cap(0), 1300);
+        assert_eq!(free.cap(200), 1100);
+        assert_eq!(free.cap(5000), 0, "no more than nothing");
     }
 }

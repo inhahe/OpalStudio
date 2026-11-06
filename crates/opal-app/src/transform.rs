@@ -648,7 +648,7 @@ impl DocState {
             && paste.into_active
             && let Some(dest) = paste.active
         {
-            match bake_into(&mut p.doc, dest, s.targets[0].object) {
+            match bake_into(&mut p.doc, dest, s.targets[0].object, to.memory()) {
                 Ok(true) => self.notice = Some(crate::layer_ops::CLIPPED.into()),
                 Ok(false) => {}
                 Err(why) => {
@@ -670,16 +670,14 @@ impl DocState {
 /// Draws image object `object` of layer `dest` into the layer's pixels: into its topmost
 /// pixel object if it has one there, else as a new pixel object.
 /// Returns whether part of it, reaching too far past the canvas, was left out (see
-/// `layer_ops::drawable`), or, leaving it as it is, why it cannot be drawn: more memory than
-/// is free.
-fn bake_into(doc: &mut Document, dest: LayerId, object: ObjectId) -> Result<bool, String> {
+/// `layer_ops::drawable`), or, leaving it as it is, why it cannot be drawn: more than
+/// `memory` (what the rest of the work left) allows.
+fn bake_into(doc: &mut Document, dest: LayerId, object: ObjectId, memory: &mut Allowance) -> Result<bool, String> {
     let canvas = doc.canvas.rect();
     let Some(Layer { content: LayerContent::Objects(objects), .. }) = doc.layer_mut(dest) else { return Ok(false) };
     let Some(at) = objects.iter().position(|o| o.id == object) else { return Ok(false) };
     let ObjectKind::Image(i) = &objects[at].kind else { return Ok(false) };
-    let mut memory = Allowance::now();
-    let _hold = crate::memory::hold_for(0);
-    let drawable = crate::layer_ops::drawable(&i.image, &i.transform, &i.sampling, &canvas, &mut memory)?;
+    let drawable = crate::layer_ops::drawable(&i.image, &i.transform, &i.sampling, &canvas, memory)?;
     let ObjectKind::Image(i) = objects.remove(at).kind else { unreachable!("an image object, just seen") };
     // An image that shows nothing goes, leaving nothing.
     let Some((area, clipped)) = drawable else { return Ok(false) };
@@ -779,7 +777,7 @@ mod tests {
         let (layer, object) = (ids.layer(), ids.object());
         let pasted = Object { id: object, kind: ObjectKind::Image(image) };
         doc.insert(Position { parent: None, index: 0 }, Layer::with_objects(layer, "l", vec![pasted])).unwrap();
-        assert_eq!(bake_into(&mut doc, layer, object), Ok(false));
+        assert_eq!(bake_into(&mut doc, layer, object, &mut Allowance::memory(None)), Ok(false));
         assert!(doc.layer(layer).unwrap().objects().is_empty(), "an empty image object stayed");
     }
 
@@ -802,7 +800,7 @@ mod tests {
         let (layer, object) = (ids.layer(), ids.object());
         let pasted = Object { id: object, kind: ObjectKind::Image(image) };
         doc.insert(Position { parent: None, index: 0 }, Layer::with_objects(layer, "l", vec![pasted])).unwrap();
-        let why = bake_into(&mut doc, layer, object).unwrap_err();
+        let why = bake_into(&mut doc, layer, object, &mut Allowance::memory(Some(16_000_000_000))).unwrap_err();
         assert!(why.contains("memory"), "{why}");
         let objects = doc.layer(layer).unwrap().objects();
         assert!(matches!(objects, [Object { kind: ObjectKind::Image(_), .. }]), "the paste was not kept as it was");

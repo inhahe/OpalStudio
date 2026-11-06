@@ -50,7 +50,9 @@ pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<Free>) -> Result<Imp
         decoder.color_type(),
         image::ColorType::L16 | image::ColorType::La16 | image::ColorType::Rgb16 | image::ColorType::Rgba16
     );
-    let need = import_memory(decoder.dimensions(), decoder.total_bytes(), orientation, sixteen);
+    // The file's bytes, held while it is decoded, too.
+    let need = import_memory(decoder.dimensions(), decoder.total_bytes(), orientation, sixteen)
+        .plus(Need::at_once(bytes.len() as u64));
     if let Some(free) = free {
         free.check(need).map_err(|short| IoError::TooLarge { path: path.to_owned(), short })?;
     }
@@ -961,19 +963,20 @@ mod tests {
     #[test]
     fn an_image_needing_more_memory_than_is_free_is_refused_before_decoding() {
         let png = gradient_png(100, 50);
-        // 5,000 pixels at 8 bits: 20 KB decoded and 20 KB as RGBA in one go, 20 KB of tiles
-        // (kept at 8 bits).
+        // 5,000 pixels at 8 bits: in one go the file, 20 KB decoded and 20 KB as RGBA; 20 KB
+        // of tiles (kept at 8 bits).
+        let file = png.len() as u64;
         let memory = |bytes| Some(Free::memory(bytes));
         let r = import_bytes(&png, Path::new("big.png"), memory(50_000));
         let Err(IoError::TooLarge { short, .. }) = r else { panic!("not refused: {:?}", r.map(|i| i.width)) };
-        assert_eq!((short.need, short.have), (60_000, 50_000));
-        assert!(import_bytes(&png, Path::new("big.png"), memory(60_000)).is_ok());
+        assert_eq!((short.need, short.have), (file + 60_000, 50_000));
+        assert!(import_bytes(&png, Path::new("big.png"), memory(file + 60_000)).is_ok());
         assert!(import_bytes(&png, Path::new("big.png"), None).is_ok());
         // The tiles may go to disk; what is taken in one go may not.
-        let with_disk = |memory| Some(Free { memory, reclaimable: 0, disk: 1 << 30 });
-        assert!(import_bytes(&png, Path::new("big.png"), with_disk(40_000)).is_ok());
-        let r = import_bytes(&png, Path::new("big.png"), with_disk(39_999));
-        assert!(matches!(r, Err(IoError::TooLarge { short, .. }) if short.need == 40_000), "{:?}", r.err());
+        let with_disk = |memory| Some(Free { memory, reclaimable: 0, disk: 1 << 30, resident: 0 });
+        assert!(import_bytes(&png, Path::new("big.png"), with_disk(file + 40_000)).is_ok());
+        let r = import_bytes(&png, Path::new("big.png"), with_disk(file + 39_999));
+        assert!(matches!(r, Err(IoError::TooLarge { short, .. }) if short.need == file + 40_000), "{:?}", r.err());
         // A size no sum of which may wrap past the check.
         let huge = import_memory((u32::MAX, u32::MAX), u64::MAX - 1, image::metadata::Orientation::Rotate90, true);
         assert_eq!((huge.at_once, huge.total()), (u64::MAX, u64::MAX));

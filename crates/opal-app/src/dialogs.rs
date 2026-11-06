@@ -600,7 +600,7 @@ mod tests {
         let huge = size_note(MAX_SIDE, MAX_SIDE, Some(Free::memory(16_000_000_000)));
         assert!(huge.contains("720.0 GB") && huge.contains("more than the 16.0 GB free:"), "{huge}");
         // With room on disk for tiles past memory.
-        let disk = Some(Free { memory: 16_000_000_000, reclaimable: 0, disk: 100_000_000_000 });
+        let disk = Some(Free { memory: 16_000_000_000, reclaimable: 0, disk: 100_000_000_000, resident: 0 });
         let note = size_note(MAX_SIDE, MAX_SIDE, disk);
         assert!(note.contains("more than the 116.0 GB free in memory and on disk"), "{note}");
         assert!(!size_note(30_000, 30_000, disk).contains("more than"), "7.2 GB fits");
