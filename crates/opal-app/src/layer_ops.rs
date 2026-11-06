@@ -57,20 +57,27 @@ impl AppState {
     }
 
     pub(crate) fn new_layer(&mut self, group: bool) {
+        self.new_layer_named(group, None);
+    }
+
+    /// Adds a layer (or, `group`, a group) above the active one, called `name` or a
+    /// numbered name; its id, if it was added (otherwise the user is told why not).
+    pub(crate) fn new_layer_named(&mut self, group: bool, name: Option<&str>) -> Option<LayerId> {
         let d = self.active_mut().expect("available");
         let pos = Self::above_active(d);
         let label = if group { "New group" } else { "New layer" };
+        let mut made = None;
         let result = d.apply(label, |doc, ids| {
             let id = ids.layer();
             let n = count_layers(doc) + 1;
-            let layer = if group {
-                Layer::new_group(id, format!("Group {n}"))
-            } else {
-                Layer::new_empty(id, format!("Layer {n}"))
-            };
-            doc.insert(pos, layer)
+            let name = name.map_or_else(|| format!("{} {n}", if group { "Group" } else { "Layer" }), str::to_owned);
+            let layer = if group { Layer::new_group(id, name) } else { Layer::new_empty(id, name) };
+            doc.insert(pos, layer)?;
+            made = Some(id);
+            Ok::<(), TreeError>(())
         });
         self.report(result);
+        made
     }
 
     /// Copies each selected layer, just above itself.

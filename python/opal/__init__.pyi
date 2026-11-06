@@ -20,7 +20,7 @@ class Editor:
     def __init__(self, pipe: str, token: str) -> None: ...
     def call(self, method: str, **params: Any) -> Any: ...
     def methods(self) -> list[dict[str, Any]]: ...
-    def close(self) -> None: ...
+    def disconnect(self) -> None: ...
     def __enter__(self) -> Editor: ...
     def __exit__(self, *exc: Any) -> None: ...
     def new(self, *, width: int, height: int, background: Literal["white", "transparent"] = "white") -> Any:
@@ -33,26 +33,28 @@ class Editor:
     def open(self, *, path: str | os.PathLike[str]) -> Any:
         """Open an image or an Opal Studio file.
 
-        path: The file: an Opal Studio file, a PNG or a JPEG.
+        path: The file, by its absolute path: an Opal Studio file, a PNG or a JPEG.
         """
     def save(self, *, document: int | None = None) -> Any:
         """Save the image as an Opal Studio file.
 
         document: The image, by id. Default: the active image.
         """
-    def save_as(self, *, document: int | None = None, path: str | os.PathLike[str]) -> Any:
+    def save_as(self, *, document: int | None = None, path: str | os.PathLike[str], overwrite: bool = False) -> Any:
         """Save the image under a new name.
 
         document: The image, by id. Default: the active image.
-        path: Where: an Opal Studio file (.opal is added if it has no extension).
+        path: Where: an Opal Studio file (.opal is added unless it is there), by its absolute path.
+        overwrite: Write over a file already there (otherwise that is refused). Default: false.
         """
-    def export(self, *, document: int | None = None, path: str | os.PathLike[str], width: int | None = None, height: int | None = None, sixteen_bit: bool | None = None, quality: int | None = None) -> Any:
+    def export(self, *, document: int | None = None, path: str | os.PathLike[str], width: int | None = None, height: int | None = None, overwrite: bool = False, sixteen_bit: bool | None = None, quality: int | None = None) -> Any:
         """Save a flattened copy as PNG or JPEG.
 
         document: The image, by id. Default: the active image.
-        path: Where: a .png, .jpg or .jpeg file, whose extension chooses the format.
-        width: The width written, in pixels. From 1 to 300000. Default: the canvas's.
-        height: The height written, in pixels. From 1 to 300000. Default: the canvas's.
+        path: Where: a .png, .jpg or .jpeg file (whose extension chooses the format), by its absolute path.
+        width: The width written, in pixels. From 1 to 300000. Default: the canvas's, or in proportion to the height given.
+        height: The height written, in pixels. From 1 to 300000. Default: the canvas's, or in proportion to the width given.
+        overwrite: Write over a file already there (otherwise that is refused). Default: false.
         sixteen_bit: For a PNG: 16 bits a channel rather than 8. Default: the preference.
         quality: For a JPEG: its quality. From 1 to 100. Default: the preference.
         """
@@ -112,17 +114,17 @@ class Editor:
         document: The image, by id. Default: the active image.
         layers: The layers, by id. Default: the selected layers.
         """
-    def move_up(self, *, document: int | None = None, layers: list[int] | None = None) -> Any:
+    def move_up(self, *, document: int | None = None, layer: int | None = None) -> Any:
         """Move the active layer one place up.
 
         document: The image, by id. Default: the active image.
-        layers: The layers, by id. Default: the selected layers.
+        layer: The layer, by id. Default: the active layer.
         """
-    def move_down(self, *, document: int | None = None, layers: list[int] | None = None) -> Any:
+    def move_down(self, *, document: int | None = None, layer: int | None = None) -> Any:
         """Move the active layer one place down.
 
         document: The image, by id. Default: the active image.
-        layers: The layers, by id. Default: the selected layers.
+        layer: The layer, by id. Default: the active layer.
         """
     def merge_down(self, *, document: int | None = None, layer: int | None = None) -> Any:
         """Combine the active layer with the layer below it.

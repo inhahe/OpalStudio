@@ -150,6 +150,8 @@ pub struct AppState {
     pub answered: Vec<(u64, Result<serde_json::Value, String>)>,
     /// The images being written for such calls (`image`): each one's file, and its size.
     pub images_written: HashMap<u64, (PathBuf, u32, u32)>,
+    /// For each copy on its way to the clipboard, in order, the call it answers, if any.
+    pub copies_answered: VecDeque<Option<u64>>,
     pub confirm: Option<Confirm>,
     pub new_image: Option<NewImage>,
     pub last_new: NewImage,
@@ -245,6 +247,7 @@ impl AppState {
             next_answer: 0,
             answered: Vec::new(),
             images_written: HashMap::new(),
+            copies_answered: VecDeque::new(),
             confirm: None,
             new_image: None,
             last_new: NewImage { width: 1920, height: 1080, background: Background::White },
@@ -673,8 +676,9 @@ impl AppState {
     /// button not held (`pointer_held`), so its question never lands in the middle of a drag.
     pub fn poll_writes(&mut self, pointer_held: bool) {
         let finished = self.writer.finished();
-        // A failure stops a quit waiting for the writes, so that it is seen.
-        if finished.iter().any(|f| f.result.is_err()) {
+        // A failure stops a quit waiting for the writes, so that it is seen (but not one a
+        // script asked for, which only the script is told of).
+        if finished.iter().any(|f| f.result.is_err() && !matches!(f.then, Then::Answer(_))) {
             self.exit_after_writes = false;
         }
         let mut finished = VecDeque::from(finished);
@@ -781,16 +785,7 @@ impl AppState {
         } else {
             with_extension(path, ext)
         };
-        let format = match spec.kind {
-            ExportKind::Png => ExportFormat::Png { sixteen_bit: self.prefs.bool("export.png_16") },
-            ExportKind::Jpeg => {
-                let bg = self.prefs.color("export.jpeg_background");
-                ExportFormat::Jpeg {
-                    quality: self.prefs.f64("export.jpeg_quality").round() as u8,
-                    background: [bg.r(), bg.g(), bg.b()],
-                }
-            }
-        };
+        let format = self.export_format(spec.kind, None, None);
         let doc = d.doc().clone();
         let c = doc.canvas;
         let size = (spec.width, spec.height) != (c.width, c.height);
@@ -800,6 +795,28 @@ impl AppState {
             sampling: crate::prefs::sampling(&self.prefs, "export"),
         });
         self.export_to(doc, path, format, size, None, Then::Nothing, ctx);
+    }
+
+    /// How an export of `kind` is written: as the preferences say, but for `sixteen_bit` (a
+    /// PNG's) and `quality` (a JPEG's) where given.
+    pub(crate) fn export_format(
+        &self,
+        kind: ExportKind,
+        sixteen_bit: Option<bool>,
+        quality: Option<u8>,
+    ) -> ExportFormat {
+        match kind {
+            ExportKind::Png => {
+                ExportFormat::Png { sixteen_bit: sixteen_bit.unwrap_or_else(|| self.prefs.bool("export.png_16")) }
+            }
+            ExportKind::Jpeg => {
+                let bg = self.prefs.color("export.jpeg_background");
+                ExportFormat::Jpeg {
+                    quality: quality.unwrap_or_else(|| self.prefs.f64("export.jpeg_quality").round() as u8),
+                    background: [bg.r(), bg.g(), bg.b()],
+                }
+            }
+        }
     }
 
     /// Writes `doc`'s canvas to `path` (off the interface thread; a failure inside the
@@ -895,7 +912,7 @@ fn file_title(path: &Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
-fn with_extension(mut path: PathBuf, ext: &str) -> PathBuf {
+pub(crate) fn with_extension(mut path: PathBuf, ext: &str) -> PathBuf {
     let has = path.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext));
     if !has {
         let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -953,12 +970,12 @@ mod tests {
     #[test]
     fn a_copy_needing_more_memory_than_is_free_is_refused() {
         let mut st = app_with_image();
-        st.copy_within(true, crate::memory::Allowance::memory(Some(1000)), &ctx());
+        st.copy_within(true, crate::memory::Allowance::memory(Some(1000)), None, &ctx());
         let said = st.messages.back().map(|m| (m.title.as_str(), m.body.as_str()));
         assert!(said.is_some_and(|(t, b)| t == "Copy" && b.contains("memory")), "{said:?}");
         st.poll_copies();
         assert!(st.notice.is_none(), "copied all the same");
-        st.copy_within(true, crate::memory::Allowance::memory(None), &ctx());
+        st.copy_within(true, crate::memory::Allowance::memory(None), None, &ctx());
         st.poll_copies();
         assert!(st.notice.as_ref().is_some_and(|n| n.0.starts_with("Copied")), "{:?}", st.notice);
     }

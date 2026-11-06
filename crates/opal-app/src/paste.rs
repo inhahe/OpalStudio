@@ -15,12 +15,26 @@ impl AppState {
     /// trimmed to their content. It is put on the clipboard off the interface thread (see
     /// [`AppState::poll_copies`]).
     pub(crate) fn copy(&mut self, merged: bool, ctx: &egui::Context) {
-        self.copy_within(merged, crate::memory::Allowance::now(), ctx);
+        self.copy_within(merged, crate::memory::Allowance::now(), None, ctx);
+    }
+
+    /// [`copy`](Self::copy), answering API call `n` once the copy is on the clipboard;
+    /// whether a copy was started (if not, it was refused, and said so).
+    pub(crate) fn copy_answering(&mut self, merged: bool, n: u64, ctx: &egui::Context) -> bool {
+        let before = self.copies_answered.len();
+        self.copy_within(merged, crate::memory::Allowance::now(), Some(n), ctx);
+        self.copies_answered.len() > before
     }
 
     /// [`copy`](Self::copy), or why not if it would need more than `memory` (or more than
     /// the clipboard holds).
-    pub(crate) fn copy_within(&mut self, merged: bool, mut memory: crate::memory::Allowance, ctx: &egui::Context) {
+    pub(crate) fn copy_within(
+        &mut self,
+        merged: bool,
+        mut memory: crate::memory::Allowance,
+        answer: Option<u64>,
+        ctx: &egui::Context,
+    ) {
         let d = self.active().expect("available");
         let doc = d.doc();
         let canvas = doc.canvas.rect();
@@ -53,16 +67,27 @@ impl AppState {
         }
         let pixels = flat.read_rect(&bounds);
         let from = bounds.translate(-canvas.x0, -canvas.y0);
+        // Each copy's result comes back in the order they were started.
+        self.copies_answered.push_back(answer);
         // The cap on tiles is kept until the copy is on the clipboard.
         self.clipboard.write_image(Copied { from, pixels, _hold: memory.into_hold() }, ctx);
     }
 
-    /// Says how the copies put on the clipboard since the last frame went.
+    /// Says how the copies put on the clipboard since the last frame went: to the API call
+    /// a copy answers, if it does (see [`AppState::answers`]).
     pub(crate) fn poll_copies(&mut self) {
         for result in self.clipboard.written() {
-            match result {
-                Ok(from) => self.notify(format!("Copied {} × {} pixels.", from.width(), from.height())),
-                Err(e) => self.message(MessageKind::Error, "Could not copy", e),
+            let answer = self.copies_answered.pop_front().flatten();
+            match (result, answer) {
+                (Ok(from), answer) => {
+                    self.notify(format!("Copied {} × {} pixels.", from.width(), from.height()));
+                    if let Some(n) = answer {
+                        self.answered
+                            .push((n, Ok(serde_json::json!({ "width": from.width(), "height": from.height() }))));
+                    }
+                }
+                (Err(e), Some(n)) => self.answered.push((n, Err(format!("Could not copy: {e}")))),
+                (Err(e), None) => self.message(MessageKind::Error, "Could not copy", e),
             }
         }
     }

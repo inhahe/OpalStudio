@@ -1,7 +1,8 @@
 # Opal Studio — roadmap
 
 What each milestone delivers is specified in `design.md`. Status: milestones 0 and 1 are
-done; everything after them is planned.
+done; milestone S is under way (the API over its pipe, the Python package, the MCP stdio
+shim and the canvas as an image are built); everything after it is planned.
 
 **Order:** 0, 1, S, 2, A, 3, 4, and so on. Photo editing comes first, with vector shapes
 taken early (milestone 4), because by then the outline tool has built most of the curve

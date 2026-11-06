@@ -56,6 +56,13 @@ fn main() -> eframe::Result {
         std::process::exit(mcp::run_stdio());
     }
     let files: Vec<std::path::PathBuf> = std::env::args_os().skip(1).map(Into::into).collect();
+    // Opened from Explorer with an editor already running: they open in that one.
+    if !files.is_empty()
+        && let Some(file) = server::connection_file()
+        && server::hand_to_running(&file, &files)
+    {
+        return Ok(());
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Opal Studio")

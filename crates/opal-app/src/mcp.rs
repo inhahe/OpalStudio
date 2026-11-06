@@ -47,8 +47,8 @@ impl Pipe {
             return Err(format!("{} does not name a pipe and a token.", file.display()));
         };
         let name = pipe.rsplit(['\\', '/']).next().unwrap_or(pipe);
-        let stream = Stream::connect(name.to_ns_name::<GenericNamespaced>().map_err(|e| e.to_string())?)
-            .map_err(|_| "Opal Studio is not running (its pipe is gone): start it again.".to_owned())?;
+        let stream = crate::server::connect(name.to_ns_name::<GenericNamespaced>().map_err(|e| e.to_string())?)
+            .ok_or_else(|| "Opal Studio is not running (its pipe is gone): start it again.".to_owned())?;
         self.conn = Some(BufReader::new(stream));
         let mut hello = Map::new();
         hello.insert("token".into(), json!(token));

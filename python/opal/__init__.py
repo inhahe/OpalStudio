@@ -11,7 +11,8 @@ methods: ::
     editor.export(path="sky.png")
 
 Each method is one of the editor's commands (named as in the editor, in snake case) or a
-query (``documents``, ``layers``), taking its parameters by name; ``editor.methods()``
+query (``documents``, ``layers``, ``image``), taking its parameters by name (paths
+relative to this script's folder); ``editor.methods()``
 lists them all, ``opal/__init__.pyi`` describes them for editors and type checkers, and
 ``API.md`` documents them. A command that fails raises :class:`OpalError` with the
 editor's reason.
@@ -24,8 +25,10 @@ from __future__ import annotations
 
 import itertools
 import json
+import operator
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -59,12 +62,36 @@ def connection_file() -> Path:
     return base / "opalstudio" / "api.json"
 
 
+def _plain(value: Any) -> Any:
+    """What JSON cannot take as it is, as what it stands for: numpy's numbers and arrays (as
+    their values and lists), and anything else that is a whole number or a number."""
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    try:
+        return operator.index(value)
+    except TypeError:
+        pass
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise TypeError(f"A {type(value).__name__} cannot be sent to the editor.") from None
+
+
 class _Pipe:
     """The connection: a line out, a line back."""
 
     def __init__(self, name: str):
         if sys.platform == "win32":
-            self._file = open(name, "r+b", buffering=0)
+            # While every instance of the pipe is busy (the editor accepting another client
+            # just then: ERROR_PIPE_BUSY), it is tried again for a moment.
+            for attempt in range(40):
+                try:
+                    self._file = open(name, "r+b", buffering=0)
+                    break
+                except OSError as e:
+                    if getattr(e, "winerror", None) != 231 or attempt == 39:
+                        raise
+                    time.sleep(0.025)
             self._recv = self._file.read
             self._send = self._file.write
         else:
@@ -79,12 +106,17 @@ class _Pipe:
         self._pending = b""
 
     def exchange(self, message: dict) -> dict:
-        self._send((json.dumps(message) + "\n").encode("utf-8"))
-        while b"\n" not in self._pending:
-            chunk = self._recv(65536)
-            if not chunk:
-                raise OpalError("The editor closed the connection.")
-            self._pending += chunk
+        line = (json.dumps(message, default=_plain) + "\n").encode("utf-8")
+        try:
+            self._send(line)
+            while b"\n" not in self._pending:
+                chunk = self._recv(65536)
+                if not chunk:
+                    raise OpalError("The editor closed the connection.")
+                self._pending += chunk
+        except OSError:
+            # A pipe the editor has dropped (it closed, or the user disconnected scripts).
+            raise OpalError("The editor closed the connection.") from None
         line, self._pending = self._pending.split(b"\n", 1)
         return json.loads(line)
 
@@ -96,18 +128,28 @@ class Editor:
     """A connection to a running Opal Studio: its methods are the editor's."""
 
     def __init__(self, pipe: str, token: str):
-        self._pipe = _Pipe(pipe)
+        try:
+            self._pipe = _Pipe(pipe)
+        except OSError:
+            raise OpalError("Opal Studio is not running (its pipe is gone): start it again.") from None
         self._ids = itertools.count(1)
-        hello = self.call("hello", token=token)
-        if hello.get("protocol") != PROTOCOL:
-            raise OpalError(f"The editor speaks protocol {hello.get('protocol')}, this package {PROTOCOL}.")
+        try:
+            hello = self.call("hello", token=token)
+            if hello.get("protocol") != PROTOCOL:
+                raise OpalError(f"The editor speaks protocol {hello.get('protocol')}, this package {PROTOCOL}.")
+        except OpalError:
+            self._pipe.close()
+            raise
         self.version = hello.get("editor")
         self._methods = {m["name"]: m for m in self.call("methods")}
 
     def call(self, method: str, **params: Any) -> Any:
         """Calls ``method`` with ``params``; returns what it gives back."""
-        # Paths given as path objects go as text; everything else as it is.
-        params = {k: os.fspath(v) if isinstance(v, os.PathLike) else v for k, v in params.items()}
+        # Paths go as absolute ones, against this script's folder (the editor's is another).
+        kinds = {p["name"]: p["kind"] for p in self.__dict__.get("_methods", {}).get(method, {}).get("params", [])}
+        params = {
+            k: os.path.abspath(os.fspath(v)) if kinds.get(k) == "path" and v is not None else v for k, v in params.items()
+        }
         reply = self._pipe.exchange({"jsonrpc": "2.0", "id": next(self._ids), "method": method, "params": params})
         if "error" in reply:
             raise OpalError(reply["error"].get("message", "The editor refused."), reply["error"].get("code"))
@@ -129,14 +171,15 @@ class Editor:
         method.__doc__ = methods[name]["help"]
         return method
 
-    def close(self) -> None:
+    def disconnect(self) -> None:
+        """Closes the connection (``close`` is the editor's command, which closes an image)."""
         self._pipe.close()
 
     def __enter__(self) -> Editor:
         return self
 
     def __exit__(self, *exc: Any) -> None:
-        self.close()
+        self.disconnect()
 
 
 def connect(file: str | os.PathLike | None = None) -> Editor:

@@ -24,7 +24,7 @@ Open an image or an Opal Studio file.
 
 | Parameter | Kind | |
 |---|---|---|
-| `path` (required) | path | The file: an Opal Studio file, a PNG or a JPEG. |
+| `path` (required) | path | The file, by its absolute path: an Opal Studio file, a PNG or a JPEG. |
 
 ### `save`
 
@@ -41,7 +41,8 @@ Save the image under a new name.
 | Parameter | Kind | |
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
-| `path` (required) | path | Where: an Opal Studio file (.opal is added if it has no extension). |
+| `path` (required) | path | Where: an Opal Studio file (.opal is added unless it is there), by its absolute path. |
+| `overwrite` | bool | Write over a file already there (otherwise that is refused). Default: false. |
 
 ### `export`
 
@@ -50,9 +51,10 @@ Save a flattened copy as PNG or JPEG.
 | Parameter | Kind | |
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
-| `path` (required) | path | Where: a .png, .jpg or .jpeg file, whose extension chooses the format. |
-| `width` | int | The width written, in pixels. From 1 to 300000. Default: the canvas's. |
-| `height` | int | The height written, in pixels. From 1 to 300000. Default: the canvas's. |
+| `path` (required) | path | Where: a .png, .jpg or .jpeg file (whose extension chooses the format), by its absolute path. |
+| `width` | int | The width written, in pixels. From 1 to 300000. Default: the canvas's, or in proportion to the height given. |
+| `height` | int | The height written, in pixels. From 1 to 300000. Default: the canvas's, or in proportion to the width given. |
+| `overwrite` | bool | Write over a file already there (otherwise that is refused). Default: false. |
 | `sixteen_bit` | bool | For a PNG: 16 bits a channel rather than 8. Default: the preference. |
 | `quality` | int | For a JPEG: its quality. From 1 to 100. Default: the preference. |
 
@@ -149,7 +151,7 @@ Move the active layer one place up.
 | Parameter | Kind | |
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
-| `layers` | layers | The layers, by id. Default: the selected layers. |
+| `layer` | layer | The layer, by id. Default: the active layer. |
 
 ### `move_down`
 
@@ -158,7 +160,7 @@ Move the active layer one place down.
 | Parameter | Kind | |
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
-| `layers` | layers | The layers, by id. Default: the selected layers. |
+| `layer` | layer | The layer, by id. Default: the active layer. |
 
 ### `merge_down`
 

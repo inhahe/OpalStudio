@@ -190,6 +190,18 @@ impl DocState {
         self.active
     }
 
+    /// The active layer and the selection, to be put back ([`set_selection_state`]).
+    ///
+    /// [`set_selection_state`]: Self::set_selection_state
+    pub(crate) fn selection_state(&self) -> (Option<LayerId>, HashSet<LayerId>) {
+        (self.active, self.selected.clone())
+    }
+
+    pub(crate) fn set_selection_state(&mut self, (active, selected): (Option<LayerId>, HashSet<LayerId>)) {
+        self.active = active;
+        self.selected = selected;
+    }
+
     /// Makes `id` the active layer and the only one selected.
     pub fn select_only(&mut self, id: LayerId) {
         self.active = Some(id);

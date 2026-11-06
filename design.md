@@ -1026,11 +1026,20 @@ server. Both rest on one language-neutral API.
   number in a range, one of some words, a path, an image's or layers' ids), and either a
   default or what the editor holds now (`document`: the active image; `layers`: the
   selected ones); `methods` lists them all, which is what the stubs and tools are made from.
-  Queries so far: `documents`, `layers`. A call is carried out between frames as the
-  interface would, without a dialog: what one would have said comes back as the call's
-  error (an error) or its `notes`; a save or export is answered once written. Commands
-  that need the transform box (Paste, Transform) and those of the view and panels are not
-  callable yet, or at all.
+  Queries so far: `documents`, `layers`, `image`. A call is carried out between frames as
+  the interface would, without a dialog: what one would have said comes back with it, an
+  error or a refusal (which the interface tells as information) as its failure, a warning
+  or a status-bar notice as its `notes`; a refused call leaves the user's active image and
+  selection as they were. A save, export or copy is answered once written. Paths must be
+  absolute (the Python package makes them so against the script's own folder); a save or
+  export over a file already there needs `overwrite`, and Save As adds `.opal` as its
+  dialog does. While the user has a dialog open or a button held, requests wait; once they
+  have asked to quit, they are refused. Disconnecting (the status bar) drops every client
+  and makes a new token. A line from a client is at most 1 MB (4 KB before `hello`), and at
+  most 16 connections wait to say hello at once. Scripts reach the first editor started: a
+  second one serves none, and one started with files hands them to the first to open and
+  quits. Commands that need the transform box (Paste, Transform) and those of the view and
+  panels are not callable yet, or at all.
 - **Python package** `opal-studio` (module `opal`): connects to the running editor or starts
   a headless one (`opal-studio --headless script.py` for batch work).
 - **In the editor:** a Run Script command, a console panel showing output and errors, and a

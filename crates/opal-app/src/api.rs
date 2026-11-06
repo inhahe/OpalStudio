@@ -97,31 +97,36 @@ const LAYER: Param = Param {
     otherwise: Otherwise::Now("the active layer"),
 };
 
+const OVERWRITE: Param = Param {
+    name: "overwrite",
+    kind: Kind::Bool,
+    help: "Write over a file already there (otherwise that is refused).",
+    otherwise: Otherwise::Value("false"),
+};
+
 const fn side(name: &'static str, help: &'static str, otherwise: Otherwise) -> Param {
     Param { name, kind: Kind::Int { min: 1, max: SIDE }, help, otherwise }
 }
 
 const NEW_WIDTH: Param = side("width", "Its width, in pixels.", Otherwise::Required);
 const NEW_HEIGHT: Param = side("height", "Its height, in pixels.", Otherwise::Required);
-const EXPORT_WIDTH: Param = side("width", "The width written, in pixels.", Otherwise::Now("the canvas's"));
-const EXPORT_HEIGHT: Param = side("height", "The height written, in pixels.", Otherwise::Now("the canvas's"));
+const EXPORT_WIDTH: Param = side(
+    "width",
+    "The width written, in pixels.",
+    Otherwise::Now("the canvas's, or in proportion to the height given"),
+);
+const EXPORT_HEIGHT: Param = side(
+    "height",
+    "The height written, in pixels.",
+    Otherwise::Now("the canvas's, or in proportion to the width given"),
+);
 const RESIZED_WIDTH: Param = side("width", "The new width, in pixels.", Otherwise::Required);
 const RESIZED_HEIGHT: Param = side("height", "The new height, in pixels.", Otherwise::Required);
 const CANVAS_WIDTH: Param = side("width", "The new width, in pixels.", Otherwise::Now("the canvas's"));
 const CANVAS_HEIGHT: Param = side("height", "The new height, in pixels.", Otherwise::Now("the canvas's"));
 
-/// Where Resize Canvas puts the old canvas in the new, by name: each `[x, y]`, 0 to 2.
-const ANCHORS: [(&str, [u8; 2]); 9] = [
-    ("top-left", [0, 0]),
-    ("top", [1, 0]),
-    ("top-right", [2, 0]),
-    ("left", [0, 1]),
-    ("center", [1, 1]),
-    ("right", [2, 1]),
-    ("bottom-left", [0, 2]),
-    ("bottom", [1, 2]),
-    ("bottom-right", [2, 2]),
-];
+/// Where Resize Canvas puts the old canvas in the new, by name, row by row: the one at `i` is
+/// at `[i % 3, i / 3]` (left, center, right; top, middle, bottom).
 const ANCHOR_NAMES: &[&str] =
     &["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"];
 
@@ -143,7 +148,7 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
         Open => &[Param {
             name: "path",
             kind: Kind::Path,
-            help: "The file: an Opal Studio file, a PNG or a JPEG.",
+            help: "The file, by its absolute path: an Opal Studio file, a PNG or a JPEG.",
             otherwise: Otherwise::Required,
         }],
         Save => &[DOCUMENT],
@@ -152,20 +157,22 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             Param {
                 name: "path",
                 kind: Kind::Path,
-                help: "Where: an Opal Studio file (.opal is added if it has no extension).",
+                help: "Where: an Opal Studio file (.opal is added unless it is there), by its absolute path.",
                 otherwise: Otherwise::Required,
             },
+            OVERWRITE,
         ],
         Export => &[
             DOCUMENT,
             Param {
                 name: "path",
                 kind: Kind::Path,
-                help: "Where: a .png, .jpg or .jpeg file, whose extension chooses the format.",
+                help: "Where: a .png, .jpg or .jpeg file (whose extension chooses the format), by its absolute path.",
                 otherwise: Otherwise::Required,
             },
             EXPORT_WIDTH,
             EXPORT_HEIGHT,
+            OVERWRITE,
             Param {
                 name: "sixteen_bit",
                 kind: Kind::Bool,
@@ -194,8 +201,8 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             DOCUMENT,
             Param { name: "name", kind: Kind::Text, help: "Its name.", otherwise: Otherwise::Now("a numbered one") },
         ],
-        Duplicate | GroupLayers | DeleteLayer | MoveUp | MoveDown | MergeSelected | Rasterize => &[DOCUMENT, LAYERS],
-        MergeDown | MergeGroup => &[DOCUMENT, LAYER],
+        Duplicate | GroupLayers | DeleteLayer | MergeSelected | Rasterize => &[DOCUMENT, LAYERS],
+        MoveUp | MoveDown | MergeDown | MergeGroup => &[DOCUMENT, LAYER],
         ResizeImage => &[
             DOCUMENT,
             RESIZED_WIDTH,
@@ -311,8 +318,14 @@ fn snake(name: &str) -> String {
     out
 }
 
-/// Every method of the API: the commands that have parameterized forms, then the queries.
-pub fn methods() -> Vec<Method> {
+/// Every method of the API: the commands that have parameterized forms, then the queries
+/// (made once).
+pub fn methods() -> &'static [Method] {
+    static METHODS: std::sync::OnceLock<Vec<Method>> = std::sync::OnceLock::new();
+    METHODS.get_or_init(make_methods)
+}
+
+fn make_methods() -> Vec<Method> {
     let commands = Cmd::ALL.into_iter().filter_map(|cmd| {
         let params = params(cmd)?;
         Some(Method { name: snake(&format!("{cmd:?}")), help: cmd.info().description, params, cmd: Some(cmd) })
@@ -413,7 +426,16 @@ fn check_value(p: &Param, value: &Value) -> Result<(), String> {
             Some(x) => return Err(format!("\"{name}\" must lie between {min} and {max}, not {x}")),
             None => false,
         },
-        Kind::Text | Kind::Path => value.is_string(),
+        Kind::Text => value.is_string(),
+        Kind::Path => match value.as_str() {
+            Some(p) if std::path::Path::new(p).is_absolute() => true,
+            Some(p) => {
+                return Err(format!(
+                    "\"{name}\" must be an absolute path (the editor's folder is not the caller's), not \"{p}\""
+                ));
+            }
+            None => false,
+        },
         Kind::Choice(words) => match value.as_str() {
             Some(w) if words.contains(&w) => true,
             Some(w) => return Err(format!("\"{name}\" must be one of {}, not \"{w}\"", words.join(", "))),
@@ -454,7 +476,7 @@ impl AppState {
     /// Calls method `name` of the API with the arguments `given`: carries out the command
     /// (or answers the query) as the interface would, without asking anything.
     pub fn call(&mut self, name: &str, given: &Map<String, Value>, ctx: &egui::Context) -> Reply {
-        let Some(method) = methods().into_iter().find(|m| m.name == name) else {
+        let Some(method) = methods().iter().find(|m| m.name == name) else {
             return Reply::Now(Err(format!("There is no method \"{name}\".")));
         };
         let args = match Args::check(method.params, given) {
@@ -462,25 +484,29 @@ impl AppState {
             Err(why) => return Reply::Now(Err(format!("{name}: {why}."))),
         };
         let told = self.messages.len();
+        let notice = self.notice.clone();
+        // The image and layers the user had, to put back if the command is refused (it
+        // makes those it names the active ones).
+        let view = (self.active_doc, self.docs.iter().map(|d| (d.id, d.selection_state())).collect::<Vec<_>>());
         let reply = match method.cmd {
-            Some(cmd) => self.carry_out(cmd, &args, ctx),
+            Some(cmd) => self.carry_out(cmd, method.params, &args, ctx),
             None if method.name == "image" => self.image_by_args(&args, ctx),
             None => Reply::Now(self.answer(&method.name, &args)),
         };
-        // What would have been told in a dialog comes back with the reply instead.
+        // What would have been told in a dialog comes back with the reply instead: an error,
+        // or a refusal (told as information), as the call's failure; a warning, or a notice
+        // the status bar would have shown, as a note.
         let messages: Vec<_> = self.messages.drain(told..).collect();
-        let errors: Vec<String> = messages
-            .iter()
-            .filter(|m| m.kind == MessageKind::Error)
-            .map(|m| format!("{}: {}", m.title, m.body))
-            .collect();
-        let notes: Vec<String> = messages
-            .iter()
-            .filter(|m| m.kind != MessageKind::Error)
-            .map(|m| format!("{}: {}", m.title, m.body))
-            .collect();
-        match reply {
-            Reply::Now(Ok(_)) if !errors.is_empty() => Reply::Now(Err(errors.join("\n"))),
+        let text = |m: &crate::state::Message| format!("{}: {}", m.title, m.body);
+        let refusals: Vec<String> = messages.iter().filter(|m| m.kind != MessageKind::Warning).map(text).collect();
+        let mut notes: Vec<String> = messages.iter().filter(|m| m.kind == MessageKind::Warning).map(text).collect();
+        if self.notice != notice
+            && let Some((said, _)) = &self.notice
+        {
+            notes.push(said.clone());
+        }
+        let reply = match reply {
+            Reply::Now(Ok(_)) if !refusals.is_empty() => Reply::Now(Err(refusals.join("\n"))),
             Reply::Now(Ok(mut value)) if !notes.is_empty() => {
                 if let Value::Object(fields) = &mut value {
                     fields.insert("notes".to_owned(), json!(notes));
@@ -488,7 +514,19 @@ impl AppState {
                 Reply::Now(Ok(value))
             }
             other => other,
+        };
+        if method.cmd.is_some() && matches!(reply, Reply::Now(Err(_))) {
+            let (active, selections) = view;
+            for (id, s) in selections {
+                if let Some(d) = self.doc_mut(id) {
+                    d.set_selection_state(s);
+                }
+            }
+            if let Some(id) = active.filter(|id| self.doc(*id).is_some()) {
+                self.show_doc(id);
+            }
         }
+        reply
     }
 
     /// Answers query `name`.
@@ -530,11 +568,11 @@ impl AppState {
     }
 
     /// Carries out `cmd` with `args`.
-    fn carry_out(&mut self, cmd: Cmd, args: &Args, ctx: &egui::Context) -> Reply {
+    fn carry_out(&mut self, cmd: Cmd, params: &[Param], args: &Args, ctx: &egui::Context) -> Reply {
         let now = |r: Result<Value, String>| Reply::Now(r);
         // The image and layers named become the active ones, as clicking them would make
         // them, so that the command acts on them.
-        if params(cmd).expect("callable").iter().any(|p| p.kind == Kind::Document) {
+        if params.iter().any(|p| p.kind == Kind::Document) {
             match self.which(args) {
                 Ok(id) => self.show_doc(id),
                 Err(why) => return now(Err(why)),
@@ -577,13 +615,20 @@ impl AppState {
             }
             Cmd::SaveAs => {
                 let id = doc.expect("available");
-                let mut path = args.path("path");
-                if path.extension().is_none() {
-                    path.set_extension("opal");
+                let path = crate::state::with_extension(args.path("path"), "opal");
+                let own = self.doc(id).and_then(|d| d.path.as_ref()) == Some(&path);
+                if !own && path.exists() && args.flag("overwrite") != Some(true) {
+                    return now(Err(format!("{} is there already: give overwrite to write over it.", path.display())));
                 }
                 self.reply_after_write(|st, then| st.save_to(id, path, then, ctx))
             }
             Cmd::Export => self.export_by_args(args, ctx),
+            Cmd::Copy | Cmd::CopyMerged => {
+                // Answered once on the clipboard (a failure there is the call's).
+                self.next_answer += 1;
+                let n = self.next_answer;
+                if self.copy_answering(cmd == Cmd::CopyMerged, n, ctx) { Reply::Later(n) } else { now(Ok(json!({}))) }
+            }
             Cmd::Close => {
                 let id = doc.expect("available");
                 let unsaved = self.doc(id).is_some_and(|d| d.is_dirty());
@@ -595,15 +640,11 @@ impl AppState {
                 self.close_now(id);
                 now(Ok(json!({})))
             }
-            Cmd::NewLayer | Cmd::NewGroup => {
-                self.run(cmd, ctx);
-                let d = self.active_mut().expect("available");
-                let id = d.active_layer().expect("just made");
-                if let Some(name) = args.text("name") {
-                    self.rename_layer(doc.expect("available"), id, name.to_owned());
-                }
-                now(Ok(json!({ "layer": id.0 })))
-            }
+            Cmd::NewLayer | Cmd::NewGroup => match self.new_layer_named(cmd == Cmd::NewGroup, args.text("name")) {
+                Some(id) => now(Ok(json!({ "layer": id.0 }))),
+                // Refused, and said why.
+                None => now(Ok(json!({}))),
+            },
             Cmd::ResizeImage => {
                 let spec = ResizeImage {
                     width: args.int("width") as u32,
@@ -616,7 +657,10 @@ impl AppState {
             }
             Cmd::ResizeCanvas => {
                 let c = self.active().expect("available").doc().canvas;
-                let anchor = args.text("anchor").and_then(|a| ANCHORS.iter().find(|(n, _)| *n == a)).map(|(_, at)| *at);
+                let anchor = args
+                    .text("anchor")
+                    .and_then(|a| ANCHOR_NAMES.iter().position(|n| *n == a))
+                    .map(|i| [(i % 3) as u8, (i / 3) as u8]);
                 let spec = ResizeCanvas {
                     width: args.opt_int("width").map_or(c.width, |w| w as u32),
                     height: args.opt_int("height").map_or(c.height, |h| h as u32),
@@ -647,14 +691,26 @@ impl AppState {
             Cmd::ToggleVisible | Cmd::ToggleLock => {
                 let visibility = cmd == Cmd::ToggleVisible;
                 let wanted = args.flag(if visibility { "visible" } else { "locked" });
-                let ids = self.active().expect("available").selection();
-                for id in ids {
-                    let l = self.active().and_then(|d| d.doc().layer(id)).expect("selected");
-                    let now_on = if visibility { l.visible } else { l.locked };
-                    if wanted.is_none_or(|w| w != now_on) {
-                        self.set_layer_flag(id, visibility);
+                let d = self.active_mut().expect("available");
+                let ids = d.selection();
+                let label = match (visibility, wanted) {
+                    (true, Some(true)) => "Show layers",
+                    (true, Some(false)) => "Hide layers",
+                    (true, None) => "Show or hide layers",
+                    (false, Some(true)) => "Lock layers",
+                    (false, Some(false)) => "Unlock layers",
+                    (false, None) => "Lock or unlock layers",
+                };
+                // One step of history for all of them.
+                let result = d.apply(label, |doc, _| {
+                    for id in ids {
+                        let l = doc.layer_mut(id).ok_or(opal_core::document::TreeError::NoSuchLayer(id))?;
+                        let flag = if visibility { &mut l.visible } else { &mut l.locked };
+                        *flag = wanted.unwrap_or(!*flag);
                     }
-                }
+                    Ok::<(), opal_core::document::TreeError>(())
+                });
+                self.report(result);
                 now(Ok(self.selection_json()))
             }
             Cmd::Rename => {
@@ -673,11 +729,14 @@ impl AppState {
     /// Makes the layers `args` names the selected ones (the first named the active one, or
     /// the one `layer` names): each must be in the active image.
     fn target(&mut self, args: &Args) -> Result<(), String> {
-        let ids = match (args.layer(), args.layers()) {
+        let mut ids = match (args.layer(), args.layers()) {
             (Some(one), _) => vec![one],
             (None, Some(many)) => many,
             (None, None) => return Ok(()),
         };
+        // Each once: a repeated one would be toggled back out of the selection.
+        let mut seen = std::collections::HashSet::new();
+        ids.retain(|id| seen.insert(*id));
         let d = self.active_mut().ok_or("No image is open.")?;
         if let Some(missing) = ids.iter().find(|id| d.doc().layer(**id).is_none()) {
             return Err(format!("There is no layer {} in the image.", missing.0));
@@ -694,25 +753,25 @@ impl AppState {
     fn export_by_args(&mut self, args: &Args, ctx: &egui::Context) -> Reply {
         let path = args.path("path");
         let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
-        let format = match ext.as_deref() {
-            Some("png") => ExportFormat::Png {
-                sixteen_bit: args.flag("sixteen_bit").unwrap_or_else(|| self.prefs.bool("export.png_16")),
-            },
-            Some("jpg" | "jpeg") => {
-                let bg = self.prefs.color("export.jpeg_background");
-                let quality = args
-                    .opt_int("quality")
-                    .map_or_else(|| self.prefs.f64("export.jpeg_quality").round() as u8, |q| q as u8);
-                ExportFormat::Jpeg { quality, background: [bg.r(), bg.g(), bg.b()] }
-            }
+        let kind = match ext.as_deref() {
+            Some("png") => crate::state::ExportKind::Png,
+            Some("jpg" | "jpeg") => crate::state::ExportKind::Jpeg,
             _ => return Reply::Now(Err("export: \"path\" must end in .png, .jpg or .jpeg.".to_owned())),
         };
+        if path.exists() && args.flag("overwrite") != Some(true) {
+            return Reply::Now(Err(format!("{} is there already: give overwrite to write over it.", path.display())));
+        }
+        let format = self.export_format(kind, args.flag("sixteen_bit"), args.opt_int("quality").map(|q| q as u8));
         let doc = self.active().expect("available").doc().clone();
         let c = doc.canvas;
-        let (width, height) = (
-            args.opt_int("width").map_or(c.width, |w| w as u32),
-            args.opt_int("height").map_or(c.height, |h| h as u32),
-        );
+        // One side given: the other in proportion, as the dialog keeps it.
+        let ratio = |a: u32, b: u32, given: i64| ((given as f64 * f64::from(b) / f64::from(a)).round() as u32).max(1);
+        let (width, height) = match (args.opt_int("width"), args.opt_int("height")) {
+            (Some(w), Some(h)) => (w as u32, h as u32),
+            (Some(w), None) => (w as u32, ratio(c.width, c.height, w)),
+            (None, Some(h)) => (ratio(c.height, c.width, h), h as u32),
+            (None, None) => (c.width, c.height),
+        };
         let size = ((width, height) != (c.width, c.height)).then(|| ExportSize {
             width,
             height,
@@ -760,8 +819,8 @@ impl AppState {
         reply
     }
 
-    /// The answers to calls whose writes have finished since asked last, by number: for
-    /// an image asked for, its file's bytes (the file then goes).
+    /// The answers to calls whose writes (or copies to the clipboard) have finished since
+    /// asked last, by number: for an image asked for, its file's bytes (the file then goes).
     pub fn answers(&mut self) -> Vec<(u64, Result<Value, String>)> {
         let answered = std::mem::take(&mut self.answered);
         answered
@@ -935,7 +994,7 @@ mod tests {
              \x20   def __init__(self, pipe: str, token: str) -> None: ...\n\
              \x20   def call(self, method: str, **params: Any) -> Any: ...\n\
              \x20   def methods(self) -> list[dict[str, Any]]: ...\n\
-             \x20   def close(self) -> None: ...\n\
+             \x20   def disconnect(self) -> None: ...\n\
              \x20   def __enter__(self) -> Editor: ...\n\
              \x20   def __exit__(self, *exc: Any) -> None: ...\n",
         );
@@ -1047,7 +1106,7 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), methods.len(), "two methods share a name");
-        for m in &methods {
+        for m in methods {
             for p in m.params {
                 if let Otherwise::Value(json) = p.otherwise {
                     let v: Value = serde_json::from_str(json).unwrap_or_else(|_| panic!("{}.{}", m.name, p.name));
@@ -1134,6 +1193,128 @@ mod tests {
         assert!(st.messages.is_empty(), "{:?}", st.messages);
         let err = now(&mut st, "zoom_in", json!({})).unwrap_err();
         assert!(err.contains("no method"), "{err}");
+    }
+
+    /// Waits for the answer to call `n`, polling the writes.
+    fn later(st: &mut AppState, n: u64) -> Result<Value, String> {
+        for _ in 0..1000 {
+            st.poll_writes(false);
+            if let Some((_, r)) = st.answers().into_iter().find(|(m, _)| *m == n) {
+                return r;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("call {n} was never answered");
+    }
+
+    #[test]
+    fn files_are_named_as_the_interface_names_them_and_not_written_over() {
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        let ctx = egui::Context::default();
+        now(&mut st, "new", json!({ "width": 40, "height": 20 })).unwrap();
+        let dir = std::env::temp_dir().join(format!("opal-api-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A file of another kind, there already: saving "as" it adds .opal, as the dialog does.
+        let photo = dir.join("photo.jpg");
+        std::fs::write(&photo, b"not to be lost").unwrap();
+        let Reply::Later(n) = st.call("save_as", &args(json!({ "path": photo.display().to_string() })), &ctx) else {
+            panic!("answered at once")
+        };
+        let saved = later(&mut st, n).unwrap();
+        assert_eq!(saved["path"], json!(dir.join("photo.jpg.opal").display().to_string()));
+        assert_eq!(std::fs::read(&photo).unwrap(), b"not to be lost");
+        // Over a file there already, only when told to; its own file, always.
+        let other = dir.join("other.opal");
+        std::fs::write(&other, b"x").unwrap();
+        let refused = now(&mut st, "save_as", json!({ "path": other.display().to_string() })).unwrap_err();
+        assert!(refused.contains("there already"), "{refused}");
+        let Reply::Later(n) = st.call("save", &args(json!({})), &ctx) else { panic!("refused its own file") };
+        later(&mut st, n).unwrap();
+        // An export of one side given keeps the proportions.
+        let png = dir.join("half.png");
+        let Reply::Later(n) = st.call("export", &args(json!({ "path": png.display().to_string(), "width": 20 })), &ctx)
+        else {
+            panic!("answered at once")
+        };
+        later(&mut st, n).unwrap();
+        let header = std::fs::read(&png).unwrap();
+        let side = |at: usize| u32::from_be_bytes(header[at..at + 4].try_into().unwrap());
+        assert_eq!((side(16), side(20)), (20, 10), "not in proportion");
+        let again = now(&mut st, "export", json!({ "path": png.display().to_string() })).unwrap_err();
+        assert!(again.contains("overwrite"), "{again}");
+        let Reply::Later(n) =
+            st.call("export", &args(json!({ "path": png.display().to_string(), "overwrite": true })), &ctx)
+        else {
+            panic!("refused with overwrite")
+        };
+        later(&mut st, n).unwrap();
+        // A relative path: the editor's folder is not the caller's.
+        let relative = now(&mut st, "export", json!({ "path": "sky.png" })).unwrap_err();
+        assert!(relative.contains("absolute"), "{relative}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_refusal_fails_the_call_and_leaves_the_users_view_as_it_was() {
+        let mut st = AppState::new();
+        let first = now(&mut st, "new", json!({ "width": 30, "height": 30, "background": "transparent" })).unwrap();
+        let first = first["document"].as_u64().unwrap();
+        let a = now(&mut st, "new_layer", json!({ "name": "a" })).unwrap()["layer"].as_u64().unwrap();
+        let b = now(&mut st, "new_layer", json!({ "name": "b" })).unwrap()["layer"].as_u64().unwrap();
+        now(&mut st, "toggle_visible", json!({ "layers": [a, b], "visible": true })).unwrap();
+        let second = now(&mut st, "new", json!({ "width": 10, "height": 10 })).unwrap()["document"].as_u64().unwrap();
+        // The user is on the second image; a script's call on the first is refused (its
+        // layers are all empty: told as information, a refusal).
+        let refused = now(&mut st, "crop_to_content", json!({ "document": first })).unwrap_err();
+        assert!(refused.contains("empty"), "{refused}");
+        assert_eq!(st.active_doc.map(|d| d.0), Some(second), "the active image changed");
+        let d = st.doc(DocId(first)).unwrap();
+        assert_eq!(d.selection(), [LayerId(a), LayerId(b)], "the selection changed");
+        // Ids named twice, each once.
+        let both = now(&mut st, "toggle_visible", json!({ "document": first, "layers": [a, b, a], "visible": false }))
+            .unwrap();
+        assert_eq!(both["layers"], json!([a, b]));
+        let layers = now(&mut st, "layers", json!({ "document": first })).unwrap();
+        assert!(
+            layers.as_array().unwrap().iter().filter(|l| l["layer"] != json!(1)).all(|l| l["visible"] == json!(false))
+        );
+        // One step of history for both.
+        now(&mut st, "undo", json!({ "document": first })).unwrap();
+        let layers = now(&mut st, "layers", json!({ "document": first })).unwrap();
+        assert!(layers.as_array().unwrap().iter().all(|l| l["visible"] == json!(true)), "{layers}");
+        assert!(st.messages.is_empty());
+    }
+
+    #[test]
+    fn a_layer_made_with_a_name_is_one_step_of_history() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 10, "height": 10 })).unwrap();
+        let before = now(&mut st, "layers", json!({})).unwrap().as_array().unwrap().len();
+        now(&mut st, "new_layer", json!({ "name": "Sky" })).unwrap();
+        now(&mut st, "undo", json!({})).unwrap();
+        let after = now(&mut st, "layers", json!({})).unwrap();
+        assert_eq!(after.as_array().unwrap().len(), before, "one undo left a layer: {after}");
+    }
+
+    #[test]
+    fn a_copy_is_answered_once_on_the_clipboard() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 30, "height": 20 })).unwrap();
+        let Reply::Later(n) = st.call("copy_merged", &args(json!({})), &egui::Context::default()) else {
+            panic!("answered before the clipboard had it")
+        };
+        let mut answers = Vec::new();
+        for _ in 0..500 {
+            st.poll_copies();
+            answers.extend(st.answers());
+            if !answers.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(answers, vec![(n, Ok(json!({ "width": 30, "height": 20 })))]);
+        assert!(st.messages.is_empty());
     }
 
     #[test]

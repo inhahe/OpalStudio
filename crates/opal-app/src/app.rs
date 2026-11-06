@@ -545,16 +545,19 @@ impl OpalApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Scripts and assistants connected, and a way to send them off.
                 if let Some(server) = &self.server
-                    && server.clients() > 0
+                    && let n = server.clients()
+                    && n > 0
                 {
                     if ui
                         .small_button("Disconnect")
-                        .on_hover_text("Drop every connected script and assistant: each request after is refused.")
+                        .on_hover_text(
+                            "Drop every connected script and assistant (each is cut off at its next request), \
+                             and make a new token, which they need to connect again.",
+                        )
                         .clicked()
                     {
                         server.disconnect_all();
                     }
-                    let n = server.clients();
                     let who =
                         if n == 1 { "A script is connected".to_owned() } else { format!("{n} scripts are connected") };
                     ui.label(
@@ -691,7 +694,8 @@ impl eframe::App for OpalApp {
         self.st.poll_writes(ctx.input(|i| i.pointer.any_down()));
         // After the writes, whose answers it passes on.
         if let Some(server) = &mut self.server {
-            server.serve(&mut self.st, &ctx);
+            let busy = self.st.dialog_open() || ctx.input(|i| i.pointer.any_down());
+            server.serve(&mut self.st, &ctx, busy);
         }
         self.st.poll_paste(ctx.input(|i| i.pointer.any_down()));
         self.st.thumbs.end_frame();
@@ -919,9 +923,14 @@ fn welcome(ui: &mut egui::Ui, st: &mut AppState) {
     });
 }
 
-/// Opens the API's connection, telling the user if it cannot be.
+/// Opens the API's connection, telling the user if it cannot be (but not that another editor
+/// already serves scripts, which they connect to).
 fn start_server(st: &mut AppState, ctx: &egui::Context) -> Option<crate::server::Server> {
     let file = crate::server::connection_file()?;
+    if crate::server::is_running(&file) {
+        st.notify("Another Opal Studio is open: scripts and assistants connect to that one.");
+        return None;
+    }
     match crate::server::Server::start(file, ctx.clone()) {
         Ok(server) => Some(server),
         Err(e) => {
