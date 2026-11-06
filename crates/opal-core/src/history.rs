@@ -268,19 +268,27 @@ impl History {
     }
 
     /// Joins the states one script (say) made one after another into one, as if they were
-    /// one action: along the way from the root to the current state, each line of states in
-    /// `made` becomes its last, put in its first's place and labeled `label`, and the others
-    /// go. A state joins the next only if all else descending from it is in `made` too (what
-    /// the script undid and did otherwise, which goes with it): one something else was made
-    /// from stays, and ends its line. A line's last state keeps its identifier (it is the
-    /// same document, given an earlier parent), so whatever refers to it still does; a line
-    /// of one state is labeled too. A state of `made` that is also `apart` (a step a script
-    /// named, inside the script's run) is no part of a line, and ends one, but goes with what
-    /// the script undid like the rest. Returns how many states went.
+    /// one action. What it undid goes first: a branch off the way from the root to the
+    /// current state that is all in `made`, wherever it hangs. Then along the way, each line
+    /// of states in `made` becomes its last, put in its first's place and labeled `label`,
+    /// and the others go. A state with something else made from it (by someone else) stays,
+    /// and ends its line. A line's last state keeps its identifier (it is the same document,
+    /// given an earlier parent), so whatever refers to it still does; a line of one state is
+    /// labeled too. A state of `made` that is also `apart` (a step a script named, inside the
+    /// script's run) is no part of a line, and ends one. Returns how many states went.
     pub fn join(&mut self, made: &HashSet<NodeId>, label: &str, apart: &HashSet<NodeId>) -> usize {
         let path = self.path_from_root(self.current);
-        let joinable = |n: &NodeId| made.contains(n) && !apart.contains(n);
+        let on_path: HashSet<NodeId> = path.iter().copied().collect();
         let mut gone = 0;
+        for &id in &path {
+            let undone: Vec<NodeId> = (self.node(id).children.iter().copied())
+                .filter(|c| !on_path.contains(c) && self.all_made(*c, made))
+                .collect();
+            for branch in undone {
+                gone += self.drop_branch(branch);
+            }
+        }
+        let joinable = |n: &NodeId| made.contains(n) && !apart.contains(n);
         let mut first = None;
         for (i, &id) in path.iter().enumerate() {
             if !joinable(&id) {
@@ -288,8 +296,8 @@ impl History {
             }
             let start = *first.get_or_insert(id);
             let next = path.get(i + 1).filter(|n| joinable(n));
-            let joins =
-                next.is_some_and(|&next| self.node(id).children.iter().all(|&c| c == next || self.all_made(c, made)));
+            // What else is made from it is someone else's now (the script's undone went).
+            let joins = next.is_some_and(|&next| self.node(id).children.iter().all(|&c| c == next));
             if !joins {
                 if start != id {
                     gone += self.join_line(start, id, label);
@@ -313,6 +321,30 @@ impl History {
             to_see.extend(&self.node(at).children);
         }
         true
+    }
+
+    /// Drops state `branch` and all that descends from it (none of it current, nor on the
+    /// way to it). Returns how many states went.
+    fn drop_branch(&mut self, branch: NodeId) -> usize {
+        if let Some(p) = self.node(branch).parent {
+            let p = self.node_mut(p);
+            p.children.retain(|&c| c != branch);
+            if p.last_child == Some(branch) {
+                p.last_child = None;
+            }
+        }
+        let mut going = vec![branch];
+        let mut i = 0;
+        while i < going.len() {
+            let below = self.node(going[i]).children.clone();
+            going.extend(below);
+            i += 1;
+        }
+        for id in &going {
+            let node = self.nodes[id.0].take().expect("a state kept");
+            self.usage.forget(&node.doc);
+        }
+        going.len()
     }
 
     /// Puts `end` in the place of `start`, an earlier state on its way from the root,
@@ -1009,6 +1041,25 @@ mod tests {
         assert!(!h.contains(first) && !h.contains(stepped));
         assert_eq!(h.undo_label(), Some("Script"));
         assert_eq!(h.node(last).parent, Some(before));
+    }
+
+    #[test]
+    fn what_a_script_undid_goes_though_a_step_ends_the_line_it_hangs_from() {
+        let mut h = painted_history(1);
+        let mut made = HashSet::new();
+        let a = scripted(&mut h, &mut made, 1);
+        let undone = scripted(&mut h, &mut made, 2);
+        h.undo();
+        let step = scripted(&mut h, &mut made, 3);
+        // And after the step, another undone.
+        let after = scripted(&mut h, &mut made, 4);
+        h.undo();
+        let last = scripted(&mut h, &mut made, 5);
+        h.join(&made, "Script", &HashSet::from([step]));
+        assert!(!h.contains(undone) && !h.contains(after), "what the script undid stayed beside its step");
+        assert_eq!(h.node(a).children, [step]);
+        assert_eq!(h.node(step).children, [last]);
+        assert!(counted_right(&h));
     }
 
     #[test]

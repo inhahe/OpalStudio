@@ -350,6 +350,8 @@ impl DocState {
     pub fn group_ended(&mut self, group: u64, label: &str, step: bool) {
         let Some(made) = self.made_by.remove(&group) else { return };
         self.history.join(&made, label, &self.named);
+        // The history panel and the undo label show it changed.
+        self.revision += 1;
         if step {
             self.named.extend(made);
         }

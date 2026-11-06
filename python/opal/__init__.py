@@ -237,9 +237,9 @@ class Editor:
         into one state when it ends, and an interactive session's are each a state."""
         try:
             self.call("begin_step", name=name)
-        except BaseException:
-            # It may have reached the editor before this went wrong (an interrupt while its
-            # answer was awaited): ended, to be sure, unless the connection is gone.
+        except (KeyboardInterrupt, SystemExit):
+            # It reached the editor before its answer came (an interrupt while it was
+            # awaited): ended, to be sure. (One refused began no step, so ends none.)
             with contextlib.suppress(OpalError, OSError, ValueError):
                 self.call("end_step")
             raise

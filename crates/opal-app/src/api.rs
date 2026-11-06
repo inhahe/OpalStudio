@@ -20,6 +20,7 @@ use opal_core::raster::RasterImage;
 use opal_core::tile::Pixel;
 use opal_io::image_files::ExportSize;
 use serde_json::{Map, Value, json};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -374,7 +375,8 @@ const CONNECTION: &[(&str, &str, &[Param])] = &[
         "begin_step",
         "Begins a step of history: what the calls until end_step change in each image becomes one state, \
          called name, which one undo takes back. A step begun inside another is part of it. One left open \
-         ends when the connection does.",
+         ends when the connection does, or, on a connection that is no script run (an assistant's), before \
+         a call that comes 10 minutes or more after the last.",
         &[Param {
             name: "name",
             kind: Kind::Text,
@@ -385,15 +387,21 @@ const CONNECTION: &[(&str, &str, &[Param])] = &[
     ("end_step", "Ends the step begin_step began (the outermost, if they are inside one another).", &[]),
 ];
 
+/// Method `name`, if there is one by that name (looked up in an index made once).
+pub fn method(name: &str) -> Option<&'static Method> {
+    static INDEX: std::sync::OnceLock<HashMap<&'static str, &'static Method>> = std::sync::OnceLock::new();
+    INDEX.get_or_init(|| methods().iter().map(|m| (m.name.as_str(), m)).collect()).get(name).copied()
+}
+
 /// The role of method `name`, if there is one by that name.
 pub fn role_of(name: &str) -> Option<Role> {
-    methods().iter().find(|m| m.name == name).map(|m| m.role)
+    method(name).map(|m| m.role)
 }
 
 /// Whether `given` are arguments method `name` takes (as every call's are checked): why
 /// not, if they are not.
 pub fn check_args(name: &str, given: &Map<String, Value>) -> Result<(), String> {
-    let method = methods().iter().find(|m| m.name == name).ok_or_else(|| format!("There is no method \"{name}\"."))?;
+    let method = method(name).ok_or_else(|| format!("There is no method \"{name}\"."))?;
     Args::check(method.params, given).map(|_| ()).map_err(|why| format!("{name}: {why}."))
 }
 
@@ -874,7 +882,7 @@ impl AppState {
     /// [`call`](Self::call); but unless `heard`, no one reads the answer (the call was a
     /// notification), so what would have been told in a dialog is told in one after all.
     fn call_heard(&mut self, heard: bool, name: &str, given: &Map<String, Value>, ctx: &egui::Context) -> Reply {
-        let Some(method) = methods().iter().find(|m| m.name == name) else {
+        let Some(method) = method(name) else {
             return Reply::Now(Err(format!("There is no method \"{name}\".")));
         };
         if method.role == Role::Connection {

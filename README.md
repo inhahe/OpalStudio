@@ -92,7 +92,7 @@ cargo test --workspace                     # all tests, interface tests included
   layer; on Windows they pass through shared memory, so even large images move at once.
   What a script changes in an image becomes one history state, named after it, when it
   ends, so one undo takes it back (from an interactive Python session, or with
-  `connect(script=None)`, each call is a step of its own); `with editor.step("name"):`
+  `connect(script=None)`, each call is a history state of its own); `with editor.step("name"):`
   makes the calls inside it one step of their own, and `editor.history()` gives an image's
   undo tree. Only programs of the user's own
   can connect (through a token in the settings folder), and the status bar says when one is

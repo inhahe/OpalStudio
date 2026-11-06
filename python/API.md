@@ -422,7 +422,7 @@ Every method of the API, with its parameters: what this list is generated from.
 
 ### `begin_step`
 
-Begins a step of history: what the calls until end_step change in each image becomes one state, called name, which one undo takes back. A step begun inside another is part of it. One left open ends when the connection does.
+Begins a step of history: what the calls until end_step change in each image becomes one state, called name, which one undo takes back. A step begun inside another is part of it. One left open ends when the connection does, or, on a connection that is no script run (an assistant's), before a call that comes 10 minutes or more after the last.
 
 | Parameter | Kind | |
 |---|---|---|

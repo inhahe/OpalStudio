@@ -36,9 +36,11 @@ const SERVE_FOR: Duration = Duration::from_millis(6);
 /// How long, within that, the next request is waited for.
 const NEXT_WITHIN: Duration = Duration::from_millis(1);
 
-/// How long a step may go without a call before it ends by itself, when the next call comes:
-/// one an assistant forgot to end would otherwise take in all its calls after.
-const STEP_IDLE: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(10 * 60) };
+/// How long a step may go without a call before it ends by itself, when the next call comes,
+/// on a connection that is no script run (an assistant's, which goes on for its whole
+/// session: one it forgot to end would otherwise take in all its calls after). A script's
+/// step ends with the script at the latest, however long it thinks inside it.
+const STEP_IDLE: Duration = Duration::from_secs(10 * 60);
 
 /// How long a connection has to say hello before it is dropped, so that connections that
 /// never do cannot keep every place among the strangers.
@@ -88,6 +90,8 @@ struct Shared {
     runs: AtomicU64,
     /// The steps connections have begun and not ended, by group: their names.
     open_steps: Mutex<HashMap<u64, String>>,
+    /// How long a step may go unused (see [`STEP_IDLE`]; shorter in a test of it).
+    step_idle: Mutex<Duration>,
     /// Whether the user has asked to quit: hellos are refused.
     quitting: AtomicBool,
     ctx: egui::Context,
@@ -298,6 +302,7 @@ impl Server {
             strangers: AtomicUsize::new(0),
             runs: AtomicU64::new(0),
             open_steps: Mutex::new(HashMap::new()),
+            step_idle: Mutex::new(STEP_IDLE),
             quitting: AtomicBool::new(false),
             ctx,
             file,
@@ -354,6 +359,8 @@ impl Server {
             c.connected = 0;
             c.shut_out = true;
         }
+        // Their steps go with them (each connection's ends at its next line, if it has one).
+        self.shared.open_steps.lock().expect("not poisoned").clear();
         // The new token is kept only once the file holds it: one it did not get would leave
         // every client, even let in again, with a token that is not the editor's.
         if let Ok(token) = new_token()
@@ -603,8 +610,10 @@ fn serve_connection(conn: Stream, shared: &Shared) {
     let mut hello: Option<(u64, bool)> = None;
     // The script run it is, if its hello named a script: its number and the script's name.
     let mut script: Option<(u64, String)> = None;
-    // The step it has begun, if one.
+    // The step it has begun, if one; and the name of one that ended by itself, unused, which
+    // an end_step coming after is told of.
     let mut step: Option<Step> = None;
+    let mut ended_idle: Option<String> = None;
     loop {
         let line = match hello {
             None => read_first_line(&mut reader, &conn),
@@ -615,10 +624,13 @@ fn serve_connection(conn: Stream, shared: &Shared) {
             // Disconnected by the user.
             break;
         }
-        // A step left open and unused this long was forgotten (an assistant's, say): it
-        // ends before this call, which is not part of it.
-        if step.as_ref().is_some_and(|s| s.used.elapsed() >= STEP_IDLE) {
-            end_step(shared, step.take().expect("there"));
+        // A step left open and unused this long, on a connection that is no script run,
+        // was forgotten: it ends before this call, which is not part of it.
+        let idle = *shared.step_idle.lock().expect("not poisoned");
+        if script.is_none() && step.as_ref().is_some_and(|s| s.used.elapsed() >= idle) {
+            let forgotten = step.take().expect("there");
+            ended_idle = Some(forgotten.name.clone());
+            end_step(shared, forgotten);
         }
         // A notification (a request without an id) is carried out but not answered; a line
         // that is not a request at all is answered, with no id.
@@ -643,17 +655,23 @@ fn serve_connection(conn: Stream, shared: &Shared) {
                         Err((NOT_ALLOWED, "This connection only opens files.".to_owned()))
                     }
                     (Some(method), Some(params)) if crate::api::role_of(&method) == Some(Role::Connection) => {
-                        connection_answer(shared, &method, &params, &mut step)
+                        let answer = connection_answer(shared, &method, &params, &mut step, &mut ended_idle);
+                        if let Some(s) = &mut step {
+                            s.used = Instant::now();
+                        }
+                        answer
                     }
                     (Some(method), Some(params)) => {
                         let (generation, _) = hello.expect("said hello");
                         let heard = id.is_some();
                         // In the script run the connection is, and the step it has begun.
                         let groups = script.iter().map(|s| s.0).chain(step.iter().map(|s| s.group)).collect();
+                        let answer = pass_on(shared, method, params, generation, groups, heard);
+                        // Used until answered (a call can wait long for the user to be done).
                         if let Some(s) = &mut step {
                             s.used = Instant::now();
                         }
-                        pass_on(shared, method, params, generation, groups, heard)
+                        answer
                     }
                     _ => Err((INVALID_REQUEST, "A request needs a method, and its params as an object.".to_owned())),
                 };
@@ -719,10 +737,12 @@ fn connection_answer(
     method: &str,
     params: &Map<String, Value>,
     step: &mut Option<Step>,
+    ended_idle: &mut Option<String>,
 ) -> Result<Value, (i64, String)> {
     crate::api::check_args(method, params).map_err(|why| (FAILED, why))?;
     match method {
         "begin_step" => {
+            *ended_idle = None;
             match step {
                 Some(outer) => outer.inside += 1,
                 None => {
@@ -736,7 +756,14 @@ fn connection_answer(
             Ok(json!({}))
         }
         "end_step" => match step {
-            None => Err((FAILED, "end_step: no step has begun.".to_owned())),
+            None => match ended_idle.take() {
+                // Not the caller's mistake: told, not refused.
+                Some(name) => Ok(json!({ "notes": [format!(
+                    "The step \u{201c}{name}\u{201d} had ended by itself, after {} minutes without a call.",
+                    shared.step_idle.lock().expect("not poisoned").as_secs() / 60
+                )] })),
+                None => Err((FAILED, "end_step: no step has begun.".to_owned())),
+            },
             Some(s) if s.inside > 0 => {
                 s.inside -= 1;
                 Ok(json!({}))
@@ -1163,6 +1190,7 @@ mod tests {
         let (pipe, token) = info(&file);
         let mut st = AppState::new();
         let ctx = egui::Context::default();
+        server.shared.step_idle.lock().unwrap().clone_from(&Duration::from_millis(300));
         let mut client = Client::connect(&pipe);
         client.send(&hello_line(&token)).unwrap();
         let ask = |client: &mut Client, line: &str, st: &mut AppState, server: &mut Server| {
@@ -1202,13 +1230,32 @@ mod tests {
         assert_eq!(server.open_steps(), ["Forgotten"]);
         ask(&mut client, r#"{"jsonrpc":"2.0","id":4,"method":"new_layer","params":{}}"#, &mut st, &mut server);
         // Unused past its time: the next call is not part of it.
-        std::thread::sleep(STEP_IDLE + Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(400));
         ask(&mut client, r#"{"jsonrpc":"2.0","id":5,"method":"new_layer","params":{}}"#, &mut st, &mut server);
         server.serve(&mut st, &ctx, false);
         assert!(server.open_steps().is_empty(), "still shown as open");
+        // Ending it after: told so, not refused.
+        let late =
+            ask(&mut client, r#"{"jsonrpc":"2.0","id":6,"method":"end_step","params":{}}"#, &mut st, &mut server);
+        assert!(late["result"]["notes"][0].as_str().unwrap().contains("ended by itself"), "{late}");
         let h = &st.docs[0].history;
         let labels: Vec<&str> = h.path_from_root(h.current()).iter().map(|&n| h.node(n).label.as_str()).collect();
         assert_eq!(labels, ["New image", "Forgotten", "New layer"]);
+        // A script's step does not end by itself, however long the script thinks in it.
+        let mut script = Client::connect(&pipe);
+        let hello =
+            format!(r#"{{"jsonrpc":"2.0","id":1,"method":"hello","params":{{"token":"{token}","script":"slow.py"}}}}"#);
+        script.send(&hello).unwrap();
+        let begin = r#"{"jsonrpc":"2.0","id":2,"method":"begin_step","params":{"name":"Thought out"}}"#;
+        ask(&mut script, begin, &mut st, &mut server);
+        ask(&mut script, r#"{"jsonrpc":"2.0","id":3,"method":"new_layer","params":{}}"#, &mut st, &mut server);
+        std::thread::sleep(Duration::from_millis(400));
+        ask(&mut script, r#"{"jsonrpc":"2.0","id":4,"method":"new_layer","params":{}}"#, &mut st, &mut server);
+        let ended =
+            ask(&mut script, r#"{"jsonrpc":"2.0","id":5,"method":"end_step","params":{}}"#, &mut st, &mut server);
+        assert!(ended.get("result").is_some_and(|r| r.get("notes").is_none()), "ended by itself: {ended}");
+        server.serve(&mut st, &ctx, false);
+        assert_eq!(st.docs[0].history.undo_label(), Some("Thought out"));
     }
 
     #[test]
@@ -1221,7 +1268,7 @@ mod tests {
             for p in m.params {
                 params.insert(p.name.to_owned(), json!("A name"));
             }
-            let answer = connection_answer(&server.shared, &m.name, &params, &mut step);
+            let answer = connection_answer(&server.shared, &m.name, &params, &mut step, &mut None);
             assert!(!answer.is_err_and(|(_, why)| why.contains("not answered")), "{} is not answered", m.name);
         }
     }
@@ -1334,8 +1381,17 @@ with opal.connect() as editor:
             raise RuntimeError("the script's own")
     except RuntimeError as e:
         assert str(e) == "the script's own", e
+    # A step refused inside another (a blank name) leaves the outer one going.
+    with editor.step("Outer"):
+        editor.new_layer(name="Before")
+        try:
+            with editor.step("   "):
+                pass
+        except opal.OpalError:
+            pass
+        editor.new_layer(name="After")
     labels = [s["label"] for s in editor.history(document=stepped)["states"]]
-    assert labels == ["New image", "Sky and sea", "Fails"], labels
+    assert labels == ["New image", "Sky and sea", "Fails", "Outer"], labels
     editor.close(document=stepped, discard=True)
     doc = editor.new(width=Count(), height=200)["document"]
     sky = editor.new_layer(name="Sky")["layer"]
