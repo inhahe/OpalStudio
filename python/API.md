@@ -6,6 +6,16 @@ run it with `OPAL_WRITE_STUBS=1` to make this page again; do not edit it by hand
 each is a method of the editor (`editor.new(width=640, height=480)`), taking its parameters by
 name; over the pipe, a JSON-RPC method of the same name.
 
+## Connecting
+
+The pipe's name and a token are in `api.json` in the user's settings folder
+(`%APPDATA%\Opal Studio\config` on Windows), or in the file `OPAL_STUDIO_API` names. Each
+request and each response is one line of JSON-RPC 2.0. A connection's first request must be
+`hello`, with `token`; anything else is refused and the connection dropped. `hello` may also
+name a `script` (the Python package gives the running script's file name): the connection is
+then a script run, and once it closes, what it changed in each image one change after another
+becomes one history state, `Script: <name>`. Without it, each call is a state of its own.
+
 ## Commands
 
 ### `new`

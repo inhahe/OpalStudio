@@ -35,11 +35,13 @@ const SERVE_FOR: std::time::Duration = std::time::Duration::from_millis(6);
 /// How long, within that, the next request is waited for.
 const NEXT_WITHIN: std::time::Duration = std::time::Duration::from_millis(1);
 
-/// A request passed to the interface thread, and where its answer goes.
-struct Request {
-    method: String,
-    params: Map<String, Value>,
-    answer: Sender<Result<Value, String>>,
+/// What a connection passes to the interface thread.
+enum Request {
+    /// A call (from script run `script`, if the connection is one), and where its answer
+    /// goes.
+    Call { method: String, params: Map<String, Value>, script: Option<u64>, answer: Sender<Result<Value, String>> },
+    /// Script run `run`, named `name`, has ended: its connection has closed.
+    Ended { run: u64, name: String },
 }
 
 /// Which connections count: those of the current generation (moving on drops every
@@ -60,6 +62,8 @@ struct Shared {
     clients: Mutex<Clients>,
     /// How many connections have not said hello yet.
     strangers: AtomicUsize,
+    /// The number the next script run gets.
+    runs: AtomicU64,
     ctx: egui::Context,
     /// Where the pipe's name and the token are written, and the pipe's name.
     file: PathBuf,
@@ -158,6 +162,7 @@ impl Server {
             requests: send,
             clients: Mutex::new(Clients::default()),
             strangers: AtomicUsize::new(0),
+            runs: AtomicU64::new(0),
             ctx,
             file,
             pipe,
@@ -227,15 +232,19 @@ impl Server {
             let until = std::time::Instant::now() + SERVE_FOR;
             let mut next = self.requests.try_recv().ok();
             while let Some(r) = next {
-                if quitting {
-                    let _ = r.answer.send(Err("The editor is closing.".to_owned()));
-                } else {
-                    match st.call(&r.method, &r.params, ctx) {
-                        Reply::Now(result) => {
-                            let _ = r.answer.send(result);
-                        }
-                        Reply::Later(n) => {
-                            self.later.insert(n, r.answer);
+                match r {
+                    Request::Ended { run, name } => st.script_ended(run, &name),
+                    Request::Call { answer, .. } if quitting => {
+                        let _ = answer.send(Err("The editor is closing.".to_owned()));
+                    }
+                    Request::Call { method, params, script, answer } => {
+                        match st.call_from(script, &method, &params, ctx) {
+                            Reply::Now(result) => {
+                                let _ = answer.send(result);
+                            }
+                            Reply::Later(n) => {
+                                self.later.insert(n, answer);
+                            }
                         }
                     }
                 }
@@ -318,6 +327,8 @@ fn serve_connection(conn: Stream, shared: &Shared) {
     let mut writer = &conn;
     // The generation it is of, once it has said hello.
     let mut hello: Option<u64> = None;
+    // The script run it is, if its hello named a script: its number and the script's name.
+    let mut script: Option<(u64, String)> = None;
     while let Some(line) = read_line(&mut reader, if hello.is_some() { CLIENT_LINE } else { STRANGER_LINE }) {
         if hello.is_some_and(|g| shared.clients.lock().expect("not poisoned").generation != g) {
             // Disconnected by the user.
@@ -345,6 +356,11 @@ fn serve_connection(conn: Stream, shared: &Shared) {
                                 hello = Some(c.generation);
                                 shared.strangers.fetch_sub(1, Ordering::Relaxed);
                                 shared.ctx.request_repaint();
+                                script = params
+                                    .get("script")
+                                    .and_then(Value::as_str)
+                                    .filter(|s| !s.is_empty())
+                                    .map(|s| (shared.runs.fetch_add(1, Ordering::Relaxed), s.to_owned()));
                             }
                             Ok(json!({ "protocol": PROTOCOL, "editor": env!("CARGO_PKG_VERSION") }))
                         } else {
@@ -354,7 +370,7 @@ fn serve_connection(conn: Stream, shared: &Shared) {
                     (Some(_), Some(_)) if hello.is_none() => {
                         Err((NOT_ALLOWED, "Say hello first, with the token from api.json.".to_owned()))
                     }
-                    (Some(method), Some(params)) => pass_on(shared, method, params),
+                    (Some(method), Some(params)) => pass_on(shared, method, params, script.as_ref().map(|s| s.0)),
                     _ => Err((INVALID_REQUEST, "A request needs a method, and its params as an object.".to_owned())),
                 };
                 (id, answer)
@@ -369,6 +385,11 @@ fn serve_connection(conn: Stream, shared: &Shared) {
             // Refused: the connection goes.
             break;
         }
+    }
+    // After all its calls (each was answered before the next was read).
+    if let Some((run, name)) = script {
+        let _ = shared.requests.send(Request::Ended { run, name });
+        shared.ctx.request_repaint();
     }
     match hello {
         None => {
@@ -385,10 +406,16 @@ fn serve_connection(conn: Stream, shared: &Shared) {
     }
 }
 
-/// Passes a request to the interface thread, and waits for its answer.
-fn pass_on(shared: &Shared, method: String, params: Map<String, Value>) -> Result<Value, (i64, String)> {
+/// Passes a request (from script run `script`, if the connection is one) to the interface
+/// thread, and waits for its answer.
+fn pass_on(
+    shared: &Shared,
+    method: String,
+    params: Map<String, Value>,
+    script: Option<u64>,
+) -> Result<Value, (i64, String)> {
     let (answer, answered) = channel();
-    if shared.requests.send(Request { method, params, answer }).is_err() {
+    if shared.requests.send(Request::Call { method, params, script, answer }).is_err() {
         return Err((FAILED, "The editor is closing.".to_owned()));
     }
     shared.ctx.request_repaint();
@@ -497,6 +524,50 @@ mod tests {
         }
         calls.join().unwrap();
         assert!(frames < 40, "200 calls took {frames} frames");
+    }
+
+    #[test]
+    fn a_script_s_changes_to_an_image_become_one_history_state_when_it_ends() {
+        let file = std::env::temp_dir().join(format!("opal-api-script-{}.json", std::process::id()));
+        let mut server = Server::start(file.clone(), egui::Context::default()).unwrap();
+        let (pipe, token) = info(&file);
+        let mut st = AppState::new();
+        // A script (its hello names it), then a client that is none (an assistant, say).
+        for script in [Some("go.py"), None] {
+            let (pipe, token) = (pipe.clone(), token.clone());
+            with_client(&mut server, &mut st, move || {
+                let mut client = Client::connect(&pipe);
+                let named = script.map_or(String::new(), |s| format!(r#","script":"{s}""#));
+                let hello =
+                    format!(r#"{{"jsonrpc":"2.0","id":1,"method":"hello","params":{{"token":"{token}"{named}}}}}"#);
+                client.send(&hello).unwrap();
+                if script.is_some() {
+                    client
+                        .send(r#"{"jsonrpc":"2.0","id":2,"method":"new","params":{"width":64,"height":32}}"#)
+                        .unwrap();
+                }
+                for (i, name) in ["A", "B"].iter().enumerate() {
+                    let call = format!(
+                        r#"{{"jsonrpc":"2.0","id":{},"method":"new_layer","params":{{"name":"{name}"}}}}"#,
+                        i + 3
+                    );
+                    assert!(client.send(&call).unwrap().get("result").is_some());
+                }
+            });
+            // Its end is told once its connection has closed.
+            let ctx = egui::Context::default();
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let joined = |st: &AppState| st.docs[0].history.undo_label() == Some("Script: go.py");
+            while script.is_some() && !joined(&st) && std::time::Instant::now() < until {
+                server.serve(&mut st, &ctx, false);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        let h = &st.docs[0].history;
+        let labels: Vec<&str> = h.path_from_root(h.current()).iter().map(|&n| h.node(n).label.as_str()).collect();
+        assert_eq!(labels[1..], ["Script: go.py", "New layer", "New layer"], "{labels:?}");
+        let names: Vec<&str> = h.doc().layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names[names.len() - 4..], ["A", "B", "A", "B"]);
     }
 
     #[test]
@@ -613,11 +684,17 @@ with opal.connect() as editor:
     exported = editor.export(path=pathlib.Path(sys.argv[1]).name)
     editor.close(document=doc, discard=True)
     left = editor.documents()
+    # Changes to an image the script leaves open, one history state once it ends.
+    editor.new(width=8, height=8)
+    editor.new_layer(name="One")
+    editor.new_layer(name="Two")
     print(json.dumps({"layers": layers, "refused": refused, "exported": exported, "methods": len(editor.methods()), "left": left}))
 "#;
+        // Run from a file, as a script is (its name names its history state).
+        let file_of_script = std::env::temp_dir().join(format!("opal-api-py-{}.py", std::process::id()));
+        std::fs::write(&file_of_script, script).unwrap();
         let child = std::process::Command::new(&python)
-            .arg("-c")
-            .arg(script)
+            .arg(&file_of_script)
             .arg(&png)
             .env("PYTHONPATH", &package)
             .env("OPAL_STUDIO_API", &file)
@@ -635,8 +712,17 @@ with opal.connect() as editor:
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         let out = done.join().unwrap();
+        std::fs::remove_file(&file_of_script).ok();
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(out.status.success(), "the script failed:\n{stderr}");
+        let label = format!("Script: {}", file_of_script.file_name().unwrap().to_string_lossy());
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while st.docs[0].history.undo_label() != Some(label.as_str()) && std::time::Instant::now() < until {
+            server.serve(&mut st, &ctx, false);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let h = &st.docs[0].history;
+        assert_eq!((h.undo_label(), h.path_from_root(h.current()).len()), (Some(label.as_str()), 2));
         let said: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{stderr}"));
         assert_eq!(said["layers"][0]["name"], json!("Sky"), "{said}");
         assert_eq!(said["layers"][0]["visible"], json!(false));

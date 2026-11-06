@@ -529,6 +529,29 @@ impl AppState {
         reply
     }
 
+    /// [`call`](Self::call), made by script run `script` if it is one: its changes to each
+    /// image are joined into one history state when the run ends (see
+    /// [`script_ended`](Self::script_ended)).
+    pub fn call_from(
+        &mut self,
+        script: Option<u64>,
+        name: &str,
+        given: &Map<String, Value>,
+        ctx: &egui::Context,
+    ) -> Reply {
+        self.docs.iter_mut().for_each(|d| d.script = script);
+        let reply = self.call(name, given, ctx);
+        self.docs.iter_mut().for_each(|d| d.script = None);
+        reply
+    }
+
+    /// Script run `run`, named `name` (its file's), has ended: in each image, the states it
+    /// made one after another become one, so that one undo takes back what it did.
+    pub fn script_ended(&mut self, run: u64, name: &str) {
+        let label = format!("Script: {name}");
+        self.docs.iter_mut().for_each(|d| d.script_ended(run, &label));
+    }
+
     /// Answers query `name`.
     fn answer(&self, name: &str, args: &Args) -> Result<Value, String> {
         match name {
@@ -989,9 +1012,9 @@ mod tests {
              PROTOCOL: int\n\n\
              class OpalError(Exception):\n    code: int | None\n    def __init__(self, message: str, code: int | None = None) -> None: ...\n\n\
              def connection_file() -> Path: ...\n\
-             def connect(file: str | os.PathLike[str] | None = None) -> Editor: ...\n\n\
+             def connect(file: str | os.PathLike[str] | None = None, *, script: str | None = ...) -> Editor: ...\n\n\
              class Editor:\n    version: str | None\n\
-             \x20   def __init__(self, pipe: str, token: str) -> None: ...\n\
+             \x20   def __init__(self, pipe: str, token: str, script: str | None = None) -> None: ...\n\
              \x20   def call(self, method: str, **params: Any) -> Any: ...\n\
              \x20   def methods(self) -> list[dict[str, Any]]: ...\n\
              \x20   def disconnect(self) -> None: ...\n\
@@ -1047,7 +1070,15 @@ mod tests {
              editor's command registry by the test `api::tests::the_python_stubs_and_api_page_are_current`:\n\
              run it with `OPAL_WRITE_STUBS=1` to make this page again; do not edit it by hand. From Python,\n\
              each is a method of the editor (`editor.new(width=640, height=480)`), taking its parameters by\n\
-             name; over the pipe, a JSON-RPC method of the same name.\n",
+             name; over the pipe, a JSON-RPC method of the same name.\n\n\
+             ## Connecting\n\n\
+             The pipe's name and a token are in `api.json` in the user's settings folder\n\
+             (`%APPDATA%\\Opal Studio\\config` on Windows), or in the file `OPAL_STUDIO_API` names. Each\n\
+             request and each response is one line of JSON-RPC 2.0. A connection's first request must be\n\
+             `hello`, with `token`; anything else is refused and the connection dropped. `hello` may also\n\
+             name a `script` (the Python package gives the running script's file name): the connection is\n\
+             then a script run, and once it closes, what it changed in each image one change after another\n\
+             becomes one history state, `Script: <name>`. Without it, each call is a state of its own.\n",
         );
         for kind in ["command", "query"] {
             out += if kind == "command" { "\n## Commands\n" } else { "\n## Queries\n" };

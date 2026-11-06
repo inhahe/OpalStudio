@@ -3,7 +3,7 @@
 use eframe::egui::{Pos2, Rect, Vec2};
 use opal_core::document::{Canvas, Document, IdGen, LayerId};
 use opal_core::history::{History, NodeId};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// Identifies an open document for the life of the application.
@@ -139,6 +139,10 @@ pub struct DocState {
     pub notice: Option<String>,
     /// Whether the user has been told that history states are being dropped.
     told_dropped: bool,
+    /// The script run (by number) a call being carried out is from, if one is.
+    pub(crate) script: Option<u64>,
+    /// The states each script run going on has made, joined into one when it ends.
+    made_by: HashMap<u64, HashSet<NodeId>>,
 }
 
 impl DocState {
@@ -165,6 +169,8 @@ impl DocState {
             crop_drag: None,
             notice: None,
             told_dropped: false,
+            script: None,
+            made_by: HashMap::new(),
         }
     }
 
@@ -325,10 +331,21 @@ impl DocState {
         let before = self.history.doc().clone();
         let mut d = before.clone();
         f(&mut d, &mut self.ids)?;
-        self.history.commit(d, label);
+        let id = self.history.commit(d, label);
+        if let Some(run) = self.script {
+            self.made_by.entry(run).or_default().insert(id);
+        }
         self.revision += 1;
         self.fix_active_layer(Some(&before));
         Ok(())
+    }
+
+    /// Joins the states script run `run` made one after another into one, labeled `label`
+    /// (see [`History::join`]), now that it has ended.
+    pub fn script_ended(&mut self, run: u64, label: &str) {
+        if let Some(made) = self.made_by.remove(&run) {
+            self.history.join(&made, label);
+        }
     }
 
     /// Changes the pending edit (starting one labeled `label` if none is in progress), for

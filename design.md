@@ -1028,10 +1028,16 @@ server. Both rest on one language-neutral API.
   selected ones); `methods` lists them all, which is what the stubs and tools are made from.
   Queries so far: `documents`, `layers`, `image`. A call is carried out between frames as
   the interface would, without a dialog (a frame goes on with the calls that follow one
-  another for a few milliseconds, so a script makes thousands a second, not one a frame): what one would have said comes back with it, an
-  error or a refusal (which the interface tells as information) as its failure, a warning
-  or a status-bar notice as its `notes`; a refused call leaves the user's active image and
-  selection as they were. A save, export or copy is answered once written. Paths must be
+  another for a few milliseconds, so a script makes thousands a second, not one a frame):
+  what one would have said comes back with it, an error or a refusal (which the interface
+  tells as information) as its failure, a warning or a status-bar notice as its `notes`; a
+  refused call leaves the user's active image and selection as they were. A `hello` may
+  name a `script` (the Python package names the script running, but not an interactive
+  session): the connection is then a script run, and once it closes, the states it made in
+  each image one after another are joined into one, labeled `Script: <name>`
+  (`History::join`: a line of them becomes its last state, in its first's place; what the
+  script undid goes with it; a state the user made, or made something from, ends a line).
+  The states stay separate while it runs, so a script's own undo takes back one step. A save, export or copy is answered once written. Paths must be
   absolute (the Python package makes them so against the script's own folder); a save or
   export over a file already there needs `overwrite`, and Save As adds `.opal` as its
   dialog does. While the user has a dialog open or a button held, requests wait; once they
@@ -1050,7 +1056,8 @@ server. Both rest on one language-neutral API.
   what a dialog would have said.
 - **In the editor:** a Run Script command, a console panel showing output and errors, and a
   preference for which Python interpreter to use. A script's changes are grouped into one
-  history state, so one undo takes back a whole script run.
+  history state, so one undo takes back a whole script run. *Built:* the grouping (see the
+  protocol, above), for every script run, whoever started it.
 - **MCP server.** The editor serves MCP (streamable HTTP on localhost) to clients that
   connect to it, and `opal-studio --mcp` is a stdio shim for clients that launch their
   servers. Its tools are the command registry; it can return the canvas, or a layer, as an

@@ -17,6 +17,10 @@ lists them all, ``opal/__init__.pyi`` describes them for editors and type checke
 ``API.md`` documents them. A command that fails raises :class:`OpalError` with the
 editor's reason.
 
+What a script changes in an image becomes one history state when it ends (or
+disconnects), so that one undo takes back the whole run; in an interactive session each
+call is a step of its own.
+
 The connection is the editor's local pipe, found with its token in ``api.json`` in the
 user's settings folder; only the user's own programs can read it.
 """
@@ -60,6 +64,19 @@ def connection_file() -> Path:
         return Path.home() / "Library" / "Application Support" / "Opal-Studio" / "api.json"
     base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     return base / "opalstudio" / "api.json"
+
+
+def _running_script() -> str | None:
+    """The file name of the script Python is running, if it is running one (not in an
+    interactive session or a notebook, which go on as long as the user likes)."""
+    if hasattr(sys, "ps1") or sys.flags.interactive or "ipykernel" in sys.modules:
+        return None
+    main = getattr(sys.modules.get("__main__"), "__file__", None)
+    return os.path.basename(main) if main else None
+
+
+#: ``connect``'s default script name: the running script's, found when it connects.
+_RUNNING: Any = object()
 
 
 def _plain(value: Any) -> Any:
@@ -127,14 +144,14 @@ class _Pipe:
 class Editor:
     """A connection to a running Opal Studio: its methods are the editor's."""
 
-    def __init__(self, pipe: str, token: str):
+    def __init__(self, pipe: str, token: str, script: str | None = None):
         try:
             self._pipe = _Pipe(pipe)
         except OSError:
             raise OpalError("Opal Studio is not running (its pipe is gone): start it again.") from None
         self._ids = itertools.count(1)
         try:
-            hello = self.call("hello", token=token)
+            hello = self.call("hello", token=token, **({"script": script} if script else {}))
             if hello.get("protocol") != PROTOCOL:
                 raise OpalError(f"The editor speaks protocol {hello.get('protocol')}, this package {PROTOCOL}.")
         except OpalError:
@@ -182,12 +199,17 @@ class Editor:
         self.disconnect()
 
 
-def connect(file: str | os.PathLike | None = None) -> Editor:
+def connect(file: str | os.PathLike | None = None, *, script: str | None = _RUNNING) -> Editor:
     """Connects to the editor running on this computer (as ``file``, or the user's
-    :func:`connection_file`, says where)."""
+    :func:`connection_file`, says where).
+
+    The connection is the run of script ``script`` (by default the running script's file
+    name): what it changes in each image is joined into one history state, named after it,
+    when it disconnects. With ``None`` (the default in an interactive session), each call
+    is a history state of its own."""
     path = Path(file) if file is not None else connection_file()
     try:
         info = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise OpalError(f"Opal Studio is not running (there is no {path}).") from None
-    return Editor(info["pipe"], info["token"])
+    return Editor(info["pipe"], info["token"], _running_script() if script is _RUNNING else script)

@@ -86,9 +86,11 @@ cargo test --workspace                     # all tests, interface tests included
 
   Most commands can be called this way, with their settings as named parameters, as can
   the queries `documents`, `layers` and `image` (what an image looks like, as a PNG);
-  `python/API.md` lists them all. Only programs of the user's own can connect (through a
-  token in the settings folder), and the status bar says when one is connected, with a
-  button to disconnect it.
+  `python/API.md` lists them all. What a script changes in an image becomes one history
+  state, named after it, when it ends, so one undo takes it back (from an interactive
+  Python session, or with `connect(script=None)`, each call is a step of its own). Only
+  programs of the user's own can connect (through a token in the settings folder), and the
+  status bar says when one is connected, with a button to disconnect it.
 - **Batch work.** `opal-studio --headless script.py [arguments]` runs a script against an
   editor with no window (the Python is `--python PATH`, or `OPAL_PYTHON`, or `python`), and
   ends with the script's exit code once the files it asked for are written.

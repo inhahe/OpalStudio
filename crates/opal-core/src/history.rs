@@ -257,6 +257,83 @@ impl History {
         }
     }
 
+    /// Joins the states one script (say) made one after another into one, as if they were
+    /// one action: along the way from the root to the current state, each line of states in
+    /// `made` becomes its last, put in its first's place and labeled `label`, and the others
+    /// go. A state joins the next only if all else descending from it is in `made` too (what
+    /// the script undid and did otherwise, which goes with it): one something else was made
+    /// from stays, and ends its line. A line's last state keeps its identifier (it is the
+    /// same document, given an earlier parent), so whatever refers to it still does.
+    /// Returns how many states went.
+    pub fn join(&mut self, made: &HashSet<NodeId>, label: &str) -> usize {
+        let path = self.path_from_root(self.current);
+        let mut gone = 0;
+        let mut first = None;
+        for (i, &id) in path.iter().enumerate() {
+            if !made.contains(&id) {
+                continue;
+            }
+            let start = *first.get_or_insert(id);
+            let next = path.get(i + 1).filter(|n| made.contains(n));
+            let joins =
+                next.is_some_and(|&next| self.node(id).children.iter().all(|&c| c == next || self.all_made(c, made)));
+            if !joins {
+                if start != id {
+                    gone += self.join_line(start, id, label);
+                }
+                first = None;
+            }
+        }
+        gone
+    }
+
+    /// Whether state `id` and everything descending from it are in `made`.
+    fn all_made(&self, id: NodeId, made: &HashSet<NodeId>) -> bool {
+        made.contains(&id) && self.node(id).children.iter().all(|&c| self.all_made(c, made))
+    }
+
+    /// Puts `end` in the place of `start`, an earlier state on its way from the root,
+    /// labeled `label`; the states between (`start` included) and what else descends from
+    /// them go. Returns how many.
+    fn join_line(&mut self, start: NodeId, end: NodeId, label: &str) -> usize {
+        let mut line = Vec::new();
+        let mut at = end;
+        while at != start {
+            at = self.node(at).parent.expect("start is on the way from the root to end");
+            line.push(at);
+        }
+        let parent = self.node(start).parent;
+        match parent {
+            Some(p) => {
+                let p = self.node_mut(p);
+                for c in &mut p.children {
+                    if *c == start {
+                        *c = end;
+                    }
+                }
+                if p.last_child == Some(start) {
+                    p.last_child = Some(end);
+                }
+            }
+            None => self.root = end,
+        }
+        let e = self.node_mut(end);
+        e.parent = parent;
+        e.label = label.to_owned();
+        let mut going = line.clone();
+        let mut i = 0;
+        while i < going.len() {
+            let side = self.node(going[i]).children.iter().filter(|&&c| c != end && !line.contains(&c));
+            going.extend(side.copied().collect::<Vec<_>>());
+            i += 1;
+        }
+        for id in &going {
+            let node = self.nodes[id.0].take().expect("a state kept");
+            self.usage.forget(&node.doc);
+        }
+        going.len()
+    }
+
     fn remove(&mut self, id: NodeId) {
         let node = self.nodes[id.0].take().expect("a state kept");
         self.usage.forget(&node.doc);
@@ -778,6 +855,103 @@ mod tests {
         h.undo();
         // This one holds the painted tile alone.
         assert_eq!((h.memory(), by_tile(&h)), (TILE_BYTES, TILE_BYTES));
+    }
+
+    /// The memory `h` counts is what counting its states afresh, and tile by tile, gives.
+    fn counted_right(h: &History) -> bool {
+        let mut u = Usage::default();
+        h.nodes().for_each(|(_, n)| u.add(&n.doc));
+        u.visit(h.doc());
+        h.memory() == u.extra() && h.memory() == by_tile(h)
+    }
+
+    /// Paints `h` once more (pixel `x`), as a script would: the state, added to `made`.
+    fn scripted(h: &mut History, made: &mut HashSet<NodeId>, x: i64) -> NodeId {
+        let d = painted(h.doc(), x);
+        let id = h.commit(d, format!("Paint {x}"));
+        made.insert(id);
+        id
+    }
+
+    #[test]
+    fn a_script_s_states_join_into_its_last_in_place_of_its_first() {
+        let mut h = painted_history(1);
+        let before = h.current();
+        let mut made = HashSet::new();
+        // Each in the first tile, so each state holds a copy of its own.
+        scripted(&mut h, &mut made, 1);
+        let last = [2, 3].map(|x| scripted(&mut h, &mut made, x))[1];
+        let memory = h.memory();
+        assert_eq!(h.join(&made, "Script: go.py"), 2);
+        assert_eq!(h.current(), last, "the last state is the same one");
+        assert_eq!(h.node(last).parent, Some(before));
+        assert_eq!(h.node(before).children, vec![last]);
+        assert_eq!(h.undo_label(), Some("Script: go.py"));
+        assert_eq!(h.nodes().count(), 3);
+        assert!(h.memory() < memory && counted_right(&h), "the states gone are no longer counted");
+        h.undo();
+        assert_eq!(h.current(), before);
+        assert_eq!(h.redo_target(), Some(last));
+    }
+
+    #[test]
+    fn what_a_script_undid_goes_with_the_states_joined() {
+        let mut h = painted_history(1);
+        let mut made = HashSet::new();
+        let first = scripted(&mut h, &mut made, 300);
+        let undone = scripted(&mut h, &mut made, 600);
+        h.undo();
+        let last = scripted(&mut h, &mut made, 900);
+        assert_eq!(h.join(&made, "Script"), 2);
+        assert!(!h.contains(first) && !h.contains(undone));
+        assert_eq!(h.path_from_root(last).len(), 3);
+        assert!(counted_right(&h));
+    }
+
+    #[test]
+    fn a_state_someone_else_made_between_or_from_ends_a_line() {
+        // The user's change between two of the script's: nothing to join.
+        let mut h = painted_history(1);
+        let mut made = HashSet::new();
+        let a = scripted(&mut h, &mut made, 300);
+        let d = painted(h.doc(), 400);
+        h.commit(d, "Paint by hand");
+        let b = scripted(&mut h, &mut made, 600);
+        assert_eq!(h.join(&made, "Script"), 0);
+        assert_eq!((h.node(a).label.as_str(), h.node(b).label.as_str()), ("Paint 300", "Paint 600"));
+        // The user went back to one of the script's states and made something from it: it
+        // stays (what was made from it depends on it), and the script's line starts after it.
+        let mut h = painted_history(1);
+        let mut made = HashSet::new();
+        let kept = scripted(&mut h, &mut made, 300);
+        let gone = scripted(&mut h, &mut made, 600);
+        let last = scripted(&mut h, &mut made, 900);
+        h.goto(kept);
+        let d = painted(h.doc(), 400);
+        let theirs = h.commit(d, "Paint by hand");
+        h.goto(last);
+        assert_eq!(h.join(&made, "Script"), 1);
+        assert!(!h.contains(gone));
+        assert_eq!(h.node(kept).children, vec![last, theirs]);
+        assert_eq!(h.node(theirs).parent, Some(kept));
+        assert!(counted_right(&h));
+    }
+
+    #[test]
+    fn a_script_s_line_from_the_root_makes_its_last_the_root() {
+        let mut h = painted_history(0);
+        let mut made = HashSet::new();
+        let first = scripted(&mut h, &mut made, 1);
+        let last = scripted(&mut h, &mut made, 2);
+        // The state the image was opened in is dropped (to keep the budget), so the
+        // script's first state is the root.
+        h.set_budget(0);
+        assert_eq!(h.root(), first);
+        assert_eq!(h.join(&made, "Script"), 1);
+        assert_eq!(h.root(), last);
+        assert!(!h.can_undo());
+        assert_eq!(h.nodes().map(|(id, _)| id).collect::<Vec<_>>(), [last]);
+        assert!(counted_right(&h));
     }
 
     #[test]
