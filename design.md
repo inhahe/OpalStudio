@@ -1039,7 +1039,13 @@ server. Both rest on one language-neutral API.
 - **MCP server.** The editor serves MCP (streamable HTTP on localhost) to clients that
   connect to it, and `opal-studio --mcp` is a stdio shim for clients that launch their
   servers. Its tools are the command registry; it can return the canvas, or a layer, as an
-  image, so an assistant can see what it is doing.
+  image, so an assistant can see what it is doing. *Built so far:* the stdio shim, which
+  opens no window: its tools are the API's methods (but `methods`, which the tool list is),
+  each with a JSON Schema of its parameters, made from the registry; each call goes to the
+  editor running on this computer through its pipe and token, as a script's would, and a
+  refusal (or no editor running) comes back as the tool's error text. The `image` query
+  (the canvas as a PNG, scaled to fit a size) comes back as an image. A layer's image, and
+  the HTTP transport, are still to come.
 - **Safety.** Local connections only; clients authenticate with a random token kept in a
   file only the user can read; MCP requests with a foreign `Origin` are refused (against
   DNS rebinding). While a script or assistant is connected, the status bar says so and can

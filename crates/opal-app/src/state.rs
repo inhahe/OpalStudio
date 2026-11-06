@@ -148,6 +148,8 @@ pub struct AppState {
     pub next_answer: u64,
     /// The answers to such calls whose writes have finished, by number, until taken.
     pub answered: Vec<(u64, Result<serde_json::Value, String>)>,
+    /// The images being written for such calls (`image`): each one's file, and its size.
+    pub images_written: HashMap<u64, (PathBuf, u32, u32)>,
     pub confirm: Option<Confirm>,
     pub new_image: Option<NewImage>,
     pub last_new: NewImage,
@@ -242,6 +244,7 @@ impl AppState {
             messages: VecDeque::new(),
             next_answer: 0,
             answered: Vec::new(),
+            images_written: HashMap::new(),
             confirm: None,
             new_image: None,
             last_new: NewImage { width: 1920, height: 1080, background: Background::White },

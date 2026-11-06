@@ -244,5 +244,9 @@ class Editor:
 
         document: The image, by id. Default: the active image.
         """
-    def methods(self) -> Any:
-        """Every method of the API, with its parameters: what this list is generated from."""
+    def image(self, *, document: int | None = None, max_side: int = 1024) -> Any:
+        """What an image shows, as a PNG, scaled down to fit a size (never enlarged): its bytes in base64, with its width and height.
+
+        document: The image, by id. Default: the active image.
+        max_side: The most pixels it may be across or down. From 16 to 8192. Default: 1024.
+        """

@@ -344,6 +344,15 @@ An image's layers, top first: for each, its id, name, kind, whether it is shown 
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 
+### `image`
+
+What an image shows, as a PNG, scaled down to fit a size (never enlarged): its bytes in base64, with its width and height.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `max_side` | int | The most pixels it may be across or down. From 16 to 8192. Default: 1024. |
+
 ### `methods`
 
 Every method of the API, with its parameters: what this list is generated from.

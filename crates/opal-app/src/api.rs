@@ -278,6 +278,20 @@ const QUERIES: &[(&str, &str, &[Param])] = &[
          opacity, whether it is selected, and the layers inside a group.",
         &[DOCUMENT],
     ),
+    (
+        "image",
+        "What an image shows, as a PNG, scaled down to fit a size (never enlarged): its bytes in base64, \
+         with its width and height.",
+        &[
+            DOCUMENT,
+            Param {
+                name: "max_side",
+                kind: Kind::Int { min: 16, max: 8192 },
+                help: "The most pixels it may be across or down.",
+                otherwise: Otherwise::Value("1024"),
+            },
+        ],
+    ),
     ("methods", "Every method of the API, with its parameters: what this list is generated from.", &[]),
 ];
 
@@ -450,6 +464,7 @@ impl AppState {
         let told = self.messages.len();
         let reply = match method.cmd {
             Some(cmd) => self.carry_out(cmd, &args, ctx),
+            None if method.name == "image" => self.image_by_args(&args, ctx),
             None => Reply::Now(self.answer(&method.name, &args)),
         };
         // What would have been told in a dialog comes back with the reply instead.
@@ -501,7 +516,7 @@ impl AppState {
                 Ok(json!(d.doc().layers.iter().rev().map(|l| layer_json(l, d)).collect::<Vec<_>>()))
             }
             "methods" => Ok(describe()),
-            _ => unreachable!("every query is answered"),
+            _ => unreachable!("every query is answered (but `image`, by image_by_args)"),
         }
     }
 
@@ -715,9 +730,52 @@ impl AppState {
         Reply::Later(n)
     }
 
-    /// The answers to calls whose writes have finished since asked last, by number.
+    /// Writes the image `args` names, scaled to fit `max_side`, as a PNG in a file of the
+    /// call's own; the answer, once it is written, is the file's bytes (see [`answers`]).
+    ///
+    /// [`answers`]: Self::answers
+    fn image_by_args(&mut self, args: &Args, ctx: &egui::Context) -> Reply {
+        let id = match self.which(args) {
+            Ok(id) => id,
+            Err(why) => return Reply::Now(Err(why)),
+        };
+        let doc = self.doc(id).expect("found").doc().clone();
+        let c = doc.canvas;
+        let k = (args.int("max_side") as f64 / f64::from(c.width.max(c.height))).min(1.0);
+        let side = |s: u32| ((f64::from(s) * k).round() as u32).max(1);
+        let (width, height) = (side(c.width), side(c.height));
+        let size = ((width, height) != (c.width, c.height)).then(|| ExportSize {
+            width,
+            height,
+            sampling: crate::prefs::sampling(&self.prefs, "export"),
+        });
+        let path = std::env::temp_dir().join(format!("opal-image-{}-{}.png", std::process::id(), self.next_answer + 1));
+        let file = path.clone();
+        let reply = self.reply_after_write(|st, then| {
+            st.export_to(doc, file, ExportFormat::Png { sixteen_bit: false }, size, None, then, ctx)
+        });
+        if let Reply::Later(n) = reply {
+            self.images_written.insert(n, (path, width, height));
+        }
+        reply
+    }
+
+    /// The answers to calls whose writes have finished since asked last, by number: for
+    /// an image asked for, its file's bytes (the file then goes).
     pub fn answers(&mut self) -> Vec<(u64, Result<Value, String>)> {
-        std::mem::take(&mut self.answered)
+        let answered = std::mem::take(&mut self.answered);
+        answered
+            .into_iter()
+            .map(|(n, result)| match self.images_written.remove(&n) {
+                None => (n, result),
+                Some((path, width, height)) => {
+                    let read =
+                        result.and_then(|_| std::fs::read(&path).map_err(|e| format!("Could not read the image: {e}")));
+                    let _ = std::fs::remove_file(&path);
+                    (n, read.map(|png| json!({ "png": base64(&png), "width": width, "height": height })))
+                }
+            })
+            .collect()
     }
 
     fn canvas_json(&self) -> Value {
@@ -734,6 +792,20 @@ impl AppState {
             None => json!({}),
         }
     }
+}
+
+/// `bytes` in base64 (the standard alphabet, padded).
+pub fn base64(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], chunk.get(1).copied().unwrap_or(0), chunk.get(2).copied().unwrap_or(0)];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            out.push(if i <= chunk.len() { DIGITS[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
 }
 
 /// Layer `l` of image `d`, as the `layers` query tells it.
@@ -867,7 +939,8 @@ mod tests {
              \x20   def __enter__(self) -> Editor: ...\n\
              \x20   def __exit__(self, *exc: Any) -> None: ...\n",
         );
-        for m in describe().as_array().unwrap() {
+        // The client gives `methods` itself (the list it fetched on connecting).
+        for m in describe().as_array().unwrap().iter().filter(|m| m["name"] != json!("methods")) {
             let params = m["params"].as_array().unwrap();
             let mut sig: Vec<String> = Vec::new();
             for p in params {
@@ -984,6 +1057,38 @@ mod tests {
         }
         assert!(names.contains(&"save_as") && names.contains(&"merge_down") && names.contains(&"layers"));
         assert!(!names.contains(&"zoom_in"), "the view is the interface's alone");
+    }
+
+    #[test]
+    fn base64_is_the_standard_padded_alphabet() {
+        assert_eq!([base64(b""), base64(b"M"), base64(b"Ma"), base64(b"Man")], ["", "TQ==", "TWE=", "TWFu"]);
+        assert_eq!(base64(&[0xfb, 0xff, 0xbf]), "+/+/");
+    }
+
+    #[test]
+    fn an_image_is_answered_as_a_png_scaled_to_fit() {
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 400, "height": 100 })).unwrap();
+        let Reply::Later(n) = st.call("image", &args(json!({ "max_side": 100 })), &egui::Context::default()) else {
+            panic!("answered at once")
+        };
+        let mut answers = Vec::new();
+        for _ in 0..500 {
+            st.poll_writes(false);
+            answers.extend(st.answers());
+            if !answers.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(answers.len(), 1);
+        let (got, image) = answers.pop().unwrap();
+        let image = image.unwrap();
+        assert_eq!((got, image["width"].as_u64(), image["height"].as_u64()), (n, Some(100), Some(25)));
+        // A PNG's signature, in base64.
+        assert!(image["png"].as_str().unwrap().starts_with("iVBORw0KGgo"), "{image}");
+        assert!(st.images_written.is_empty(), "its file was kept");
     }
 
     #[test]

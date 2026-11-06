@@ -85,9 +85,15 @@ cargo test --workspace                     # all tests, interface tests included
   ```
 
   Most commands can be called this way, with their settings as named parameters, as can
-  the queries `documents` and `layers`; `python/API.md` lists them all. Only programs of
-  the user's own can connect (through a token in the settings folder), and the status bar
-  says when one is connected, with a button to disconnect it.
+  the queries `documents`, `layers` and `image` (what an image looks like, as a PNG);
+  `python/API.md` lists them all. Only programs of the user's own can connect (through a
+  token in the settings folder), and the status bar says when one is connected, with a
+  button to disconnect it.
+- **AI assistants.** `opal-studio --mcp` is an MCP server for assistants whose clients
+  launch their servers, its tools the same commands and queries, the image coming back as
+  an image so the assistant sees what it is doing. For Claude Code, for example:
+  `claude mcp add opal-studio -- "C:\path\to\opal-studio.exe" --mcp`. The editor itself
+  must be running for a tool to act.
 
 ## Layout
 
