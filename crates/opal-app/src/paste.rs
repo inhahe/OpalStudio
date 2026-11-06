@@ -34,7 +34,7 @@ impl AppState {
                 .map(|l| Arc::new(Layer { visible: true, ..l.clone() }))
                 .collect()
         };
-        if let Err(why) = memory.take(opal_core::composite::composite_cost(&layers, Some(&canvas))) {
+        if let Err(why) = memory.take_tiles(opal_core::composite::composite_cost(&layers, Some(&canvas))) {
             return self.message(MessageKind::Info, "Copy", why);
         }
         let flat = composite_within(&layers, &canvas);
@@ -47,11 +47,11 @@ impl AppState {
             );
         };
         let (w, h) = (bounds.width() as u64, bounds.height() as u64);
-        if let Err(why) =
-            crate::clipboard::check_copy(w, h).and_then(|()| memory.take(w * h * crate::clipboard::COPY_BYTES))
-        {
+        let copies = crate::memory::Need::at_once(w * h * crate::clipboard::COPY_BYTES);
+        if let Err(why) = crate::clipboard::check_copy(w, h).and_then(|()| memory.take(copies)) {
             return self.message(MessageKind::Info, "Copy", why);
         }
+        memory.make_room();
         let pixels = flat.read_rect(&bounds);
         let from = bounds.translate(-canvas.x0, -canvas.y0);
         self.clipboard.write_image(Copied { from, pixels }, ctx);

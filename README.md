@@ -28,8 +28,9 @@ cargo test --workspace                     # all tests, interface tests included
 - **Files.** Open PNG and JPEG (8 and 16 bits; EXIF orientation honored) and Opal
   Studio's own `.opal` files, which keep every layer. An 8-bit image takes half the
   memory until it is changed: its pixels are kept as they were read. Images larger than
-  memory can be worked on: past a share of it (a preference), the parts not looked at
-  lately go to a scratch file on disk. Save as `.opal`;
+  memory can be worked on, saved and opened again: past a share of it (a preference), or
+  when other programs leave too little free, the parts not looked at lately go to a
+  scratch file on disk. Save as `.opal`;
   export the canvas to PNG (8 or 16 bits) or JPEG, at its own size or another. Saving and
   exporting run in the background, so the window stays usable; the status bar shows how far
   they have got and can cancel them. A save that fails or is cancelled never damages the
@@ -49,7 +50,8 @@ cargo test --workspace                     # all tests, interface tests included
   Content; Resize Image and Resize Canvas; quarter turns, flips and rotation by any angle.
   Cropping and resizing the canvas never delete anything unless asked to. Canvases go up
   to 300,000 pixels a side; anything that would need more memory than the computer has
-  free is refused, with how much it needs, rather than run out of it.
+  free (counting room on disk for the parts that can go there) is refused, with how much
+  it needs, rather than run out of it.
 - **Layers and groups.** Add, duplicate, delete, group, reorder (buttons or dragging,
   into and out of groups), rename, hide, lock, change opacity; select several with Ctrl
   and Shift; merge down, merge selected, merge visible, merge a group, stamp visible,

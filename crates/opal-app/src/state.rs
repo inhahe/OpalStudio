@@ -319,9 +319,16 @@ impl AppState {
     }
 
     /// Lets images' tiles take the share of memory the preference says, before they go to
-    /// disk; and says once if they could not go.
+    /// disk, as far as memory free allows ([`tile_budget`]); and says once if they could
+    /// not go. Done every frame, as what else takes memory changes.
     pub fn apply_tile_budget(&mut self) {
-        let budget = tile_budget(self.prefs.f64("memory.tiles"), crate::memory::total());
+        let resident = opal_core::store::status().resident;
+        let budget = tile_budget(
+            self.prefs.f64("memory.tiles"),
+            crate::memory::total(),
+            resident,
+            crate::memory::physical_free(),
+        );
         if budget != self.tile_budget {
             self.tile_budget = budget;
             opal_core::store::set_budget(budget);
@@ -333,7 +340,10 @@ impl AppState {
             self.message(
                 MessageKind::Warning,
                 "Images can no longer go to disk",
-                format!("{why}. Images now stay in memory, so working on more than it holds will be refused."),
+                format!(
+                    "{why}. Images now stay in memory (but for parts already on disk), so working on more than it \
+                     holds will be refused."
+                ),
             );
         }
     }
@@ -780,6 +790,7 @@ impl AppState {
             // Measured now, not when asked for: the write may have waited behind others.
             let mut memory = memory.unwrap_or_else(crate::memory::Allowance::now);
             memory.take(image_files::export_memory(&doc, size.as_ref()))?;
+            memory.make_room();
             let pool = Some(crate::background::pool());
             image_files::export_in(&doc, &path, &format, size.as_ref(), pool, p).map_err(|e| e.to_string())
         });
@@ -843,9 +854,15 @@ impl AppState {
 }
 
 /// The memory images' tiles may take before going to disk: `percent` of the computer's
-/// `total` memory; none set (they never go) if the total is not known.
-fn tile_budget(percent: f64, total: Option<u64>) -> Option<u64> {
-    total.map(|t| (t as f64 * percent.clamp(0.0, 100.0) / 100.0) as u64)
+/// `total` memory, but no more than the tiles take now (`resident`) and the memory `free`
+/// leave room for, less a twentieth of the total for the rest of the program and the
+/// system: so tiles go to disk before memory runs out, whatever else takes it. None set
+/// (they never go) if the total is not known.
+fn tile_budget(percent: f64, total: Option<u64>, resident: u64, free: Option<u64>) -> Option<u64> {
+    let total = total?;
+    let share = (total as f64 * percent.clamp(0.0, 100.0) / 100.0) as u64;
+    let room = free.map_or(u64::MAX, |f| resident.saturating_add(f).saturating_sub(total / 20));
+    Some(share.min(room))
 }
 
 /// The name a file is shown under.
@@ -885,7 +902,7 @@ mod tests {
         let doc = st.active().unwrap().doc().clone();
         let path = std::env::temp_dir().join(format!("opal-refused-{}.png", std::process::id()));
         let png = ExportFormat::Png { sixteen_bit: false };
-        st.export_to(doc, path.clone(), png, None, Some(crate::memory::Allowance::of(Some(1000))), &ctx());
+        st.export_to(doc, path.clone(), png, None, Some(crate::memory::Allowance::memory(Some(1000))), &ctx());
         for _ in 0..1000 {
             st.poll_writes(false);
             if !st.writer.busy() {
@@ -903,22 +920,32 @@ mod tests {
     #[test]
     fn a_copy_needing_more_memory_than_is_free_is_refused() {
         let mut st = app_with_image();
-        st.copy_within(true, crate::memory::Allowance::of(Some(1000)), &ctx());
+        st.copy_within(true, crate::memory::Allowance::memory(Some(1000)), &ctx());
         let said = st.messages.back().map(|m| (m.title.as_str(), m.body.as_str()));
         assert!(said.is_some_and(|(t, b)| t == "Copy" && b.contains("memory")), "{said:?}");
         st.poll_copies();
         assert!(st.notice.is_none(), "copied all the same");
-        st.copy_within(true, crate::memory::Allowance::of(None), &ctx());
+        st.copy_within(true, crate::memory::Allowance::memory(None), &ctx());
         st.poll_copies();
         assert!(st.notice.as_ref().is_some_and(|n| n.0.starts_with("Copied")), "{:?}", st.notice);
     }
 
     #[test]
     fn images_may_keep_the_share_of_memory_the_preference_says() {
-        assert_eq!(tile_budget(60.0, Some(32_000_000_000)), Some(19_200_000_000));
-        assert_eq!(tile_budget(100.0, Some(8_000_000_000)), Some(8_000_000_000));
-        assert_eq!(tile_budget(60.0, None), None, "not knowing the memory, nothing goes to disk");
-        assert_eq!(tile_budget(AppState::new().prefs.f64("memory.tiles"), Some(10_000)), Some(6_000), "60% by default");
+        let gb = 1_000_000_000;
+        assert_eq!(tile_budget(60.0, Some(32 * gb), 0, None), Some(19_200_000_000));
+        assert_eq!(tile_budget(100.0, Some(8 * gb), 0, None), Some(8 * gb));
+        assert_eq!(tile_budget(60.0, None, 0, Some(gb)), None, "not knowing the memory, nothing goes to disk");
+        assert_eq!(
+            tile_budget(AppState::new().prefs.f64("memory.tiles"), Some(10_000), 0, None),
+            Some(6_000),
+            "60% by default"
+        );
+        // With room enough, the share; with other programs taking memory, what is left of it,
+        // less a reserve, so that tiles go to disk before memory runs out.
+        assert_eq!(tile_budget(60.0, Some(32 * gb), 3 * gb, Some(25 * gb)), Some(19_200_000_000));
+        assert_eq!(tile_budget(60.0, Some(32 * gb), 3 * gb, Some(gb)), Some(2_400_000_000));
+        assert_eq!(tile_budget(60.0, Some(32 * gb), 0, Some(gb / 2)), Some(0));
     }
 
     #[test]

@@ -8,6 +8,7 @@
 //! image takes a while.
 
 use crate::background::JobThread;
+use crate::memory::Need;
 use eframe::egui;
 use opal_core::geom::IRect;
 use opal_core::raster::RasterImage;
@@ -242,7 +243,7 @@ fn from_import(i: image_files::Imported) -> Pasted {
 /// holds one.
 #[cfg(windows)]
 #[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
-fn clipboard_bitmap_memory() -> Option<u64> {
+fn clipboard_bitmap_memory() -> Option<Need> {
     use clipboard_win::{formats, raw};
     let _open = open_clipboard().ok()?;
     let size = raw::size(formats::CF_DIB)?.get() as u64;
@@ -252,23 +253,19 @@ fn clipboard_bitmap_memory() -> Option<u64> {
 }
 
 /// The memory pasting a bitmap of `size` bytes, whose header (a `BITMAPINFOHEADER`) begins
-/// `header`, takes as it is read: the bitmap, the image at 8 bits a channel (4 bytes a
-/// pixel), and its tiles, kept at 8 bits (4).
+/// `header`, takes as it is read: in one go, the bitmap and the image at 8 bits a channel
+/// (4 bytes a pixel); and its tiles, kept at 8 bits (4).
 #[cfg(any(windows, test))]
-fn bitmap_memory(header: &[u8], size: u64) -> Option<u64> {
+fn bitmap_memory(header: &[u8], size: u64) -> Option<Need> {
     let int = |at: usize| Some(i32::from_le_bytes(header.get(at..at + 4)?.try_into().ok()?));
     let pixels = u64::from(int(4)?.unsigned_abs()) * u64::from(int(8)?.unsigned_abs());
-    Some(size.saturating_add(pixels.saturating_mul(8)))
+    Some(Need { at_once: size.saturating_add(pixels.saturating_mul(4)), tiles: pixels.saturating_mul(4) })
 }
 
-/// Why an image on the clipboard is not pasted: it would need `need` bytes, `free` are free.
+/// Why an image on the clipboard is not pasted.
 #[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
-fn too_large_to_paste(need: u64, free: u64) -> String {
-    format!(
-        "pasting the image on the clipboard would need about {} of memory, but only {} is free",
-        opal_io::bytes(need),
-        opal_io::bytes(free)
-    )
+fn too_large_to_paste(short: opal_io::memory::Short) -> String {
+    format!("pasting the image on the clipboard {short}")
 }
 
 /// What reading an image the clipboard offers gave: the image, `None` if it was not one
@@ -280,7 +277,7 @@ fn imported(read: Result<image_files::Imported, opal_io::IoError>, file: bool) -
     match read {
         Ok(i) => Ok(Some(from_import(i))),
         Err(e @ opal_io::IoError::TooLarge { .. }) if file => Err(e.to_string()),
-        Err(opal_io::IoError::TooLarge { need, free, .. }) => Err(too_large_to_paste(need, free)),
+        Err(opal_io::IoError::TooLarge { short, .. }) => Err(too_large_to_paste(short)),
         Err(_) => Ok(None),
     }
 }
@@ -299,10 +296,9 @@ fn read_system(own: Option<OwnCopy>) -> ReadResult {
         }
     }
     #[cfg(windows)]
-    if let (Some(need), Some(free)) = (clipboard_bitmap_memory(), crate::memory::free())
-        && need > free
-    {
-        return Err(too_large_to_paste(need, free));
+    if let (Some(need), Some(free)) = (clipboard_bitmap_memory(), crate::memory::free()) {
+        free.check(need).map_err(too_large_to_paste)?;
+        free.make_room(need.at_once);
     }
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     #[cfg(not(windows))]
@@ -559,14 +555,18 @@ mod tests {
         header[4..8].copy_from_slice(&30_000i32.to_le_bytes());
         header[8..12].copy_from_slice(&(-20_000i32).to_le_bytes());
         let size = 40 + 4 * 30_000 * 20_000;
-        assert_eq!(bitmap_memory(&header, size), Some(size + 8 * 600_000_000));
+        assert_eq!(
+            bitmap_memory(&header, size),
+            Some(Need { at_once: size + 4 * 600_000_000, tiles: 4 * 600_000_000 })
+        );
         assert_eq!(bitmap_memory(&header[..6], size), None, "a header cut short");
     }
 
     #[test]
     fn a_clipboard_image_too_large_to_open_is_said_not_passed_over() {
         let path = std::path::PathBuf::from("clipboard.png");
-        let too_large = opal_io::IoError::TooLarge { path: path.clone(), need: 2_000_000_000, free: 1_000_000_000 };
+        let short = opal_io::memory::Short { need: 2_000_000_000, have: 1_000_000_000, disk: false };
+        let too_large = opal_io::IoError::TooLarge { path: path.clone(), short };
         let why = imported(Err(too_large), false).unwrap_err();
         assert_eq!(
             why,
@@ -574,7 +574,7 @@ mod tests {
         );
         // A file copied in a file manager is named.
         let big = std::path::PathBuf::from("big.png");
-        let file = opal_io::IoError::TooLarge { path: big, need: 2_000_000_000, free: 1_000_000_000 };
+        let file = opal_io::IoError::TooLarge { path: big, short };
         let why = imported(Err(file), true).unwrap_err();
         assert!(why.starts_with("big.png: "), "{why}");
         let unreadable = opal_io::IoError::Decode { path, message: "not an image".into() };
@@ -705,7 +705,7 @@ mod system_tests {
             clipboard_win::raw::empty().unwrap();
             clipboard_win::raw::set_without_clear(clipboard_win::formats::CF_DIB, &dib).unwrap();
         }
-        assert!(clipboard_bitmap_memory().is_some_and(|n| n > 0), "the bitmap's size was not read");
+        assert!(clipboard_bitmap_memory().is_some_and(|n| n.total() > 0), "the bitmap's size was not read");
         let Read::Later(read) = SystemClipboard::default().read_image() else { panic!("read off the thread") };
         let bitmap = read().unwrap().expect("the bitmap was read");
         assert_eq!((bitmap.width, bitmap.height), (2, 2));

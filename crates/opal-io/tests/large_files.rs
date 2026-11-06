@@ -232,17 +232,16 @@ fn import_large_png() {
 #[test]
 #[ignore]
 fn export_spilled() {
-    let (one, _) = large();
+    let (one, mut ids) = large();
     let mut d = one.clone();
-    let mut ids = IdGen::default();
     for i in 1..3 {
         let mut layer = (*one.layers[0]).clone();
         layer.id = ids.layer();
         layer.opacity = 0.5;
-        // Its own tiles, so that the three take three times the memory.
-        if let opal_core::document::LayerContent::Objects(objects) = &mut layer.content
-            && let opal_core::document::ObjectKind::Pixels(p) = &mut objects[0].kind
-        {
+        // Its own object, and its own tiles, so that the three take three times the memory.
+        let opal_core::document::LayerContent::Objects(objects) = &mut layer.content else { unreachable!() };
+        objects[0].id = ids.object();
+        if let opal_core::document::ObjectKind::Pixels(p) = &mut objects[0].kind {
             Arc::make_mut(&mut p.image).set_pixel(i, 0, pixel_from_f32([1.0; 4]));
             let copied: Vec<_> = p.image.tiles().map(|(c, t)| (c, Arc::new((**t).clone()))).collect();
             let image = Arc::make_mut(&mut p.image);
@@ -259,6 +258,18 @@ fn export_spilled() {
     });
     let s = opal_core::store::status();
     eprintln!("  {} MB in memory, {} MB on disk", s.resident >> 20, s.on_disk >> 20);
-    opal_core::store::set_budget(None);
     std::fs::remove_file(path).unwrap();
+    // Saved, let go of, and opened again: its tiles go to disk as they are read.
+    let saved = temp("spilled.opal");
+    opal_io::native::save(&d, &ids, &saved, &opal_io::Progress::default()).unwrap();
+    drop((d, one));
+    opal_core::store::settle();
+    let mut opened = None;
+    measure("Opened, 200 MB in memory", || opened = Some(opal_io::native::load(&saved, None).unwrap()));
+    let s = opal_core::store::status();
+    eprintln!("  {} MB in memory, {} MB on disk", s.resident >> 20, s.on_disk >> 20);
+    assert!(s.resident <= 200 << 20, "opening took memory past the budget");
+    assert_eq!(opened.unwrap().doc.layers.len(), 3);
+    opal_core::store::set_budget(None);
+    std::fs::remove_file(saved).unwrap();
 }

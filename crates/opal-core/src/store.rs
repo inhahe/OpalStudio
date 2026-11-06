@@ -4,11 +4,11 @@
 //! memory take more than the budget ([`set_budget`]; none by default), the tiles read
 //! least recently go to the scratch file. A thread that takes memory past the budget sends
 //! as much as it took to disk itself, so memory never runs ahead of the budget however fast
-//! tiles are made; a thread of the store's own then takes more, down to nine tenths of it,
-//! so that this is not done for every tile made past it, nor on the thread that crossed it
-//! (the interface's, say). A tile on disk is read back when next read, and keeps its copy
-//! there while unchanged, so it can go again without being written. A tile being read or
-//! changed is never taken away meanwhile.
+//! tiles are made; a thread of the store's own then takes more, down to a little below it
+//! (a tenth, at most 256 MB), so that this is not done for every tile made past it, nor on
+//! the thread that crossed it (the interface's, say). A tile on disk is read back when next
+//! read, and keeps its copy there while unchanged, so it can go again without being
+//! written. A tile being read or changed is never taken away meanwhile.
 //!
 //! The scratch file is made in the system's temporary folder on first need and deleted
 //! when the program ends (Windows deletes it as the program's handles close, even after a
@@ -211,6 +211,23 @@ pub fn set_budget(bytes: Option<u64>) {
     }
 }
 
+/// The memory tiles may take before going to disk, if a budget is set ([`set_budget`]).
+pub fn budget() -> Option<u64> {
+    let b = STORE.budget.load(Relaxed);
+    (b != u64::MAX).then_some(b)
+}
+
+/// Takes the tiles read least recently to disk until `bytes` of them have gone, or none
+/// more can (nothing goes without a budget): room for work about to take that much in one
+/// go. Done on the calling thread, which waits for it.
+pub fn release(bytes: u64) {
+    if budget().is_none() {
+        return;
+    }
+    let until = STORE.resident.load(Relaxed).saturating_sub(bytes);
+    STORE.take_away(|| STORE.resident.load(Relaxed) > until);
+}
+
 /// The memory that taking tiles to disk could give back now, while a budget is set: the
 /// pixels in memory, or once writing to disk has failed, those that kept a copy there.
 pub fn reclaimable() -> u64 {
@@ -295,9 +312,12 @@ impl Store {
         self.clock.load(Relaxed)
     }
 
-    /// Nine tenths of the budget: what the store's thread takes memory down to.
+    /// What the store's thread takes memory down to: a tenth below the budget, or 256 MB if
+    /// less (the budget may follow the memory free, and dips in it should not send gigabytes
+    /// to disk).
     fn target(&self) -> u64 {
-        self.budget.load(Relaxed) / 10 * 9
+        let budget = self.budget.load(Relaxed);
+        budget - (budget / 10).min(256 << 20)
     }
 
     /// Whether the pixels in memory take more than the budget, and some can go.

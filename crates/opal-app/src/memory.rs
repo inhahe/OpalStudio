@@ -1,6 +1,7 @@
 //! The memory the system has free, so that work needing more is refused with the reason
 //! rather than started: an allocation that fails ends the program, losing unsaved work.
-//! What tiles going to disk could give back counts as free too (see `opal_core::store`).
+//! Images' tiles may go to disk (see `opal_core::store`), so room there counts too, as
+//! `opal_io::memory` says.
 //!
 //! On Windows this is the available physical memory `GlobalMemoryStatusEx` reports, or
 //! what the process may still commit if that is less (an allocation fails at the commit
@@ -8,15 +9,28 @@
 //! `MemAvailable` from `/proc/meminfo`. Elsewhere it is not known, and nothing is
 //! refused for want of memory.
 
-/// The memory work may take now, in bytes, if the system says: what is free, and what
-/// images' tiles going to disk could give back (as far as the disk holds it).
-pub fn free() -> Option<u64> {
+pub use opal_io::memory::{Free, Need};
+
+/// What work may take now, if the system says: the memory free; while tiles may go to
+/// disk, those in memory as far as the disk holds them, and the disk's room (once writing
+/// there has failed, only the tiles that kept a copy there).
+pub fn free() -> Option<Free> {
     #[cfg(test)]
     if let Some(free) = testing::FREE.get() {
         return free;
     }
-    let spill = opal_core::store::reclaimable().min(disk_free().unwrap_or(u64::MAX));
-    Some(physical_free()?.saturating_add(spill))
+    use opal_core::store;
+    let memory = physical_free()?;
+    let (reclaimable, disk) = if store::budget().is_none() {
+        (0, 0)
+    } else if store::status().trouble.is_some() {
+        let kept = store::reclaimable();
+        (kept, kept)
+    } else {
+        let disk = disk_free().unwrap_or(u64::MAX);
+        (store::reclaimable().min(disk), disk)
+    };
+    Some(Free { memory, reclaimable, disk })
 }
 
 /// The memory this computer has, in bytes, if the system says.
@@ -59,7 +73,7 @@ fn disk_free() -> Option<u64> {
 }
 
 /// Physical memory free now, in bytes, if the system says.
-fn physical_free() -> Option<u64> {
+pub fn physical_free() -> Option<u64> {
     #[cfg(windows)]
     {
         use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
@@ -93,8 +107,8 @@ fn meminfo(key: &str) -> Option<u64> {
 #[derive(Clone, Copy, Debug)]
 pub struct Allowance {
     /// `None` when not known: then there is no limit.
-    free: Option<u64>,
-    taken: u64,
+    free: Option<Free>,
+    taken: Need,
 }
 
 impl Allowance {
@@ -103,25 +117,38 @@ impl Allowance {
         Allowance::of(free())
     }
 
-    /// `free` bytes, or no limit if `None`.
-    pub fn of(free: Option<u64>) -> Allowance {
-        Allowance { free, taken: 0 }
+    /// `free`, or no limit if `None`.
+    pub fn of(free: Option<Free>) -> Allowance {
+        Allowance { free, taken: Need::default() }
     }
 
-    /// Sets aside `bytes` more, or says why there is not that much: how much the work would
-    /// need in all, and how much is free.
-    pub fn take(&mut self, bytes: u64) -> Result<(), String> {
-        let need = self.taken.saturating_add(bytes);
-        match self.free {
-            Some(free) if need > free => Err(format!(
-                "This would need about {} of memory, but only {} is free.",
-                opal_io::bytes(need),
-                opal_io::bytes(free)
-            )),
-            _ => {
-                self.taken = need;
-                Ok(())
-            }
+    /// `bytes` of memory with nothing going to disk, or no limit if `None`.
+    #[cfg(test)]
+    pub fn memory(bytes: Option<u64>) -> Allowance {
+        Allowance::of(bytes.map(Free::memory))
+    }
+
+    /// Sets aside `need` more, or says why there is not that much: how much the work would
+    /// need, and how much is free.
+    pub fn take(&mut self, need: Need) -> Result<(), String> {
+        let total = self.taken.plus(need);
+        if let Some(free) = &self.free {
+            free.check(total).map_err(|short| format!("This {short}."))?;
+        }
+        self.taken = total;
+        Ok(())
+    }
+
+    /// Sets aside `bytes` more of tiles ([`take`](Self::take)).
+    pub fn take_tiles(&mut self, bytes: u64) -> Result<(), String> {
+        self.take(Need::tiles(bytes))
+    }
+
+    /// Before what was set aside to be taken in one go is taken: sends tiles to disk for
+    /// what memory lacks of it.
+    pub fn make_room(&self) {
+        if let Some(free) = &self.free {
+            free.make_room(self.taken.at_once);
         }
     }
 }
@@ -129,17 +156,19 @@ impl Allowance {
 /// For tests: what is free, made up.
 #[cfg(test)]
 pub mod testing {
+    use super::Free;
     use std::cell::Cell;
 
     thread_local! {
         /// What [`free`](super::free) says on this thread, while pretended.
-        pub(super) static FREE: Cell<Option<Option<u64>>> = const { Cell::new(None) };
+        pub(super) static FREE: Cell<Option<Option<Free>>> = const { Cell::new(None) };
     }
 
-    /// Makes [`free`](super::free) say `free` on this thread (only, so tests running beside
-    /// it are not affected) until what this returns is dropped.
+    /// Makes [`free`](super::free) say `free` bytes of memory, with nothing going to disk,
+    /// on this thread (only, so tests running beside it are not affected) until what this
+    /// returns is dropped.
     pub fn pretend_free(free: Option<u64>) -> Pretend {
-        FREE.set(Some(free));
+        FREE.set(Some(free.map(Free::memory)));
         Pretend
     }
 
@@ -160,16 +189,21 @@ mod tests {
     #[cfg(any(windows, target_os = "linux"))]
     fn the_system_says_how_much_is_free() {
         let free = free().expect("known on Windows and Linux");
-        assert!(free > 0);
+        assert!(free.memory > 0);
     }
 
     #[test]
     fn an_allowance_refuses_what_would_pass_what_is_free() {
-        let mut a = Allowance::of(Some(1_000_000_000));
-        assert!(a.take(600_000_000).is_ok());
-        let why = a.take(600_000_000).unwrap_err();
+        let mut a = Allowance::memory(Some(1_000_000_000));
+        assert!(a.take_tiles(600_000_000).is_ok());
+        let why = a.take_tiles(600_000_000).unwrap_err();
         assert!(why.contains("1.2 GB") && why.contains("1.0 GB"), "{why}");
-        assert!(a.take(400_000_000).is_ok(), "a refusal set something aside");
-        assert!(Allowance::of(None).take(u64::MAX).is_ok(), "no limit when not known");
+        assert!(a.take_tiles(400_000_000).is_ok(), "a refusal set something aside");
+        assert!(Allowance::memory(None).take_tiles(u64::MAX).is_ok(), "no limit when not known");
+        // Tiles may go to disk; what is taken in one go may not.
+        let mut a = Allowance::of(Some(Free { memory: 100, reclaimable: 0, disk: 1000 }));
+        assert!(a.take_tiles(900).is_ok());
+        assert!(a.take(Need::at_once(101)).is_err());
+        assert!(a.take(Need::at_once(100)).is_ok());
     }
 }

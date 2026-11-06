@@ -1,5 +1,6 @@
 //! Importing and exporting ordinary image files (PNG and JPEG).
 
+use crate::memory::{Free, Need};
 use crate::pixels::{from_srgb8, pixels_from_rgba16, pixels_to_rgba8, pixels_to_rgba16};
 use crate::{IoError, Progress, write_atomically};
 use half::f16;
@@ -30,13 +31,14 @@ pub struct Imported {
 
 /// Reads a PNG or JPEG (recognized by content, not extension), turned upright according to
 /// its EXIF orientation.
-pub fn import(path: &Path, free: Option<u64>) -> Result<Imported, IoError> {
+pub fn import(path: &Path, free: Option<Free>) -> Result<Imported, IoError> {
     let bytes = std::fs::read(path).map_err(|e| IoError::io(path, e))?;
     import_bytes(&bytes, path, free)
 }
 
-/// Like [`import`], from bytes already in memory; `path` is used only in messages.
-pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<u64>) -> Result<Imported, IoError> {
+/// Like [`import`], from bytes already in memory; `path` is used only in messages. Refused
+/// before it is decoded if it would need more memory than `free` (if known) allows.
+pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<Free>) -> Result<Imported, IoError> {
     let decode_err = |e: image::ImageError| IoError::Decode { path: path.to_owned(), message: e.to_string() };
     let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(|e| IoError::io(path, e))?;
     if reader.format().is_none() {
@@ -49,8 +51,9 @@ pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<u64>) -> Result<Impo
         image::ColorType::L16 | image::ColorType::La16 | image::ColorType::Rgb16 | image::ColorType::Rgba16
     );
     let need = import_memory(decoder.dimensions(), decoder.total_bytes(), orientation, sixteen);
-    if let Some(free) = free.filter(|&f| need > f) {
-        return Err(IoError::TooLarge { path: path.to_owned(), need, free });
+    if let Some(free) = free {
+        free.check(need).map_err(|short| IoError::TooLarge { path: path.to_owned(), short })?;
+        free.make_room(need.at_once);
     }
     let icc = decoder.icc_profile().map_err(decode_err)?;
     let mut img = DynamicImage::from_decoder(decoder).map_err(decode_err)?;
@@ -84,21 +87,24 @@ pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<u64>) -> Result<Impo
     Ok(Imported { width, height, image, warnings })
 }
 
-/// The memory opening an image of `dimensions` takes at once, given the bytes its decoder
-/// makes (`decoded`): those, a turned copy of them if `orientation` turns it, and per pixel
-/// the image as RGBA and its tiles: at 8 bits (4 and 4 bytes, kept at 8 bits), or at 16
-/// (8, and 8 for working pixels and 8 for their tiles).
+/// The memory opening an image of `dimensions` takes, given the bytes its decoder makes
+/// (`decoded`): in one go those, a turned copy of them if `orientation` turns it, and per
+/// pixel the image as RGBA (4 bytes at 8 bits; at 16, 8, and 8 for working pixels); and
+/// its tiles (4 bytes a pixel, kept at 8 bits, or 8).
 fn import_memory(
     dimensions: (u32, u32),
     decoded: u64,
     orientation: image::metadata::Orientation,
     sixteen: bool,
-) -> u64 {
+) -> Need {
     // Saturating: a header may claim any size, and a wrapped sum would pass the check.
     let pixels = u64::from(dimensions.0) * u64::from(dimensions.1);
     let turned = if orientation == image::metadata::Orientation::NoTransforms { 0 } else { decoded };
-    let per_pixel = if sixteen { 24 } else { 8 };
-    decoded.saturating_add(turned).saturating_add(pixels.saturating_mul(per_pixel))
+    let (in_one_go, tiles) = if sixteen { (16, 8) } else { (4, 4) };
+    Need {
+        at_once: decoded.saturating_add(turned).saturating_add(pixels.saturating_mul(in_one_go)),
+        tiles: pixels.saturating_mul(tiles),
+    }
 }
 
 /// Whether an ICC profile is (by its description) one of the sRGB profiles, which need no
@@ -165,25 +171,26 @@ enum Source<'d> {
     Resized { image: Box<RasterImage>, to_size: Affine, sampling: Sampling },
 }
 
-/// The memory exporting `doc` (at `size`, if given) takes beyond the document: the bands
-/// in flight (one being made, as tiles and then as rows; one waiting; one being encoded,
-/// and its encoding), and at another size the image the result is drawn from, with its
-/// edges copied outward ([`frame_edges`]), and the canvas rows a shrunk one is made from.
-pub fn export_memory(doc: &Document, size: Option<&ExportSize>) -> u64 {
+/// The memory exporting `doc` (at `size`, if given) takes beyond the document: in one go,
+/// the bands in flight (one being made, as tiles and then as rows; one waiting; one being
+/// encoded, and its encoding), and the canvas rows a shrunk result is made from; and at
+/// another size the tiles of the image the result is drawn from, with its edges copied
+/// outward ([`frame_edges`]).
+pub fn export_memory(doc: &Document, size: Option<&ExportSize>) -> Need {
     use opal_core::raster::TILE_BYTES;
     let canvas = doc.canvas.rect();
     let band = |w: u32| u64::from(w) * BAND as u64 * 8;
-    let Some(s) = size.filter(|s| resizes(doc, s)) else { return 5 * band(doc.canvas.width) };
+    let Some(s) = size.filter(|s| resizes(doc, s)) else { return Need::at_once(5 * band(doc.canvas.width)) };
     let (at, border) = resized_frame(&canvas, s);
-    let source = if shrink_factors(&canvas, s) == (1, 1) {
-        opal_core::composite::composite_cost(&doc.layers, Some(&canvas))
+    let (rows, source) = if shrink_factors(&canvas, s) == (1, 1) {
+        (0, opal_core::composite::composite_cost(&doc.layers, Some(&canvas)))
     } else {
-        tiles_over(&at) * TILE_BYTES + 2 * band(doc.canvas.width)
+        (2 * band(doc.canvas.width), tiles_over(&at) * TILE_BYTES)
     };
     // The tiles the edges are copied into: those reaching past the canvas's pixels (which,
     // shared with a layer, are copied first).
     let edges = tiles_over(&at.expand(border)) - tiles_within(&at);
-    5 * band(s.width) + source + edges * TILE_BYTES
+    Need { at_once: 5 * band(s.width) + rows, tiles: source + edges * TILE_BYTES }
 }
 
 /// How many tiles `r` touches.
@@ -954,17 +961,22 @@ mod tests {
     #[test]
     fn an_image_needing_more_memory_than_is_free_is_refused_before_decoding() {
         let png = gradient_png(100, 50);
-        // 5,000 pixels at 8 bits: 20 KB decoded, 40 KB beyond (kept at 8 bits).
-        let r = import_bytes(&png, Path::new("big.png"), Some(50_000));
-        let Err(IoError::TooLarge { need, free, .. }) = r else { panic!("not refused: {:?}", r.map(|i| i.width)) };
-        assert_eq!((need, free), (60_000, 50_000));
-        assert!(import_bytes(&png, Path::new("big.png"), Some(60_000)).is_ok());
+        // 5,000 pixels at 8 bits: 20 KB decoded and 20 KB as RGBA in one go, 20 KB of tiles
+        // (kept at 8 bits).
+        let memory = |bytes| Some(Free::memory(bytes));
+        let r = import_bytes(&png, Path::new("big.png"), memory(50_000));
+        let Err(IoError::TooLarge { short, .. }) = r else { panic!("not refused: {:?}", r.map(|i| i.width)) };
+        assert_eq!((short.need, short.have), (60_000, 50_000));
+        assert!(import_bytes(&png, Path::new("big.png"), memory(60_000)).is_ok());
         assert!(import_bytes(&png, Path::new("big.png"), None).is_ok());
+        // The tiles may go to disk; what is taken in one go may not.
+        let with_disk = |memory| Some(Free { memory, reclaimable: 0, disk: 1 << 30 });
+        assert!(import_bytes(&png, Path::new("big.png"), with_disk(40_000)).is_ok());
+        let r = import_bytes(&png, Path::new("big.png"), with_disk(39_999));
+        assert!(matches!(r, Err(IoError::TooLarge { short, .. }) if short.need == 40_000), "{:?}", r.err());
         // A size no sum of which may wrap past the check.
-        assert_eq!(
-            import_memory((u32::MAX, u32::MAX), u64::MAX - 1, image::metadata::Orientation::Rotate90, true),
-            u64::MAX
-        );
+        let huge = import_memory((u32::MAX, u32::MAX), u64::MAX - 1, image::metadata::Orientation::Rotate90, true);
+        assert_eq!((huge.at_once, huge.total()), (u64::MAX, u64::MAX));
     }
 
     #[test]
@@ -1013,12 +1025,12 @@ mod tests {
         let size = |width, height| ExportSize { width, height, sampling: Sampling::default() };
         let mut ids = IdGen::default();
         let mut d = Document::new(3000, 2000);
-        assert_eq!(export_memory(&d, None), 5 * band(3000));
-        assert_eq!(export_memory(&d, Some(&size(3000, 2000))), 5 * band(3000), "the canvas's own size");
+        assert_eq!(export_memory(&d, None), Need::at_once(5 * band(3000)));
+        assert_eq!(export_memory(&d, Some(&size(3000, 2000))), Need::at_once(5 * band(3000)), "the canvas's own size");
         // Halved: averaged into 1500 × 1000 (6 × 4 tiles), from bands of the canvas; its
         // edges copied 5 pixels out (Bicubic reaches 4) into the tiles past the 5 × 3
         // within it, of the 7 × 5 the copies reach.
-        let halved = 5 * band(1500) + 24 * TILE_BYTES + 2 * band(3000) + (35 - 15) * TILE_BYTES;
+        let halved = Need { at_once: 5 * band(1500) + 2 * band(3000), tiles: 24 * TILE_BYTES + (35 - 15) * TILE_BYTES };
         assert_eq!(export_memory(&d, Some(&size(1500, 1000))), halved);
         // Enlarged: drawn from the canvas composited, here one tile made; its edges copied
         // into the tiles past the 11 × 7 within it, of the 13 × 9 the copies reach.
@@ -1027,7 +1039,8 @@ mod tests {
         let l = ids.layer();
         d.insert(Position { parent: None, index: 0 }, Layer::new_raster(l, ids.object(), "l", img)).unwrap();
         d.layer_mut(l).unwrap().opacity = 0.5;
-        assert_eq!(export_memory(&d, Some(&size(4000, 3000))), 5 * band(4000) + TILE_BYTES + (117 - 77) * TILE_BYTES);
+        let enlarged = Need { at_once: 5 * band(4000), tiles: TILE_BYTES + (117 - 77) * TILE_BYTES };
+        assert_eq!(export_memory(&d, Some(&size(4000, 3000))), enlarged);
     }
 
     /// The exports to try progress on: at the canvas's size, shrunk (by block averages), and

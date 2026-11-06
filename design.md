@@ -127,12 +127,15 @@ not a goal.
   channel); copies that move pixels without changing them (quarter turns, flips,
   cropping) stay 8-bit, and changing a tile makes it working pixels.
 - **Tiles go to disk past a budget** (`opal_core::store`): the pixels of open images may
-  take a share of the computer's memory (Preferences › Memory, 60% by default); past it,
-  the tiles read least recently go to a scratch file in the temporary folder (deleted when
-  the program ends) and come back when next read. A thread taking memory past the budget
-  sends as much as it took to disk itself, so memory never runs ahead of the budget
-  however fast tiles are made; a thread of the store's own takes memory down to nine
-  tenths of it, so that a lower budget, or a tile brought back by the interface, never
+  take a share of the computer's memory (Preferences › Memory, 60% by default), but never
+  more than they take now and the memory free leave room for, less a twentieth of the
+  total (worked out every frame, so tiles go to disk before memory runs out, whatever else
+  takes it); past it, the tiles read least recently go to a scratch file in the temporary
+  folder (deleted when the program ends) and come back when next read. A thread taking
+  memory past the budget sends as much as it took to disk itself, so memory never runs
+  ahead of the budget however fast tiles are made; a thread of the store's own takes
+  memory down a tenth below it (at most 256 MB, so that a dip in the memory free sends no
+  more than that), so that a lower budget, or a tile brought back by the interface, never
   holds up the thread that crossed it. The order is kept in a queue, made by sorting the
   tiles by when each was last read (read once each, as tiles read meanwhile change it) and
   made again when used up, skipping tiles read since. A tile being read or changed never
@@ -463,9 +466,13 @@ curve editors.
   reason, a result needing more than 2 GiB beyond four canvases' worth; baking a paste
   into a layer, or resampling on Resize Image, keeps only the part around the canvas then,
   and says so. Within those limits, nothing is drawn into pixels that would need more
-  memory than is free when the work begins (the available physical memory, on Windows
-  and Linux, and what tiles going to disk could give back, as far as the disk holds it;
-  `memory.rs`), since a failed allocation ends the program: merging counts
+  memory than is free when the work begins, since a failed allocation ends the program
+  (`opal_io::memory`, measured by the app's `memory.rs`). Work needs memory two ways: what
+  it takes in one go (a decoded file, the bitmaps of a copy, an export's bands), which must
+  fit in the memory free (the available physical memory, on Windows and Linux) together
+  with what tiles in memory going to disk could make room for, as far as the disk holds
+  them (sent there before it is taken); and the tiles it makes as it goes, which may also
+  take the disk's room, since past the budget they go there as they come. Merging counts
   exactly the tiles it would make (none for those it shares), drawing into pixels exactly
   the tiles it draws (`render_cost`), summed over everything one command draws; Rasterize
   counts every image object it draws, hidden or not, and no pixel object. A transform box
@@ -479,11 +486,13 @@ curve editors.
   16-bit PNG, the bitmaps, the system's copies of them, and the copy kept for pasting
   back; 24 elsewhere), and on
   Windows no more than the 4 GB a clipboard bitmap holds. Opening a PNG or JPEG (or
-  pasting one) is checked before it is decoded: the decoder's buffer, a turned copy if
-  its orientation turns it, and 24 bytes a pixel for the conversions and tiles; opening
-  an `.opal` file before its tiles are read (each held twice for a moment); and, on
-  Windows, pasting a system bitmap from its header before it is read (the bitmap, and
-  20 bytes a pixel). (Merging layers that are not adjacent moves the lower ones above whatever lay
+  pasting one) is checked before it is decoded: in one go the decoder's buffer, a turned
+  copy if its orientation turns it, and the image as RGBA (4 bytes a pixel at 8 bits; 16
+  at 16, with its working pixels), and its tiles (4 bytes a pixel, kept at 8 bits, or 8);
+  opening an `.opal` file before its tiles are read, which are then read 64 at a time and
+  may go to disk as they come, so a document larger than memory opens again; and, on
+  Windows, pasting a system bitmap from its header before it is read (in one go the
+  bitmap and 4 bytes a pixel, and 4 of tiles). (Merging layers that are not adjacent moves the lower ones above whatever lay
   between them, which can change the look where those overlap; the status bar says so.)
 
 ### Performance with many layers

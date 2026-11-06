@@ -17,6 +17,7 @@
 //! (sign, exponent, top of the mantissa) of neighboring values are similar, so grouping them
 //! lets deflate compress photos far better.
 
+use crate::memory::{Free, Need};
 use crate::{IoError, Progress, write_all, write_atomically};
 use opal_core::document::{
     Canvas, Document, IdGen, ImageObject, Layer, LayerContent, LayerId, Object, ObjectId, ObjectKind, PixelObject,
@@ -46,6 +47,9 @@ const SRGB8_BYTES: usize = TILE_PIXELS * 4;
 const TILES_AT_ONCE: usize = 256;
 /// How many tiles one worker compresses into an archive of its own.
 const TILES_PER_PART: usize = 8;
+/// How many tiles opening reads before making them (in parallel): what it holds at once of
+/// the file's bytes.
+const BATCH: usize = 64;
 /// The largest `document.json` accepted.
 const MAX_JSON: usize = 256 << 20;
 
@@ -238,14 +242,15 @@ pub struct Loaded {
     pub ids: IdGen,
 }
 
-/// Loads an `.opal` file.
-pub fn load(path: &Path, free: Option<u64>) -> Result<Loaded, IoError> {
+/// Loads an `.opal` file; refused before its tiles are read if they would need more memory
+/// than `free` (if known) allows.
+pub fn load(path: &Path, free: Option<Free>) -> Result<Loaded, IoError> {
     let file = std::fs::File::open(path).map_err(|e| IoError::io(path, e))?;
     load_from(std::io::BufReader::new(file), path, free)
 }
 
 /// Loads an `.opal` file from a reader; `path` is used only in messages.
-pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<u64>) -> Result<Loaded, IoError> {
+pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> Result<Loaded, IoError> {
     let bad = |message: String| IoError::Format { path: path.to_owned(), message };
     let mut zip = ZipArchive::new(reader).map_err(|e| bad(format!("not a zip archive ({e})")))?;
 
@@ -283,32 +288,46 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<u64>) -> Re
     let places = wanted.len() as u64;
     wanted.sort_unstable();
     wanted.dedup();
-    // Refused before any is read if they would need more than is free: each tile is held
-    // twice for a moment (as read, and as pixels), and each place one goes is an entry in
-    // its image.
-    let need = (wanted.len() as u64).saturating_mul(2 * TILE_BYTES as u64).saturating_add(places.saturating_mul(64));
-    if let Some(free) = free.filter(|&f| need > f) {
-        return Err(IoError::TooLarge { path: path.to_owned(), need, free });
-    }
     // Each as stored: at 8 bits, or as working pixels.
-    let mut raw: Vec<(usize, bool, Vec<u8>)> = Vec::with_capacity(wanted.len());
-    for n in wanted {
-        let at_8 = format!("tiles/{n}.srgb8");
-        let (name, size, srgb8) = if zip.index_for_name(&at_8).is_some() {
-            (at_8, SRGB8_BYTES, true)
-        } else {
-            (format!("tiles/{n}.bin"), TILE_BYTES, false)
-        };
-        let bytes = read_entry(&mut zip, &name, size, path)?;
-        if bytes.len() != size {
-            return Err(bad(format!("{name} has {} bytes, not {size}", bytes.len())));
-        }
-        raw.push((n, srgb8, bytes));
-    }
-    let tiles: HashMap<usize, Arc<Tile>> = raw
-        .into_par_iter()
-        .map(|(n, srgb8, bytes)| (n, Arc::new(if srgb8 { from_planes(&bytes) } else { unshuffle(&bytes) })))
+    let stored: Vec<(usize, String, usize, bool)> = wanted
+        .into_iter()
+        .map(|n| {
+            let at_8 = format!("tiles/{n}.srgb8");
+            if zip.index_for_name(&at_8).is_some() {
+                (n, at_8, SRGB8_BYTES, true)
+            } else {
+                (n, format!("tiles/{n}.bin"), TILE_BYTES, false)
+            }
+        })
         .collect();
+    // Refused before any is read if they would need more than is free: the tiles, which
+    // may go to disk as they are made; and in one go each place one goes (an entry in its
+    // image) and the batch being read.
+    let tiles: u64 = stored.iter().map(|s| s.2 as u64).sum();
+    let batch = stored.chunks(BATCH).map(|b| b.iter().map(|s| s.2 as u64).sum()).max().unwrap_or(0);
+    let need = Need { at_once: places.saturating_mul(64).saturating_add(batch), tiles };
+    if let Some(free) = free {
+        free.check(need).map_err(|short| IoError::TooLarge { path: path.to_owned(), short })?;
+        free.make_room(need.at_once);
+    }
+    // Read a batch at a time, each made into tiles in parallel: the bytes read are held a
+    // batch at a time, and the tiles made can go to disk as they come.
+    let mut tiles: HashMap<usize, Arc<Tile>> = HashMap::with_capacity(stored.len());
+    for batch in stored.chunks(BATCH) {
+        let mut raw = Vec::with_capacity(batch.len());
+        for (n, name, size, srgb8) in batch {
+            let bytes = read_entry(&mut zip, name, *size, path)?;
+            if bytes.len() != *size {
+                return Err(bad(format!("{name} has {} bytes, not {size}", bytes.len())));
+            }
+            raw.push((*n, *srgb8, bytes));
+        }
+        let made: Vec<(usize, Arc<Tile>)> = raw
+            .into_par_iter()
+            .map(|(n, srgb8, bytes)| (n, Arc::new(if srgb8 { from_planes(&bytes) } else { unshuffle(&bytes) })))
+            .collect();
+        tiles.extend(made);
+    }
 
     let mut layers = Vec::with_capacity(file.layers.len());
     for l in file.layers {
@@ -556,11 +575,38 @@ mod tests {
         let (doc, ids) = sample();
         let path = std::env::temp_dir().join(format!("opal-native-free-{}.opal", std::process::id()));
         save(&doc, &ids, &path, &Progress::default()).unwrap();
-        let refused = load(&path, Some(1_000_000));
-        let opened = load(&path, Some(1 << 30));
+        let refused = load(&path, Some(Free::memory(1_000_000)));
+        let opened = load(&path, Some(Free::memory(1 << 30)));
         std::fs::remove_file(&path).unwrap();
-        assert!(matches!(refused, Err(IoError::TooLarge { free: 1_000_000, .. })), "{:?}", refused.err());
+        assert!(
+            matches!(refused, Err(IoError::TooLarge { short, .. }) if short.have == 1_000_000),
+            "{:?}",
+            refused.err()
+        );
         assert!(opened.is_ok());
+    }
+
+    #[test]
+    fn a_document_larger_than_memory_opens_reading_its_tiles_a_batch_at_a_time() {
+        // A hundred tiles, each its own.
+        let mut ids = IdGen::default();
+        let mut doc = Document::new(2560, 2560);
+        let mut img = RasterImage::new();
+        for c in TileCoord::covering(&IRect::from_size(2560, 2560), 0) {
+            let colour = pixel_from_f32([c.x as f32 / 10.0, c.y as f32 / 10.0, 0.5, 1.0]);
+            img.set_tile(c, Some(Arc::new(Tile::filled(colour))));
+        }
+        let layer = Layer::new_raster(ids.layer(), ids.object(), "l", img);
+        doc.insert(Position { parent: None, index: 0 }, layer).unwrap();
+        let path = std::env::temp_dir().join(format!("opal-native-batches-{}.opal", std::process::id()));
+        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        // Memory for a batch, and the tiles on disk.
+        let (batch, tiles) = ((BATCH * TILE_BYTES) as u64, (100 * TILE_BYTES) as u64);
+        let opened = load(&path, Some(Free { memory: batch + 100_000, reclaimable: 0, disk: tiles }));
+        let refused = load(&path, Some(Free { memory: batch - 1, reclaimable: 0, disk: 1 << 40 }));
+        std::fs::remove_file(&path).unwrap();
+        assert!(opened.is_ok(), "{:?}", opened.err());
+        assert!(matches!(refused, Err(IoError::TooLarge { short, .. }) if !short.disk), "{:?}", refused.err());
     }
 
     #[test]

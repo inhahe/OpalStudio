@@ -10,6 +10,7 @@
 //! [`Progress`].
 
 pub mod image_files;
+pub mod memory;
 pub mod native;
 pub mod pixels;
 
@@ -33,9 +34,9 @@ pub enum IoError {
     /// The write was cancelled (through its [`Progress`]); the file was left as it was.
     #[error("{path}: cancelled")]
     Cancelled { path: PathBuf },
-    /// Reading the file would need `need` bytes of memory, more than the `free` allowed.
-    #[error("{path}: opening it would need about {} of memory, but only {} is free", bytes(*.need), bytes(*.free))]
-    TooLarge { path: PathBuf, need: u64, free: u64 },
+    /// Reading the file would need more memory than may be taken.
+    #[error("{path}: opening it {short}")]
+    TooLarge { path: PathBuf, short: memory::Short },
 }
 
 impl IoError {

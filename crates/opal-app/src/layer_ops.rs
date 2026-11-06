@@ -39,7 +39,7 @@ pub(crate) fn drawable(
     } else {
         (footprint.intersect(keep), true)
     };
-    memory.take(resample::render_cost(image, transform, sampling, Some(&area)))?;
+    memory.take_tiles(resample::render_cost(image, transform, sampling, Some(&area)))?;
     Ok(Some((area, cut)))
 }
 
@@ -464,7 +464,7 @@ fn rasterize_fits(layers: &[Arc<Layer>], canvas: &IRect, mut memory: Allowance) 
     within_reach(reached, canvas)?;
     for o in objects {
         if let ObjectKind::Image(i) = &o.kind {
-            memory.take(resample::render_cost(&i.image, &i.transform, &i.sampling, None))?;
+            memory.take_tiles(resample::render_cost(&i.image, &i.transform, &i.sampling, None))?;
         }
     }
     Ok(())
@@ -502,7 +502,7 @@ fn fits(layers: &[Arc<Layer>], canvas: &IRect, mut memory: Allowance) -> Result<
         }
     }
     within_reach((stored.len() as i64).saturating_mul(tile).saturating_add(reached), canvas)?;
-    memory.take(opal_core::composite::composite_cost(layers, None))
+    memory.take_tiles(opal_core::composite::composite_cost(layers, None))
 }
 
 /// How many layers the document has, groups included (for naming new ones).
@@ -648,7 +648,7 @@ mod tests {
         // Nine tiles each unlike the others (an area across tile edges), and room for ten.
         let img = RasterImage::filled(&IRect::new(-50, -50, 300, 300), pixel_from_f32([1.0; 4]));
         let same = Affine::translate(0.0, 0.0);
-        let mut memory = Allowance::of(Some(10 * opal_core::raster::TILE_BYTES));
+        let mut memory = Allowance::memory(Some(10 * opal_core::raster::TILE_BYTES));
         assert!(drawable(&img, &same, &s, &canvas, &mut memory).is_ok());
         let why = drawable(&img, &same, &s, &canvas, &mut memory).unwrap_err();
         assert!(why.contains("memory"), "{why}");
@@ -676,8 +676,8 @@ mod tests {
         let hidden = [Arc::new(hidden)];
         let need = resample::render_cost(&photo, &Affine::rotate(0.2), &Sampling::default(), None);
         assert!(need > 0);
-        assert!(rasterize_fits(&hidden, &canvas, Allowance::of(Some(need))).is_ok());
-        let why = rasterize_fits(&hidden, &canvas, Allowance::of(Some(need - 1))).unwrap_err();
+        assert!(rasterize_fits(&hidden, &canvas, Allowance::memory(Some(need))).is_ok());
+        let why = rasterize_fits(&hidden, &canvas, Allowance::memory(Some(need - 1))).unwrap_err();
         assert!(why.contains("memory"), "{why}");
         // A large pixel object beside it is not copied, so it is not counted.
         let big = RasterImage::filled(&IRect::from_size(20_000, 20_000), pixel_from_f32([1.0; 4]));
@@ -690,7 +690,7 @@ mod tests {
                 Object { id: ids.object(), kind: ObjectKind::Image(image(&photo)) },
             ],
         );
-        assert!(rasterize_fits(&[Arc::new(both)], &canvas, Allowance::of(Some(need))).is_ok());
+        assert!(rasterize_fits(&[Arc::new(both)], &canvas, Allowance::memory(Some(need))).is_ok());
     }
 
     #[test]
@@ -718,7 +718,7 @@ mod tests {
         let st = app(20_000, 15_000);
         let layers = &st.active().unwrap().doc().layers;
         let canvas = IRect::from_size(20_000, 15_000);
-        assert!(fits(layers, &canvas, Allowance::of(Some(0))).is_ok());
+        assert!(fits(layers, &canvas, Allowance::memory(Some(0))).is_ok());
         // A layer of its own over part of it: the tiles it overlaps are made.
         let mut img = RasterImage::new();
         for x in 0..300 {
@@ -728,8 +728,8 @@ mod tests {
         let top = Arc::new(Layer::new_raster(ids.layer(), ids.object(), "dots", img));
         let both = [layers[0].clone(), top];
         let four = 4 * opal_core::raster::TILE_BYTES;
-        assert!(fits(&both, &canvas, Allowance::of(Some(four))).is_ok());
-        let why = fits(&both, &canvas, Allowance::of(Some(four - 1))).unwrap_err();
+        assert!(fits(&both, &canvas, Allowance::memory(Some(four))).is_ok());
+        let why = fits(&both, &canvas, Allowance::memory(Some(four - 1))).unwrap_err();
         assert!(why.contains("memory"), "{why}");
     }
 }

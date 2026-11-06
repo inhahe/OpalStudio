@@ -201,16 +201,19 @@ fn new_image(ctx: &egui::Context, st: &mut AppState) {
 }
 
 /// What the New Image dialog says of a `width × height` canvas: its pixels, and the memory
-/// a layer covering it takes, which on a large canvas may be more than is `free`.
-fn size_note(width: u32, height: u32, free: Option<u64>) -> String {
+/// a layer covering it takes, which on a large canvas may be more than `free` has room for.
+fn size_note(width: u32, height: u32, free: Option<crate::memory::Free>) -> String {
     let pixels = u64::from(width) * u64::from(height);
     let full = pixels * 8;
     let mut note =
         format!("{:.1} megapixels; a layer covering it all takes about {} of memory", pixels as f64 / 1e6, bytes(full));
-    if let Some(free) = free.filter(|&f| full > f) {
+    if let Some(free) = free
+        && let Err(short) = free.check(crate::memory::Need::tiles(full))
+    {
+        let room = if short.disk { "free in memory and on disk" } else { "free" };
         note += &format!(
-            " (more than the {} free: fill only part of it; a white background costs next to nothing)",
-            bytes(free)
+            " (more than the {} {room}: fill only part of it; a white background costs next to nothing)",
+            bytes(short.have)
         );
     }
     note
@@ -591,10 +594,16 @@ mod tests {
 
     #[test]
     fn a_canvas_larger_than_memory_allows_says_so() {
-        let plain = size_note(1000, 1000, Some(1 << 30));
+        use crate::memory::Free;
+        let plain = size_note(1000, 1000, Some(Free::memory(1 << 30)));
         assert_eq!(plain, "1.0 megapixels; a layer covering it all takes about 8 MB of memory");
-        let huge = size_note(MAX_SIDE, MAX_SIDE, Some(16_000_000_000));
-        assert!(huge.contains("720.0 GB") && huge.contains("more than the 16.0 GB free"), "{huge}");
+        let huge = size_note(MAX_SIDE, MAX_SIDE, Some(Free::memory(16_000_000_000)));
+        assert!(huge.contains("720.0 GB") && huge.contains("more than the 16.0 GB free:"), "{huge}");
+        // With room on disk for tiles past memory.
+        let disk = Some(Free { memory: 16_000_000_000, reclaimable: 0, disk: 100_000_000_000 });
+        let note = size_note(MAX_SIDE, MAX_SIDE, disk);
+        assert!(note.contains("more than the 116.0 GB free in memory and on disk"), "{note}");
+        assert!(!size_note(30_000, 30_000, disk).contains("more than"), "7.2 GB fits");
         assert!(!size_note(MAX_SIDE, MAX_SIDE, None).contains("free"), "said without knowing");
     }
 }
