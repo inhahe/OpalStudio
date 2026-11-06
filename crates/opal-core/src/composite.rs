@@ -199,16 +199,23 @@ impl Reduced {
             }
             wanted[l as usize] = mixed;
         }
-        // Made from the bottom up, each level in parallel.
+        // Made from the bottom up, each level in parallel; tiles of the same four below (an
+        // edge of one tile repeated, say) are made once and shared.
+        let address = |t: &Option<Arc<Tile>>| t.as_ref().map_or(0, |t| Arc::as_ptr(t) as usize);
         for l in 1..=level {
-            let made: Vec<(TileCoord, Option<Arc<Tile>>)> = std::mem::take(&mut wanted[l as usize])
+            let mut unique: HashMap<[usize; 4], [Option<Arc<Tile>>; 4]> = HashMap::new();
+            let mut of: Vec<(TileCoord, [usize; 4])> = Vec::new();
+            for c in std::mem::take(&mut wanted[l as usize]) {
+                let kids = c.children().map(|k| reduced_tile(tiles, image, l - 1, k).cloned());
+                let key = kids.each_ref().map(address);
+                unique.entry(key).or_insert(kids);
+                of.push((c, key));
+            }
+            let made: HashMap<[usize; 4], Option<Arc<Tile>>> = unique
                 .into_par_iter()
-                .map(|c| {
-                    let kids = c.children().map(|k| reduced_tile(tiles, image, l - 1, k).map(|t| &**t));
-                    (c, downsample(kids).map(Arc::new))
-                })
+                .map(|(key, kids)| (key, downsample(kids.each_ref().map(|k| k.as_deref())).map(Arc::new)))
                 .collect();
-            tiles.extend(made.into_iter().map(|(c, t)| ((id, l, c), t)));
+            tiles.extend(of.into_iter().map(|(c, key)| ((id, l, c), made[&key].clone())));
         }
     }
 }
@@ -2666,6 +2673,31 @@ mod tests {
         // The tiles asked for (the level-3 tile and those around it the filter reaches),
         // and nothing beneath; reducing copies makes every tile beneath.
         assert_eq!((made, made_from_copies), (9, 9 + 4 + 16));
+    }
+
+    #[test]
+    fn a_preview_reduces_tiles_of_the_same_four_below_once() {
+        use crate::document::{ImageObject, Object};
+        // A white canvas whose last column and row are part tiles, all alike: the blocks over
+        // them are mixed, reduced four at a time, and alike along the edge.
+        let mut ids = IdGen::default();
+        let size: i64 = 256 * 16 + 100;
+        let mut d = Document::new(size as u32, size as u32);
+        add(&mut d, &mut ids, RasterImage::filled(&IRect::from_size(size, size), pixel_from_f32([1.0; 4])));
+        let image = ImageObject {
+            image: Arc::new(shared(IRect::from_size(256, 256), [1.0, 0.0, 0.0, 1.0]).0),
+            frame: IRect::from_size(256, 256),
+            transform: Affine::scale(size as f64 / 256.0, size as f64 / 256.0),
+            sampling: Sampling::default(),
+        };
+        let object = Object { id: ids.object(), kind: ObjectKind::Image(image) };
+        let index = d.layers.len();
+        d.insert(Position { parent: None, index }, Layer::with_objects(ids.layer(), "image", vec![object])).unwrap();
+        let mut p = Projection::new();
+        p.update(&d.layers, 4, &IRect::from_size(size, size), Quality::Preview);
+        let made: HashSet<usize> = p.reduced.tiles.values().flatten().map(|t| Arc::as_ptr(t) as usize).collect();
+        assert!(p.reduced.tiles.len() > 40, "{} reduced", p.reduced.tiles.len());
+        assert!(made.len() <= 16, "{} reduced tiles made, not shared", made.len());
     }
 
     #[test]
