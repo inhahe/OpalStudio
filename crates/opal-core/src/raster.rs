@@ -187,9 +187,9 @@ impl RasterImage {
         self.bounds = OnceLock::new();
     }
 
-    /// The tile map holds a new tile at `c` (or none): the runs follow, if built.
-    fn placed(&mut self, c: TileCoord) {
-        let p = self.tiles.get(&c).map(|t| Arc::as_ptr(t) as usize);
+    /// The tile map holds the tile at address `p` at `c` (or, `None`, none): the runs follow,
+    /// if built.
+    fn placed(&mut self, c: TileCoord, p: Option<usize>) {
         if let Some(runs) = self.runs.get_mut() {
             Arc::make_mut(runs).set(c, p);
         }
@@ -246,14 +246,18 @@ impl RasterImage {
         self.changed();
         // This image's own first, so that the runs know where it is; changed after, it is
         // still one tile of its own there.
-        Arc::make_mut(self.tiles.entry(c).or_insert_with(|| Arc::new(Tile::transparent())));
-        self.placed(c);
-        Arc::get_mut(self.tiles.get_mut(&c).expect("placed")).expect("this image's own")
+        let tile = self.tiles.entry(c).or_insert_with(|| Arc::new(Tile::transparent()));
+        Arc::make_mut(tile);
+        if let Some(runs) = self.runs.get_mut() {
+            Arc::make_mut(runs).set(c, Some(Arc::as_ptr(tile) as usize));
+        }
+        Arc::get_mut(tile).expect("this image's own")
     }
 
     /// Sets or removes the tile at `c`.
     pub fn set_tile(&mut self, c: TileCoord, tile: Option<Arc<Tile>>) {
         self.changed();
+        let p = tile.as_ref().map(|t| Arc::as_ptr(t) as usize);
         match tile {
             Some(t) => {
                 self.tiles.insert(c, t);
@@ -262,7 +266,7 @@ impl RasterImage {
                 self.tiles.remove(&c);
             }
         }
-        self.placed(c);
+        self.placed(c, p);
     }
 
     /// Every tile, in no particular order.
