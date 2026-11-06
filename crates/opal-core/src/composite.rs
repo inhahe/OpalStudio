@@ -149,9 +149,19 @@ struct Reduced {
     images: HashMap<usize, Copies>,
     /// For each pixel object, the image (by address) its copies were last made of.
     last: HashMap<ObjectId, usize>,
-    /// For each stored tile repeated over an area (by address): it halved from four
-    /// copies of itself, by level, as far as asked.
-    halved: HashMap<usize, Vec<Option<Arc<Tile>>>>,
+    /// For each stored tile repeated over an area (by address; the chain holds the tile, so
+    /// the address cannot be reused): it halved from four copies of itself, by level, as
+    /// far as asked. Kept from one update to the next while used, so that an edit beneath a
+    /// view of a large uniform area does not halve its tile all the way up again.
+    halved: HashMap<usize, Halved>,
+}
+
+/// A tile halved from four copies of itself, level by level (see [`halved_to`]).
+#[derive(Debug)]
+struct Halved {
+    chain: Vec<Option<Arc<Tile>>>,
+    /// Whether the update under way has used it.
+    used: bool,
 }
 
 /// One image's reduced tiles.
@@ -209,7 +219,7 @@ impl Reduced {
         });
         let objects: HashSet<ObjectId> = reads.iter().map(|r| r.0).collect();
         self.last.retain(|id, _| objects.contains(id));
-        self.halved.clear();
+        keep_used(&mut self.halved);
     }
 
     /// Keeps, of what was made, the tiles at `level`: what the view at that level may read
@@ -218,7 +228,7 @@ impl Reduced {
         for copies in self.images.values_mut() {
             copies.tiles.retain(|(l, _), _| *l == level);
         }
-        self.halved.clear();
+        keep_used(&mut self.halved);
     }
 
     /// Tile `c` of `image` reduced to `level`, if it was made and has content.
@@ -322,10 +332,18 @@ fn extend_chain(chain: &mut Vec<Option<Arc<Tile>>>, level: u32) {
 
 /// `tile` halved from four copies of itself `level` times, as reducing an area of it
 /// repeated makes it; each level's made once, kept in `halved`.
-fn halved_to(halved: &mut HashMap<usize, Vec<Option<Arc<Tile>>>>, tile: &Arc<Tile>, level: u32) -> Option<Arc<Tile>> {
-    let chain = halved.entry(Arc::as_ptr(tile) as usize).or_insert_with(|| vec![Some(tile.clone())]);
-    extend_chain(chain, level);
-    chain[level as usize].clone()
+fn halved_to(halved: &mut HashMap<usize, Halved>, tile: &Arc<Tile>, level: u32) -> Option<Arc<Tile>> {
+    let h = halved
+        .entry(Arc::as_ptr(tile) as usize)
+        .or_insert_with(|| Halved { chain: vec![Some(tile.clone())], used: false });
+    h.used = true;
+    extend_chain(&mut h.chain, level);
+    h.chain[level as usize].clone()
+}
+
+/// Lets go of the halved tiles the update just ended did not use, and starts the next.
+fn keep_used(halved: &mut HashMap<usize, Halved>) {
+    halved.retain(|_, h| std::mem::take(&mut h.used));
 }
 
 /// The tiles of pixel object `p`'s image, reduced to level `level`, that tile `c` of that
@@ -3391,6 +3409,29 @@ mod tests {
         d.insert(Position { parent: None, index: copies }, over).unwrap();
         d.layer_mut(over_layer).unwrap().opacity = 0.5;
         (d, photo)
+    }
+
+    #[test]
+    fn an_edit_beneath_keeps_the_tile_a_uniform_layer_repeats_halved() {
+        // A white canvas, one tile repeated, under a picture drawn at level 3.
+        let size: i64 = 8192;
+        let mut d = picture_over_white(size, picture(512), 0.3, 12.0, Sampling::default());
+        let mut p = Projection::new();
+        p.set_budget(Some(4 * TILE_BYTES));
+        let all = IRect::from_size(size, size);
+        p.update(&d.layers, 3, &all, Quality::Exact);
+        assert!(!p.costly.is_empty());
+        let ObjectKind::Pixels(white) = &d.layers[0].objects()[0].kind else { panic!() };
+        let white = Arc::as_ptr(white.image.tile(TileCoord::new(0, 0)).unwrap()) as usize;
+        let halved = |p: &Projection| p.reduced.halved.get(&white).and_then(|h| h.chain.get(3).cloned().flatten());
+        let before = halved(&p).expect("the white tile halved to level 3");
+        // A pixel far from the first tile changed: the white tile is halved no more.
+        let canvas = d.layers[0].id;
+        let LayerContent::Objects(objects) = &mut d.layer_mut(canvas).unwrap().content else { panic!() };
+        let ObjectKind::Pixels(o) = &mut objects[0].kind else { panic!() };
+        Arc::make_mut(&mut o.image).set_pixel(5000, 5000, pixel_from_f32([1.0, 0.0, 0.0, 1.0]));
+        p.update(&d.layers, 3, &all, Quality::Exact);
+        assert!(halved(&p).is_some_and(|after| Arc::ptr_eq(&before, &after)), "halved again");
     }
 
     #[test]

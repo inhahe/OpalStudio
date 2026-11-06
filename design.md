@@ -202,9 +202,10 @@ not a goal.
   start from its last one's, but for those over a tile the change touched (told apart by
   the two images' rows of tiles, which an edit shares where it leaves them alone), so an
   edit beneath makes again only the reduced tiles over what it changed, each from full
-  resolution. So an image object across a huge canvas costs the tiles shown
-  too (one across a 300,000-pixel canvas shown whole: 90 ms; 6 ms when its opacity
-  changes, 25 ms when a pixel of the canvas beneath does). Those tiles
+  resolution (a tile a layer repeats is halved once a level, and kept halved while the
+  view reads it). So an image object across a huge canvas costs the tiles shown too (one
+  across a 300,000-pixel canvas shown whole: 80 ms; 6 ms when its opacity changes, 15 ms
+  when a pixel of the canvas beneath does). Those tiles
   look very slightly different from reducing full resolution where layers overlap, and a
   pixel layer beneath them, off the level's pixel grid, slightly softer; everywhere else
   the view is exact. The cache
