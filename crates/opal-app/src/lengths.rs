@@ -150,6 +150,12 @@ pub fn print_note(width: u32, height: u32, ppi: f64, unit: Unit, per: Resolution
     format!("At {} it prints {size}.", show_resolution(ppi, per))
 }
 
+/// `ppi` in `unit`, short ("300 ppi"), as the status bar shows it.
+pub fn show_resolution_short(ppi: f64, unit: ResolutionUnit) -> String {
+    let text = format!("{:.2}", unit.from_ppi(ppi));
+    format!("{} {}", text.trim_end_matches('0').trim_end_matches('.'), unit.id())
+}
+
 /// The unit a print size is told in: `unit` if it is one, else inches or centimeters as
 /// the resolution is shown.
 pub fn print_unit(unit: Unit, resolution: ResolutionUnit) -> Unit {
@@ -170,6 +176,11 @@ impl AppState {
     pub fn set_unit(&mut self, unit: Unit) {
         self.prefs.set("ui.unit", Value::Choice(unit.id().to_owned()));
         self.settings_touched();
+    }
+
+    /// The resolution an image gets whose file does not say (a preference).
+    pub fn default_resolution(&self) -> f64 {
+        self.prefs.f64("ui.default_resolution")
     }
 
     /// The unit resolutions are shown in.

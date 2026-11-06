@@ -69,10 +69,11 @@ impl AppState {
         }
         let pixels = flat.read_rect(&bounds);
         let from = bounds.translate(-canvas.x0, -canvas.y0);
+        let resolution = doc.resolution;
         // Each copy's result comes back in the order they were started.
         self.copies_answered.push_back(answer);
         // The cap on tiles is kept until the copy is on the clipboard.
-        self.clipboard.write_image(Copied { from, pixels, _hold: memory.into_hold() }, ctx);
+        self.clipboard.write_image(Copied { from, pixels, resolution, _hold: memory.into_hold() }, ctx);
     }
 
     /// Says how the copies put on the clipboard since the last frame went: to the API call
@@ -348,6 +349,7 @@ impl AppState {
             height: imported.height,
             image: imported.image,
             from: None,
+            resolution: imported.resolution.map(|[across, _]| across),
             warnings: imported.warnings,
         };
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned());
@@ -379,6 +381,8 @@ impl AppState {
     fn new_image_from(&mut self, pasted: &Pasted) {
         let mut ids = IdGen::default();
         let mut doc = Document::new(pasted.width, pasted.height);
+        doc.resolution =
+            pasted.resolution.filter(|&r| opal_core::units::valid_ppi(r)).unwrap_or(self.default_resolution());
         let layer = Layer::new_raster(ids.layer(), ids.object(), "Pasted image", pasted.image.clone());
         doc.insert(Position { parent: None, index: 0 }, layer).expect("an empty document takes a layer");
         self.new_untitled(doc, ids, "Paste");

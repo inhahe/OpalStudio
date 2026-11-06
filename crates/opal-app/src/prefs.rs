@@ -216,6 +216,17 @@ pub static PREFS: &[Def] = &[
         default: Init::Choice("ppi"),
         advanced: true,
     },
+    Def {
+        key: "ui.default_resolution",
+        label: "Resolution of images that do not say",
+        help: "The resolution an image opened (or pasted as a new image) gets when its file does not say \
+               how large its pixels print: 72 pixels per inch, as most image editors take it, or 96, as \
+               Windows does, say. It changes no pixels: only sizes in units other than pixels.",
+        section: "Interface",
+        kind: Kind::Float { min: 1.0, max: 10_000.0, decimals: 2, suffix: " ppi", log: true },
+        default: Init::Float(opal_core::units::DEFAULT_PPI),
+        advanced: true,
+    },
     // Canvas
     Def {
         key: "canvas.checker_size",

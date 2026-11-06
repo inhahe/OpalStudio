@@ -139,6 +139,8 @@ pub struct DocState {
     /// canvas's, and its size), once one has been typed; the canvas, whatever it is then,
     /// until then.
     pub fit_rect: Option<[f64; 4]>,
+    /// What the boxes' positions count from (see `box_fields::Origin`).
+    pub origin: crate::box_fields::Origin,
     /// Something an operation on the document wants said in the status bar.
     pub notice: Option<String>,
     /// Whether the user has been told that history states are being dropped.
@@ -174,6 +176,7 @@ impl DocState {
             moving: None,
             crop: None,
             fit_rect: None,
+            origin: crate::box_fields::Origin::default(),
             crop_drag: None,
             notice: None,
             told_dropped: false,

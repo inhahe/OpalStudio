@@ -688,9 +688,17 @@ impl OpalApp {
                 }
                 let print = crate::lengths::print_note(c.width, c.height, ppi, unit, per);
                 ui.label(RichText::new(size).color(weak)).on_hover_text(format!(
-                    "The canvas's size. {print} (Image › Resize Image changes the resolution; Preferences › \
-                     Interface, the unit sizes are shown in.)"
+                    "The canvas's size. {print} (Preferences › Interface: the unit sizes are shown in.)"
                 ));
+                ui.separator();
+                let shown = crate::lengths::show_resolution_short(ppi, per);
+                let r = ui.add(egui::Button::new(RichText::new(shown).color(weak)).frame(false)).on_hover_text(
+                    "The image's resolution: how large its pixels print, which sizes in units other than pixels \
+                     are counted at. Click to change it (Image › Resize Image), with or without its pixels.",
+                );
+                if r.clicked() {
+                    self.st.queue.push(Cmd::ResizeImage);
+                }
                 ui.separator();
                 // Positions count from the canvas's corner, wherever cropping has put it.
                 if let Some((x, y)) = cursor {

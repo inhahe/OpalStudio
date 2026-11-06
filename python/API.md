@@ -126,6 +126,8 @@ Paste the image on the clipboard, then place and size it.
 | `angle` | number | The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is. |
 | `fit` | `stretch`, `inside`, `cover` | With both width and height given: stretch it to them (along its own sides, turned as it is); or keep its proportions and fit it, as it is turned, inside the rectangle they make on the canvas (placed by its anchor point at x and y), or make it cover that rectangle, centered on it. Default: "stretch". |
 | `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left". |
+| `from_layer` | layer | A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas. |
+| `from_anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the canvas (or of from_layer) x and y count from. Default: "top-left". |
 | `into_active` | bool | Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false. |
 | `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
 
@@ -143,6 +145,8 @@ Paste where the copy came from.
 | `angle` | number | The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is. |
 | `fit` | `stretch`, `inside`, `cover` | With both width and height given: stretch it to them (along its own sides, turned as it is); or keep its proportions and fit it, as it is turned, inside the rectangle they make on the canvas (placed by its anchor point at x and y), or make it cover that rectangle, centered on it. Default: "stretch". |
 | `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left". |
+| `from_layer` | layer | A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas. |
+| `from_anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the canvas (or of from_layer) x and y count from. Default: "top-left". |
 | `into_active` | bool | Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false. |
 | `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
 
@@ -162,6 +166,8 @@ Place an image file into this image, then position and size it.
 | `angle` | number | The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is. |
 | `fit` | `stretch`, `inside`, `cover` | With both width and height given: stretch it to them (along its own sides, turned as it is); or keep its proportions and fit it, as it is turned, inside the rectangle they make on the canvas (placed by its anchor point at x and y), or make it cover that rectangle, centered on it. Default: "stretch". |
 | `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left". |
+| `from_layer` | layer | A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas. |
+| `from_anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the canvas (or of from_layer) x and y count from. Default: "top-left". |
 | `into_active` | bool | Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false. |
 | `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
 
@@ -180,6 +186,8 @@ Move, scale and rotate the selected layers with a box.
 | `angle` | number | The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is. |
 | `fit` | `stretch`, `inside`, `cover` | With both width and height given: stretch it to them (along its own sides, turned as it is); or keep its proportions and fit it, as it is turned, inside the rectangle they make on the canvas (placed by its anchor point at x and y), or make it cover that rectangle, centered on it. Default: "stretch". |
 | `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left". |
+| `from_layer` | layer | A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas. |
+| `from_anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the canvas (or of from_layer) x and y count from. Default: "top-left". |
 | `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
 
 ### `new_layer`
@@ -436,6 +444,8 @@ Crops the image to a rectangle of its canvas, which may be turned: the canvas be
 | `angle` | number | The rectangle's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: 0. |
 | `delete` | bool | Remove the pixels outside the new canvas, rather than keep them for later. Default: the Crop tool's Delete cropped pixels. |
 | `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the rectangle x and y give, and what the angle turns it about. Default: "top-left". |
+| `from_layer` | layer | A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas. |
+| `from_anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the canvas (or of from_layer) x and y count from. Default: "top-left". |
 | `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
 
 ### `set_preference`

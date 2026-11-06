@@ -89,6 +89,23 @@ fn the_rulers_take_a_strip_beside_the_view_and_ctrl_r_hides_them() {
 }
 
 #[test]
+fn the_resolution_in_the_status_bar_opens_resize_image() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    h.state_mut().state_mut().create_image(&crate::state::NewImage {
+        width: 40,
+        height: 30,
+        background: crate::state::Background::White,
+        resolution: 150.0,
+    });
+    h.run();
+    h.get_by_label("150 ppi").click();
+    h.run();
+    let st = h.state().state();
+    assert!(st.resize_image.as_ref().is_some_and(|r| r.resolution == 150.0), "Resize Image did not open");
+}
+
+#[test]
 fn ribbon_tabs_switch_and_commands_run() {
     let _gpu = gpu_lock();
     let mut h = harness();
@@ -453,6 +470,7 @@ fn pasted(w: u32, h: u32, rgba: [f32; 4]) -> crate::clipboard::Pasted {
         height: h,
         image: opal_core::raster::RasterImage::from_pixels(w, h, &px),
         from: None,
+        resolution: None,
         warnings: Vec::new(),
     }
 }
@@ -549,6 +567,11 @@ fn the_numbers_button_by_the_box_opens_its_fields_in_the_unit_chosen() {
     assert_eq!(h.state().state().prefs.choice("transform.reference"), "center");
     assert_eq!(shows(&h, -0.125), 0, "the top-left corner is still shown");
     assert!(shows(&h, 0.5) >= 2, "the center is not shown");
+    // Counted from the canvas's bottom-right corner (4 × 3 in): the center is 3.5 in left of
+    // it and 2.5 in above.
+    h.query_all_by_label("From: Bottom right").last().unwrap().click();
+    h.run();
+    assert!(shows(&h, -3.5) >= 1 && shows(&h, -2.5) >= 1, "not counted from the canvas's bottom-right corner");
     // The crop box has them too.
     h.key_press(egui::Key::Enter);
     h.state_mut().state_mut().tool = crate::tools::ToolId::Crop;

@@ -738,6 +738,7 @@ impl AppState {
                 Ok(imported) => {
                     let mut ids = IdGen::default();
                     let mut doc = Document::new(imported.width, imported.height);
+                    doc.resolution = self.default_resolution();
                     let mut warnings = imported.warnings;
                     if let Some([x, y]) = imported.resolution {
                         doc.resolution = x;

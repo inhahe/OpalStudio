@@ -101,7 +101,12 @@ not a goal.
   else EXIF resolution) files on opening, written into PNG and JPEG exports, and kept in
   `.opal` files. A file's per-meter or per-centimeter density reads as the round number
   its writer most likely meant (2,835 pixels per meter is 72 ppi). Pixels are square: a
-  file whose aren't takes the resolution across, and says so.
+  file whose aren't takes the resolution across, and says so. Where it comes from: the
+  file; New Image's field (remembered; its paper and photo sizes at 300 ppi); for a file
+  that does not say, a preference (72 by default; 96 is Windows' habit); for a paste made
+  a new image, what the clipboard says (a PNG's, or the image a copy made here came from),
+  else that preference. The status bar shows it beside the size, and clicking it opens
+  Resize Image, where it is changed.
 - A **layer** is either a **group**, holding child layers, or holds **objects**: pixel
   objects and image objects (below), and later vector paths, text, brush strokes and
   adjustments. A group composites its children by themselves first, then applies its own
@@ -632,7 +637,13 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   take them too. The position is that of the box's **reference point** (a 3 × 3 grid in
   the fields, a preference: its top-left corner unless another is chosen), turned with
   it, from the canvas's corner; a size typed scales along the box's own sides about that
-  point, and an angle turns about it, so the numbers typed stay as typed.
+  point, and an angle turns about it, so the numbers typed stay as typed. **From**: the
+  position counts from a point (one of the same nine) of the canvas or of a layer (the
+  bounds of what it holds; not one the box moves, nor a group holding one), kept per
+  image (`box_fields::Origin`); a layer gone or emptied leaves the canvas's corner. Vector
+  paths' nodes, text boxes' corners and guides are to join the layers as things to count
+  from (`box_fields::Base`) when they come. Scripts name it as `from_layer` and
+  `from_anchor` (place, paste, transform, crop), held where it is when the call begins.
 - **Fit into a rectangle:** the transform box's fields also hold a rectangle, kept per
   image (the canvas, whatever it is then, until one is typed; at the same reference
   point), with *Fit inside* and *Fill*, which keep the box's proportions and its turn and

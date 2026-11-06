@@ -48,8 +48,9 @@ cargo test --workspace                     # all tests, interface tests included
   the canvas and other layers; Enter places it. A pasted image keeps its own pixels, so it
   can be resized again later without losing quality. The numbers button by the box (and
   the tool settings) gives its exact position, size and angle, in any unit, measured from
-  any of nine points of the box, and fits it inside, or makes it fill, a rectangle you
-  type, keeping its proportions. Place (File)
+  any of nine points of the box, counted from any of nine points of the canvas or of another
+  layer, and fits it inside, or makes it fill, a rectangle you type, keeping its
+  proportions. Place (File)
   puts an image file in the box the same way. Paste in Place, Copy and Copy Merged;
   pasting with nothing open makes a new image. Copies keep their full precision when pasted
   back, and on Windows reach other programs as 16-bit PNG. A large image is read in the

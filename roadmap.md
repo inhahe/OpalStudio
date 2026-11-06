@@ -118,6 +118,8 @@ selection core it builds on.
 
 ## 4. Vector shapes
 - Pen tool reusing the outline tool's curve editing; rectangle, ellipse, polygon, star.
+- Paths' nodes as points the boxes' positions can count from (`box_fields::Base`), beside
+  the canvas and layers, from the fields and from scripts.
 - Fill and stroke; editable brush strokes on vector shapes.
 - SVG import and export.
 - Boolean operations on paths.
@@ -159,6 +161,7 @@ selection core it builds on.
 
 ## 7. Text
 - Area text and point text; editable permanently, even inside an existing layer.
+- Text boxes' corners as points the boxes' positions can count from, as paths' nodes.
 - Shaping, bidirectional text, line breaking, font fallback.
 
 ## 8. Edge snapping and color matching

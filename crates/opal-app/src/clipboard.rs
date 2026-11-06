@@ -27,6 +27,9 @@ pub struct Pasted {
     pub image: RasterImage,
     /// For a copy made in Opal Studio: the document pixels it was copied from.
     pub from: Option<IRect>,
+    /// Pixels per inch, if what was copied says (a PNG's resolution, the image a copy made
+    /// here came from), across: a paste that makes a new image gives it this.
+    pub resolution: Option<f64>,
     /// Things the user should know about how it was read (an unsupported color profile).
     pub warnings: Vec<String>,
 }
@@ -36,6 +39,8 @@ pub struct Pasted {
 pub struct Copied {
     pub from: IRect,
     pub pixels: Vec<Pixel>,
+    /// The resolution of the image it was copied from.
+    pub resolution: f64,
     /// The cap on tiles' memory while the copy goes onto the clipboard (see
     /// `memory::Allowance`): let go of with the copy, once it is there.
     pub _hold: Option<opal_core::store::Hold>,
@@ -46,7 +51,14 @@ impl Copied {
     fn pasted(&self) -> Pasted {
         let (w, h) = (self.from.width() as u32, self.from.height() as u32);
         let image = RasterImage::from_pixels(w, h, &self.pixels);
-        Pasted { width: w, height: h, image, from: Some(self.from), warnings: Vec::new() }
+        Pasted {
+            width: w,
+            height: h,
+            image,
+            from: Some(self.from),
+            resolution: Some(self.resolution),
+            warnings: Vec::new(),
+        }
     }
 }
 
@@ -239,7 +251,14 @@ impl Clipboard for SystemClipboard {
 
 #[cfg_attr(test, allow(dead_code, reason = "tests use TestClipboard"))]
 fn from_import(i: image_files::Imported) -> Pasted {
-    Pasted { width: i.width, height: i.height, image: i.image, from: None, warnings: i.warnings }
+    Pasted {
+        width: i.width,
+        height: i.height,
+        image: i.image,
+        from: None,
+        resolution: i.resolution.map(|[across, _]| across),
+        warnings: i.warnings,
+    }
 }
 
 /// The memory pasting the bitmap on the clipboard would take (see [`bitmap_memory`]), if it
@@ -325,7 +344,7 @@ fn read_system(own: Option<OwnCopy>) -> ReadResult {
             let (w, h) = (img.width as u32, img.height as u32);
             // Kept at 8 bits, as the clipboard gave it.
             let image = RasterImage::from_srgb8(w, h, bytemuck::cast_slice(&img.bytes));
-            Ok(Some(Pasted { width: w, height: h, image, from: None, warnings: Vec::new() }))
+            Ok(Some(Pasted { width: w, height: h, image, from: None, resolution: None, warnings: Vec::new() }))
         }
         Err(arboard::Error::ContentNotAvailable) => Ok(None),
         Err(e) => Err(e.to_string()),
@@ -672,7 +691,7 @@ mod system_tests {
         let px = vec![opal_core::tile::pixel_from_f32([0.30001, 0.5, 0.7, 1.0]); 4];
         let mut cb = SystemClipboard::default();
         cb.write_image(
-            Copied { from: IRect::from_size(2, 2), pixels: px.clone(), _hold: None },
+            Copied { from: IRect::from_size(2, 2), pixels: px.clone(), resolution: 72.0, _hold: None },
             &egui::Context::default(),
         );
         // Read at once, while the copy may still be being written: the read waits for it.
@@ -728,7 +747,7 @@ mod system_tests {
             .map(opal_core::tile::pixel_from_f32)
             .to_vec();
         cb.write_image(
-            Copied { from: IRect::from_size(2, 2), pixels: px.clone(), _hold: None },
+            Copied { from: IRect::from_size(2, 2), pixels: px.clone(), resolution: 72.0, _hold: None },
             &egui::Context::default(),
         );
         drop(cb.shared.when_written());

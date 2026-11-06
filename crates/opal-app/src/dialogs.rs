@@ -555,7 +555,7 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
                 ui.end_row();
                 ui.label("Anchor").on_hover_text("Where the old canvas sits in the new one.");
                 let mut i = usize::from(spec.anchor[1]) * 3 + usize::from(spec.anchor[0]);
-                crate::box_fields::reference_grid(ui, &mut i, "canvas-anchor");
+                crate::box_fields::reference_grid(ui, &mut i, Some("Anchor"), "canvas-anchor");
                 spec.anchor = [(i % 3) as u8, (i / 3) as u8];
                 ui.end_row();
             });

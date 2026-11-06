@@ -230,6 +230,20 @@ const BOX_ANCHOR: Param = Param {
            rectangle given with width and height is placed by its same point).",
     otherwise: Otherwise::Value("\"top-left\""),
 };
+const FROM_LAYER: Param = Param {
+    name: "from_layer",
+    kind: Kind::Layer,
+    help: "A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), \
+           rather than from the canvas. Held where it is when the call begins (a layer moved counts from where \
+           it was).",
+    otherwise: Otherwise::Now("the canvas"),
+};
+const FROM_ANCHOR: Param = Param {
+    name: "from_anchor",
+    kind: Kind::Choice(&ANCHOR_NAMES),
+    help: "Which point of the canvas (or of from_layer) x and y count from.",
+    otherwise: Otherwise::Value("\"top-left\""),
+};
 const INTO_ACTIVE: Param = Param {
     name: "into_active",
     kind: Kind::Bool,
@@ -431,6 +445,8 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             BOX_ANGLE,
             BOX_FIT,
             BOX_ANCHOR,
+            FROM_LAYER,
+            FROM_ANCHOR,
             INTO_ACTIVE,
             UNIT,
         ],
@@ -455,10 +471,25 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             BOX_ANGLE,
             BOX_FIT,
             BOX_ANCHOR,
+            FROM_LAYER,
+            FROM_ANCHOR,
             INTO_ACTIVE,
             UNIT,
         ],
-        Transform => &[DOCUMENT, LAYERS, BOX_X, BOX_Y, BOX_WIDTH, BOX_HEIGHT, BOX_ANGLE, BOX_FIT, BOX_ANCHOR, UNIT],
+        Transform => &[
+            DOCUMENT,
+            LAYERS,
+            BOX_X,
+            BOX_Y,
+            BOX_WIDTH,
+            BOX_HEIGHT,
+            BOX_ANGLE,
+            BOX_FIT,
+            BOX_ANCHOR,
+            FROM_LAYER,
+            FROM_ANCHOR,
+            UNIT,
+        ],
         Preferences | Exit | RunScript | ConnectAssistant | ZoomIn | ZoomOut | ZoomFit | Zoom100 | ToggleOffCanvas
         | ToggleRulers | ToggleTheme | ToggleRibbon | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts
         | About | WidgetGallery => return None,
@@ -638,6 +669,8 @@ const CHANGES: &[(&str, &str, &[Param])] = &[
                 help: "Which point of the rectangle x and y give, and what the angle turns it about.",
                 otherwise: Otherwise::Value("\"top-left\""),
             },
+            FROM_LAYER,
+            FROM_ANCHOR,
             UNIT,
         ],
     ),
@@ -1106,6 +1139,8 @@ pub struct BoxArgs {
     ///
     /// [`box_fields::POINTS`]: crate::box_fields::POINTS
     pub at: [f64; 2],
+    /// What `x` and `y` count from.
+    pub origin: crate::box_fields::Origin,
 }
 
 /// How a box given both a width and a height takes them.
@@ -1135,6 +1170,7 @@ impl BoxArgs {
                 _ => Fit::Stretch,
             },
             at: crate::box_fields::point(args.text("anchor").unwrap_or("top-left")),
+            origin: origin_of(args),
         }
     }
 
@@ -1165,8 +1201,7 @@ impl BoxArgs {
 /// by its point `at` at `x` and `y`, or at the box's own); otherwise its numbers are put in
 /// (see [`BoxArgs::applied`]).
 pub(crate) fn place_box(d: &mut crate::doc::DocState, place: &BoxArgs) -> Result<(), String> {
-    let canvas = d.doc().canvas.rect();
-    let corner = [canvas.x0 as f64, canvas.y0 as f64];
+    let corner = located(&place.origin, d.doc())?;
     let s = d.transform.as_ref().expect("a box is open");
     let at = place.at;
     let p = s.params_at(at);
@@ -1187,6 +1222,27 @@ pub(crate) fn place_box(d: &mut crate::doc::DocState, place: &BoxArgs) -> Result
     }
     d.set_box(m, None);
     Ok(())
+}
+
+/// What `args` say x and y count from (`from_layer`, `from_anchor`).
+fn origin_of(args: &Args) -> crate::box_fields::Origin {
+    use crate::box_fields::{Base, Origin, POINTS};
+    let anchor = args.text("from_anchor").unwrap_or("top-left");
+    Origin {
+        base: args.opt_int("from_layer").map_or(Base::Canvas, |l| Base::Layer(LayerId(l as u64))),
+        point: POINTS.iter().position(|(p, _)| *p == anchor).unwrap_or(0),
+    }
+}
+
+/// Where `origin` is in `doc`, or why it cannot be counted from.
+fn located(origin: &crate::box_fields::Origin, doc: &opal_core::document::Document) -> Result<[f64; 2], String> {
+    origin.locate(doc).ok_or_else(|| match origin.base {
+        crate::box_fields::Base::Layer(id) if doc.layer(id).is_some() => {
+            format!("Layer {} holds nothing, so there is nothing of it to count from.", id.0)
+        }
+        crate::box_fields::Base::Layer(id) => format!("There is no layer {} in the image.", id.0),
+        crate::box_fields::Base::Canvas => unreachable!("the canvas is always there"),
+    })
 }
 
 /// `value` with `notes` added to its "notes", if there are any.
@@ -1757,8 +1813,14 @@ impl AppState {
     /// can hold, or there is no layer to go into.
     pub(crate) fn apply_box(&mut self, place: &BoxArgs, into_active: bool) -> Result<Value, String> {
         let d = self.active_mut().expect("a box is open");
-        let canvas = d.doc().canvas.rect();
-        let corner = [canvas.x0 as f64, canvas.y0 as f64];
+        // (Where the origin is before the box moves: a layer moved counts from where it was.)
+        let corner = match located(&place.origin, d.doc()) {
+            Ok(corner) => corner,
+            Err(why) => {
+                d.cancel_transform();
+                return Err(why);
+            }
+        };
         let paste = d.transform.as_ref().expect("a box is open").paste.clone();
         if let Err(why) = place_box(d, place) {
             d.cancel_transform();
@@ -1806,15 +1868,17 @@ impl AppState {
         let c = d.doc().canvas;
         let side = |name: &str, canvas: u32| args.opt_number(name).map_or(f64::from(canvas), f64::round);
         let at = crate::box_fields::point(args.text("anchor").unwrap_or("top-left"));
+        let from = located(&origin_of(args), d.doc()).map_err(|why| format!("crop: {why}"))?;
+        // Left out, x and y are where the anchor's point of the canvas is.
         let p = crate::transform::Params {
-            x: args.opt_number("x").unwrap_or(at[0] * f64::from(c.width)),
-            y: args.opt_number("y").unwrap_or(at[1] * f64::from(c.height)),
+            x: args.opt_number("x").unwrap_or(c.x as f64 + at[0] * f64::from(c.width) - from[0]),
+            y: args.opt_number("y").unwrap_or(c.y as f64 + at[1] * f64::from(c.height) - from[1]),
             width: side("width", c.width),
             height: side("height", c.height),
             angle: args.number("angle"),
             mirrored: false,
         };
-        let b = crate::crop::CropBox::from_numbers(&p, [c.x as f64, c.y as f64], at);
+        let b = crate::crop::CropBox::from_numbers(&p, from, at);
         if b.canvas() != c || b.angle.abs() > 1e-9 || delete {
             d.crop_to(&b, delete, sampling).map_err(|why| format!("crop: {why}"))?;
         }
@@ -2860,11 +2924,12 @@ mod tests {
         assert!(err.contains("no method"), "{err}");
     }
 
-    /// Waits for the answer to call `n`, polling the writes and the pastes (not all that is
+    /// Waits for the answer to call `n`, polling the copies, writes and pastes (not all that is
     /// done between frames, which would give the tiles of every test in this process a
     /// budget).
     fn later(st: &mut AppState, n: u64) -> Result<Value, String> {
         for _ in 0..1000 {
+            st.poll_copies();
             st.poll_writes(false);
             st.poll_paste(false);
             if let Some((_, r)) = st.answers().into_iter().find(|(m, _)| *m == n) {
@@ -3122,6 +3187,7 @@ mod tests {
             height: 2,
             image: RasterImage::from_pixels(2, 2, &px),
             from: None,
+            resolution: None,
             warnings: Vec::new(),
         };
         st.clipboard = Box::new(TestClipboard { image: Some(image), slow: true, ..Default::default() });
@@ -3146,6 +3212,14 @@ mod tests {
     fn an_image_opened_has_its_file_s_resolution() {
         let _turn = crate::background::testing::turn();
         let mut st = AppState::new();
+        // A file that does not say has the preference's.
+        now(&mut st, "set_preference", json!({ "key": "ui.default_resolution", "value": 96 })).unwrap();
+        let plain = std::env::temp_dir().join(format!("opal-api-no-ppi-{}.png", std::process::id()));
+        image::RgbaImage::new(4, 4).save(&plain).unwrap();
+        now(&mut st, "open", json!({ "path": plain.display().to_string() })).unwrap();
+        std::fs::remove_file(&plain).ok();
+        assert_eq!(st.active().unwrap().doc().resolution, 96.0);
+        now(&mut st, "close", json!({ "discard": true })).unwrap();
         now(&mut st, "new", json!({ "width": 30, "height": 20, "resolution": 240 })).unwrap();
         let path = std::env::temp_dir().join(format!("opal-api-ppi-{}.png", std::process::id()));
         let doc = st.active().unwrap().doc().clone();
@@ -3198,6 +3272,7 @@ mod tests {
             height: 2,
             image: RasterImage::from_pixels(2, 2, &px),
             from: None,
+            resolution: None,
             warnings: Vec::new(),
         };
         st.clipboard = Box::new(TestClipboard { image: Some(image), slow: true, ..Default::default() });
@@ -3322,6 +3397,7 @@ mod tests {
                 height: 10,
                 image: RasterImage::from_pixels(20, 10, &px),
                 from: None,
+                resolution: None,
                 warnings: Vec::new(),
             }
         };
@@ -3360,5 +3436,51 @@ mod tests {
         let made = later(&mut st, anew).unwrap();
         assert_eq!(made["document"].as_u64(), st.active_doc.map(|d| d.0));
         assert_eq!(st.active().unwrap().doc().canvas.width, 20);
+        // A copy from an image at 300 ppi, pasted as a new image, is at 300 ppi too.
+        now(&mut st, "resize_image", json!({ "resolution": 300 })).unwrap();
+        let copied = call(&mut st, "copy_merged", json!({}));
+        later(&mut st, copied).unwrap();
+        now(&mut st, "close", json!({ "discard": true })).unwrap();
+        let anew = call(&mut st, "paste", json!({}));
+        later(&mut st, anew).unwrap();
+        assert_eq!(st.active().unwrap().doc().resolution, 300.0, "the copy's resolution was lost");
+    }
+
+    #[test]
+    fn a_box_is_put_a_length_from_a_point_of_another_layer() {
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 200, "height": 100, "resolution": 100 })).unwrap();
+        let path = png_file("mark.png", 10, 10).display().to_string();
+        let mark = now(&mut st, "place", json!({ "path": path, "x": 50, "y": 20 })).unwrap()["layer"].clone();
+        let bounds = |st: &AppState, layer: &Value| {
+            let id = LayerId(layer.as_u64().unwrap());
+            let b = st.active().unwrap().doc().layer(id).unwrap().bounds().unwrap();
+            (b.x0, b.y0, b.x1, b.y1)
+        };
+        // Its top-left corner 0.05 in (5 px) right of the mark's bottom-right corner.
+        let given = json!({ "path": path, "x": "0.05in", "y": 0, "from_layer": mark, "from_anchor": "bottom-right" });
+        let next = now(&mut st, "place", given).unwrap();
+        assert_eq!((next["box"]["x"].clone(), next["box"]["y"].clone()), (json!(5.0), json!(0.0)), "{next}");
+        let layer = next["layer"].clone();
+        assert_eq!(bounds(&st, &layer), (65.0, 30.0, 75.0, 40.0));
+        // Its center on the canvas's, by numbers from the canvas's center.
+        let centered = json!({ "layers": [layer], "x": 0, "y": 0, "anchor": "center", "from_anchor": "center" });
+        now(&mut st, "transform", centered).unwrap();
+        assert_eq!(bounds(&st, &layer), (95.0, 45.0, 105.0, 55.0));
+        // Cropped to the mark, by numbers from it.
+        let crop = json!({ "from_layer": mark, "x": -1, "y": -1, "width": 12, "height": 12 });
+        let c = now(&mut st, "crop", crop).unwrap();
+        assert_eq!((c["width"].as_u64(), c["height"].as_u64()), (Some(12), Some(12)));
+        let canvas = st.active().unwrap().doc().canvas;
+        assert_eq!((canvas.x, canvas.y), (49, 19));
+        // A layer that is not there, or holds nothing, is nothing to count from.
+        let none = now(&mut st, "place", json!({ "path": path, "from_layer": 999 })).unwrap_err();
+        assert!(none.contains("no layer 999"), "{none}");
+        let empty = now(&mut st, "new_layer", json!({})).unwrap()["layer"].clone();
+        let nothing = now(&mut st, "place", json!({ "path": path, "from_layer": empty })).unwrap_err();
+        assert!(nothing.contains("holds nothing"), "{nothing}");
+        assert!(st.active().unwrap().transform.is_none(), "a refused box was left open");
+        std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).ok();
     }
 }
