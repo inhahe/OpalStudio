@@ -8,6 +8,7 @@
 //! - [`resample`]: drawing a bitmap through a transform (image objects, resizing).
 //! - [`geom`]: rectangles and affine transforms.
 //! - [`curve`]: editable curves, used by settings throughout the editor.
+//! - [`units`]: units of length and the resolution that converts them to pixels.
 //!
 //! Everything a history state holds is shared through [`std::sync::Arc`], so taking a
 //! snapshot copies pointers, and changing a tile copies that tile alone.
@@ -21,6 +22,7 @@ pub mod raster;
 pub mod resample;
 pub mod store;
 pub mod tile;
+pub mod units;
 
 // The tests allocate tiles as the application does: through mimalloc (see opal-app's
 // main.rs for why).

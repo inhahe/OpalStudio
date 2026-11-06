@@ -331,13 +331,16 @@ impl std::error::Error for TreeError {}
 #[derive(Clone, Debug)]
 pub struct Document {
     pub canvas: Canvas,
+    /// Pixels per inch: how large the pixels are when printed, which converts lengths in
+    /// other units (see [`crate::units`]). Always [`valid_ppi`](crate::units::valid_ppi).
+    pub resolution: f64,
     /// Top-level layers, bottom to top.
     pub layers: Vec<Arc<Layer>>,
 }
 
 impl Document {
     pub fn new(width: u32, height: u32) -> Document {
-        Document { canvas: Canvas::sized(width, height), layers: Vec::new() }
+        Document { canvas: Canvas::sized(width, height), resolution: crate::units::DEFAULT_PPI, layers: Vec::new() }
     }
 
     /// Visits every layer depth first, bottom to top, with its depth (0 for top level).

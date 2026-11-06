@@ -9,6 +9,7 @@
 //! already there. A long write tells how far it has got, and can be stopped, through a
 //! [`Progress`].
 
+mod density;
 pub mod image_files;
 pub mod memory;
 pub mod native;

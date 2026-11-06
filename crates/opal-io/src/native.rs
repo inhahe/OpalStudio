@@ -3,8 +3,8 @@
 //! A zip archive holding:
 //!
 //! - `mimetype`, stored first and uncompressed: `application/x-opal-studio`.
-//! - `document.json`: the canvas (a rectangle), the layer tree, and the next free
-//!   identifier. Objects are `pixels` (tiles and a whole-pixel offset) or `image` (tiles,
+//! - `document.json`: the canvas (a rectangle), the resolution (pixels per inch; 72 if a
+//!   file has none, as files before it do), the layer tree, and the next free identifier. Objects are `pixels` (tiles and a whole-pixel offset) or `image` (tiles,
 //!   the frame, the transform as `[a, b, c, d, e, f]`, and the sampling).
 //! - `tiles/<n>.bin`: one tile each, numbered from 0. A tile shared by several layers or
 //!   objects (after duplicating a layer, say) is stored once and referenced from each.
@@ -67,8 +67,15 @@ struct FileDoc {
     format: String,
     version: u32,
     canvas: Canvas,
+    /// Pixels per inch. Older files have none, and older versions ignore it.
+    #[serde(default = "default_resolution")]
+    resolution: f64,
     next_id: u64,
     layers: Vec<FileLayer>,
+}
+
+fn default_resolution() -> f64 {
+    opal_core::units::DEFAULT_PPI
 }
 
 /// Read through [`LayerRead`]: see there why.
@@ -202,6 +209,7 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path, progress: &Progress) -> Re
         format: "opal-studio".into(),
         version: FORMAT_VERSION,
         canvas: doc.canvas,
+        resolution: doc.resolution,
         next_id: ids.peek(),
         layers,
     };
@@ -355,6 +363,9 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
     if c.x.abs() > MAX_COORD || c.y.abs() > MAX_COORD || c.width == 0 || c.height == 0 {
         return Err(bad(format!("the canvas is {}×{} at ({}, {}), out of range", c.width, c.height, c.x, c.y)));
     }
+    if !opal_core::units::valid_ppi(file.resolution) {
+        return Err(bad(format!("the resolution {} is out of range", file.resolution)));
+    }
     if file.next_id >= MAX_ID {
         return Err(bad(format!("next identifier {} is out of range", file.next_id)));
     }
@@ -410,7 +421,7 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
     for l in file.layers {
         layers.push(Arc::new(build_layer(l, &tiles, path)?));
     }
-    let doc = Document { canvas: file.canvas, layers };
+    let doc = Document { canvas: file.canvas, resolution: file.resolution, layers };
     let mut ids = IdGen::starting_at(file.next_id);
     ids.reserve_above(&doc);
     Ok(Loaded { doc, ids })
@@ -795,6 +806,26 @@ mod tests {
         for bad in ["[0,0,0,0,0,0]", "[1e300,0,0,1,0,0]", "[1,0,0,1,1e30,0]", "[1,2,2,4,0,0]", "[1e6,0,0,2e-18,0,0]"] {
             let err = load_from(crafted(&doc(object(bad)), &[]), Path::new("bad.opal"), None).err();
             assert!(err.is_some_and(|e| e.to_string().contains("transform")), "{bad} accepted");
+        }
+    }
+
+    #[test]
+    fn the_resolution_round_trips_and_older_files_get_the_default() {
+        let (mut doc, ids) = sample();
+        doc.resolution = 299.5;
+        let path = std::env::temp_dir().join(format!("opal-native-ppi-{}.opal", std::process::id()));
+        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        let loaded = load(&path, None).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded.doc.resolution, 299.5);
+
+        let old = doc_json(&[]);
+        let d = load_from(crafted(&old, &[]), Path::new("old.opal"), None).unwrap().doc;
+        assert_eq!(d.resolution, opal_core::units::DEFAULT_PPI);
+        for bad in ["0", "-72", "1e7"] {
+            let json = old.replace(r#""next_id""#, &format!(r#""resolution":{bad},"next_id""#));
+            let err = load_from(crafted(&json, &[]), Path::new("bad.opal"), None).err();
+            assert!(err.is_some_and(|e| e.to_string().contains("resolution")), "{bad} accepted");
         }
     }
 

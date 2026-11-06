@@ -25,6 +25,8 @@ pub struct Imported {
     pub width: u32,
     pub height: u32,
     pub image: RasterImage,
+    /// Pixels per inch, if the file says.
+    pub resolution: Option<f64>,
     /// Things the user should know about how the file was read.
     pub warnings: Vec<String>,
 }
@@ -43,9 +45,9 @@ pub fn import(path: &Path, free: Option<Free>) -> Result<Imported, IoError> {
 pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<Free>) -> Result<Imported, IoError> {
     let decode_err = |e: image::ImageError| IoError::Decode { path: path.to_owned(), message: e.to_string() };
     let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(|e| IoError::io(path, e))?;
-    if reader.format().is_none() {
+    let Some(format) = reader.format() else {
         return Err(IoError::Unsupported { path: path.to_owned(), message: "not a PNG or JPEG image".into() });
-    }
+    };
     let mut decoder = reader.into_decoder().map_err(decode_err)?;
     let orientation = decoder.orientation().map_err(decode_err)?;
     let depth = Depth::of(decoder.color_type());
@@ -64,6 +66,23 @@ pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<Free>) -> Result<Imp
     let image = image_of(&img);
 
     let mut warnings = Vec::new();
+    // Turned a quarter, the file's across is the image's down.
+    let turned = matches!(
+        orientation,
+        image::metadata::Orientation::Rotate90
+            | image::metadata::Orientation::Rotate270
+            | image::metadata::Orientation::Rotate90FlipH
+            | image::metadata::Orientation::Rotate270FlipH
+    );
+    let resolution = crate::density::read(bytes, format).map(|[x, y]| if turned { [y, x] } else { [x, y] });
+    if let Some([x, y]) = resolution
+        && (x - y).abs() > x.max(y) * 1e-3
+    {
+        warnings.push(format!(
+            "This image's pixels are not square ({x} by {y} per inch). Opal Studio's are, so it              takes the resolution across ({x} pixels per inch) for both."
+        ));
+    }
+    let resolution = resolution.map(|[x, _]| x);
     if let Some(profile) = icc
         && !looks_like_srgb(&profile)
     {
@@ -73,7 +92,7 @@ pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<Free>) -> Result<Imp
                 .to_owned(),
         );
     }
-    Ok(Imported { width, height, image, warnings })
+    Ok(Imported { width, height, image, resolution, warnings })
 }
 
 /// How a decoded image's samples become tiles (by its colour type, which [`image_of`]'s
@@ -556,14 +575,15 @@ pub fn export_in(
     in_bands(doc, size, pool, progress, |width, height, bands| {
         write_atomically(path, Some(progress), |out| match format {
             ExportFormat::Png { sixteen_bit } => {
-                write_png(out, width, height, bands, *sixteen_bit).map_err(|e| encode_err(e.to_string()))
+                write_png(out, width, height, bands, *sixteen_bit, Some(doc.resolution))
+                    .map_err(|e| encode_err(e.to_string()))
             }
             ExportFormat::Jpeg { quality, background } => {
                 let bg = from_srgb8([background[0], background[1], background[2], 255]);
                 let rows = JpegRows::new(bands, width, height, bg);
-                JpegEncoder::new_with_quality(out, (*quality).clamp(1, 100))
-                    .encode_image(&rows)
-                    .map_err(|e| encode_err(e.to_string()))
+                let mut encoder = JpegEncoder::new_with_quality(out, (*quality).clamp(1, 100));
+                encoder.set_pixel_density(crate::density::jpeg_density(doc.resolution));
+                encoder.encode_image(&rows).map_err(|e| encode_err(e.to_string()))
             }
         })
     })
@@ -579,7 +599,7 @@ pub fn png_in_memory(
 ) -> Result<Vec<u8>, String> {
     in_bands(doc, size, pool, &Progress::default(), |width, height, bands| {
         let mut out = Vec::new();
-        write_png(&mut out, width, height, bands, false).map(|()| out).map_err(|e| e.to_string())
+        write_png(&mut out, width, height, bands, false, None).map(|()| out).map_err(|e| e.to_string())
     })
     .unwrap_or_else(|| Err("cancelled".to_owned()))
 }
@@ -619,15 +639,17 @@ fn in_bands<R>(
 }
 
 /// Writes a `width × height` PNG with transparency, at 8 or (`sixteen`) 16 bits a channel,
-/// from `bands` of rows, top to bottom.
+/// from `bands` of rows, top to bottom, recording `ppi` pixels per inch if given.
 fn write_png(
     out: impl Write,
     width: u32,
     height: u32,
     bands: impl Iterator<Item = Vec<Pixel>>,
     sixteen: bool,
+    ppi: Option<f64>,
 ) -> Result<(), png::EncodingError> {
     let mut encoder = png::Encoder::new(out, width, height);
+    encoder.set_pixel_dims(ppi.map(crate::density::png_dims));
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(if sixteen { png::BitDepth::Sixteen } else { png::BitDepth::Eight });
     encoder.set_compression(png::Compression::Balanced);
@@ -783,6 +805,42 @@ mod tests {
                 assert_eq!(a, b);
             }
         }
+    }
+
+    #[test]
+    fn the_resolution_is_written_on_export_and_read_on_import() {
+        let mut d = doc_from(import_bytes(&gradient_png(4, 4), Path::new("t.png"), None).unwrap());
+        // A PNG without a resolution says nothing; the document then has the default.
+        assert_eq!(import_bytes(&gradient_png(4, 4), Path::new("t.png"), None).unwrap().resolution, None);
+        for (ppi, format) in [
+            (300.0, ExportFormat::Png { sixteen_bit: false }),
+            (72.0, ExportFormat::Png { sixteen_bit: true }),
+            (300.0, ExportFormat::Jpeg { quality: 90, background: [0; 3] }),
+            // 118 pixels per centimeter.
+            (299.72, ExportFormat::Jpeg { quality: 90, background: [0; 3] }),
+        ] {
+            d.resolution = ppi;
+            let path = temp("ppi.img");
+            export(&d, &path, &format, None).unwrap();
+            let back = import(&path, None).unwrap();
+            std::fs::remove_file(&path).unwrap();
+            let read = back.resolution.unwrap();
+            assert!((read - ppi).abs() < 1e-9, "{format:?} at {ppi} read back as {read}");
+        }
+    }
+
+    #[test]
+    fn a_turned_image_s_resolution_across_is_its_file_s_down() {
+        use image::codecs::jpeg::{PixelDensity, PixelDensityUnit};
+        let mut jpeg = Vec::new();
+        let mut encoder = JpegEncoder::new_with_quality(&mut jpeg, 90);
+        encoder.set_pixel_density(PixelDensity { density: (100, 200), unit: PixelDensityUnit::Inches });
+        DynamicImage::ImageRgb8(image::RgbImage::new(16, 8)).write_with_encoder(encoder).unwrap();
+        let level = import_bytes(&jpeg, Path::new("level.jpg"), None).unwrap();
+        assert_eq!(level.resolution, Some(100.0));
+        assert!(level.warnings.iter().any(|w| w.contains("not square")), "{:?}", level.warnings);
+        let turned = import_bytes(&insert_exif_orientation(&jpeg, 6), Path::new("turned.jpg"), None).unwrap();
+        assert_eq!(turned.resolution, Some(200.0));
     }
 
     #[test]
@@ -963,9 +1021,9 @@ mod tests {
             })
             .collect();
         let mut expected = Vec::new();
-        JpegEncoder::new_with_quality(&mut expected, 90)
-            .encode(&whole, 300, 700, image::ExtendedColorType::Rgb8)
-            .unwrap();
+        let mut encoder = JpegEncoder::new_with_quality(&mut expected, 90);
+        encoder.set_pixel_density(crate::density::jpeg_density(d.resolution));
+        encoder.encode(&whole, 300, 700, image::ExtendedColorType::Rgb8).unwrap();
         let path = temp("bands.jpg");
         export(&d, &path, &ExportFormat::Jpeg { quality: 90, background: [10, 200, 30] }, None).unwrap();
         let got = std::fs::read(&path).unwrap();
