@@ -1010,7 +1010,7 @@ impl Args {
 
     /// A canvas side, in whole pixels, if given (once [`in_pixels`](Self::in_pixels)).
     fn side(&self, name: &str) -> Option<u32> {
-        self.opt_number(name).map(|v| (v.round() as u32).clamp(1, MAX_SIDE))
+        self.opt_number(name).map(crate::lengths::whole_side)
     }
 
     /// These arguments with each length of `params` in pixels: a number in the call's
@@ -1130,6 +1130,8 @@ impl BoxArgs {
             (Some(bw), Some(bh)) => ((bw - w) * 0.5, (bh - h) * 0.5),
             _ => (0.0, 0.0),
         };
+        // (A mirrored box's height runs the other way from its corner.)
+        let dy = if p.mirrored { -dy } else { dy };
         let [dx, dy] = opal_core::geom::Affine::rotate(angle.to_radians()).apply([dx, dy]);
         crate::transform::Params {
             x: self.x.map_or(p.x, |x| corner[0] + x) + dx,
@@ -1321,12 +1323,7 @@ impl AppState {
         }
         let reply = match reply {
             Reply::Now(Ok(_)) if !refusals.is_empty() => Reply::Now(Err(refusals.join("\n"))),
-            Reply::Now(Ok(mut value)) if !notes.is_empty() => {
-                if let Value::Object(fields) = &mut value {
-                    fields.insert("notes".to_owned(), json!(notes));
-                }
-                Reply::Now(Ok(value))
-            }
+            Reply::Now(Ok(value)) if !notes.is_empty() => Reply::Now(Ok(with_notes(value, notes))),
             other => other,
         };
         if let Some((active, selections)) = view
@@ -1434,9 +1431,10 @@ impl AppState {
         let now = |r: Result<Value, String>| Reply::Now(r);
         // The image and layers named become the active ones, as clicking them would make
         // them, so that the command acts on them.
-        // (A paste with no image open, and none named, makes one.)
-        let pastes_anew = matches!(cmd, Cmd::Paste | Cmd::PasteInPlace) && self.active_doc.is_none();
-        if params.iter().any(|p| p.kind == Kind::Document) && !(pastes_anew && args.document().is_none()) {
+        // (A paste shows its image once it is placed, which may be refused after the call has
+        // returned, when nothing would put the user's back.)
+        let pastes = matches!(cmd, Cmd::Paste | Cmd::PasteInPlace);
+        if params.iter().any(|p| p.kind == Kind::Document) && !pastes {
             match self.which(args) {
                 Ok(id) => self.show_doc(id),
                 Err(why) => return now(Err(why)),
@@ -1594,7 +1592,16 @@ impl AppState {
                 now(Ok(self.selection_json()))
             }
             Cmd::Paste | Cmd::PasteInPlace => {
-                let groups = self.active().map(|d| d.groups.clone()).unwrap_or_default();
+                // The image named, or the active one; with none open, and none named, the
+                // paste makes one.
+                let target = match (args.document(), self.active_doc) {
+                    (None, None) => None,
+                    _ => match self.which(args) {
+                        Ok(id) => Some(id),
+                        Err(why) => return now(Err(why)),
+                    },
+                };
+                let groups = target.and_then(|t| self.doc(t)).map(|d| d.groups.clone()).unwrap_or_default();
                 self.next_answer += 1;
                 let answer = crate::state::PasteAnswer {
                     n: self.next_answer,
@@ -1603,7 +1610,7 @@ impl AppState {
                     groups,
                 };
                 let n = answer.n;
-                self.paste_answering(cmd == Cmd::PasteInPlace, Some(answer), ctx);
+                self.paste_answering(cmd == Cmd::PasteInPlace, target, Some(answer), ctx);
                 // Answered at once if the clipboard was read at once, else once it is.
                 Reply::Later(n)
             }
@@ -3168,8 +3175,12 @@ mod tests {
         assert_eq!(applied(BoxArgs { fit: Fit::Cover, ..both.clone() }), (70.0, 200.0, 120.0, 60.0));
         // Turned, it is centered on the rectangle turned the same way about its corner:
         // 60 × 30 down the 60 × 60 square turned a quarter, 15 to the left of its corner.
-        let (x, y, w, h) = applied(BoxArgs { fit: Fit::Inside, angle: Some(90.0), ..both });
+        let (x, y, w, h) = applied(BoxArgs { fit: Fit::Inside, angle: Some(90.0), ..both.clone() });
         assert!((x - 85.0).abs() < 1e-9 && (y - 200.0).abs() < 1e-9 && (w, h) == (60.0, 30.0), "{x}, {y}");
+        // Mirrored, the box runs up from its corner, and is centered on the rectangle so.
+        let mirrored = crate::transform::Params { mirrored: true, ..p };
+        let q = BoxArgs { fit: Fit::Inside, ..both }.applied(&mirrored, corner);
+        assert_eq!((q.x, q.y, q.width, q.height), (100.0, 185.0, 60.0, 30.0));
     }
 
     #[test]
@@ -3282,11 +3293,16 @@ mod tests {
         let second = call(&mut st, "paste_in_place", json!({ "angle": 45 }));
         assert!(later(&mut st, first).unwrap_err().contains("Another paste"));
         assert_eq!(later(&mut st, second).unwrap()["box"]["angle"], json!(45.0));
-        // Nothing on the clipboard: the call is told so, and no dialog is left.
+        // Nothing on the clipboard: the call is told so, no dialog is left, and the image
+        // the user had stays shown, though the paste named another.
+        let first = st.active_doc.unwrap().0;
+        let second = now(&mut st, "new", json!({ "width": 10, "height": 10 })).unwrap()["document"].as_u64();
         st.clipboard = Box::new(TestClipboard::default());
-        let empty = call(&mut st, "paste", json!({}));
+        let empty = call(&mut st, "paste", json!({ "document": first }));
         assert!(later(&mut st, empty).unwrap_err().contains("holds no image"));
         assert!(st.messages.is_empty(), "{:?}", st.messages);
+        assert_eq!(st.active_doc.map(|d| d.0), second, "a refused paste left its image shown");
+        now(&mut st, "close", json!({ "discard": true })).unwrap();
         // With no image open, a paste is a new image.
         now(&mut st, "close", json!({ "discard": true })).unwrap();
         st.clipboard = clipboard(false);

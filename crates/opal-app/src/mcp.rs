@@ -106,15 +106,19 @@ impl Pipe {
     /// running and it may, starts one of its own and connects to that.
     fn connect(&mut self) -> Result<(), String> {
         let file = match &self.hosted {
-            Some(h) => h.file.clone(),
+            Some(h) => Some(h.file.clone()),
             None => self
                 .file
                 .clone()
                 .or_else(|| std::env::var_os("OPAL_STUDIO_API").map(std::path::PathBuf::from))
-                .or_else(crate::server::connection_file)
-                .ok_or("There is no settings folder to find the editor in.")?,
+                .or_else(crate::server::connection_file),
         };
-        match crate::server::say_hello(&file, false) {
+        // (With no settings folder there is no editor to find, but one can still be started.)
+        let hello = match file {
+            Some(file) => crate::server::say_hello(&file, false),
+            None => Hello::Nobody("There is no settings folder to find the editor in.".to_owned()),
+        };
+        match hello {
             Hello::Answered(conn) => {
                 self.conn = Some(conn);
                 Ok(())

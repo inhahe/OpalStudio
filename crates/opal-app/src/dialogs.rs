@@ -218,7 +218,8 @@ fn new_image(ctx: &egui::Context, st: &mut AppState) {
                 ui.label(*row);
                 ui.horizontal_wrapped(|ui| {
                     for &Preset { name, size: [w, h], unit: in_unit, ppi } in *presets {
-                        let (pw, ph) = (preset_side(in_unit.to_px(w, ppi)), preset_side(in_unit.to_px(h, ppi)));
+                        let (pw, ph) =
+                            (lengths::whole_side(in_unit.to_px(w, ppi)), lengths::whole_side(in_unit.to_px(h, ppi)));
                         let tip = if in_unit == Unit::Px {
                             format!("{pw} × {ph} px")
                         } else {
@@ -267,11 +268,6 @@ fn new_image(ctx: &egui::Context, st: &mut AppState) {
     }
 }
 
-/// A preset's side of `px` pixels, whole.
-fn preset_side(px: f64) -> u32 {
-    (px.round() as u32).clamp(1, MAX_SIDE)
-}
-
 /// Makes `unit` and `per` the units lengths and resolutions are shown in, if a dialog
 /// changed them.
 fn remember_units(st: &mut AppState, unit: Unit, per: ResolutionUnit) {
@@ -296,7 +292,7 @@ fn hold_print_size(ui: &egui::Ui, id: egui::Id, size: (&mut u32, &mut u32), befo
         Some((print, made, at)) if made == [*w, *h] && at == before => print,
         _ => [f64::from(*w) / before, f64::from(*h) / before],
     };
-    (*w, *h) = (preset_side(print[0] * after), preset_side(print[1] * after));
+    (*w, *h) = (lengths::whole_side(print[0] * after), lengths::whole_side(print[1] * after));
     ui.data_mut(|d| d.insert_temp(id, (print, [*w, *h], after)));
 }
 
@@ -412,7 +408,7 @@ fn size_fields(
         lengths::side(ui, w, *unit, ppi);
         let mut pct = f64::from(*w) / ow * 100.0;
         if ui.add(egui::DragValue::new(&mut pct).range(0.01..=10_000.0).suffix("%").max_decimals(2)).changed() {
-            *w = ((ow * pct / 100.0).round() as u32).clamp(1, MAX_SIDE);
+            *w = lengths::whole_side(ow * pct / 100.0);
         }
         lengths::unit_menu(ui, unit, "size-unit");
     });
@@ -422,7 +418,7 @@ fn size_fields(
         lengths::side(ui, h, *unit, ppi);
         let mut pct = f64::from(*h) / oh * 100.0;
         if ui.add(egui::DragValue::new(&mut pct).range(0.01..=10_000.0).suffix("%").max_decimals(2)).changed() {
-            *h = ((oh * pct / 100.0).round() as u32).clamp(1, MAX_SIDE);
+            *h = lengths::whole_side(oh * pct / 100.0);
         }
     });
     ui.end_row();
@@ -431,9 +427,9 @@ fn size_fields(
     ui.end_row();
     if *keep {
         if *w != before.0 {
-            *h = ((f64::from(*w) * oh / ow).round() as u32).clamp(1, MAX_SIDE);
+            *h = lengths::whole_side(f64::from(*w) * oh / ow);
         } else if *h != before.1 {
-            *w = ((f64::from(*h) * ow / oh).round() as u32).clamp(1, MAX_SIDE);
+            *w = lengths::whole_side(f64::from(*h) * ow / oh);
         }
     }
 }

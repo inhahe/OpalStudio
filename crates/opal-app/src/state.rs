@@ -369,10 +369,11 @@ impl AppState {
     }
 
     /// Whether work that a call will be answered with once it is done is under way: a
-    /// write, a copy, a paste being read, an answer being made off this thread, or a change
-    /// made ready waiting to be made.
+    /// write, a copy, a paste being read, an answer being made off this thread, a change
+    /// made ready waiting to be made, or an answer made and not yet passed on.
     pub fn work_under_way(&self) -> bool {
-        self.writer.busy()
+        !self.answered.is_empty()
+            || self.writer.busy()
             || self.reading.is_some()
             || !self.copies_answered.is_empty()
             || !self.made.is_empty()

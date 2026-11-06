@@ -33,6 +33,8 @@ pub fn length(
             unit.from_px(*px, ppi)
         })
         .range(shown)
+        // Kept as it is if outside the range (a box dragged far), until the user types.
+        .clamp_existing_to_range(false)
         // A pixel for each point dragged.
         .speed(unit.from_px(1.0, ppi))
         .min_decimals(0)
@@ -45,12 +47,17 @@ pub fn length(
     )
 }
 
+/// A canvas side of `px` pixels, in whole pixels from 1 to [`MAX_SIDE`].
+pub fn whole_side(px: f64) -> u32 {
+    (px.round() as u32).clamp(1, MAX_SIDE)
+}
+
 /// A field for a canvas side of `n` pixels (1 to [`MAX_SIDE`]), shown in `unit` at `ppi`.
 pub fn side(ui: &mut egui::Ui, n: &mut u32, unit: Unit, ppi: f64) -> egui::Response {
     let mut px = f64::from(*n);
     let r = length(ui, &mut px, unit, ppi, 1.0..=f64::from(MAX_SIDE), 0);
     if r.changed() {
-        *n = (px.round() as u32).clamp(1, MAX_SIDE);
+        *n = whole_side(px);
     }
     r
 }
@@ -180,6 +187,19 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_length_outside_its_field_s_range_is_shown_as_it_is() {
+        // A crop box dragged past the largest canvas, say: showing it must not move it.
+        let ctx = egui::Context::default();
+        let mut px = 400_000.0;
+        let mut changed = false;
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            changed |= length(ui, &mut px, Unit::In, 300.0, 1.0..=300_000.0, 0).changed();
+        });
+        out.textures_delta.clear();
+        assert_eq!((px, changed), (400_000.0, false));
+    }
 
     #[test]
     fn lengths_show_as_a_field_would() {

@@ -99,13 +99,19 @@ impl AppState {
     /// the system clipboard runs on a worker thread; the paste lands when it is done (see
     /// [`AppState::poll_paste`]), on the document active when it was asked for.
     pub(crate) fn paste(&mut self, in_place: bool, ctx: &egui::Context) {
-        self.paste_answering(in_place, None, ctx);
+        self.paste_answering(in_place, self.active_doc, None, ctx);
     }
 
-    /// [`paste`](Self::paste), for the API call `answer` names, if any: once read, the paste
-    /// is placed where the call says and applied, and the call answered (or told why not).
-    pub(crate) fn paste_answering(&mut self, in_place: bool, answer: Option<PasteAnswer>, ctx: &egui::Context) {
-        let target = self.active_doc;
+    /// [`paste`](Self::paste) into document `target` (a new image if none), for the API call
+    /// `answer` names, if any: once read, the paste is placed where the call says and
+    /// applied, and the call answered (or told why not).
+    pub(crate) fn paste_answering(
+        &mut self,
+        in_place: bool,
+        target: Option<DocId>,
+        answer: Option<PasteAnswer>,
+        ctx: &egui::Context,
+    ) {
         // This paste replaces one still being read, and what that one said.
         if let Some(r) = self.reading.take() {
             self.take_down(&r.notice);

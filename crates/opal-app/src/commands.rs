@@ -947,12 +947,12 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
     }
 }
 
-/// The layer itself if it is locked, or else the first locked layer inside it.
 /// The name of a layer of `doc` that is locked, or holds one that is, if any.
 pub fn locked_layer(doc: &opal_core::document::Document) -> Option<String> {
     doc.layers.iter().find_map(|l| first_locked(l)).map(|l| l.name.clone())
 }
 
+/// The layer itself if it is locked, or else the first locked layer inside it.
 fn first_locked(layer: &opal_core::document::Layer) -> Option<&opal_core::document::Layer> {
     if layer.locked {
         return Some(layer);
