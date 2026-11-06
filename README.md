@@ -73,6 +73,21 @@ cargo test --workspace                     # all tests, interface tests included
   - Every preference shows its default, marks changes and can be reset, and tool
     settings can be saved as named presets.
   - Dark and light color schemes.
+- **Scripting.** Python scripts can drive the running editor through the `opal` package in
+  `python/` (put it on `PYTHONPATH`, or `pip install ./python`):
+
+  ```python
+  import opal
+  with opal.connect() as editor:
+      editor.new(width=1920, height=1080)
+      editor.new_layer(name="Sky")
+      editor.export(path="sky.png")
+  ```
+
+  Most commands can be called this way, with their settings as named parameters, as can
+  the queries `documents` and `layers`; `python/API.md` lists them all. Only programs of
+  the user's own can connect (through a token in the settings folder), and the status bar
+  says when one is connected, with a button to disconnect it.
 
 ## Layout
 
@@ -81,4 +96,5 @@ cargo test --workspace                     # all tests, interface tests included
 | `crates/opal-color` | Color models and conversions (a port of the author's colorpicker, plus OKLab). |
 | `crates/opal-core` | The document: tiles, layers, the history tree, compositing, curves. |
 | `crates/opal-io` | PNG and JPEG import and export, and the `.opal` format. |
-| `crates/opal-app` | The application: interface, canvas rendering, settings. |
+| `crates/opal-app` | The application: interface, canvas rendering, settings, the scripting API. |
+| `python` | The `opal` package for scripts, and the API's reference (`API.md`). |

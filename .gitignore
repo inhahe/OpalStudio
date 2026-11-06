@@ -8,3 +8,4 @@
 
 # Images made for trying the application out
 /test-images/
+__pycache__/

@@ -815,6 +815,151 @@ mod tests {
         v.as_object().expect("an object").clone()
     }
 
+    /// A parameter's Python type, as the stubs give it.
+    fn py_type(p: &Value) -> String {
+        match p["kind"].as_str().unwrap() {
+            "bool" => "bool".into(),
+            "int" | "document" | "layer" => "int".into(),
+            "number" => "float".into(),
+            "text" => "str".into(),
+            "path" => "str | os.PathLike[str]".into(),
+            "layers" => "list[int]".into(),
+            "choice" => {
+                let words: Vec<String> = p["choices"].as_array().unwrap().iter().map(|w| format!("{w}")).collect();
+                format!("Literal[{}]", words.join(", "))
+            }
+            other => panic!("no Python type for {other}"),
+        }
+    }
+
+    /// What a parameter is, in words: its help, its range or words, and what leaving it out
+    /// stands for.
+    fn param_text(p: &Value) -> String {
+        let mut text = p["help"].as_str().unwrap().to_owned();
+        if let (Some(min), Some(max)) = (p.get("min"), p.get("max")) {
+            text += &format!(" From {min} to {max}.");
+        }
+        if let Some(d) = p.get("default") {
+            text += &format!(" Default: {d}.");
+        } else if let Some(o) = p.get("otherwise") {
+            text += &format!(" Default: {}.", o.as_str().unwrap());
+        }
+        text
+    }
+
+    /// The Python stubs for the methods: the `Editor` class's methods, with their types
+    /// and help, for editors and type checkers.
+    fn python_stubs() -> String {
+        let mut out = String::from(
+            "# The editor's methods, for editors and type checkers. Made from its command\n\
+             # registry by the test `api::tests::the_python_stubs_and_api_page_are_current`: run\n\
+             # it with OPAL_WRITE_STUBS=1 to make this again. Do not edit by hand.\n\n\
+             import os\nfrom pathlib import Path\nfrom typing import Any, Literal\n\n\
+             PROTOCOL: int\n\n\
+             class OpalError(Exception):\n    code: int | None\n    def __init__(self, message: str, code: int | None = None) -> None: ...\n\n\
+             def connection_file() -> Path: ...\n\
+             def connect(file: str | os.PathLike[str] | None = None) -> Editor: ...\n\n\
+             class Editor:\n    version: str | None\n\
+             \x20   def __init__(self, pipe: str, token: str) -> None: ...\n\
+             \x20   def call(self, method: str, **params: Any) -> Any: ...\n\
+             \x20   def methods(self) -> list[dict[str, Any]]: ...\n\
+             \x20   def close(self) -> None: ...\n\
+             \x20   def __enter__(self) -> Editor: ...\n\
+             \x20   def __exit__(self, *exc: Any) -> None: ...\n",
+        );
+        for m in describe().as_array().unwrap() {
+            let params = m["params"].as_array().unwrap();
+            let mut sig: Vec<String> = Vec::new();
+            for p in params {
+                let name = p["name"].as_str().unwrap();
+                let ty = py_type(p);
+                sig.push(match (p.get("required"), p.get("default")) {
+                    (Some(_), _) => format!("{name}: {ty}"),
+                    (None, Some(d)) => format!("{name}: {ty} = {}", py_value(d)),
+                    (None, None) => format!("{name}: {ty} | None = None"),
+                });
+            }
+            let star = if sig.is_empty() { String::new() } else { format!(", *, {}", sig.join(", ")) };
+            out += &format!(
+                "    def {}(self{star}) -> Any:\n        \"\"\"{}",
+                m["name"].as_str().unwrap(),
+                m["help"].as_str().unwrap()
+            );
+            if !params.is_empty() {
+                out += "\n\n";
+                for p in params {
+                    out += &format!("        {}: {}\n", p["name"].as_str().unwrap(), param_text(p));
+                }
+                out += "        ";
+            }
+            out += "\"\"\"\n";
+        }
+        out
+    }
+
+    /// A JSON value as Python writes it.
+    fn py_value(v: &Value) -> String {
+        match v {
+            Value::Bool(true) => "True".into(),
+            Value::Bool(false) => "False".into(),
+            Value::Null => "None".into(),
+            other => other.to_string(),
+        }
+    }
+
+    /// The API's reference page: each method with its help and parameters.
+    fn api_page() -> String {
+        let mut out = String::from(
+            "# The Opal Studio API\n\n\
+             Every method a script or assistant can call (see `design.md`, *Scripting*), made from the\n\
+             editor's command registry by the test `api::tests::the_python_stubs_and_api_page_are_current`:\n\
+             run it with `OPAL_WRITE_STUBS=1` to make this page again; do not edit it by hand. From Python,\n\
+             each is a method of the editor (`editor.new(width=640, height=480)`), taking its parameters by\n\
+             name; over the pipe, a JSON-RPC method of the same name.\n",
+        );
+        for kind in ["command", "query"] {
+            out += if kind == "command" { "\n## Commands\n" } else { "\n## Queries\n" };
+            for m in describe().as_array().unwrap().iter().filter(|m| m["kind"] == json!(kind)) {
+                out += &format!("\n### `{}`\n\n{}\n", m["name"].as_str().unwrap(), m["help"].as_str().unwrap());
+                let params = m["params"].as_array().unwrap();
+                if !params.is_empty() {
+                    out += "\n| Parameter | Kind | |\n|---|---|---|\n";
+                    for p in params {
+                        let kind = match p["kind"].as_str().unwrap() {
+                            "choice" => {
+                                let words: Vec<String> = p["choices"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .map(|w| format!("`{}`", w.as_str().unwrap()))
+                                    .collect();
+                                words.join(", ")
+                            }
+                            k => k.to_owned(),
+                        };
+                        let required = if p.get("required").is_some() { " (required)" } else { "" };
+                        out +=
+                            &format!("| `{}`{required} | {kind} | {} |\n", p["name"].as_str().unwrap(), param_text(p));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_python_stubs_and_api_page_are_current() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python");
+        for (file, made) in [("opal/__init__.pyi", python_stubs()), ("API.md", api_page())] {
+            let path = root.join(file);
+            if std::env::var_os("OPAL_WRITE_STUBS").is_some() {
+                std::fs::write(&path, &made).unwrap();
+            }
+            let on_disk = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
+            assert!(on_disk == made, "python/{file} is out of date: run this test with OPAL_WRITE_STUBS=1");
+        }
+    }
+
     fn now(st: &mut AppState, name: &str, given: Value) -> Result<Value, String> {
         match st.call(name, &args(given), &egui::Context::default()) {
             Reply::Now(r) => r,

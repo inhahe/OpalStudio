@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opal-studio"
+version = "0.1.0"
+description = "Drive the Opal Studio graphics editor from Python"
+readme = "API.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.setuptools]
+packages = ["opal"]
+
+[tool.setuptools.package-data]
+opal = ["__init__.pyi", "py.typed"]

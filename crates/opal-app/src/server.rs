@@ -68,7 +68,10 @@ impl Server {
     /// Starts listening on a pipe of this process's own, and writes its name and a new
     /// token to `file` (the user's [`connection_file`], or another, for tests).
     pub fn start(file: PathBuf, ctx: egui::Context) -> std::io::Result<Server> {
-        let name = format!("opal-studio-{}.sock", std::process::id());
+        // This process's own (a test makes several servers).
+        static SERVERS: AtomicU64 = AtomicU64::new(0);
+        let n = SERVERS.fetch_add(1, Ordering::Relaxed);
+        let name = format!("opal-studio-{}-{n}.sock", std::process::id());
         let listener = ListenerOptions::new().name(name.as_str().to_ns_name::<GenericNamespaced>()?).create_sync()?;
         let token = new_token()?;
         if let Some(dir) = file.parent() {
@@ -285,6 +288,75 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         done.join().unwrap();
+    }
+
+    /// The Python to run the package's test with: `OPAL_PYTHON`, or `python` if it runs.
+    fn python() -> Option<String> {
+        let python = std::env::var("OPAL_PYTHON").unwrap_or_else(|_| "python".to_owned());
+        let runs = std::process::Command::new(&python).arg("--version").output().is_ok_and(|o| o.status.success());
+        runs.then_some(python)
+    }
+
+    #[test]
+    fn the_python_package_drives_the_editor() {
+        let Some(python) = python() else {
+            eprintln!("No Python found (set OPAL_PYTHON): the package was not tried.");
+            return;
+        };
+        let _turn = crate::background::testing::turn();
+        let file = std::env::temp_dir().join(format!("opal-api-py-{}.json", std::process::id()));
+        let mut server = Server::start(file.clone(), egui::Context::default()).unwrap();
+        let mut st = AppState::new();
+        let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python");
+        let png = std::env::temp_dir().join(format!("opal-api-py-{}.png", std::process::id()));
+        let script = r#"
+import ast, json, pathlib, sys
+import opal
+# The stubs are Python.
+ast.parse(pathlib.Path(opal.__file__).with_suffix(".pyi").read_text(encoding="utf-8"))
+with opal.connect() as editor:
+    doc = editor.new(width=320, height=200)["document"]
+    sky = editor.new_layer(name="Sky")["layer"]
+    editor.toggle_visible(layers=[sky], visible=False)
+    layers = editor.layers(document=doc)
+    try:
+        editor.rename(layer=999999, name="x")
+        refused = None
+    except opal.OpalError as e:
+        refused = str(e)
+    exported = editor.export(path=pathlib.Path(sys.argv[1]))
+    print(json.dumps({"layers": layers, "refused": refused, "exported": exported, "methods": len(editor.methods())}))
+"#;
+        let child = std::process::Command::new(&python)
+            .arg("-c")
+            .arg(script)
+            .arg(&png)
+            .env("PYTHONPATH", &package)
+            .env("OPAL_STUDIO_API", &file)
+            .env("PYTHONIOENCODING", "utf-8")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // The script runs while this thread serves it.
+        let ctx = egui::Context::default();
+        let done = std::thread::spawn(move || child.wait_with_output().unwrap());
+        while !done.is_finished() {
+            server.serve(&mut st, &ctx);
+            st.poll_writes(false);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let out = done.join().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "the script failed:\n{stderr}");
+        let said: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{stderr}"));
+        assert_eq!(said["layers"][0]["name"], json!("Sky"), "{said}");
+        assert_eq!(said["layers"][0]["visible"], json!(false));
+        assert!(said["refused"].as_str().is_some_and(|r| r.contains("no layer")), "{said}");
+        assert_eq!(said["exported"]["path"], json!(png.display().to_string()));
+        assert_eq!(said["methods"].as_u64(), Some(crate::api::methods().len() as u64));
+        assert!(std::fs::metadata(&png).is_ok_and(|m| m.len() > 0));
+        std::fs::remove_file(&png).ok();
     }
 
     #[test]
