@@ -11,7 +11,8 @@ use std::sync::{Arc, OnceLock};
 pub const MAX_REDUCTION: u32 = 24;
 
 /// A bitmap with no edges: only tiles with content exist, at any coordinates, negative
-/// included. Cloning copies the tile map (pointers), not the pixels.
+/// included. Cloning copies pointers to its chunks of tiles (see [`TileMap`]), not the
+/// tiles, and changing a tile of a clone then copies the one chunk it lies in.
 ///
 /// An image also keeps, built when first asked for, its content bounds and a pyramid of
 /// half-size copies (for drawing it shrunk), which changing a pixel discards; and where one
@@ -19,11 +20,112 @@ pub const MAX_REDUCTION: u32 = 24;
 /// follows each tile changed, and which a copy shares until either changes a row of it.
 #[derive(Default)]
 pub struct RasterImage {
-    tiles: HashMap<TileCoord, Arc<Tile>>,
+    tiles: TileMap,
     /// `pyramid[k - 1]` is the image halved `k` times.
     pyramid: [OnceLock<Box<Level>>; MAX_REDUCTION as usize],
     bounds: OnceLock<Option<IRect>>,
     runs: OnceLock<Arc<Runs>>,
+}
+
+/// Each side of a chunk of a [`TileMap`], as a power of two: 16 tiles.
+const CHUNK_SHIFT: i32 = 4;
+
+/// An image's tiles by place, kept in chunks of 16 × 16 places, each shared between copies
+/// of the image until one of them changes a tile in it. Images are copied (through
+/// `Arc::make_mut`) to be changed, a whole layer for one stroke, so a copy costs a pointer
+/// a chunk, not one a tile, and the change copies only the chunks it lands in.
+#[derive(Clone, Default)]
+struct TileMap {
+    chunks: HashMap<TileCoord, Arc<HashMap<TileCoord, Arc<Tile>>>>,
+    /// How many tiles all the chunks hold.
+    len: usize,
+}
+
+/// The chunk of a [`TileMap`] tile `c` lies in.
+fn chunk_of(c: TileCoord) -> TileCoord {
+    TileCoord::new(c.x >> CHUNK_SHIFT, c.y >> CHUNK_SHIFT)
+}
+
+impl TileMap {
+    fn get(&self, c: &TileCoord) -> Option<&Arc<Tile>> {
+        self.chunks.get(&chunk_of(*c))?.get(c)
+    }
+
+    fn contains_key(&self, c: &TileCoord) -> bool {
+        self.get(c).is_some()
+    }
+
+    /// Puts `tile` at `c`, returning the tile it replaces.
+    fn insert(&mut self, c: TileCoord, tile: Arc<Tile>) -> Option<Arc<Tile>> {
+        let old = Arc::make_mut(self.chunks.entry(chunk_of(c)).or_default()).insert(c, tile);
+        if old.is_none() {
+            self.len += 1;
+        }
+        old
+    }
+
+    /// Takes the tile at `c` away, returning it.
+    fn remove(&mut self, c: &TileCoord) -> Option<Arc<Tile>> {
+        let k = chunk_of(*c);
+        let chunk = self.chunks.get_mut(&k)?;
+        if !chunk.contains_key(c) {
+            return None;
+        }
+        let old = Arc::make_mut(chunk).remove(c);
+        if chunk.is_empty() {
+            self.chunks.remove(&k);
+        }
+        self.len -= 1;
+        old
+    }
+
+    /// The tile at `c`, put there by `make` if there is none.
+    fn get_or_insert_with(&mut self, c: TileCoord, make: impl FnOnce() -> Arc<Tile>) -> &mut Arc<Tile> {
+        let TileMap { chunks, len } = self;
+        Arc::make_mut(chunks.entry(chunk_of(c)).or_default()).entry(c).or_insert_with(|| {
+            *len += 1;
+            make()
+        })
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&TileCoord, &Arc<Tile>)> {
+        self.chunks.values().flat_map(|chunk| chunk.iter())
+    }
+
+    fn par_iter(&self) -> impl ParallelIterator<Item = (&TileCoord, &Arc<Tile>)> {
+        self.chunks.par_iter().flat_map_iter(|(_, chunk)| chunk.iter())
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &TileCoord> {
+        self.iter().map(|(c, _)| c)
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Keeps the tiles `keep` says to, copying only the chunks it takes a tile from.
+    fn retain(&mut self, keep: impl Fn(&TileCoord, &Arc<Tile>) -> bool) {
+        let mut len = 0;
+        self.chunks.retain(|_, chunk| {
+            if !chunk.iter().all(|(c, t)| keep(c, t)) {
+                Arc::make_mut(chunk).retain(|c, t| keep(c, t));
+            }
+            len += chunk.len();
+            !chunk.is_empty()
+        });
+        self.len = len;
+    }
+
+    fn extend(&mut self, tiles: impl IntoIterator<Item = (TileCoord, Arc<Tile>)>) {
+        for (c, t) in tiles {
+            self.insert(c, t);
+        }
+    }
 }
 
 /// The tiles of an image along each tile row, as runs of one tile repeated: by row, the
@@ -64,7 +166,7 @@ fn row_differences(a: &Row, b: &Row) -> Vec<(i32, i32)> {
 }
 
 impl Runs {
-    fn of(tiles: &HashMap<TileCoord, Arc<Tile>>) -> Runs {
+    fn of(tiles: &TileMap) -> Runs {
         let mut at: Vec<(i32, i32, usize)> = tiles.iter().map(|(c, t)| (c.y, c.x, Arc::as_ptr(t) as usize)).collect();
         at.sort_unstable();
         let mut rows: HashMap<i32, Row> = HashMap::new();
@@ -383,7 +485,7 @@ impl RasterImage {
         self.changed();
         // This image's own first, so that the runs know where it is; changed after, it is
         // still one tile of its own there.
-        let tile = self.tiles.entry(c).or_insert_with(|| Arc::new(Tile::transparent()));
+        let tile = self.tiles.get_or_insert_with(c, || Arc::new(Tile::transparent()));
         Arc::make_mut(tile);
         if let Some(runs) = self.runs.get_mut() {
             Arc::make_mut(runs).set(c, Some(Arc::as_ptr(tile) as usize));
@@ -1086,6 +1188,37 @@ mod tests {
             assert_eq!(along, (k < 11).then_some(all), "after step {k}, found along the edge");
         }
         assert_eq!(RasterImage::new().content_bounds(), None);
+    }
+
+    #[test]
+    fn a_copy_changed_in_one_tile_copies_only_that_tile_s_chunk() {
+        let (white, black) = (pixel_from_f32([1.0; 4]), pixel_from_f32([0.0, 0.0, 0.0, 1.0]));
+        // 64 × 64 tiles: 4 × 4 chunks.
+        let img = RasterImage::filled(&IRect::from_size(256 * 64, 256 * 64), white);
+        let mut copy = img.clone();
+        copy.set_pixel(300, 300, black);
+        let shared = |a: &RasterImage, b: &RasterImage| {
+            a.tiles.chunks.iter().filter(|(k, ch)| b.tiles.chunks.get(k).is_some_and(|o| Arc::ptr_eq(ch, o))).count()
+        };
+        assert_eq!(img.tiles.chunks.len(), 16);
+        assert_eq!(shared(&img, &copy), 15, "the copy copied chunks it did not change");
+        assert_eq!((copy.pixel(300, 300), img.pixel(300, 300)), (black, white));
+        assert_eq!((copy.tile_count(), img.tile_count()), (64 * 64, 64 * 64));
+        // A tile taken away, a chunk emptied (and let go), the clear tiles pruned: counted.
+        copy.set_tile(TileCoord::new(1, 1), None);
+        for c in TileCoord::covering(&IRect::new(256 * 48, 0, 256 * 64, 256 * 16), 0) {
+            copy.set_tile(c, None);
+        }
+        assert_eq!(copy.tile_count(), 64 * 64 - 1 - 256);
+        assert_eq!(copy.tiles.chunks.len(), 15);
+        copy.set_tile(TileCoord::new(-5, 70), Some(Arc::new(Tile::transparent())));
+        copy.set_tile(TileCoord::new(2, 2), Some(Arc::new(Tile::transparent())));
+        assert_eq!(copy.tile_count(), 64 * 64 - 1 - 256 + 1);
+        copy.prune_transparent();
+        assert_eq!(copy.tile_count(), 64 * 64 - 1 - 256 - 1);
+        assert_eq!(copy.tiles().count(), copy.tile_count());
+        assert_eq!(copy.tiles.chunks.len(), 15, "an emptied chunk was kept");
+        assert_eq!(img.tile_count(), 64 * 64, "the original changed");
     }
 
     #[test]

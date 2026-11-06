@@ -250,12 +250,12 @@ fn image_object_across_a_large_canvas() {
         panic!()
     };
     let ObjectKind::Pixels(o) = &mut objects[0].kind else { panic!() };
-    Arc::make_mut(&mut o.image).set_pixel(
-        i64::from(side / 3),
-        i64::from(side / 3),
-        pixel_from_f32([1.0, 0.0, 0.0, 1.0]),
-    );
-    measure("A pixel of the canvas beneath changed", || {
+    // The canvas's image is shared (with the view), so changing it copies it first.
+    measure("The canvas copied, and a pixel of it changed", || {
+        let red = pixel_from_f32([1.0, 0.0, 0.0, 1.0]);
+        Arc::make_mut(&mut o.image).set_pixel(i64::from(side / 3), i64::from(side / 3), red);
+    });
+    measure("A pixel of the canvas beneath changed, shown", || {
         p.update(&d.layers, level, &whole, Quality::Exact);
     });
     let id = d.layers[1].id;
