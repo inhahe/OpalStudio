@@ -108,7 +108,17 @@ fn apply_json(st: &mut AppState, text: &str) -> Result<(), String> {
 /// Writes the settings, replacing the file only once the new one is complete.
 pub fn save(st: &AppState) -> std::io::Result<()> {
     let Some(path) = settings_path() else { return Ok(()) };
-    let saved = Saved {
+    let json = serde_json::to_string_pretty(&saved(st)).map_err(std::io::Error::other)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    opal_io::write_atomically(&path, None, |out| opal_io::write_all(out, json.as_bytes(), &path))
+        .map_err(std::io::Error::other)
+}
+
+/// What is saved of `st`.
+fn saved(st: &AppState) -> Saved {
+    Saved {
         prefs: st.prefs.to_map(),
         tools: st
             .tool_settings
@@ -118,19 +128,25 @@ pub fn save(st: &AppState) -> std::io::Result<()> {
             .collect(),
         presets: st.presets.iter().map(|(t, p)| (t.info().id.to_owned(), p.clone())).collect(),
         last_new: Some((st.last_new.width, st.last_new.height, st.last_new.background == Background::White)),
-        recent_scripts: st.console.recent.clone(),
-    };
-    let json = serde_json::to_string_pretty(&saved).map_err(std::io::Error::other)?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        // Those JSON can hold (a path that is not Unicode would fail the whole file).
+        recent_scripts: st.console.recent.iter().filter(|p| p.to_str().is_some()).cloned().collect(),
     }
-    opal_io::write_atomically(&path, None, |out| opal_io::write_all(out, json.as_bytes(), &path))
-        .map_err(std::io::Error::other)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_recent_script_whose_path_is_not_unicode_does_not_keep_the_settings_from_being_saved() {
+        use std::os::windows::ffi::OsStringExt;
+        let mut st = AppState::new();
+        let odd = PathBuf::from(std::ffi::OsString::from_wide(&[0x44, 0x3a, 0x5c, 0xd800, 0x2e, 0x70, 0x79]));
+        st.console.recent = vec![odd, PathBuf::from("C:/scripts/fine.py")];
+        let json = serde_json::to_string(&saved(&st)).expect("saved all the same");
+        assert!(json.contains("fine.py"));
+    }
 
     #[test]
     fn saved_settings_round_trip_through_json() {

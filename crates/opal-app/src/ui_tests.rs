@@ -1580,9 +1580,15 @@ fn the_console_offers_the_scripts_run_lately() {
     let here = std::env::current_exe().unwrap();
     let gone = here.with_file_name("no-such-script.py");
     let st = h.state_mut().state_mut();
-    st.console.recent = vec![here.clone(), gone];
+    st.console.recent = vec![here.clone(), gone.clone()];
     st.scripts_file = Some(std::env::temp_dir().join("opal-ui-recent.json"));
     st.show_console = true;
+    h.run();
+    // Whether each is there is looked at off the interface thread: once it has been, it shows.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while h.state().state().console.there(&gone) && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     h.run();
     let name = here.file_name().unwrap().to_string_lossy().into_owned();
     let again = format!("{}  Run {name} again", crate::icons::PLAY);

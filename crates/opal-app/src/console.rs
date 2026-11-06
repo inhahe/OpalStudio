@@ -6,12 +6,15 @@ use crate::commands::Cmd;
 use crate::icons;
 use crate::state::{AppState, MessageKind};
 use eframe::egui::{self, RichText};
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How many scripts run lately the console remembers.
@@ -148,7 +151,15 @@ pub struct Console {
     /// The scripts run lately, the last first, each once: at most [`RECENT`], kept between
     /// sessions (see `config`).
     pub recent: Vec<PathBuf>,
+    /// Whether each of them was there when last looked (see [`Console::there`]).
+    seen: Arc<Mutex<HashMap<PathBuf, bool>>>,
+    /// Whether they are being looked at, and when they last were.
+    looking: Arc<AtomicBool>,
+    looked: Option<Instant>,
 }
+
+/// How often the recent scripts are looked at again, while the Console panel is shown.
+const LOOK_EVERY: Duration = Duration::from_secs(5);
 
 /// A command running `script` (with `args`) in `python` (see [`python_program`]),
 /// connected to the editor whose connection file is `api`, with the `opal` package on its
@@ -221,8 +232,7 @@ impl Console {
     /// connected to the editor whose connection file is `api`. Nothing else may be running.
     pub fn run(&mut self, script: &Path, python: &str, api: &Path, ctx: &egui::Context) -> Result<(), String> {
         assert!(self.running.is_none(), "a script is running already");
-        let name =
-            script.file_name().map_or_else(|| script.display().to_string(), |n| n.to_string_lossy().into_owned());
+        let name = file_name(script);
         let mut command = script_command(python, script.as_os_str(), &[], api);
         command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(folder) = script.parent().filter(|f| !f.as_os_str().is_empty()) {
@@ -275,6 +285,41 @@ impl Console {
         self.recent.retain(|p| p != script);
         self.recent.insert(0, script.to_owned());
         self.recent.truncate(RECENT);
+        self.looked = None;
+    }
+
+    /// Forgets the recent scripts.
+    pub fn forget_recent(&mut self) {
+        self.recent.clear();
+        self.looked = None;
+    }
+
+    /// Whether `script` was there when the recent scripts were last looked at (one not yet
+    /// looked at is taken to be).
+    pub fn there(&self, script: &Path) -> bool {
+        self.seen.lock().expect("not poisoned").get(script).copied().unwrap_or(true)
+    }
+
+    /// Looks whether the recent scripts are there, if they were not looked at lately, on a
+    /// thread of its own: a script on a share that does not answer would otherwise hold
+    /// the window up while asked about.
+    pub fn look_at_recent(&mut self, ctx: &egui::Context) {
+        if self.looking.load(Ordering::Relaxed) || self.looked.is_some_and(|t| t.elapsed() < LOOK_EVERY) {
+            return;
+        }
+        self.looked = Some(Instant::now());
+        self.looking.store(true, Ordering::Relaxed);
+        let (recent, seen, looking, ctx) = (self.recent.clone(), self.seen.clone(), self.looking.clone(), ctx.clone());
+        let look = move || {
+            let found: HashMap<PathBuf, bool> =
+                recent.into_iter().map(|p| (p.is_file(), p)).map(|(t, p)| (p, t)).collect();
+            *seen.lock().expect("not poisoned") = found;
+            looking.store(false, Ordering::Relaxed);
+            ctx.request_repaint();
+        };
+        if std::thread::Builder::new().name("recent scripts".into()).spawn(look).is_err() {
+            self.looking.store(false, Ordering::Relaxed);
+        }
     }
 
     /// Takes what the script has printed since asked last; once it has ended (and what it
@@ -339,10 +384,13 @@ impl AppState {
             return;
         };
         let python = self.prefs.text("scripting.python");
+        let recent = self.console.recent.clone();
         match self.console.run(script, &python, &api, ctx) {
             Ok(()) => {
                 // The recent scripts are kept with the settings.
-                self.settings_touched();
+                if self.console.recent != recent {
+                    self.settings_touched();
+                }
                 self.show_console = true;
                 // The user's own doing: if they had shut scripts out, this one is let in.
                 self.let_scripts_in = true;
@@ -379,9 +427,15 @@ fn file_name(path: &Path) -> String {
 /// The scripts run lately, to run one again (if `can_run`), and a way to forget them.
 fn recent_menu(ui: &mut egui::Ui, st: &mut AppState, can_run: bool) {
     ui.menu_button(format!("{}  Recent", icons::HISTORY), |ui| {
-        for script in st.console.recent.clone() {
-            let there = script.is_file();
-            let item = ui.add_enabled(can_run && there, egui::Button::new(file_name(&script)));
+        let recent = st.console.recent.clone();
+        for script in &recent {
+            let there = st.console.there(script);
+            // Two of one name (in two folders) told apart by their folder.
+            let name = file_name(script);
+            let twice = recent.iter().filter(|p| file_name(p) == name).count() > 1;
+            let folder = script.parent().map(|f| f.display().to_string()).unwrap_or_default();
+            let label = if twice { format!("{name}  ({folder})") } else { name };
+            let item = ui.add_enabled(can_run && there, egui::Button::new(label));
             let shown = script.display().to_string();
             let item = if there {
                 item.on_hover_text(shown)
@@ -389,13 +443,13 @@ fn recent_menu(ui: &mut egui::Ui, st: &mut AppState, can_run: bool) {
                 item.on_disabled_hover_text(format!("No longer there: {shown}"))
             };
             if item.clicked() {
-                st.run_script(&script, ui.ctx());
+                st.run_script(script, ui.ctx());
                 ui.close();
             }
         }
         ui.separator();
         if ui.button("Forget them").clicked() {
-            st.console.recent.clear();
+            st.console.forget_recent();
             st.settings_touched();
             ui.close();
         }
@@ -432,13 +486,20 @@ pub fn console_panel(ui: &mut egui::Ui, st: &mut AppState) {
                 if run.clicked() {
                     st.queue.push(Cmd::RunScript);
                 }
+                st.console.look_at_recent(ui.ctx());
                 if let Some(last) = st.console.recent.first().cloned() {
+                    let there = st.console.there(&last);
+                    let shown = last.display().to_string();
                     let again = ui
                         .add_enabled(
-                            available.is_ok() && last.is_file(),
+                            available.is_ok() && there,
                             egui::Button::new(format!("{}  Run {} again", icons::PLAY, file_name(&last))),
                         )
-                        .on_hover_text(last.display().to_string());
+                        .on_hover_text(&shown)
+                        .on_disabled_hover_text(match &available {
+                            Err(why) => why.clone(),
+                            Ok(()) => format!("No longer there: {shown}"),
+                        });
                     if again.clicked() {
                         st.run_script(&last, ui.ctx());
                     }
@@ -675,6 +736,23 @@ mod tests {
         assert_eq!(console.recent.len(), RECENT);
         assert_eq!(console.recent[..3], [at(RECENT), at(RECENT + 2), at(RECENT + 1)]);
         assert_eq!(console.recent.iter().filter(|p| **p == at(RECENT)).count(), 1);
+    }
+
+    #[test]
+    fn whether_the_recent_scripts_are_there_is_looked_at_off_this_thread() {
+        let scratch = Scratch::new("seen");
+        let here = scratch.script("here.py", "");
+        let gone = scratch.0.join("gone.py");
+        let mut console = Console::default();
+        console.remember(&gone);
+        console.remember(&here);
+        assert!(console.there(&gone), "taken to be there before it is looked at");
+        console.look_at_recent(&egui::Context::default());
+        let until = Instant::now() + Duration::from_secs(10);
+        while console.looking.load(Ordering::Relaxed) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(console.there(&here) && !console.there(&gone));
     }
 
     #[test]

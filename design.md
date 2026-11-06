@@ -1133,8 +1133,11 @@ server. Both rest on one language-neutral API.
   how long it took); it can stop it, and every process it started (on Windows, all of them
   are in a job object; what they did stays), run the last one again, copy everything
   shown, and clear; it keeps the last 5000 lines. Its Recent menu holds the last
-  ten scripts run (each once, the last first, kept in `settings.json`), one no longer there
-  shown but not offered, and a way to forget them. A script still running when the editor
+  ten scripts run (each once, the last first, kept in `settings.json`, but for a path that
+  is not Unicode, which JSON cannot hold), two of one name told apart by their folder, one
+  no longer there shown but not offered (whether each is there looked at off the interface
+  thread, every few seconds while the panel shows: a share that does not answer cannot hold
+  the window up), and a way to forget them. A script still running when the editor
   closes is stopped the same way (one that ended by itself leaves what it started running). The grouping (see *Script runs*, above) holds for every
   script run, whoever started it.
 - **MCP server.** The editor serves MCP (streamable HTTP on localhost) to clients that
