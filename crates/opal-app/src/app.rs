@@ -688,7 +688,8 @@ impl OpalApp {
                 }
                 let print = crate::lengths::print_note(c.width, c.height, ppi, unit, per);
                 ui.label(RichText::new(size).color(weak)).on_hover_text(format!(
-                    "The canvas's size. {print} (Image › Resize Image changes the resolution; Preferences ›                      Interface, the unit sizes are shown in.)"
+                    "The canvas's size. {print} (Image › Resize Image changes the resolution; Preferences › \
+                     Interface, the unit sizes are shown in.)"
                 ));
                 ui.separator();
                 // Positions count from the canvas's corner, wherever cropping has put it.
@@ -698,7 +699,11 @@ impl OpalApp {
                         format!("{x}, {y}")
                     } else {
                         let x = crate::lengths::show(x, unit, ppi);
-                        format!("{}, {}", x.rsplit_once(' ').map_or(x.as_str(), |(n, _)| n), crate::lengths::show(y, unit, ppi))
+                        format!(
+                            "{}, {}",
+                            x.rsplit_once(' ').map_or(x.as_str(), |(n, _)| n),
+                            crate::lengths::show(y, unit, ppi)
+                        )
                     };
                     ui.label(RichText::new(at).color(weak));
                 }

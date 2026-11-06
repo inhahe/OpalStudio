@@ -104,6 +104,8 @@ struct Shared {
 pub struct Server {
     shared: Arc<Shared>,
     requests: Receiver<Request>,
+    /// A request [`wait`](Self::wait) took, carried out first by the next `serve`.
+    waiting: Option<Request>,
     /// The answers awaited from files being written, by the number of the call.
     later: HashMap<u64, Sender<Result<Value, String>>>,
 }
@@ -340,7 +342,7 @@ impl Server {
             let _ = std::fs::remove_file(&shared.file);
             return Err(e);
         }
-        Ok(Server { shared, requests, later: HashMap::new() })
+        Ok(Server { shared, requests, waiting: None, later: HashMap::new() })
     }
 
     /// How many clients are connected (have said hello).
@@ -402,7 +404,7 @@ impl Server {
         if !busy || quitting {
             let generation = self.shared.clients.lock().expect("not poisoned").generation;
             let until = Instant::now() + SERVE_FOR;
-            let mut next = self.requests.try_recv().ok();
+            let mut next = self.waiting.take().or_else(|| self.requests.try_recv().ok());
             while let Some(r) = next {
                 match r {
                     Request::Ended { group, label, step } => st.group_ended(group, &label, step),
@@ -431,6 +433,15 @@ impl Server {
             if let Some(answer) = self.later.remove(&n) {
                 let _ = answer.send(result);
             }
+        }
+    }
+
+    /// Waits up to `timeout` for a request, which the next [`serve`](Self::serve) carries
+    /// out first: how an editor with no window, which no repaint wakes, sleeps until it is
+    /// called.
+    pub fn wait(&mut self, timeout: Duration) {
+        if self.waiting.is_none() {
+            self.waiting = self.requests.recv_timeout(timeout).ok();
         }
     }
 

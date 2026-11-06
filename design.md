@@ -661,8 +661,9 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
 - **Crop to Content** shrinks the canvas to the visible content.
 - **Resize Image:** a size in any unit or in percent (aspect ratio locked by default), a
   resolution, and a resampling method. A new resolution keeps the pixels and changes how
-  large they print (one history state, "Change resolution", and no pixel touched), or,
-  with *Keep the print size*, changes the pixel size with it; the size the fields show is
+  large they print (one history state, "Change resolution", and no pixel touched, so it
+  may be given while a layer is locked, which a new size may not), or, with *Keep the
+  print size*, changes the pixel size with it; the size the fields show is
   at the new resolution, and the dialog says how large the image will print. Image objects are scaled with the canvas. Pixel objects too become
   image objects, keeping their pixels (enlarging again later loses nothing), unless
   *Resample pixels* is set, which resamples them now for a smaller file; the dialog says
@@ -1070,11 +1071,14 @@ server. Both rest on one language-neutral API.
   a paste asked for again, or cancelled, before then is told so), `place` (an image file),
   and `transform`, each with the box's `x`, `y` (its top-left corner from the canvas's),
   `width`, `height` (one alone keeps the proportions; both, with `fit`, stretch to them or
-  fit inside or cover them, centered), `angle`, and for a paste `into_active`; they answer
-  with the layer and the box. Changes the API alone makes: `put_pixels`, `crop` (a
+  fit inside or cover them, centered on the rectangle they make, turned with the box about
+  its corner), `angle`, and for a paste `into_active`; they answer with the layer and the
+  box. What a box applies is made in the call's groups, as any change is (a script run, a
+  step), the asynchronous paste's too. Changes the API alone makes: `put_pixels`, `crop` (a
   rectangle of the canvas, which may be turned), and `set_preference` (any but those of
   scripting, which would let a script or assistant choose what runs scripts or open the
-  editor to HTTP clients; given no value, the default). Queries so far: `documents`,
+  editor to HTTP clients; given no value, the default; applied at once, as the Preferences
+  window applies it). Queries so far: `documents`,
   `preferences`, `layers`, `image` (of
   the image as shown or of one layer alone, made in memory on a thread of its own, out of
   the user's sight, unlike an export), `pixels`, and `history` (an image's history as a
@@ -1171,7 +1175,11 @@ server. Both rest on one language-neutral API.
   are written, printing what a dialog would have said. The script is given to Python as
   given, so `-c "code"` and `-` (standard input) work as they do for Python. What is done
   between frames is the window's (writes, copies, a paste whose clipboard has been read),
-  so a script's paste is placed headless too. The editor being a windowed
+  so a script's paste is placed headless too; and with no window nothing waits for a
+  dialog, which no one could close. Between calls it waits for the next (`Server::wait`)
+  rather than looking for it again and again: every millisecond or so while work a call
+  waits for is under way, every 50 ms otherwise (`headless::serve_windowless`, which the
+  editor `--mcp` starts runs too). The editor being a windowed
   program, which a command prompt does not wait for, `opal-studio.com` beside it (the
   `opal-studio-console` binary, which a prompt finds first) runs it with the same
   arguments on the same console, waiting for `--headless` and `--mcp` and ending with
@@ -1209,7 +1217,7 @@ server. Both rest on one language-neutral API.
   running) comes back as the tool's error text. With no editor running, the shim starts
   one of its own on the first call (an editor's state and server with no window, on a
   thread, with a connection file of its own, as `--headless` runs them, stopped with the
-  shim) and connects to that; that call's answer says so in a text of its own, since what
+  shim, which waits for it to have taken its connection file away) and connects to that; that call's answer says so in a text of its own, since what
   it makes lasts only as long as the shim. The `image` query (the canvas, or a layer
   alone, as a PNG scaled to fit a size) comes back as an image. And MCP over HTTP
   (`mcp_http.rs`), off unless the preference turns it on (Preferences › Scripting, with its

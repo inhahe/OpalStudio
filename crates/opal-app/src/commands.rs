@@ -297,7 +297,10 @@ impl Cmd {
                 "Place",
                 icons::PLACE,
                 "Place an image file into this image, then position and size it.",
-                "The file's image goes onto a new layer above the active one, in the transform box,                  as a paste does: drag the box, or type its exact position and size in any unit                  (the numbers button by the box). Enter or the check mark places it, Esc cancels.                  It keeps its own pixels, so it can be resized again later without losing quality.",
+                "The file's image goes onto a new layer above the active one, in the transform box, \
+                 as a paste does: drag the box, or type its exact position and size in any unit \
+                 (the numbers button by the box). Enter or the check mark places it, Esc cancels. \
+                 It keeps its own pixels, so it can be resized again later without losing quality.",
                 const { &[ctrl_alt(Key::O)] },
             ),
             Cmd::Transform => i(
@@ -640,7 +643,8 @@ pub static RIBBON: &[Tab] = &[
         groups: &[
             Group {
                 name: "File",
-                description: "Creating, opening, saving and exporting images, and placing image files                               into them.",
+                description: "Creating, opening, saving and exporting images, and placing image files \
+                              into them.",
                 large: 3,
                 cmds: &[Cmd::New, Cmd::Open, Cmd::Save, Cmd::Place, Cmd::SaveAs, Cmd::Export, Cmd::Close],
             },
@@ -870,7 +874,10 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
                 None => Ok(()),
             }
         }
-        ResizeImage | RotateCw | RotateCcw | Rotate180 | RotateBy | FlipHorizontal | FlipVertical => {
+        // (Resize Image may give a new resolution alone, which changes no layer; a new size is
+        // refused while one is locked, by `resize_image`, through `locked_layer`.)
+        ResizeImage => needs_doc(),
+        RotateCw | RotateCcw | Rotate180 | RotateBy | FlipHorizontal | FlipVertical => {
             let d = st.active().ok_or("Open or create an image first.")?;
             match d.doc().layers.iter().find_map(|l| first_locked(l)) {
                 Some(l) => Err(format!("\"{}\" is locked, and this changes every layer. Unlock it first.", l.name)),
@@ -941,6 +948,11 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
 }
 
 /// The layer itself if it is locked, or else the first locked layer inside it.
+/// The name of a layer of `doc` that is locked, or holds one that is, if any.
+pub fn locked_layer(doc: &opal_core::document::Document) -> Option<String> {
+    doc.layers.iter().find_map(|l| first_locked(l)).map(|l| l.name.clone())
+}
+
 fn first_locked(layer: &opal_core::document::Layer) -> Option<&opal_core::document::Layer> {
     if layer.locked {
         return Some(layer);

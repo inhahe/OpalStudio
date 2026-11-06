@@ -339,7 +339,8 @@ pub fn settings(ui: &mut egui::Ui, st: &mut AppState) {
     });
     ui.label(
         RichText::new(
-            "Drag the box to move, a corner or edge to scale, the round handle or anywhere outside to rotate.              Enter applies, Esc cancels.",
+            "Drag the box to move, a corner or edge to scale, the round handle or anywhere outside to rotate. \
+             Enter applies, Esc cancels.",
         )
         .color(palette.weak_text),
     );

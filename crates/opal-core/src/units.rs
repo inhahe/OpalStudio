@@ -38,7 +38,7 @@ impl Unit {
         [Unit::Px, Unit::Pt, Unit::Pc, Unit::In, Unit::Ft, Unit::Yd, Unit::Mm, Unit::Cm, Unit::M];
 
     /// The unit's short name, as written after a number and in scripts and settings.
-    pub fn id(self) -> &'static str {
+    pub const fn id(self) -> &'static str {
         match self {
             Unit::Px => "px",
             Unit::In => "in",
@@ -53,7 +53,7 @@ impl Unit {
     }
 
     /// The unit's name in menus.
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Unit::Px => "Pixels",
             Unit::In => "Inches",
@@ -160,7 +160,7 @@ impl ResolutionUnit {
     pub const ALL: [ResolutionUnit; 2] = [ResolutionUnit::PerInch, ResolutionUnit::PerCm];
 
     /// The unit's short name, as in scripts and settings.
-    pub fn id(self) -> &'static str {
+    pub const fn id(self) -> &'static str {
         match self {
             ResolutionUnit::PerInch => "ppi",
             ResolutionUnit::PerCm => "ppcm",
@@ -168,7 +168,7 @@ impl ResolutionUnit {
     }
 
     /// The unit's name in menus.
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             ResolutionUnit::PerInch => "Pixels/inch",
             ResolutionUnit::PerCm => "Pixels/cm",

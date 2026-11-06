@@ -57,6 +57,31 @@ fn use_parent_console() {
     }
 }
 
+/// How long an editor with no window waits for a call before it does again what is done
+/// between frames, when nothing that will be answered is under way.
+const IDLE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Serves `server`'s clients with `st` and no window until `done` (asked after each round)
+/// says to stop: each call carried out as soon as it comes (waited for, not looked for
+/// again and again), and between them what the window does between frames, every
+/// millisecond or so while work a call waits for is under way, every [`IDLE`] otherwise.
+pub fn serve_windowless(
+    server: &mut Server,
+    st: &mut AppState,
+    ctx: &egui::Context,
+    mut done: impl FnMut(&Server) -> bool,
+) {
+    loop {
+        server.serve(st, ctx, false);
+        st.between_frames(false);
+        if done(server) {
+            return;
+        }
+        let soon = st.work_under_way();
+        server.wait(if soon { std::time::Duration::from_millis(1) } else { IDLE });
+    }
+}
+
 /// Runs headless with the arguments after `--headless`; the process's exit code.
 pub fn run(given: Vec<OsString>) -> i32 {
     use_parent_console();
@@ -69,6 +94,7 @@ pub fn run(given: Vec<OsString>) -> i32 {
     };
     let ctx = egui::Context::default();
     let mut st = AppState::new();
+    st.windowless = true;
     // The user's preferences (how exports are written, the memory budgets), not saved back.
     crate::config::load(&mut st);
     st.apply_tile_budget();
@@ -92,19 +118,13 @@ pub fn run(given: Vec<OsString>) -> i32 {
     // script started may go on calling), each call carried out: a client's connection lasts
     // until its last call is answered.
     let mut ended = None;
-    let status = loop {
-        server.serve(&mut st, &ctx, false);
-        st.between_frames(false);
+    serve_windowless(&mut server, &mut st, &ctx, |server| {
         if ended.is_none() {
             ended = child.try_wait().ok().flatten();
         }
-        if let Some(status) = ended
-            && server.clients() == 0
-        {
-            break status;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    };
+        ended.is_some() && server.clients() == 0
+    });
+    let status = ended.expect("served until it ended");
     // The files asked for, written before this ends.
     while st.writer.busy() {
         st.poll_writes(false);

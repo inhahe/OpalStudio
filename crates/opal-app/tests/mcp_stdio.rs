@@ -1,5 +1,5 @@
 //! `opal-studio --mcp` as an assistant's client launches it: MCP over standard input and
-//! output, without a window, the tools listed even with no editor running to call.
+//! output, without a window; with no editor running, it starts one of its own.
 
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
@@ -34,9 +34,16 @@ fn the_mcp_server_answers_over_stdio_without_a_window() {
         tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"new") && names.contains(&"image") && names.contains(&"layers"), "{names:?}");
     let call = ask(json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "documents" } }));
-    assert_eq!(call["result"]["isError"], json!(true), "{call}");
-    assert!(call["result"]["content"][0]["text"].as_str().unwrap().contains("not running"));
+    assert_eq!(call["result"].get("isError"), None, "{call}");
+    assert!(call["result"]["content"][1]["text"].as_str().unwrap().contains("started one of its own"), "{call}");
+    let new = json!({ "name": "new", "arguments": { "width": "1in", "height": 10, "resolution": 50 } });
+    ask(json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": new }));
+    let docs = ask(json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": "documents" } }));
+    assert!(docs["result"]["content"][0]["text"].as_str().unwrap().contains("\"width\": 50"), "{docs}");
+    let pid = child.id();
     drop(input);
-    // The input ended: it stops.
+    // The input ended: it stops, the editor it started with it, taking its file away.
     assert!(child.wait().unwrap().success());
+    let hosted = std::env::temp_dir().join(format!("opal-mcp-{pid}-0.json"));
+    assert!(!hosted.exists(), "{} was left behind", hosted.display());
 }

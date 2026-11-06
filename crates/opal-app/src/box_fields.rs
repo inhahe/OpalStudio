@@ -11,8 +11,9 @@ use crate::transform::Params;
 use eframe::egui;
 use opal_core::units::Unit;
 
-/// The farthest a box's corner may be typed from the canvas's, in pixels.
-const FAR: f64 = 1e7;
+/// The farthest a box's corner may be put from the canvas's, in pixels: typed in its
+/// fields, or given to a script's call.
+pub const FAR: f64 = 1e7;
 
 /// How a box's fields behave.
 pub struct Fields<'a> {

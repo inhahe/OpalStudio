@@ -153,12 +153,20 @@ const RESIZED_HEIGHT: Param =
 const CANVAS_WIDTH: Param = length_side("width", "The new width.", Otherwise::Now("the canvas's"));
 const CANVAS_HEIGHT: Param = length_side("height", "The new height.", Otherwise::Now("the canvas's"));
 
-/// The units' short names, as `unit` takes them, in [`Unit::ALL`]'s order.
-const UNIT_IDS: &[&str] = &["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"];
+/// The units' short names, as `unit` takes them: `opal_core`'s, in their order.
+const UNIT_IDS: [&str; Unit::ALL.len()] = {
+    let mut ids = [""; Unit::ALL.len()];
+    let mut i = 0;
+    while i < ids.len() {
+        ids[i] = Unit::ALL[i].id();
+        i += 1;
+    }
+    ids
+};
 
 const UNIT: Param = Param {
     name: "unit",
-    kind: Kind::Choice(UNIT_IDS),
+    kind: Kind::Choice(&UNIT_IDS),
     help: "What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, \
            millimeters, centimeters or meters, converted at the image's resolution. A length can also be \
            given as text with a unit of its own: \"8.5in\", \"21 cm\".",
@@ -173,8 +181,7 @@ const NEW_RESOLUTION: Param = Param {
     otherwise: Otherwise::Value("72"),
 };
 
-/// The farthest from the canvas's corner a box may be put, in pixels.
-const FAR: f64 = 1e7;
+use crate::box_fields::FAR;
 
 const BOX_X: Param = Param {
     name: "x",
@@ -1009,12 +1016,11 @@ impl Args {
     /// These arguments with each length of `params` in pixels: a number in the call's
     /// `unit`, or text with a unit of its own, converted at `ppi` pixels per inch. Each
     /// must then be in its parameter's range.
-    fn in_pixels(&self, params: &[Param], ppi: f64) -> Result<Args, String> {
+    fn in_pixels(mut self, params: &[Param], ppi: f64) -> Result<Args, String> {
         let unit = self.text("unit").and_then(Unit::from_name).unwrap_or(Unit::Px);
-        let mut out = self.0.clone();
         for p in params {
-            let (Kind::Length { min, max }, Some(v)) = (p.kind, self.get(p.name)) else { continue };
-            let (value, typed) = match v {
+            let (Kind::Length { min, max }, Some(v)) = (p.kind, self.0.get_mut(p.name)) else { continue };
+            let (value, typed) = match &*v {
                 Value::String(s) => parse_length(s).expect("checked"),
                 v => (v.as_f64().expect("checked"), None),
             };
@@ -1028,9 +1034,9 @@ impl Args {
                 };
                 return Err(format!("\"{}\" must lie between {min} and {max} pixels, not {given}", p.name));
             }
-            out.insert(p.name.to_owned(), json!(px));
+            *v = json!(px);
         }
-        Ok(Args(out))
+        Ok(self)
     }
 
     fn flag(&self, name: &str) -> Option<bool> {
@@ -1102,8 +1108,8 @@ impl BoxArgs {
     }
 
     /// The box `p` (as the document has it) with these put in; `corner` is the canvas's
-    /// top-left corner. A box fitted to a width and height is centered on them before it
-    /// is turned.
+    /// top-left corner. A box fitted to a width and height is centered on the rectangle
+    /// they make, turned with it about its corner.
     pub fn applied(&self, p: &crate::transform::Params, corner: [f64; 2]) -> crate::transform::Params {
         let (w, h) = match (self.width, self.height) {
             (Some(w), Some(h)) => match self.fit {
@@ -1118,16 +1124,19 @@ impl BoxArgs {
             (None, Some(h)) => (p.width * h / p.height, h),
             (None, None) => (p.width, p.height),
         };
+        let angle = self.angle.unwrap_or(p.angle);
+        // From the rectangle's corner to the box's, along the rectangle's sides.
         let (dx, dy) = match (self.width, self.height) {
             (Some(bw), Some(bh)) => ((bw - w) * 0.5, (bh - h) * 0.5),
             _ => (0.0, 0.0),
         };
+        let [dx, dy] = opal_core::geom::Affine::rotate(angle.to_radians()).apply([dx, dy]);
         crate::transform::Params {
             x: self.x.map_or(p.x, |x| corner[0] + x) + dx,
             y: self.y.map_or(p.y, |y| corner[1] + y) + dy,
             width: w,
             height: h,
-            angle: self.angle.unwrap_or(p.angle),
+            angle,
             mirrored: p.mirrored,
         }
     }
@@ -1278,24 +1287,24 @@ impl AppState {
             Ok(args) => args,
             Err(why) => return Reply::Now(Err(format!("{name}: {why}."))),
         };
-        let args = match args.in_pixels(method.params, self.resolution_for(method, &args)) {
+        let ppi = self.resolution_for(method, &args);
+        let args = match args.in_pixels(method.params, ppi) {
             Ok(args) => args,
             Err(why) => return Reply::Now(Err(format!("{name}: {why}."))),
         };
         let told = if heard { self.messages.len() } else { usize::MAX };
         let notice = self.notice.clone();
-        // The image and layers the user had, to put back if the command is refused (it
-        // makes those it names the active ones).
-        let view = method
-            .cmd
-            .map(|_| (self.active_doc, self.docs.iter().map(|d| (d.id, d.selection_state())).collect::<Vec<_>>()));
+        // The image and layers the user had, to put back if the change is refused (it makes
+        // those it names the active ones).
+        let view = (method.role == Role::Command)
+            .then(|| (self.active_doc, self.docs.iter().map(|d| (d.id, d.selection_state())).collect::<Vec<_>>()));
         let reply = match method.cmd {
             Some(cmd) => self.carry_out(cmd, method.params, &args, ctx),
             None if method.name == "image" => self.image_by_args(&args, ctx),
             None if method.name == "pixels" => self.pixels_by_args(&args, ctx),
             None if method.name == "put_pixels" => self.put_pixels_by_args(&args, ctx),
             None if method.name == "crop" => Reply::Now(self.crop_by_args(&args)),
-            None if method.name == "set_preference" => Reply::Now(self.set_preference(&args)),
+            None if method.name == "set_preference" => Reply::Now(self.set_preference(&args, ctx)),
             None => Reply::Now(self.answer(&method.name, &args)),
         };
         // What would have been told in a dialog comes back with the reply instead: an error,
@@ -1809,8 +1818,8 @@ impl AppState {
     }
 
     /// Changes the preference `args` names, or puts it back to its default (see the
-    /// `set_preference` method).
-    fn set_preference(&mut self, args: &Args) -> Result<Value, String> {
+    /// `set_preference` method), applying it to `ctx` as the Preferences window does.
+    fn set_preference(&mut self, args: &Args, ctx: &egui::Context) -> Result<Value, String> {
         use crate::settings::{Kind as Setting, Value as Set};
         let key = args.text("key").expect("required");
         let Some(def) = crate::prefs::PREFS.iter().find(|d| d.key == key) else {
@@ -1831,6 +1840,7 @@ impl AppState {
         let Some(given) = args.get("value") else {
             self.prefs.reset(key);
             self.settings_touched();
+            self.apply_prefs(ctx);
             return Ok(json!({ "key": key, "value": setting_json(&self.prefs.get(key)) }));
         };
         let value = match (def.kind, given) {
@@ -1862,6 +1872,7 @@ impl AppState {
         };
         self.prefs.set(key, value);
         self.settings_touched();
+        self.apply_prefs(ctx);
         Ok(json!({ "key": key, "value": setting_json(&self.prefs.get(key)) }))
     }
 
@@ -3036,10 +3047,13 @@ mod tests {
 
     #[test]
     fn a_paste_read_off_the_interface_thread_is_placed_with_no_window() {
-        // As --headless and the editor --mcp starts run it: between frames, nothing else.
+        // As --headless and the editor --mcp starts run it: between frames, nothing else, and
+        // with a message no one will ever dismiss.
         use crate::clipboard::{Pasted, TestClipboard};
         let mut st = AppState::new();
+        st.windowless = true;
         now(&mut st, "new", json!({ "width": 50, "height": 50 })).unwrap();
+        st.message(MessageKind::Warning, "Settings not loaded", "the file could not be read");
         let px = vec![opal_core::tile::pixel_from_f32([0.0, 1.0, 0.0, 1.0]); 4];
         let image = Pasted {
             width: 2,
@@ -3084,6 +3098,54 @@ mod tests {
         std::fs::remove_file(&path).ok();
         let docs = now(&mut st, "documents", json!({})).unwrap();
         assert_eq!(docs[1]["resolution"], json!(240.0), "{docs}");
+        // Pixels that are not square: the resolution across, and a note that says so.
+        use image::codecs::jpeg::{JpegEncoder, PixelDensity, PixelDensityUnit};
+        let tall = std::env::temp_dir().join(format!("opal-api-tall-{}.jpg", std::process::id()));
+        let mut jpeg = Vec::new();
+        let mut encoder = JpegEncoder::new_with_quality(&mut jpeg, 90);
+        encoder.set_pixel_density(PixelDensity { density: (100, 200), unit: PixelDensityUnit::Inches });
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8)).write_with_encoder(encoder).unwrap();
+        std::fs::write(&tall, jpeg).unwrap();
+        let opened = now(&mut st, "open", json!({ "path": tall.display().to_string() })).unwrap();
+        std::fs::remove_file(&tall).ok();
+        assert!(opened["notes"][0].as_str().is_some_and(|n| n.contains("not square")), "{opened}");
+        assert_eq!(now(&mut st, "documents", json!({})).unwrap()[2]["resolution"], json!(100.0));
+    }
+
+    #[test]
+    fn what_a_script_places_transforms_and_pastes_is_part_of_its_run() {
+        use crate::clipboard::{Pasted, TestClipboard};
+        let _turn = crate::background::testing::turn();
+        let ctx = egui::Context::default();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 100, "height": 100 })).unwrap();
+        let path = png_file("run.png", 10, 10).display().to_string();
+        let states = st.active().unwrap().history.nodes().count();
+        // Each call made in the run's group, as the server makes a script's.
+        let call = |st: &mut AppState, name: &str, given: Value| st.call_from(&[7], true, name, &args(given), &ctx);
+        let Reply::Now(Ok(placed)) = call(&mut st, "place", json!({ "path": path, "x": 5 })) else {
+            panic!("not placed")
+        };
+        let Reply::Now(Ok(_)) = call(&mut st, "transform", json!({ "layers": [placed["layer"]], "angle": 30 })) else {
+            panic!("not transformed")
+        };
+        // A paste read off the interface thread, placed after its call has returned.
+        let px = vec![opal_core::tile::pixel_from_f32([1.0; 4]); 4];
+        let image = Pasted {
+            width: 2,
+            height: 2,
+            image: RasterImage::from_pixels(2, 2, &px),
+            from: None,
+            warnings: Vec::new(),
+        };
+        st.clipboard = Box::new(TestClipboard { image: Some(image), slow: true, ..Default::default() });
+        let Reply::Later(n) = call(&mut st, "paste", json!({})) else { panic!("answered at once") };
+        later(&mut st, n).unwrap();
+        st.group_ended(7, "Script: run", false);
+        let d = st.active().unwrap();
+        assert_eq!(d.history.undo_label(), Some("Script: run"));
+        assert_eq!(d.history.nodes().count(), states + 1, "the run is not one state");
+        std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).ok();
     }
 
     #[test]
@@ -3103,7 +3165,11 @@ mod tests {
         let both = BoxArgs { x: Some(0.0), y: Some(0.0), width: Some(60.0), height: Some(60.0), ..BoxArgs::default() };
         assert_eq!(applied(both.clone()), (100.0, 200.0, 60.0, 60.0));
         assert_eq!(applied(BoxArgs { fit: Fit::Inside, ..both.clone() }), (100.0, 215.0, 60.0, 30.0));
-        assert_eq!(applied(BoxArgs { fit: Fit::Cover, ..both }), (70.0, 200.0, 120.0, 60.0));
+        assert_eq!(applied(BoxArgs { fit: Fit::Cover, ..both.clone() }), (70.0, 200.0, 120.0, 60.0));
+        // Turned, it is centered on the rectangle turned the same way about its corner:
+        // 60 × 30 down the 60 × 60 square turned a quarter, 15 to the left of its corner.
+        let (x, y, w, h) = applied(BoxArgs { fit: Fit::Inside, angle: Some(90.0), ..both });
+        assert!((x - 85.0).abs() < 1e-9 && (y - 200.0).abs() < 1e-9 && (w, h) == (60.0, 30.0), "{x}, {y}");
     }
 
     #[test]
@@ -3119,7 +3185,22 @@ mod tests {
         let before = st.active().unwrap().history.current();
         now(&mut st, "crop", json!({})).unwrap();
         assert_eq!(st.active().unwrap().history.current(), before, "an empty crop made a state");
-        let turned = now(&mut st, "crop", json!({ "x": 10, "y": 10, "width": 20, "height": 20, "angle": 30 })).unwrap();
+        // Refused (a locked layer and a turn), the user's image stays the one shown.
+        let other = now(&mut st, "new", json!({ "width": 10, "height": 10 })).unwrap()["document"].clone();
+        let first = now(&mut st, "documents", json!({})).unwrap()[0]["document"].clone();
+        let bg = now(&mut st, "layers", json!({ "document": first })).unwrap()[0]["layer"].clone();
+        now(&mut st, "toggle_lock", json!({ "document": first, "layers": [bg], "locked": true })).unwrap();
+        now(&mut st, "new_layer", json!({ "document": other })).unwrap();
+        let refused = now(&mut st, "crop", json!({ "document": first, "angle": 10 })).unwrap_err();
+        assert!(refused.contains("locked"), "{refused}");
+        assert_eq!(st.active_doc.map(|d| d.0), other.as_u64(), "a refused crop left its image shown");
+        now(&mut st, "toggle_lock", json!({ "document": first, "layers": [bg], "locked": false })).unwrap();
+        let turned = now(
+            &mut st,
+            "crop",
+            json!({ "document": first, "x": 10, "y": 10, "width": 20, "height": 20, "angle": 30 }),
+        )
+        .unwrap();
         assert_eq!((turned["width"].as_u64(), turned["height"].as_u64()), (Some(20), Some(20)));
         assert_eq!(st.active().unwrap().history.undo_label(), Some("Crop and straighten"));
     }
@@ -3137,6 +3218,13 @@ mod tests {
         assert_eq!(find("export.jpeg_quality")["max"], json!(100.0));
         now(&mut st, "set_preference", json!({ "key": "ui.unit", "value": "mm" })).unwrap();
         assert_eq!(st.unit(), Unit::Mm);
+        // Those egui keeps take effect at once, as from the Preferences window.
+        let ctx = egui::Context::default();
+        let scaled = st.call("set_preference", &args(json!({ "key": "ui.scale", "value": 150 })), &ctx);
+        assert!(matches!(scaled, Reply::Now(Ok(_))), "{scaled:?}");
+        // (egui takes a new zoom at its next frame.)
+        ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
+        assert_eq!(ctx.zoom_factor(), 1.5, "the interface size was not applied");
         now(&mut st, "set_preference", json!({ "key": "export.jpeg_quality", "value": 77 })).unwrap();
         assert_eq!(st.prefs.f64("export.jpeg_quality"), 77.0);
         now(&mut st, "set_preference", json!({ "key": "canvas.checker_a", "value": [10, 20, 30] })).unwrap();

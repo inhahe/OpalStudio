@@ -141,6 +141,9 @@ pub struct AppState {
     /// Whether the fields for a box's exact position and size are open beside the transform
     /// or crop box (see `box_fields`).
     pub box_numbers: bool,
+    /// Whether this editor has no window (`--headless`, or the one `--mcp` starts): what
+    /// would be told in a dialog is printed or answered instead, and nothing waits for one.
+    pub windowless: bool,
     /// Commands to run once this frame's UI is done.
     pub queue: Vec<Cmd>,
     /// Documents whose tab must be created.
@@ -311,6 +314,7 @@ impl AppState {
             copies_answered: VecDeque::new(),
             confirm: None,
             box_numbers: false,
+            windowless: false,
             new_image: None,
             last_new: NewImage {
                 width: 1920,
@@ -364,15 +368,28 @@ impl AppState {
         self.notice.as_ref().is_none_or(|(_, at)| at.elapsed() >= NOTICE_SHOWN)
     }
 
-    /// Whether a dialog is open, so keys and the canvas belong to it.
+    /// Whether work that a call will be answered with once it is done is under way: a
+    /// write, a copy, a paste being read, an answer being made off this thread, or a change
+    /// made ready waiting to be made.
+    pub fn work_under_way(&self) -> bool {
+        self.writer.busy()
+            || self.reading.is_some()
+            || !self.copies_answered.is_empty()
+            || !self.made.is_empty()
+            || !self.finishing.is_empty()
+    }
+
+    /// Whether a dialog is open, so keys and the canvas belong to it. With no window, none
+    /// is ever shown, nor waited for.
     pub fn dialog_open(&self) -> bool {
-        self.confirm.is_some()
-            || !self.messages.is_empty()
-            || self.new_image.is_some()
-            || self.export.is_some()
-            || self.resize_image.is_some()
-            || self.resize_canvas.is_some()
-            || self.rotate_by.is_some()
+        !self.windowless
+            && (self.confirm.is_some()
+                || !self.messages.is_empty()
+                || self.new_image.is_some()
+                || self.export.is_some()
+                || self.resize_image.is_some()
+                || self.resize_canvas.is_some()
+                || self.rotate_by.is_some())
     }
 
     /// The color scheme in use: the chosen one, or the system's when following it.
@@ -715,13 +732,20 @@ impl AppState {
                 Ok(imported) => {
                     let mut ids = IdGen::default();
                     let mut doc = Document::new(imported.width, imported.height);
-                    if let Some(ppi) = imported.resolution {
-                        doc.resolution = ppi;
+                    let mut warnings = imported.warnings;
+                    if let Some([x, y]) = imported.resolution {
+                        doc.resolution = x;
+                        if (x - y).abs() > x.max(y) * 1e-3 {
+                            warnings.push(format!(
+                                "This image's pixels are not square ({x} by {y} per inch). Opal Studio's are, \
+                                 so it takes the resolution across ({x} pixels per inch) for both."
+                            ));
+                        }
                     }
                     let layer = Layer::new_raster(ids.layer(), ids.object(), "Background", imported.image);
                     doc.insert(Position { parent: None, index: 0 }, layer).expect("an empty document takes a layer");
                     self.add_doc(title, doc, ids, "Open");
-                    for w in imported.warnings {
+                    for w in warnings {
                         self.message(MessageKind::Warning, format!("Opened {}", file_title(path)), w);
                     }
                 }

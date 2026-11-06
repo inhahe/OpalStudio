@@ -378,12 +378,16 @@ impl DocState {
         self.pending.as_ref().map(|p| p.label.as_str())
     }
 
-    /// Commits the pending edit, if any, as one history state; a transform box in
+    /// Commits the pending edit, if any, as one history state, made in the groups the
+    /// document is in now (as [`apply`](Self::apply) records it); a transform box in
     /// progress is applied first.
     pub fn commit_pending(&mut self) {
         self.finish_transform();
         if let Some(p) = self.pending.take() {
-            self.history.commit(p.doc, p.label);
+            let id = self.history.commit(p.doc, p.label);
+            for &group in &self.groups {
+                self.made_by.entry(group).or_default().insert(id);
+            }
             self.revision += 1;
         }
     }

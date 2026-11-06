@@ -52,10 +52,14 @@ struct Pipe {
 struct Hosted {
     file: std::path::PathBuf,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The thread it runs on, joined when this is dropped, so that it stops (and takes its
+    /// connection file away) before the process ends.
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Hosted {
-    /// Starts it, loading the user's preferences (not saved back), as `--headless` does.
+    /// Starts it, loading the user's preferences (not saved back) as `--headless` does (but
+    /// not in tests, which must not depend on, or rename, the user's settings).
     fn start() -> Result<Hosted, String> {
         use std::sync::atomic::{AtomicBool, Ordering};
         static HOSTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -64,35 +68,38 @@ impl Hosted {
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel();
         let (at, stopped) = (file.clone(), stop.clone());
-        std::thread::spawn(move || {
+        let thread = std::thread::spawn(move || {
             let ctx = eframe::egui::Context::default();
             let mut st = crate::state::AppState::new();
-            crate::config::load(&mut st);
+            st.windowless = true;
+            if !cfg!(test) {
+                crate::config::load(&mut st);
+            }
             st.apply_tile_budget();
             let mut server = match crate::server::Server::start(at, ctx.clone()) {
                 Ok(server) => server,
                 Err(e) => return drop(tx.send(Err(format!("An editor could not be started: {e}")))),
             };
             let _ = tx.send(Ok(()));
-            while !stopped.load(Ordering::Relaxed) {
-                server.serve(&mut st, &ctx, false);
-                st.between_frames(false);
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
+            crate::headless::serve_windowless(&mut server, &mut st, &ctx, |_| stopped.load(Ordering::Relaxed));
         });
         rx.recv().map_err(|_| "An editor could not be started.".to_owned())??;
-        Ok(Hosted { file, stop })
+        Ok(Hosted { file, stop, thread: Some(thread) })
     }
 }
 
 impl Drop for Hosted {
     fn drop(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
 /// What the first answer from an editor this server started says of it.
-const HOSTED_NOTE: &str = "No Opal Studio was running, so this server started one of its own, with no window.                            What it opens and makes lasts as long as this server: save or export what is to be kept.";
+const HOSTED_NOTE: &str = "No Opal Studio was running, so this server started one of its own, with no window. \
+                           What it opens and makes lasts as long as this server: save or export what is to be kept.";
 
 impl Pipe {
     /// Connects to the editor the connection file tells of, and says hello; if none is
@@ -388,13 +395,7 @@ mod tests {
         assert!(text(&docs).contains("\"width\": 144"), "{docs}");
         let hosted = pipe.hosted.as_ref().unwrap().file.clone();
         drop(pipe);
-        // Stopped with the server: its connection file goes with it.
-        for _ in 0..200 {
-            if !hosted.exists() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        // Stopped with the server, before the process can end: its file goes with it.
         assert!(!hosted.exists(), "the editor it started is still serving");
     }
 

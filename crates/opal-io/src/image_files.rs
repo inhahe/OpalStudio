@@ -25,8 +25,8 @@ pub struct Imported {
     pub width: u32,
     pub height: u32,
     pub image: RasterImage,
-    /// Pixels per inch, if the file says.
-    pub resolution: Option<f64>,
+    /// Pixels per inch across and down, if the file says (turned with the image).
+    pub resolution: Option<[f64; 2]>,
     /// Things the user should know about how the file was read.
     pub warnings: Vec<String>,
 }
@@ -75,14 +75,6 @@ pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<Free>) -> Result<Imp
             | image::metadata::Orientation::Rotate270FlipH
     );
     let resolution = crate::density::read(bytes, format).map(|[x, y]| if turned { [y, x] } else { [x, y] });
-    if let Some([x, y]) = resolution
-        && (x - y).abs() > x.max(y) * 1e-3
-    {
-        warnings.push(format!(
-            "This image's pixels are not square ({x} by {y} per inch). Opal Studio's are, so it              takes the resolution across ({x} pixels per inch) for both."
-        ));
-    }
-    let resolution = resolution.map(|[x, _]| x);
     if let Some(profile) = icc
         && !looks_like_srgb(&profile)
     {
@@ -824,7 +816,7 @@ mod tests {
             export(&d, &path, &format, None).unwrap();
             let back = import(&path, None).unwrap();
             std::fs::remove_file(&path).unwrap();
-            let read = back.resolution.unwrap();
+            let [read, _] = back.resolution.unwrap();
             assert!((read - ppi).abs() < 1e-9, "{format:?} at {ppi} read back as {read}");
         }
     }
@@ -837,10 +829,9 @@ mod tests {
         encoder.set_pixel_density(PixelDensity { density: (100, 200), unit: PixelDensityUnit::Inches });
         DynamicImage::ImageRgb8(image::RgbImage::new(16, 8)).write_with_encoder(encoder).unwrap();
         let level = import_bytes(&jpeg, Path::new("level.jpg"), None).unwrap();
-        assert_eq!(level.resolution, Some(100.0));
-        assert!(level.warnings.iter().any(|w| w.contains("not square")), "{:?}", level.warnings);
+        assert_eq!(level.resolution, Some([100.0, 200.0]));
         let turned = import_bytes(&insert_exif_orientation(&jpeg, 6), Path::new("turned.jpg"), None).unwrap();
-        assert_eq!(turned.resolution, Some(200.0));
+        assert_eq!(turned.resolution, Some([200.0, 100.0]));
     }
 
     #[test]

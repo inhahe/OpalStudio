@@ -286,16 +286,18 @@ fn remember_units(st: &mut AppState, unit: Unit, per: ResolutionUnit) {
 /// Changes `size` with the resolution, from `before` to `after` pixels per inch, so that it
 /// prints as large. It works from the print size it had when the resolution began to
 /// change (kept under `id`), not from the size made of it at each step, so that rounding to
-/// whole pixels does not add up over a drag; a size changed since is taken afresh.
+/// whole pixels does not add up over a drag; a size or resolution changed since otherwise
+/// is taken afresh.
 fn hold_print_size(ui: &egui::Ui, id: egui::Id, size: (&mut u32, &mut u32), before: f64, after: f64) {
     let (w, h) = size;
-    let held: Option<([f64; 2], [u32; 2])> = ui.data(|d| d.get_temp(id));
+    // The print size, and the pixel size and resolution last made of it.
+    let held: Option<([f64; 2], [u32; 2], f64)> = ui.data(|d| d.get_temp(id));
     let print = match held {
-        Some((print, made)) if made == [*w, *h] => print,
+        Some((print, made, at)) if made == [*w, *h] && at == before => print,
         _ => [f64::from(*w) / before, f64::from(*h) / before],
     };
     (*w, *h) = (preset_side(print[0] * after), preset_side(print[1] * after));
-    ui.data_mut(|d| d.insert_temp(id, (print, [*w, *h])));
+    ui.data_mut(|d| d.insert_temp(id, (print, [*w, *h], after)));
 }
 
 /// What the New Image dialog says of a `width × height` canvas: its pixels, and the memory
@@ -453,7 +455,7 @@ fn ok_cancel(ui: &mut egui::Ui, ok: &str) -> Option<bool> {
 
 fn resize_image(ctx: &egui::Context, st: &mut AppState) {
     let Some(mut spec) = st.resize_image.clone() else { return };
-    let Some(c) = st.active().map(|d| d.doc().canvas) else {
+    let Some((c, locked)) = st.active().map(|d| (d.doc().canvas, crate::commands::locked_layer(d.doc()))) else {
         st.resize_image = None;
         return;
     };
@@ -485,6 +487,12 @@ fn resize_image(ctx: &egui::Context, st: &mut AppState) {
         });
         let print = lengths::print_note(spec.width, spec.height, spec.resolution, unit, per);
         ui.label(RichText::new(print).small().color(palette.weak_text));
+        if let Some(name) = &locked
+            && (spec.width, spec.height) != (c.width, c.height)
+        {
+            let why = format!("\"{name}\" is locked: only the resolution can change while it is.");
+            ui.label(RichText::new(why).color(ui.visuals().error_fg_color));
+        }
         ui.add_space(4.0);
         if settings::settings_ui(ui, &mut st.prefs, Show::Section("Resize"), &palette, "resize") {
             st.settings_touched();
@@ -747,5 +755,24 @@ mod tests {
         assert!(note.contains("more than the 116.0 GB free in memory and on disk"), "{note}");
         assert!(!size_note(30_000, 30_000, disk).contains("more than"), "7.2 GB fits");
         assert!(!size_note(MAX_SIDE, MAX_SIDE, None).contains("free"), "said without knowing");
+    }
+
+    #[test]
+    fn a_held_print_size_is_taken_afresh_once_the_resolution_changed_otherwise() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::unique("held-print-test");
+        let (mut w, mut h) = (2550, 3300);
+        let step = |w: &mut u32, h: &mut u32, before: f64, after: f64| {
+            let mut out =
+                ctx.run_ui(Default::default(), |ui| hold_print_size(ui, id, (&mut *w, &mut *h), before, after));
+            out.textures_delta.clear();
+        };
+        // Held from 300 to 150 ppi: 8.5 × 11 in.
+        step(&mut w, &mut h, 300.0, 150.0);
+        assert_eq!((w, h), (1275, 1650));
+        // Then, not held, from 150 to 100: the pixels stay, and it prints 12.75 × 16.5 in.
+        // Held again from 100 to 200: that print size, not the 8.5 × 11 held before.
+        step(&mut w, &mut h, 100.0, 200.0);
+        assert_eq!((w, h), (2550, 3300));
     }
 }

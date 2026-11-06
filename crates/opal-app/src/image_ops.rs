@@ -291,6 +291,16 @@ impl AppState {
             }
             return;
         }
+        if let Some(name) = crate::commands::locked_layer(d.doc()) {
+            return self.message(
+                MessageKind::Info,
+                "Resize image",
+                format!(
+                    "\"{name}\" is locked, and a new size changes every layer. Unlock it first. (A new \
+                     resolution alone can be given while it is locked.)"
+                ),
+            );
+        }
         let mut clipped = false;
         let result = d.apply("Resize image", |doc, _| {
             doc.resolution = spec.resolution;
@@ -479,6 +489,29 @@ mod tests {
         assert_eq!(d.doc().resolution, 300.0);
         assert!(Arc::ptr_eq(&d.doc().layers[0], &before), "the layer was redrawn");
         assert_eq!(d.history.undo_label(), Some("Change resolution"));
+        // With a layer locked, the resolution can still change; the size cannot.
+        let bg = st.active().unwrap().doc().layers[0].id;
+        st.active_mut()
+            .unwrap()
+            .apply("Lock", |doc, _| {
+                doc.layer_mut(bg).unwrap().locked = true;
+                Ok::<(), String>(())
+            })
+            .unwrap();
+        assert!(crate::commands::availability(&st, crate::commands::Cmd::ResizeImage).is_ok());
+        st.resize_image(&ResizeImage { resolution: 200.0, ..spec.clone() }, false);
+        assert_eq!(st.active().unwrap().doc().resolution, 200.0);
+        st.resize_image(&ResizeImage { width: 60, height: 40, ..spec.clone() }, false);
+        assert!(st.messages.back().is_some_and(|m| m.body.contains("is locked")), "resized a locked layer");
+        assert_eq!(st.active().unwrap().doc().canvas.width, 30);
+        st.messages.clear();
+        st.active_mut()
+            .unwrap()
+            .apply("Unlock", |doc, _| {
+                doc.layer_mut(bg).unwrap().locked = false;
+                Ok::<(), String>(())
+            })
+            .unwrap();
         // Resized, it takes the resolution too.
         let spec = ResizeImage { width: 60, height: 40, resolution: 150.0, ..spec };
         st.resize_image(&spec, false);
