@@ -1,7 +1,7 @@
 //! Importing and exporting ordinary image files (PNG and JPEG).
 
 use crate::memory::{Free, Need};
-use crate::pixels::{from_srgb8, pixels_from_rgba16, pixels_to_rgba8, pixels_to_rgba16};
+use crate::pixels::{from_srgb8, from_srgb16, pixels_to_rgba8, pixels_to_rgba16};
 use crate::{IoError, Progress, write_atomically};
 use half::f16;
 use image::codecs::jpeg::JpegEncoder;
@@ -64,19 +64,7 @@ pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<Free>) -> Result<Imp
     img.apply_orientation(orientation);
 
     let (width, height) = (img.width(), img.height());
-    let sixteen_bit = matches!(
-        img,
-        DynamicImage::ImageLuma16(_)
-            | DynamicImage::ImageLumaA16(_)
-            | DynamicImage::ImageRgb16(_)
-            | DynamicImage::ImageRgba16(_)
-    );
-    // 8-bit images are kept at 8 bits, which reads as the same working pixels.
-    let image = if sixteen_bit {
-        RasterImage::from_pixels(width, height, &pixels_from_rgba16(img.to_rgba16().as_raw()))
-    } else {
-        RasterImage::from_srgb8(width, height, bytemuck::cast_slice(img.to_rgba8().as_raw()))
-    };
+    let image = image_of(&img);
 
     let mut warnings = Vec::new();
     if let Some(profile) = icc
@@ -92,9 +80,8 @@ pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<Free>) -> Result<Imp
 }
 
 /// The memory opening an image of `dimensions` takes, given the bytes its decoder makes
-/// (`decoded`): in one go those, a turned copy of them if `orientation` turns it, and per
-/// pixel the image as RGBA (4 bytes at 8 bits; at 16, 8, and 8 for working pixels); and
-/// its tiles (4 bytes a pixel, kept at 8 bits, or 8).
+/// (`decoded`): in one go those, and a turned copy of them if `orientation` turns it; and
+/// its tiles, made straight from them (4 bytes a pixel, kept at 8 bits, or 8).
 fn import_memory(
     dimensions: (u32, u32),
     decoded: u64,
@@ -104,10 +91,59 @@ fn import_memory(
     // Saturating: a header may claim any size, and a wrapped sum would pass the check.
     let pixels = u64::from(dimensions.0) * u64::from(dimensions.1);
     let turned = if orientation == image::metadata::Orientation::NoTransforms { 0 } else { decoded };
-    let (in_one_go, tiles) = if sixteen { (16, 8) } else { (4, 4) };
-    Need {
-        at_once: decoded.saturating_add(turned).saturating_add(pixels.saturating_mul(in_one_go)),
-        tiles: pixels.saturating_mul(tiles),
+    Need { at_once: decoded.saturating_add(turned), tiles: pixels.saturating_mul(if sixteen { 8 } else { 4 }) }
+}
+
+/// A decoded image as tiles, made straight from its samples whatever its channels (gray,
+/// gray and alpha, RGB, RGBA): 8-bit ones kept at 8 bits (which read as the same working
+/// pixels), 16-bit ones as working pixels.
+fn image_of(img: &DynamicImage) -> RasterImage {
+    let (w, h) = (img.width(), img.height());
+    match img {
+        DynamicImage::ImageLuma8(b) => eight(w, h, b.as_raw(), 1),
+        DynamicImage::ImageLumaA8(b) => eight(w, h, b.as_raw(), 2),
+        DynamicImage::ImageRgb8(b) => eight(w, h, b.as_raw(), 3),
+        DynamicImage::ImageRgba8(b) => eight(w, h, b.as_raw(), 4),
+        DynamicImage::ImageLuma16(b) => sixteen(w, h, b.as_raw(), 1),
+        DynamicImage::ImageLumaA16(b) => sixteen(w, h, b.as_raw(), 2),
+        DynamicImage::ImageRgb16(b) => sixteen(w, h, b.as_raw(), 3),
+        DynamicImage::ImageRgba16(b) => sixteen(w, h, b.as_raw(), 4),
+        // No PNG or JPEG decodes to these: converted whole.
+        other => sixteen(w, h, other.to_rgba16().as_raw(), 4),
+    }
+}
+
+/// An image of 8-bit samples, `channels` a pixel, kept at 8 bits.
+fn eight(width: u32, height: u32, samples: &[u8], channels: usize) -> RasterImage {
+    let w = width as usize;
+    RasterImage::from_srgb8_rows(width, height, |y, x0, out| {
+        let from = &samples[(y * w + x0) * channels..][..out.len() * channels];
+        for (o, s) in out.iter_mut().zip(from.chunks_exact(channels)) {
+            *o = rgba(s, u8::MAX);
+        }
+    })
+}
+
+/// An image of 16-bit samples, `channels` a pixel, as working pixels.
+fn sixteen(width: u32, height: u32, samples: &[u16], channels: usize) -> RasterImage {
+    let w = width as usize;
+    RasterImage::from_rows(width, height, |y, x0, out| {
+        let from = &samples[(y * w + x0) * channels..][..out.len() * channels];
+        for (o, s) in out.iter_mut().zip(from.chunks_exact(channels)) {
+            *o = from_srgb16(rgba(s, u16::MAX));
+        }
+    })
+}
+
+/// A pixel's samples (gray, gray and alpha, RGB or RGBA) as RGBA, `opaque` the alpha of
+/// those without.
+fn rgba<T: Copy>(s: &[T], opaque: T) -> [T; 4] {
+    match *s {
+        [l] => [l, l, l, opaque],
+        [l, a] => [l, l, l, a],
+        [r, g, b] => [r, g, b, opaque],
+        [r, g, b, a, ..] => [r, g, b, a],
+        [] => unreachable!("a pixel has samples"),
     }
 }
 
@@ -965,23 +1001,68 @@ mod tests {
     #[test]
     fn an_image_needing_more_memory_than_is_free_is_refused_before_decoding() {
         let png = gradient_png(100, 50);
-        // 5,000 pixels at 8 bits: in one go the file, 20 KB decoded and 20 KB as RGBA; 20 KB
-        // of tiles (kept at 8 bits).
+        // 5,000 pixels at 8 bits: in one go the file and 20 KB decoded; 20 KB of tiles
+        // (kept at 8 bits).
         let file = png.len() as u64;
         let memory = |bytes| Some(Free::memory(bytes));
-        let r = import_bytes(&png, Path::new("big.png"), memory(50_000));
+        let r = import_bytes(&png, Path::new("big.png"), memory(30_000));
         let Err(IoError::TooLarge { short, .. }) = r else { panic!("not refused: {:?}", r.map(|i| i.width)) };
-        assert_eq!((short.need, short.have), (file + 60_000, 50_000));
-        assert!(import_bytes(&png, Path::new("big.png"), memory(file + 60_000)).is_ok());
+        assert_eq!((short.need, short.have), (file + 40_000, 30_000));
+        assert!(import_bytes(&png, Path::new("big.png"), memory(file + 40_000)).is_ok());
         assert!(import_bytes(&png, Path::new("big.png"), None).is_ok());
         // The tiles may go to disk; what is taken in one go may not.
         let with_disk = |memory| Some(Free { memory, reclaimable: 0, disk: 1 << 30, resident: 0 });
-        assert!(import_bytes(&png, Path::new("big.png"), with_disk(file + 40_000)).is_ok());
-        let r = import_bytes(&png, Path::new("big.png"), with_disk(file + 39_999));
-        assert!(matches!(r, Err(IoError::TooLarge { short, .. }) if short.need == file + 40_000), "{:?}", r.err());
+        assert!(import_bytes(&png, Path::new("big.png"), with_disk(file + 20_000)).is_ok());
+        let r = import_bytes(&png, Path::new("big.png"), with_disk(file + 19_999));
+        assert!(matches!(r, Err(IoError::TooLarge { short, .. }) if short.need == file + 20_000), "{:?}", r.err());
         // A size no sum of which may wrap past the check.
         let huge = import_memory((u32::MAX, u32::MAX), u64::MAX - 1, image::metadata::Orientation::Rotate90, true);
         assert_eq!((huge.at_once, huge.total()), (u64::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn every_kind_of_decoded_image_becomes_the_pixels_converting_it_whole_gives() {
+        use image::{ImageBuffer, Luma, LumaA, Rgb, Rgba};
+        // Across tiles, and past a tile's edge; with clear pixels, and a flat area.
+        let (w, h) = (300u32, 270u32);
+        let v = |x: u32, y: u32, k: u32| ((x * 7 + y * 13 + k * 101) % 256) as u8;
+        let a = |x: u32, y: u32| {
+            if x < 40 {
+                0
+            } else if y > 200 {
+                255
+            } else {
+                v(x, y, 3)
+            }
+        };
+        let sixteen = |b: u8| u16::from(b) * 251 + 3;
+        let images = [
+            DynamicImage::ImageLuma8(ImageBuffer::from_fn(w, h, |x, y| Luma([v(x, y, 0)]))),
+            DynamicImage::ImageLumaA8(ImageBuffer::from_fn(w, h, |x, y| LumaA([v(x, y, 0), a(x, y)]))),
+            DynamicImage::ImageRgb8(ImageBuffer::from_fn(w, h, |x, y| Rgb([v(x, y, 0), v(x, y, 1), 9]))),
+            DynamicImage::ImageRgba8(ImageBuffer::from_fn(w, h, |x, y| Rgba([v(x, y, 0), 4, v(x, y, 2), a(x, y)]))),
+            DynamicImage::ImageLuma16(ImageBuffer::from_fn(w, h, |x, y| Luma([sixteen(v(x, y, 0))]))),
+            DynamicImage::ImageLumaA16(ImageBuffer::from_fn(w, h, |x, y| {
+                LumaA([sixteen(v(x, y, 0)), u16::from(a(x, y)) * 257])
+            })),
+            DynamicImage::ImageRgb16(ImageBuffer::from_fn(w, h, |x, y| Rgb([sixteen(v(x, y, 0)), 700, 65535]))),
+            DynamicImage::ImageRgba16(ImageBuffer::from_fn(w, h, |x, y| {
+                Rgba([sixteen(v(x, y, 1)), 5, sixteen(v(x, y, 2)), u16::from(a(x, y)) * 257])
+            })),
+        ];
+        for img in images {
+            let got = image_of(&img);
+            let is16 = img.color().bytes_per_pixel() / img.color().channel_count() == 2;
+            let want = if is16 {
+                RasterImage::from_pixels(w, h, &img.to_rgba16().pixels().map(|p| from_srgb16(p.0)).collect::<Vec<_>>())
+            } else {
+                RasterImage::from_srgb8(w, h, bytemuck::cast_slice(img.to_rgba8().as_raw()))
+            };
+            let all = IRect::from_size(i64::from(w), i64::from(h));
+            assert!(got.read_rect(&all) == want.read_rect(&all), "{:?} read otherwise", img.color());
+            assert_eq!(got.tile_count(), want.tile_count(), "{:?}", img.color());
+            assert_eq!(got.read_rect_srgb8(&all).is_some(), !is16, "{:?} kept at 8 bits or not", img.color());
+        }
     }
 
     #[test]

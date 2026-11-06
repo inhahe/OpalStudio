@@ -124,6 +124,25 @@ impl Runs {
     }
 }
 
+/// A pixel as a tile stores it, for building images of either kind (see
+/// `RasterImage::tiled`).
+trait Alpha {
+    /// Whether it is not fully transparent.
+    fn shows(&self) -> bool;
+}
+
+impl Alpha for Pixel {
+    fn shows(&self) -> bool {
+        self[3] != f16::ZERO
+    }
+}
+
+impl Alpha for [u8; 4] {
+    fn shows(&self) -> bool {
+        self[3] != 0
+    }
+}
+
 /// Up to how many tiles a question about a rectangle of them looks at each tile, rather than
 /// at the runs (which are built for it, at the cost of sorting every tile of the image).
 const LOOKED_AT_ONE_BY_ONE: i64 = 64;
@@ -340,53 +359,84 @@ impl RasterImage {
     }
 
     /// Builds an image from a row-major buffer of `width × height` pixels placed with its
-    /// top-left corner at the canvas origin. Tiles that come out fully transparent are
-    /// left out.
+    /// top-left corner at the canvas origin, as [`from_rows`](Self::from_rows) does.
     pub fn from_pixels(width: u32, height: u32, pixels: &[Pixel]) -> RasterImage {
-        let mut img = RasterImage::new();
-        img.write_rect(&IRect::from_size(i64::from(width), i64::from(height)), pixels);
-        img
+        let w = width as usize;
+        assert_eq!(pixels.len(), w * height as usize, "buffer size");
+        RasterImage::from_rows(width, height, |y, x0, out| out.copy_from_slice(&pixels[y * w + x0..][..out.len()]))
+    }
+
+    /// Builds an image of `width × height` pixels placed with its top-left corner at the
+    /// canvas origin, whose rows `row` gives: row `y` from column `x0`, into `out` (as many
+    /// as it holds), for each tile in parallel, so that no copy of the whole is needed.
+    /// Tiles all clear are left out, and those of one pixel value throughout (a flat
+    /// background) are one tile for each value.
+    pub fn from_rows(width: u32, height: u32, row: impl Fn(usize, usize, &mut [Pixel]) + Sync) -> RasterImage {
+        let clear = [f16::ZERO; 4];
+        RasterImage::tiled(width, height, clear, row, |p| p.map(f16::to_bits), Tile::from_pixels)
     }
 
     /// Builds an image from `width × height` 8-bit sRGB pixels with straight alpha, row by
     /// row (as 8-bit files hold them), placed with its top-left corner at the canvas origin
-    /// and kept at 8 bits (see [`Tile::from_srgb8`]). Tiles all clear are left out, and
-    /// those of one colour throughout (a flat background) are one tile for each colour.
+    /// and kept at 8 bits (see [`Tile::from_srgb8`]), as [`from_srgb8_rows`] does.
+    ///
+    /// [`from_srgb8_rows`]: Self::from_srgb8_rows
     pub fn from_srgb8(width: u32, height: u32, rgba: &[[u8; 4]]) -> RasterImage {
+        let w = width as usize;
+        assert_eq!(rgba.len(), w * height as usize, "buffer size");
+        RasterImage::from_srgb8_rows(width, height, |y, x0, out| out.copy_from_slice(&rgba[y * w + x0..][..out.len()]))
+    }
+
+    /// [`from_rows`](Self::from_rows) for 8-bit sRGB pixels with straight alpha, kept at 8
+    /// bits.
+    pub fn from_srgb8_rows(width: u32, height: u32, row: impl Fn(usize, usize, &mut [[u8; 4]]) + Sync) -> RasterImage {
+        RasterImage::tiled(width, height, [0; 4], row, |p| *p, Tile::from_srgb8)
+    }
+
+    /// The image `row` gives (see [`from_rows`](Self::from_rows)), each tile's pixels (`clear`
+    /// past the image's edges) made a tile by `make`, those alike throughout found by `key`.
+    fn tiled<P, K>(
+        width: u32,
+        height: u32,
+        clear: P,
+        row: impl Fn(usize, usize, &mut [P]) + Sync,
+        key: impl Fn(&P) -> K,
+        make: impl Fn(Vec<P>) -> Tile + Sync,
+    ) -> RasterImage
+    where
+        P: Copy + PartialEq + Send + Sync + Alpha,
+        K: std::hash::Hash + Eq,
+    {
         let (w, h) = (width as usize, height as usize);
-        assert_eq!(rgba.len(), w * h, "buffer size");
         let n = TILE_SIZE as usize;
         let coords: Vec<TileCoord> = TileCoord::covering(&IRect::from_size(w as i64, h as i64), 0).collect();
-        // A tile of one colour is told by its pixels before it is made: made, past the
+        // A tile of one value is told by its pixels before it is made: made, past the
         // memory budget, it could be on disk by the time it was looked at.
-        enum Made {
-            Flat([u8; 4]),
+        enum Made<P> {
+            Flat(P),
             Own(Tile),
         }
-        let made: Vec<(TileCoord, Made)> = coords
+        let made: Vec<(TileCoord, Made<P>)> = coords
             .into_par_iter()
             .filter_map(|c| {
                 let r = c.rect(0);
-                let mut px = vec![[0u8; 4]; TILE_PIXELS];
+                let (x0, x1) = (r.x0 as usize, (r.x1 as usize).min(w));
+                let mut px = vec![clear; TILE_PIXELS];
                 for y in r.y0 as usize..(r.y1 as usize).min(h) {
-                    let row = &rgba[y * w + r.x0 as usize..y * w + (r.x1 as usize).min(w)];
-                    px[(y - r.y0 as usize) * n..][..row.len()].copy_from_slice(row);
+                    row(y, x0, &mut px[(y - r.y0 as usize) * n..][..x1 - x0]);
                 }
-                if !px.iter().any(|p| p[3] != 0) {
+                if !px.iter().any(|p| p.shows()) {
                     return None;
                 }
-                let flat = px.iter().all(|p| *p == px[0]);
-                let flat = flat.then_some(px[0]);
-                Some((c, flat.map_or_else(|| Made::Own(Tile::from_srgb8(px)), Made::Flat)))
+                let flat = px.iter().all(|p| *p == px[0]).then_some(px[0]);
+                Some((c, flat.map_or_else(|| Made::Own(make(px)), Made::Flat)))
             })
             .collect();
-        let mut flat: HashMap<[u8; 4], Arc<Tile>> = HashMap::new();
+        let mut flat: HashMap<K, Arc<Tile>> = HashMap::new();
         let mut img = RasterImage::new();
         for (c, made) in made {
             let tile = match made {
-                Made::Flat(colour) => {
-                    flat.entry(colour).or_insert_with(|| Arc::new(Tile::from_srgb8(vec![colour; TILE_PIXELS]))).clone()
-                }
+                Made::Flat(p) => flat.entry(key(&p)).or_insert_with(|| Arc::new(make(vec![p; TILE_PIXELS]))).clone(),
                 Made::Own(t) => Arc::new(t),
             };
             img.tiles.insert(c, tile);

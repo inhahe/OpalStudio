@@ -498,9 +498,10 @@ curve editors.
   16-bit PNG, the bitmaps, the system's copies of them, and the copy kept for pasting
   back; 24 elsewhere), and on
   Windows no more than the 4 GB a clipboard bitmap holds. Opening a PNG or JPEG (or
-  pasting one) is checked before it is decoded: in one go the decoder's buffer, a turned
-  copy if its orientation turns it, and the image as RGBA (4 bytes a pixel at 8 bits; 16
-  at 16, with its working pixels), and its tiles (4 bytes a pixel, kept at 8 bits, or 8);
+  pasting one) is checked before it is decoded: in one go the file's bytes, the decoder's
+  buffer and a turned copy if its orientation turns it; and its tiles, made straight from
+  the decoder's samples whatever their channels, in parallel, a tile at a time (4 bytes a
+  pixel, kept at 8 bits, or 8), with flat areas one tile for each value;
   opening an `.opal` file before its tiles are read, which are then read 64 at a time and
   may go to disk as they come, so a document larger than memory opens again; and, on
   Windows, pasting a system bitmap from its header before it is read (in one go the
