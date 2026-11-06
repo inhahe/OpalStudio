@@ -678,6 +678,7 @@ fn bake_into(doc: &mut Document, dest: LayerId, object: ObjectId) -> Result<bool
     let Some(at) = objects.iter().position(|o| o.id == object) else { return Ok(false) };
     let ObjectKind::Image(i) = &objects[at].kind else { return Ok(false) };
     let mut memory = Allowance::now();
+    let _hold = crate::memory::hold_for(0);
     let drawable = crate::layer_ops::drawable(&i.image, &i.transform, &i.sampling, &canvas, &mut memory)?;
     let ObjectKind::Image(i) = objects.remove(at).kind else { unreachable!("an image object, just seen") };
     // An image that shows nothing goes, leaving nothing.

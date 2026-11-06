@@ -53,8 +53,8 @@ pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<Free>) -> Result<Imp
     let need = import_memory(decoder.dimensions(), decoder.total_bytes(), orientation, sixteen);
     if let Some(free) = free {
         free.check(need).map_err(|short| IoError::TooLarge { path: path.to_owned(), short })?;
-        free.make_room(need.at_once);
     }
+    let _hold = free.map(|f| f.hold(need.at_once));
     let icc = decoder.icc_profile().map_err(decode_err)?;
     let mut img = DynamicImage::from_decoder(decoder).map_err(decode_err)?;
     img.apply_orientation(orientation);

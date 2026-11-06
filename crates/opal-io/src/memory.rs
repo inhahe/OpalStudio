@@ -5,8 +5,7 @@
 //! Tiles past the memory budget go to disk (`opal_core::store`), so the tiles work makes
 //! as it goes may take room on disk as well as in memory. What it takes in one go (a decoded
 //! file, a bitmap for the clipboard) must be in memory all at once: tiles already there can
-//! go to disk to make room for it, if they are sent before it is taken
-//! ([`Free::make_room`]).
+//! go to disk to make room for it, held there while the work runs ([`Free::hold`]).
 
 use crate::bytes;
 
@@ -85,12 +84,13 @@ impl Free {
         Ok(())
     }
 
-    /// Before `bytes` are taken in one go: sends tiles to disk for what memory lacks of them.
-    pub fn make_room(&self, bytes: u64) {
-        let short = bytes.saturating_sub(self.memory);
-        if short > 0 {
-            opal_core::store::release(short);
-        }
+    /// For work taking `at_once` bytes in one go, while what this returns is kept: tiles may
+    /// take no more memory than they take now and the memory free leaves beside that (those
+    /// past it go to disk, the first at once), so the work's memory and theirs fit in what
+    /// is free. `self` should be measured just before.
+    pub fn hold(&self, at_once: u64) -> opal_core::store::Hold {
+        let resident = opal_core::store::status().resident;
+        opal_core::store::hold(resident.saturating_add(self.memory).saturating_sub(at_once))
     }
 }
 

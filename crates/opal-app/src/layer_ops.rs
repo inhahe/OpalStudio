@@ -159,6 +159,7 @@ impl AppState {
         if let Err(why) = check_size(&pair, &d.doc().canvas.rect()) {
             return self.message(MessageKind::Info, "Merge Down", why);
         }
+        let _hold = crate::memory::hold_for(0);
         let d = self.active_mut().expect("available");
         let result = d.apply("Merge down", |doc, ids| {
             let image = composite_all(&pair);
@@ -187,6 +188,7 @@ impl AppState {
         if let Err(why) = check_size(&layers, &d.doc().canvas.rect()) {
             return self.message(MessageKind::Info, "Merge Selected", why);
         }
+        let _hold = crate::memory::hold_for(0);
         let adjacent = adjacent_siblings(doc, &sel);
         let d = self.active_mut().expect("available");
         let result = d.apply("Merge selected", |doc, ids| {
@@ -225,6 +227,7 @@ impl AppState {
         if let Err(why) = check_size(&top, &d.doc().canvas.rect()) {
             return self.message(MessageKind::Info, "Merge Visible", why);
         }
+        let _hold = crate::memory::hold_for(0);
         let d = self.active_mut().expect("available");
         let result = d.apply("Merge visible", |doc, ids| {
             let image = composite_all(&doc.layers);
@@ -258,6 +261,7 @@ impl AppState {
         if let Err(why) = check_size(&children, &d.doc().canvas.rect()) {
             return self.message(MessageKind::Info, "Merge Group", why);
         }
+        let _hold = crate::memory::hold_for(0);
         let d = self.active_mut().expect("available");
         let result = d.apply("Merge group", |doc, ids| {
             let image = composite_all(&children);
@@ -287,6 +291,7 @@ impl AppState {
         if let Err(why) = check_size(&layers, &d.doc().canvas.rect()) {
             return self.message(MessageKind::Info, "Stamp Visible", why);
         }
+        let _hold = crate::memory::hold_for(0);
         let index = d.active_layer().and_then(|a| d.doc().path(a)).map_or(layers.len(), |p| p[0] + 1);
         let d = self.active_mut().expect("available");
         let result = d.apply("Stamp visible", |doc, ids| {
@@ -301,6 +306,7 @@ impl AppState {
         if let Err(why) = check_size(&d.doc().layers.clone(), &d.doc().canvas.rect()) {
             return self.message(MessageKind::Info, "Flatten Image", why);
         }
+        let _hold = crate::memory::hold_for(0);
         let d = self.active_mut().expect("available");
         let result = d.apply("Flatten image", |doc, ids| {
             let image = composite_all(&doc.layers);
@@ -320,6 +326,7 @@ impl AppState {
         if let Err(why) = rasterize_fits(&targets, &d.doc().canvas.rect(), Allowance::now()) {
             return self.message(MessageKind::Info, "Rasterize", why);
         }
+        let _hold = crate::memory::hold_for(0);
         let d = self.active_mut().expect("available");
         let result = d.apply("Rasterize", |doc, _| {
             for id in sel {

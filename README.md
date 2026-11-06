@@ -29,8 +29,8 @@ cargo test --workspace                     # all tests, interface tests included
   Studio's own `.opal` files, which keep every layer. An 8-bit image takes half the
   memory until it is changed: its pixels are kept as they were read. Images larger than
   memory can be worked on, saved and opened again: past a share of it (a preference), or
-  when other programs leave too little free, the parts not looked at lately go to a
-  scratch file on disk. Save as `.opal`;
+  past what is free while something needing memory is done, the parts not looked at
+  lately go to a scratch file on disk. Save as `.opal`;
   export the canvas to PNG (8 or 16 bits) or JPEG, at its own size or another. Saving and
   exporting run in the background, so the window stays usable; the status bar shows how far
   they have got and can cancel them. A save that fails or is cancelled never damages the

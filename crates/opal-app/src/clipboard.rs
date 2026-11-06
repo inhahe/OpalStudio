@@ -36,6 +36,9 @@ pub struct Pasted {
 pub struct Copied {
     pub from: IRect,
     pub pixels: Vec<Pixel>,
+    /// The cap on tiles' memory while the copy goes onto the clipboard (see
+    /// `memory::hold_for`): let go of with the copy, once it is there.
+    pub _hold: Option<opal_core::store::Hold>,
 }
 
 impl Copied {
@@ -295,11 +298,15 @@ fn read_system(own: Option<OwnCopy>) -> ReadResult {
             return Ok(Some(p));
         }
     }
+    // Held while the bitmap is read.
     #[cfg(windows)]
-    if let (Some(need), Some(free)) = (clipboard_bitmap_memory(), crate::memory::free()) {
-        free.check(need).map_err(too_large_to_paste)?;
-        free.make_room(need.at_once);
-    }
+    let _hold = match (clipboard_bitmap_memory(), crate::memory::free()) {
+        (Some(need), Some(free)) => {
+            free.check(need).map_err(too_large_to_paste)?;
+            Some(free.hold(need.at_once))
+        }
+        _ => None,
+    };
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     #[cfg(not(windows))]
     if let Ok(files) = cb.get().file_list() {
@@ -662,7 +669,10 @@ mod system_tests {
     fn the_system_clipboard_gets_a_16_bit_png_and_a_bitmap() {
         let px = vec![opal_core::tile::pixel_from_f32([0.30001, 0.5, 0.7, 1.0]); 4];
         let mut cb = SystemClipboard::default();
-        cb.write_image(Copied { from: IRect::from_size(2, 2), pixels: px.clone() }, &egui::Context::default());
+        cb.write_image(
+            Copied { from: IRect::from_size(2, 2), pixels: px.clone(), _hold: None },
+            &egui::Context::default(),
+        );
         // Read at once, while the copy may still be being written: the read waits for it.
         let own = match cb.read_image() {
             Read::Ready(r) => *r,
@@ -715,7 +725,10 @@ mod system_tests {
         let px: Vec<Pixel> = [[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0], [1.0, 1.0, 0.0, 1.0]]
             .map(opal_core::tile::pixel_from_f32)
             .to_vec();
-        cb.write_image(Copied { from: IRect::from_size(2, 2), pixels: px.clone() }, &egui::Context::default());
+        cb.write_image(
+            Copied { from: IRect::from_size(2, 2), pixels: px.clone(), _hold: None },
+            &egui::Context::default(),
+        );
         drop(cb.shared.when_written());
         let theirs = arboard::Clipboard::new().unwrap().get_image().expect("our bitmap is read");
         assert_eq!((theirs.width, theirs.height), (2, 2));

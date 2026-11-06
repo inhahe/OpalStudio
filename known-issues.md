@@ -18,12 +18,11 @@ Vulkan backend (and Metal's `recommendedMaxWorkingSetSize`) on other platforms.
 
 ## The scratch drive's free space is only known on Windows
 
-`crates/opal-app/src/memory.rs` (`disk_free`). Elsewhere it is not known, and is counted as
-unlimited: work may then be admitted whose tiles the disk cannot hold. Writing to the
-scratch file failing is caught (tiles are no longer written, and the user is told), but
-the tiles that could not go stay in memory past what was planned. **Fix:** `statvfs` on
-the temporary folder on Linux and macOS (through `libc`, or `rustix`), once a non-Windows
-build exists to test it on.
+`crates/opal-app/src/memory.rs` (`disk_free`). Elsewhere it is not known, and none is
+counted: tiles still go to disk past the budget, but work is admitted only as far as
+memory holds it, so a document larger than memory cannot be opened there. **Fix:**
+`statvfs` on the temporary folder on Linux and macOS (through `libc`, or `rustix`), once a
+non-Windows build exists to test it on.
 
 ## Building on Linux and macOS needs the target override removed
 

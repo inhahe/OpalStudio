@@ -51,6 +51,8 @@ fn past_the_budget_tiles_go_to_disk_and_read_back_as_they_were() {
         }
         assert!(status().resident <= 10 * TILE, "reading them back took memory past the budget");
         drop(tiles);
+        // The store's thread may be holding one it is writing.
+        store::settle();
         assert_eq!((status().resident, status().on_disk), (0, 0), "let go, they take nothing");
     });
 }
@@ -216,10 +218,34 @@ fn an_eight_bit_image_made_past_the_budget_reads_no_tile_back() {
 }
 
 #[test]
+fn a_cap_held_keeps_tiles_within_it_until_let_go() {
+    with_budget(100, || {
+        let mut tiles: Vec<Arc<Tile>> = (0..20).map(|n| Arc::new(tile(n))).collect();
+        assert_eq!(status().on_disk, 0);
+        let hold = store::hold(8 * TILE);
+        assert!(status().resident <= 8 * TILE, "holding the cap took {} tiles' worth away", status().resident / TILE);
+        // Another, wider, held meanwhile: the lower applies.
+        let wider = store::hold(50 * TILE);
+        tiles.extend((20..30).map(|n| Arc::new(tile(n))));
+        assert!(status().resident <= 8 * TILE, "tiles made under the cap went past it");
+        drop((hold, wider));
+        store::settle();
+        let on_disk = status().on_disk;
+        tiles.extend((30..40).map(|n| Arc::new(tile(n))));
+        assert_eq!(status().on_disk, on_disk, "the cap let go of, tiles made stayed within the budget");
+        for (n, t) in tiles.iter().enumerate() {
+            assert!(is(t, n));
+        }
+    });
+}
+
+#[test]
 fn without_a_budget_nothing_goes() {
     let _turn = TURN.lock();
+    store::settle();
     let tiles: Vec<Arc<Tile>> = (0..20).map(|n| Arc::new(tile(n))).collect();
-    assert_eq!(status().on_disk, 0);
+    let held = store::hold(TILE);
+    assert_eq!(status().on_disk, 0, "without a budget a cap does nothing either");
     assert_eq!(store::reclaimable(), 0);
-    drop(tiles);
+    drop((held, tiles));
 }

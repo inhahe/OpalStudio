@@ -27,10 +27,19 @@ pub fn free() -> Option<Free> {
         let kept = store::reclaimable();
         (kept, kept)
     } else {
-        let disk = disk_free().unwrap_or(u64::MAX);
+        // Not known (off Windows): none counted, rather than more than there may be.
+        let disk = disk_free().unwrap_or(0);
         (store::reclaimable().min(disk), disk)
     };
     Some(Free { memory, reclaimable, disk })
+}
+
+/// For work taking `at_once` bytes in one go (and tiles as it goes), while what this
+/// returns is kept: tiles may take no more memory than they take now and what is free
+/// leaves beside that, as measured now (see `opal_io::memory::Free::hold`); past it they go
+/// to disk rather than into the memory the work and the system need.
+pub fn hold_for(at_once: u64) -> Option<opal_core::store::Hold> {
+    free().map(|f| f.hold(at_once))
 }
 
 /// The memory this computer has, in bytes, if the system says.
@@ -144,12 +153,10 @@ impl Allowance {
         self.take(Need::tiles(bytes))
     }
 
-    /// Before what was set aside to be taken in one go is taken: sends tiles to disk for
-    /// what memory lacks of it.
-    pub fn make_room(&self) {
-        if let Some(free) = &self.free {
-            free.make_room(self.taken.at_once);
-        }
+    /// For the work, while what this returns is kept: tiles may take no more memory than
+    /// what is free now leaves beside what it set aside to take in one go ([`hold_for`]).
+    pub fn hold(&self) -> Option<opal_core::store::Hold> {
+        hold_for(self.taken.at_once)
     }
 }
 

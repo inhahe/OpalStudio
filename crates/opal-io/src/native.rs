@@ -383,8 +383,8 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
     let need = Need { at_once: places.saturating_mul(64).saturating_add(batch), tiles };
     if let Some(free) = free {
         free.check(need).map_err(|short| IoError::TooLarge { path: path.to_owned(), short })?;
-        free.make_room(need.at_once);
     }
+    let _hold = free.map(|f| f.hold(need.at_once));
     // Read a batch at a time, each made into tiles in parallel: the bytes read are held a
     // batch at a time, and the tiles made can go to disk as they come.
     let mut tiles: HashMap<usize, Arc<Tile>> = HashMap::with_capacity(stored.len());

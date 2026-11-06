@@ -127,16 +127,20 @@ not a goal.
   channel); copies that move pixels without changing them (quarter turns, flips,
   cropping) stay 8-bit, and changing a tile makes it working pixels.
 - **Tiles go to disk past a budget** (`opal_core::store`): the pixels of open images may
-  take a share of the computer's memory (Preferences › Memory, 60% by default), but never
-  more than they take now and the memory free leave room for, less a twentieth of the
-  total (worked out every frame, so tiles go to disk before memory runs out, whatever else
-  takes it); past it, the tiles read least recently go to a scratch file in the temporary
-  folder (deleted when the program ends) and come back when next read. A thread taking
-  memory past the budget sends as much as it took to disk itself, so memory never runs
-  ahead of the budget however fast tiles are made; a thread of the store's own takes
-  memory down a tenth below it (at most 256 MB, so that a dip in the memory free sends no
-  more than that), so that a lower budget, or a tile brought back by the interface, never
-  holds up the thread that crossed it. The order is kept in a queue, made by sorting the
+  take a share of the computer's memory (Preferences › Memory, 60% by default), and while
+  work that needs memory runs (opening, pasting, copying, exporting, merging, drawing into
+  pixels), no more than they took when it began and what was free beside the work's own
+  (`store::hold`, measured then, at once): past either, the tiles read least recently go
+  to a scratch file in the temporary folder (deleted when the program ends) and come back
+  when next read. Measured once a piece of work, not every frame: tiles written to the
+  file sit in the system's cache for a while, uncounted as free, and a budget following
+  the memory free would send more after them. Outside such work the system pages as it
+  does. A thread taking memory past the limit sends as much as it took to disk itself, so
+  memory never runs ahead of it however fast tiles are made (bringing nothing, a tile
+  changed where it lies, it neither sends nor waits); a thread of the store's own takes
+  memory down a tenth below it (at most 256 MB), a batch of 32 MB at a time, asking the
+  limit again as it goes, so that a lower limit, or a tile brought back by the interface,
+  never holds up the thread that crossed it. The order is kept in a queue, made by sorting the
   tiles by when each was last read (read once each, as tiles read meanwhile change it) and
   made again when used up, skipping tiles read since. A tile being read or changed never
   goes meanwhile (each tile's pixels sit behind a read-write lock, which a thread may read
@@ -471,8 +475,9 @@ curve editors.
   it takes in one go (a decoded file, the bitmaps of a copy, an export's bands), which must
   fit in the memory free (the available physical memory, on Windows and Linux) together
   with what tiles in memory going to disk could make room for, as far as the disk holds
-  them (sent there before it is taken); and the tiles it makes as it goes, which may also
-  take the disk's room, since past the budget they go there as they come. Merging counts
+  them (the work holds a cap on tiles, which sends them there before it is taken); and the
+  tiles it makes as it goes, which may also take the disk's room (known on Windows only;
+  none is counted elsewhere), since past the cap they go there as they come. Merging counts
   exactly the tiles it would make (none for those it shares), drawing into pixels exactly
   the tiles it draws (`render_cost`), summed over everything one command draws; Rasterize
   counts every image object it draws, hidden or not, and no pixel object. A transform box

@@ -203,7 +203,8 @@ pub fn status() -> Status {
 }
 
 /// Lets the pixels of tiles in memory take up to `bytes` (`None`: any amount, nothing going
-/// to disk). Past it, the store's own thread takes tiles away; this does not wait for it.
+/// to disk; then [`hold`] does nothing either). Past it, the store's own thread takes tiles
+/// away; this does not wait for it.
 pub fn set_budget(bytes: Option<u64>) {
     STORE.budget.store(bytes.unwrap_or(u64::MAX), Relaxed);
     if STORE.over() {
@@ -211,21 +212,49 @@ pub fn set_budget(bytes: Option<u64>) {
     }
 }
 
+/// A cap on the memory tiles may take, while work that needs memory runs ([`hold`]); let go
+/// of when dropped.
+#[must_use = "the cap holds only while this is kept"]
+#[derive(Debug)]
+pub struct Hold {
+    id: u64,
+}
+
+/// Lets the pixels of tiles in memory take no more than `bytes` while what this returns is
+/// kept (the lowest cap held applies, and the budget, if lower; with no budget nothing
+/// does): for work whose own memory, with the tiles', must fit in what is free. Tiles past
+/// it are taken to disk at once, on the calling thread, a batch at a time.
+pub fn hold(bytes: u64) -> Hold {
+    let id = STORE.next_hold.fetch_add(1, Relaxed);
+    {
+        let mut holds = STORE.holds.lock();
+        holds.push((id, bytes));
+        STORE.cap.store(holds.iter().map(|h| h.1).min().unwrap_or(u64::MAX), Relaxed);
+    }
+    while STORE.over() {
+        let until = STORE.resident.load(Relaxed).saturating_sub(BATCH).max(STORE.limit());
+        if !STORE.take_away(|| STORE.resident.load(Relaxed) > until.max(STORE.limit())) {
+            break;
+        }
+    }
+    if STORE.over_target() {
+        STORE.wake();
+    }
+    Hold { id }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        let mut holds = STORE.holds.lock();
+        holds.retain(|h| h.0 != self.id);
+        STORE.cap.store(holds.iter().map(|h| h.1).min().unwrap_or(u64::MAX), Relaxed);
+    }
+}
+
 /// The memory tiles may take before going to disk, if a budget is set ([`set_budget`]).
 pub fn budget() -> Option<u64> {
     let b = STORE.budget.load(Relaxed);
     (b != u64::MAX).then_some(b)
-}
-
-/// Takes the tiles read least recently to disk until `bytes` of them have gone, or none
-/// more can (nothing goes without a budget): room for work about to take that much in one
-/// go. Done on the calling thread, which waits for it.
-pub fn release(bytes: u64) {
-    if budget().is_none() {
-        return;
-    }
-    let until = STORE.resident.load(Relaxed).saturating_sub(bytes);
-    STORE.take_away(|| STORE.resident.load(Relaxed) > until);
 }
 
 /// The memory that taking tiles to disk could give back now, while a budget is set: the
@@ -264,6 +293,10 @@ struct Store {
     /// How many tiles have been read back.
     loads: AtomicU64,
     budget: AtomicU64,
+    /// The caps held ([`hold`]), by number, the lowest of them, and the next number.
+    holds: Mutex<Vec<(u64, u64)>>,
+    cap: AtomicU64,
+    next_hold: AtomicU64,
     /// Advanced each time the order of tiles to take away is made: tiles read since have
     /// the latest.
     clock: AtomicU64,
@@ -293,6 +326,9 @@ static STORE: Store = Store {
     away: AtomicU64::new(0),
     loads: AtomicU64::new(0),
     budget: AtomicU64::new(u64::MAX),
+    holds: Mutex::new(Vec::new()),
+    cap: AtomicU64::new(u64::MAX),
+    next_hold: AtomicU64::new(0),
     clock: AtomicU64::new(0),
     queue: Mutex::new(Queue { order: Vec::new(), epoch: 0 }),
     wanted: Mutex::new(false),
@@ -312,17 +348,28 @@ impl Store {
         self.clock.load(Relaxed)
     }
 
-    /// What the store's thread takes memory down to: a tenth below the budget, or 256 MB if
-    /// less (the budget may follow the memory free, and dips in it should not send gigabytes
-    /// to disk).
-    fn target(&self) -> u64 {
+    /// The memory tiles may take: the budget, or the lowest cap held if lower (none without
+    /// a budget).
+    fn limit(&self) -> u64 {
         let budget = self.budget.load(Relaxed);
-        budget - (budget / 10).min(256 << 20)
+        if budget == u64::MAX { budget } else { budget.min(self.cap.load(Relaxed)) }
     }
 
-    /// Whether the pixels in memory take more than the budget, and some can go.
+    /// What the store's thread takes memory down to: a tenth below the limit, or 256 MB if
+    /// less (a cap may be held for a moment: it should not send gigabytes more to disk).
+    fn target(&self) -> u64 {
+        let limit = self.limit();
+        limit - (limit / 10).min(256 << 20)
+    }
+
+    /// Whether the pixels in memory take more than the limit, and some can go.
     fn over(&self) -> bool {
-        self.resident.load(Relaxed) > self.budget.load(Relaxed) && self.can_go()
+        self.resident.load(Relaxed) > self.limit() && self.can_go()
+    }
+
+    /// Whether they take more than the target, and some can go.
+    fn over_target(&self) -> bool {
+        self.resident.load(Relaxed) > self.target() && self.can_go()
     }
 
     /// Whether any tile could go: any, while writing works; else those with a copy there.
@@ -330,15 +377,18 @@ impl Store {
         !self.stopped.load(Relaxed) || self.kept.load(Relaxed) > 0
     }
 
-    /// A thread brought `bytes` more into memory: past the budget, it takes as much away
-    /// (or what brings memory back to the budget, if less), and the store's thread is asked
-    /// for the rest.
+    /// A thread brought `bytes` more into memory: past the limit, it takes as much away
+    /// (or what brings memory back to the limit, if less), and the store's thread is asked
+    /// for the rest. Bringing nothing (a tile changed where it was), it takes nothing, nor
+    /// waits for a turn to.
     fn took(&self, bytes: u64) {
         if !self.over() {
             return;
         }
-        let until = self.resident.load(Relaxed).saturating_sub(bytes).max(self.budget.load(Relaxed));
-        self.take_away(|| self.resident.load(Relaxed) > until);
+        if bytes > 0 {
+            let until = self.resident.load(Relaxed).saturating_sub(bytes);
+            self.take_away(|| self.resident.load(Relaxed) > until.max(self.limit()));
+        }
         self.wake();
     }
 
@@ -365,9 +415,10 @@ impl Store {
                 }
                 *wanted = false;
             }
-            while self.resident.load(Relaxed) > self.target() && self.can_go() {
-                let until = self.resident.load(Relaxed).saturating_sub(BATCH).max(self.target());
-                if !self.take_away(|| self.resident.load(Relaxed) > until) {
+            while self.over_target() {
+                // The target is asked again as tiles go: the budget may be raised meanwhile.
+                let until = self.resident.load(Relaxed).saturating_sub(BATCH);
+                if !self.take_away(|| self.resident.load(Relaxed) > until.max(self.target())) {
                     break;
                 }
             }

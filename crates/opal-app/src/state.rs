@@ -188,6 +188,8 @@ pub struct AppState {
     pub reading: Option<Reading>,
     /// The memory images' tiles may take before going to disk, as last given to the store.
     tile_budget: Option<u64>,
+    /// The memory this computer has, if known.
+    memory_total: Option<u64>,
     /// Whether tiles failing to go to disk has been said.
     told_store_trouble: bool,
 }
@@ -268,6 +270,7 @@ impl AppState {
             thumbs: Default::default(),
             reading: None,
             tile_budget: None,
+            memory_total: crate::memory::total(),
             told_store_trouble: false,
         }
     }
@@ -319,16 +322,10 @@ impl AppState {
     }
 
     /// Lets images' tiles take the share of memory the preference says, before they go to
-    /// disk, as far as memory free allows ([`tile_budget`]); and says once if they could
-    /// not go. Done every frame, as what else takes memory changes.
+    /// disk (work that needs memory caps them lower while it runs: `memory::hold_for`); and
+    /// says once if they could not go.
     pub fn apply_tile_budget(&mut self) {
-        let resident = opal_core::store::status().resident;
-        let budget = tile_budget(
-            self.prefs.f64("memory.tiles"),
-            crate::memory::total(),
-            resident,
-            crate::memory::physical_free(),
-        );
+        let budget = tile_budget(self.prefs.f64("memory.tiles"), self.memory_total);
         if budget != self.tile_budget {
             self.tile_budget = budget;
             opal_core::store::set_budget(budget);
@@ -790,7 +787,7 @@ impl AppState {
             // Measured now, not when asked for: the write may have waited behind others.
             let mut memory = memory.unwrap_or_else(crate::memory::Allowance::now);
             memory.take(image_files::export_memory(&doc, size.as_ref()))?;
-            memory.make_room();
+            let _hold = memory.hold();
             let pool = Some(crate::background::pool());
             image_files::export_in(&doc, &path, &format, size.as_ref(), pool, p).map_err(|e| e.to_string())
         });
@@ -854,15 +851,9 @@ impl AppState {
 }
 
 /// The memory images' tiles may take before going to disk: `percent` of the computer's
-/// `total` memory, but no more than the tiles take now (`resident`) and the memory `free`
-/// leave room for, less a twentieth of the total for the rest of the program and the
-/// system: so tiles go to disk before memory runs out, whatever else takes it. None set
-/// (they never go) if the total is not known.
-fn tile_budget(percent: f64, total: Option<u64>, resident: u64, free: Option<u64>) -> Option<u64> {
-    let total = total?;
-    let share = (total as f64 * percent.clamp(0.0, 100.0) / 100.0) as u64;
-    let room = free.map_or(u64::MAX, |f| resident.saturating_add(f).saturating_sub(total / 20));
-    Some(share.min(room))
+/// `total` memory; none set (they never go) if the total is not known.
+fn tile_budget(percent: f64, total: Option<u64>) -> Option<u64> {
+    total.map(|t| (t as f64 * percent.clamp(0.0, 100.0) / 100.0) as u64)
 }
 
 /// The name a file is shown under.
@@ -932,20 +923,10 @@ mod tests {
 
     #[test]
     fn images_may_keep_the_share_of_memory_the_preference_says() {
-        let gb = 1_000_000_000;
-        assert_eq!(tile_budget(60.0, Some(32 * gb), 0, None), Some(19_200_000_000));
-        assert_eq!(tile_budget(100.0, Some(8 * gb), 0, None), Some(8 * gb));
-        assert_eq!(tile_budget(60.0, None, 0, Some(gb)), None, "not knowing the memory, nothing goes to disk");
-        assert_eq!(
-            tile_budget(AppState::new().prefs.f64("memory.tiles"), Some(10_000), 0, None),
-            Some(6_000),
-            "60% by default"
-        );
-        // With room enough, the share; with other programs taking memory, what is left of it,
-        // less a reserve, so that tiles go to disk before memory runs out.
-        assert_eq!(tile_budget(60.0, Some(32 * gb), 3 * gb, Some(25 * gb)), Some(19_200_000_000));
-        assert_eq!(tile_budget(60.0, Some(32 * gb), 3 * gb, Some(gb)), Some(2_400_000_000));
-        assert_eq!(tile_budget(60.0, Some(32 * gb), 0, Some(gb / 2)), Some(0));
+        assert_eq!(tile_budget(60.0, Some(32_000_000_000)), Some(19_200_000_000));
+        assert_eq!(tile_budget(100.0, Some(8_000_000_000)), Some(8_000_000_000));
+        assert_eq!(tile_budget(60.0, None), None, "not knowing the memory, nothing goes to disk");
+        assert_eq!(tile_budget(AppState::new().prefs.f64("memory.tiles"), Some(10_000)), Some(6_000), "60% by default");
     }
 
     #[test]
