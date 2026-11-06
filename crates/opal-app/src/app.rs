@@ -566,7 +566,8 @@ impl OpalApp {
                 if tiles.on_disk > 0 {
                     ui.label(RichText::new(format!("{} on disk", bytes(tiles.on_disk))).color(weak)).on_hover_text(
                         format!(
-                            "Parts of the open images not looked at lately, kept in a scratch file until they are                              needed again (Preferences › Memory); {} of them are in memory.",
+                            "Parts of the open images not looked at lately, kept in a scratch file until they are \
+                             needed again (Preferences › Memory); {} of them are in memory.",
                             bytes(tiles.resident)
                         ),
                     );

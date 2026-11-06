@@ -52,11 +52,6 @@ pub fn to_srgb16(p: Pixel) -> [u16; 4] {
     to_srgb_unit(p).map(|v| (v * 65535.0).round() as u16)
 }
 
-/// Converts a buffer of 8-bit RGBA bytes (row-major, straight alpha) in parallel.
-pub fn pixels_from_rgba8(bytes: &[u8]) -> Vec<Pixel> {
-    bytes.par_chunks_exact(4).map(|c| from_srgb8([c[0], c[1], c[2], c[3]])).collect()
-}
-
 /// Converts a buffer of 16-bit RGBA values (row-major, straight alpha) in parallel.
 pub fn pixels_from_rgba16(values: &[u16]) -> Vec<Pixel> {
     values.par_chunks_exact(4).map(|c| from_srgb16([c[0], c[1], c[2], c[3]])).collect()
