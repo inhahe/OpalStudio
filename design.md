@@ -183,11 +183,16 @@ not a goal.
   tile, at a lookup a row) and of rectangles covering the image objects, so the view lists
   no tiles beneath a uniform block: a huge, mostly blank canvas costs about what the
   screen shows (a 300,000-pixel white canvas shown whole: 17 ms after an edit, 10 MB).
-  Zoomed out, a tile an image object reaches is drawn at the level shown instead, as a
-  preview draws it (each object from its own copy at the level: a pixel object's reduced
-  tiles, an image object's pyramid with its own sampling), and kept while its key holds:
-  so an image object across a huge canvas costs the tiles shown too, and looks very
-  slightly different from reducing full resolution where layers overlap. The cache
+  Zoomed out, where an image object's full-resolution tiles in view would take more than
+  half the cache's budget (1 GB without one), the tiles it draws into are drawn at the
+  level shown instead, as a preview draws them (each object from its own copy at the
+  level: a pixel object's reduced tiles, an image object's pyramid with its own sampling,
+  never point-sampled when shrunk), and kept while their key holds, with the reduced tiles
+  at that level: so an image object across a huge canvas costs the tiles shown too (one
+  across a 300,000-pixel canvas shown whole: 75 ms, 6 ms an edit). Those tiles look very
+  slightly different from reducing full resolution where layers overlap, and a pixel
+  layer beneath them, off the level's pixel grid, slightly softer; everywhere else the
+  view is exact. The cache
   may hold a set amount of memory (a preference, 2 GB by default), counting each tile it
   made once (a layer's own tile shown as it is costs nothing); past it, the tiles farthest
   from the view go first,
@@ -536,8 +541,9 @@ Editable content does not mean recomputing everything on each change.
   tiles, for the drag's length, and where a layer repeats one tile its reduced tile is that
   tile halved, made once a level, with nothing beneath it reduced (a drag over a
   300,000-pixel white canvas shown whole: 23 ms a frame); image objects are drawn through
-  their transform with their own resampling. Tiles the drag leaves alone stay exact, and the full-resolution result
-  follows on release. A tile over a uniform block is made exactly even during a drag,
+  their transform with their own resampling. Tiles the drag leaves alone stay exact, and the
+  full-resolution result follows on release (but for the tiles of an image object too
+  costly to reduce, which stay drawn at the level, as above). A tile over a uniform block is made exactly even during a drag,
   costing no more than a preview. A 24-megapixel image dragged at 25% takes about 13 ms a frame this
   way, against about 90 ms. Heavy effects will preview the same way while their settings
   are dragged.

@@ -118,20 +118,32 @@ fn touches(image: &RasterImage, transform: &Affine, sampling: &Sampling, c: Tile
 /// Object `o` placed at pyramid level `level`: its pixels, carried by the transform into
 /// that level's pixels (a level-`level` tile is then drawn like a level-0 one), and how it
 /// is drawn there: pixel objects with Bilinear (exact on whole level pixels), image objects
-/// as they ask (during a drag, the faster method if the preference says so).
-fn at_level(o: &Object, level: u32) -> (&Arc<RasterImage>, Affine, Sampling) {
+/// as they ask (during a drag, the faster method if the preference says so); but in a view
+/// `settled` (not a drag's), an image shrunk is never point-sampled: Nearest becomes
+/// Bilinear from the image's pyramid, as reducing it from full resolution would average it.
+fn at_level(o: &Object, level: u32, settled: bool) -> (&Arc<RasterImage>, Affine, Sampling) {
     let down = Affine::scale(0.5f64.powi(level as i32), 0.5f64.powi(level as i32));
     match &o.kind {
         ObjectKind::Pixels(p) => {
             (&p.image, Affine::translate(p.offset[0] as f64, p.offset[1] as f64).then(down), Sampling::DRAFT)
         }
-        ObjectKind::Image(i) => (&i.image, i.transform.then(down), i.sampling),
+        ObjectKind::Image(i) => {
+            let t = i.transform.then(down);
+            let shrunk = t.inverse().is_some_and(|inv| inv.row_norms().iter().any(|&n| n > 1.0));
+            let s = if settled && shrunk && matches!(i.sampling.method, resample::Method::Nearest) {
+                Sampling { method: resample::Method::Bilinear, ..i.sampling }
+            } else {
+                i.sampling
+            };
+            (&i.image, t, s)
+        }
     }
 }
 
-/// Reduced copies of pixel objects' tiles, made while previewing (see [`Quality::Preview`])
-/// for the tiles being previewed alone, so their cost and memory follow the screen; cleared
-/// by the next exact update. Keyed by image (its address; `held` keeps the image alive, so
+/// Reduced copies of pixel objects' tiles, made for tiles drawn at their level (see
+/// [`Quality::Preview`], [`costly_image_tiles`]) alone, so their cost and memory follow the
+/// screen. An exact update clears them, but for those at the level it shows of what it
+/// still draws at the level. Keyed by image (its address; `held` keeps the image alive, so
 /// the address cannot be reused), level, and tile at that level.
 #[derive(Default, Debug)]
 struct Reduced {
@@ -157,6 +169,20 @@ fn reduced_tile<'a>(
 }
 
 impl Reduced {
+    /// Keeps, of what was made, the tiles at `level` of the images of `layers`' pixel
+    /// objects: what the view at that level reads again, nothing beneath.
+    fn keep_only(&mut self, layers: &[Arc<Layer>], level: u32) {
+        let mut images = HashSet::new();
+        for_each_visible_object(layers, &mut |o| {
+            if let ObjectKind::Pixels(p) = &o.kind {
+                images.insert(Arc::as_ptr(&p.image) as usize);
+            }
+        });
+        self.tiles.retain(|(image, l, _), _| *l == level && images.contains(image));
+        self.held.retain(|image, _| images.contains(image));
+        self.halved.clear();
+    }
+
     fn get<'a>(&'a self, image: &'a Arc<RasterImage>, level: u32, c: TileCoord) -> Option<&'a Arc<Tile>> {
         reduced_tile(&self.tiles, image, level, c)
     }
@@ -264,8 +290,8 @@ fn reduced_area(p: &PixelObject, level: u32, c: TileCoord) -> IRect {
 /// What object `o` shows in tile `c` of pyramid level `level`, drawn there directly: a
 /// pixel object from its reduced tiles in `reduced` (made beforehand), an image object
 /// through its transform.
-fn level_tile<'o>(o: &'o Object, c: TileCoord, level: u32, reduced: &Reduced) -> Option<Shown<'o>> {
-    let (image, t, s) = at_level(o, level);
+fn level_tile<'o>(o: &'o Object, c: TileCoord, level: u32, settled: bool, reduced: &Reduced) -> Option<Shown<'o>> {
+    let (image, t, s) = at_level(o, level, settled);
     if !touches(image, &t, &s, c) {
         return None;
     }
@@ -286,13 +312,17 @@ fn level_tile<'o>(o: &'o Object, c: TileCoord, level: u32, reduced: &Reduced) ->
 }
 
 /// [`level_tile`] at `level`, as a [`ShowFn`] takes it.
-fn shown_at(level: u32, reduced: &Reduced) -> impl for<'o> Fn(&'o Object, TileCoord) -> Option<Shown<'o>> + Sync + '_ {
-    move |o, c| level_tile(o, c, level, reduced)
+fn shown_at(
+    level: u32,
+    settled: bool,
+    reduced: &Reduced,
+) -> impl for<'o> Fn(&'o Object, TileCoord) -> Option<Shown<'o>> + Sync + '_ {
+    move |o, c| level_tile(o, c, level, settled, reduced)
 }
 
 /// The token for what object `o` shows in tile `c` of pyramid level `level`.
-fn level_token(o: &Object, c: TileCoord, level: u32) -> Option<Token> {
-    let (image, t, s) = at_level(o, level);
+fn level_token(o: &Object, c: TileCoord, level: u32, settled: bool) -> Option<Token> {
+    let (image, t, s) = at_level(o, level, settled);
     touches(image, &t, &s, c).then(|| Token::Image {
         image: Arc::downgrade(image),
         transform: t.to_bits(),
@@ -465,8 +495,15 @@ fn for_each_visible_object(layers: &[Arc<Layer>], f: &mut dyn FnMut(&Object)) {
 /// `None`) will need (their pyramids), so tiles drawn in parallel find it ready instead of
 /// each building it.
 fn prepare(layers: &[Arc<Layer>], range: Option<&IRect>) {
+    prepare_except(layers, range, &HashSet::new());
+}
+
+/// [`prepare`], but for the image objects whose images (by address) are in `skip`.
+fn prepare_except(layers: &[Arc<Layer>], range: Option<&IRect>, skip: &HashSet<usize>) {
     for_each_visible_object(layers, &mut |o| {
-        if let ObjectKind::Image(i) = &o.kind {
+        if let ObjectKind::Image(i) = &o.kind
+            && !skip.contains(&(Arc::as_ptr(&i.image) as usize))
+        {
             let reaches = match range {
                 None => true,
                 Some(r) => o.extent().is_some_and(|e| !e.intersect(r).is_empty()),
@@ -517,16 +554,37 @@ fn image_rects(i: &ImageObject, f: &mut dyn FnMut(IRect)) {
 }
 
 /// The level-`level` tiles over `outer` that a visible image object of `layers` reaches.
-fn reached_by_images(layers: &[Arc<Layer>], level: u32, outer: &IRect) -> HashSet<TileCoord> {
-    let mut reached = HashSet::new();
+/// The level-`level` tiles over `outer` to draw at the level rather than exactly: those
+/// image objects reach (into which they draw) whose full-resolution tiles within `outer`
+/// would take more than `limit` bytes; and the images of those objects. Elsewhere the view
+/// stays exact, which costs no more than that.
+fn costly_image_tiles(
+    layers: &[Arc<Layer>],
+    level: u32,
+    outer: &IRect,
+    limit: u64,
+) -> (HashSet<TileCoord>, HashSet<usize>) {
+    let mut tiles = HashSet::new();
+    let mut images = HashSet::new();
+    if level == 0 {
+        return (tiles, images);
+    }
     for_each_visible_object(layers, &mut |o| {
-        if let ObjectKind::Image(i) = &o.kind
-            && let Some(f) = resample::footprint(&i.image, &i.transform, &i.sampling)
-        {
-            reached.extend(TileCoord::covering(&f.intersect(outer), level));
+        let ObjectKind::Image(i) = &o.kind else { return };
+        let Some(f) = resample::footprint(&i.image, &i.transform, &i.sampling).map(|f| f.intersect(outer)) else {
+            return;
+        };
+        let t = i64::from(TILE_SIZE);
+        let count = |a: i64, b: i64| if b > a { ((b - 1).div_euclid(t) - a.div_euclid(t) + 1) as u64 } else { 0 };
+        let cost = count(f.x0, f.x1).saturating_mul(count(f.y0, f.y1)).saturating_mul(TILE_BYTES);
+        if cost <= limit {
+            return;
         }
+        images.insert(Arc::as_ptr(&i.image) as usize);
+        let (image, t, s) = at_level(o, level, true);
+        tiles.extend(TileCoord::covering(&f, level).filter(|&c| touches(image, &t, &s, c)));
     });
-    reached
+    (tiles, images)
 }
 
 /// Appends the visible pixel objects of `layers`, at any depth, to `out`.
@@ -543,22 +601,33 @@ fn visible_pixel_objects<'a>(layers: &'a [Arc<Layer>], out: &mut Vec<&'a PixelOb
 }
 
 /// Where the image objects of a set of layers draw, worked out once for them and asked of
-/// each area shown: rectangles, one per tile of each image (which, transformed, may span
-/// more tiles than are worth listing). Pixel objects are asked of their own tiles.
+/// each area shown: for each, the rectangle all it draws lies in, and rectangles, one per
+/// tile of its image (which, transformed, may span more tiles than are worth listing).
+/// Pixel objects are asked of their own tiles.
 #[derive(Debug, Default)]
 struct Occupancy {
-    rects: Vec<IRect>,
+    images: Vec<(IRect, Vec<IRect>)>,
 }
 
 impl Occupancy {
     fn of(layers: &[Arc<Layer>]) -> Occupancy {
-        let mut rects = Vec::new();
+        let mut images = Vec::new();
         for_each_visible_object(layers, &mut |o| {
             if let ObjectKind::Image(i) = &o.kind {
+                let mut rects = Vec::new();
                 image_rects(i, &mut |r| rects.push(r));
+                let all = rects.iter().copied().reduce(|a, b| a.union(&b));
+                images.extend(all.map(|all| (all, rects)));
             }
         });
-        Occupancy { rects }
+        Occupancy { images }
+    }
+
+    /// Whether an image object draws into `r`.
+    fn holds(&self, r: &IRect) -> bool {
+        self.images
+            .iter()
+            .any(|(all, rects)| !all.intersect(r).is_empty() && rects.iter().any(|i| !i.intersect(r).is_empty()))
     }
 }
 
@@ -865,7 +934,8 @@ enum Key {
     Pyramid([u64; 4]),
     /// A tile drawn at its level directly (see [`Quality::Preview`]): what went into it,
     /// as for a level-0 tile. It never equals an exact key, so the next exact update
-    /// replaces the tile.
+    /// replaces the tile, unless that too draws it at the level (see
+    /// [`costly_image_tiles`]), which it then keeps while the key holds.
     Preview(Vec<Token>),
     /// A tile over a uniform block (see [`uniform_block`]): the key every level-0 tile in
     /// it has. Made from one such tile, with nothing cached below it.
@@ -922,9 +992,8 @@ struct Plan<'a> {
     uniform: Vec<HashSet<TileCoord>>,
     /// The visible pixel objects.
     pixels: Vec<&'a PixelObject>,
-    /// Rectangles covering what image objects draw within the area shown (see
-    /// [`Occupancy`]).
-    images: Vec<IRect>,
+    /// Where image objects draw.
+    images: Arc<Occupancy>,
 }
 
 impl<'a> Plan<'a> {
@@ -935,15 +1004,14 @@ impl<'a> Plan<'a> {
         layers: &'a [Arc<Layer>],
         level: u32,
         outer: &IRect,
-        occupancy: &Occupancy,
+        occupancy: &Arc<Occupancy>,
         drawn: &HashSet<TileCoord>,
     ) -> Plan<'a> {
         let top = level as usize;
         let mut pixels = Vec::new();
         visible_pixel_objects(layers, &mut pixels);
-        let images = occupancy.rects.iter().map(|r| r.intersect(outer)).filter(|r| !r.is_empty()).collect();
         let empty = vec![HashSet::new(); top + 1];
-        let mut plan = Plan { need: empty.clone(), uniform: empty, pixels, images };
+        let mut plan = Plan { need: empty.clone(), uniform: empty, pixels, images: occupancy.clone() };
         // Each question costs a few lookups: in parallel, they would cost more.
         plan.need[top] =
             TileCoord::covering(outer, level).filter(|&c| !drawn.contains(&c) && plan.occupied(c, level)).collect();
@@ -961,8 +1029,7 @@ impl<'a> Plan<'a> {
     /// Whether content lies in level-`level` tile `c` (within the area shown).
     fn occupied(&self, c: TileCoord, level: u32) -> bool {
         let r = c.rect(level);
-        self.images.iter().any(|i| !i.intersect(&r).is_empty())
-            || self.pixels.iter().any(|p| p.image.any_under(&r.translate(-p.offset[0], -p.offset[1])))
+        self.images.holds(&r) || self.pixels.iter().any(|p| p.image.any_under(&r.translate(-p.offset[0], -p.offset[1])))
     }
 }
 
@@ -1073,7 +1140,7 @@ pub struct Projection {
     /// The layers of this generation, held so that a replaced layer cannot reuse an
     /// address, and where their content lies.
     layers: Vec<Arc<Layer>>,
-    occupancy: Occupancy,
+    occupancy: Arc<Occupancy>,
     /// The last version given (see [`Entry::version`]).
     versions: u64,
     /// How many level-0 keys have been built (for tests).
@@ -1089,12 +1156,15 @@ use crate::raster::TILE_BYTES;
 /// How [`Projection::update`] brings tiles up to date.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Quality {
-    /// At full resolution, then reduced: exactly what the image is.
+    /// At full resolution, then reduced: exactly what the image is. Zoomed out, but for the
+    /// tiles an image object reaches whose full-resolution tiles in view would cost too much
+    /// ([`costly_image_tiles`]), which are drawn at the level shown, as previews are.
     Exact,
     /// While something is dragged: tiles out of date at the level shown (above 0) are drawn
     /// at that level directly, from each object's reduced copy, so their cost follows the
     /// screen rather than the image; tiles still up to date stay exact. The next exact
-    /// update recomputes what was previewed.
+    /// update recomputes what was previewed (those a costly image object reaches as it
+    /// draws them itself, at the level).
     Preview,
 }
 
@@ -1131,6 +1201,13 @@ impl Projection {
         self.last.as_ref().is_some_and(|l| l.quality == Quality::Preview)
     }
 
+    /// What the full-resolution tiles of an image object in view may take before its tiles
+    /// are drawn at the level shown instead (see [`costly_image_tiles`]): half the cache's
+    /// budget, or 1 GB without one.
+    fn drawn_limit(&self) -> u64 {
+        self.budget.map_or(1 << 30, |b| b / 2)
+    }
+
     fn next_version(&mut self) -> u64 {
         self.versions += 1;
         self.versions
@@ -1151,7 +1228,7 @@ impl Projection {
         if !same_layers(&self.layers, layers) {
             self.generation += 1;
             self.layers = layers.to_vec();
-            self.occupancy = Occupancy::of(layers);
+            self.occupancy = Arc::new(Occupancy::of(layers));
         }
         if let Some(last) = &self.last
             && last.generation == self.generation
@@ -1175,14 +1252,21 @@ impl Projection {
         );
         let result = match quality {
             Quality::Exact => {
-                self.reduced = Reduced::default();
-                prepare(layers, Some(&outer));
-                // Zoomed out, the tiles image objects reach are drawn at the level shown, as
-                // previews are, rather than reduced from every tile beneath them.
-                let drawn = if level > 0 { reached_by_images(layers, level, &outer) } else { HashSet::new() };
+                // Zoomed out, the tiles image objects too costly to draw exactly reach are
+                // drawn at the level shown, as previews are; nothing of those objects is
+                // drawn at full resolution, so nothing of them is prepared for it.
+                let (drawn, costly) = costly_image_tiles(layers, level, &outer, self.drawn_limit());
+                // What is drawn at the level keeps its reduced tiles at the level; with none,
+                // nothing is kept.
+                if drawn.is_empty() {
+                    self.reduced = Reduced::default();
+                } else {
+                    self.reduced.keep_only(layers, level);
+                }
+                prepare_except(layers, Some(&outer), &costly);
                 let coords = self.update_exact(layers, level, &outer, &drawn);
                 self.restore(layers, level, coords.iter().copied());
-                self.draw_at_level(layers, level, &outer, &drawn);
+                self.draw_at_level(layers, level, &outer, &drawn, true);
                 self.shown(level, coords.iter().chain(&drawn))
             }
             Quality::Preview => self.update_preview(layers, level, &outer),
@@ -1215,8 +1299,9 @@ impl Projection {
         // The level-`level` tiles with a level-0 tile under them out of date, or emptied:
         // of those an exact update would make. A tile over a uniform block is made exactly
         // whatever happened, being made from one level-0 tile: no dearer than a preview.
-        // Drawn at the level, never exact: the tiles image objects reach.
-        let drawn = reached_by_images(layers, level, outer);
+        // Drawn at the level as an exact update draws them: the tiles costly image objects
+        // reach.
+        let (drawn, _) = costly_image_tiles(layers, level, outer, self.drawn_limit());
         let plan = Plan::of(layers, level, outer, &self.occupancy, &drawn);
         let mut dirty: HashSet<TileCoord> = HashSet::new();
         for c in self.levels[0].keys() {
@@ -1229,29 +1314,39 @@ impl Projection {
                 dirty.insert(up(c, 0));
             }
         }
+        dirty.retain(|c| !drawn.contains(c));
         // The exact pyramid for the rest; previews already drawn at the level are kept.
+        let at_level: HashSet<TileCoord> = dirty.union(&drawn).copied().collect();
         for l in 1..=level {
             let clean = |c: &&TileCoord| !dirty.contains(&up(**c, l));
             let coords: HashSet<TileCoord> = plan.need[l as usize].iter().filter(clean).copied().collect();
             let uniform: HashSet<TileCoord> = plan.uniform[l as usize].iter().filter(clean).copied().collect();
-            let keep = if l == level { dirty.union(&drawn).copied().collect() } else { HashSet::new() };
+            let keep = if l == level { at_level.clone() } else { HashSet::new() };
             self.update_pyramid(layers, l, &coords, &uniform, outer, &keep);
         }
         let coords: Vec<TileCoord> = plan.need[level as usize].iter().filter(|c| !dirty.contains(c)).copied().collect();
         self.restore(layers, level, coords.iter().copied());
-        // The dirty ones, and those image objects reach, drawn at the level where their key
-        // changed since they last were.
-        let at_level: HashSet<TileCoord> = dirty.union(&drawn).copied().collect();
-        self.draw_at_level(layers, level, outer, &at_level);
+        // The dirty ones, drawn for the drag; those costly image objects reach, as an exact
+        // update draws them; each where its key changed since it last was.
+        self.draw_at_level(layers, level, outer, &dirty, false);
+        self.draw_at_level(layers, level, outer, &drawn, true);
         self.shown(level, coords.iter().chain(&at_level))
     }
 
     /// Draws the level-`level` tiles `tiles` (over `outer`) at that level, each object from
     /// its own copy at the level (a pixel object's reduced tiles, an image object's
-    /// pyramid with its own sampling), those whose key changed since they last were.
-    fn draw_at_level(&mut self, layers: &[Arc<Layer>], level: u32, outer: &IRect, tiles: &HashSet<TileCoord>) {
+    /// pyramid with its own sampling, as a `settled` view draws it: see [`at_level`]), those
+    /// whose key changed since they last were.
+    fn draw_at_level(
+        &mut self,
+        layers: &[Arc<Layer>],
+        level: u32,
+        outer: &IRect,
+        tiles: &HashSet<TileCoord>,
+        settled: bool,
+    ) {
         let generation = self.generation;
-        let token = |o: &Object, c: TileCoord| level_token(o, c, level);
+        let token = |o: &Object, c: TileCoord| level_token(o, c, level, settled);
         let top = &self.levels[level as usize];
         let mut stale = Vec::new();
         for &c in tiles {
@@ -1262,6 +1357,9 @@ impl Projection {
                 stale.push((c, key));
             }
         }
+        if stale.is_empty() {
+            return;
+        }
         // What drawing them needs, made first: image objects' pyramids, and the reduced
         // tiles of pixel objects under them alone.
         let mut need: Vec<(Arc<RasterImage>, HashSet<TileCoord>)> = Vec::new();
@@ -1271,11 +1369,11 @@ impl Projection {
             }
             match &o.kind {
                 ObjectKind::Image(_) => {
-                    let (image, t, s) = at_level(o, level);
+                    let (image, t, s) = at_level(o, level, settled);
                     resample::prepare(image, &t, &s);
                 }
                 ObjectKind::Pixels(p) => {
-                    let (image, t, s) = at_level(o, level);
+                    let (image, t, s) = at_level(o, level, settled);
                     let tiles: HashSet<TileCoord> = stale
                         .iter()
                         .filter(|(c, _)| touches(image, &t, &s, *c))
@@ -1291,7 +1389,7 @@ impl Projection {
         for (image, tiles) in need {
             self.reduced.make(&image, level, tiles);
         }
-        let show = shown_at(level, &self.reduced);
+        let show = shown_at(level, settled, &self.reduced);
         let drawn: Vec<(TileCoord, Key, Option<Arc<Tile>>)> = stale
             .into_par_iter()
             .map(|(c, key)| {
@@ -2572,28 +2670,11 @@ mod tests {
             let want = from_every_tile(&d.layers, 4);
             for level in [3, 0, 1, 4, 2] {
                 for view in &views {
-                    let mut shown: HashMap<TileCoord, Arc<Tile>> =
+                    let shown: HashMap<TileCoord, Arc<Tile>> =
                         p.update(&d.layers, level, view, Quality::Exact).into_iter().collect();
-                    // Zoomed out, the tiles image objects reach are drawn at the level: as a
-                    // preview drawing every tile anew draws them.
-                    let everywhere = IRect::new(-1 << 30, -1 << 30, 1 << 30, 1 << 30);
-                    let reached =
-                        if level > 0 { reached_by_images(&d.layers, level, &everywhere) } else { HashSet::new() };
-                    if !reached.is_empty() {
-                        let drawn: HashMap<TileCoord, Arc<Tile>> =
-                            Projection::new().update(&d.layers, level, view, Quality::Preview).into_iter().collect();
-                        for c in &reached {
-                            let (a, b) = (shown.remove(c), drawn.get(c));
-                            assert_eq!(a.is_some(), b.is_some(), "{what}: level {level}, tile {c:?}");
-                            assert!(
-                                a.zip(b).is_none_or(|(a, b)| *a == **b),
-                                "{what}: level {level}, {c:?} drawn otherwise"
-                            );
-                        }
-                    }
                     let want: Vec<(&TileCoord, &Tile)> = want[level as usize]
                         .iter()
-                        .filter(|(c, _)| !c.rect(level).intersect(view).is_empty() && !reached.contains(c))
+                        .filter(|(c, _)| !c.rect(level).intersect(view).is_empty())
                         .collect();
                     assert_eq!(shown.len(), want.len(), "{what}: level {level}, {view:?}");
                     for (c, t) in want {
@@ -2776,6 +2857,99 @@ mod tests {
         p.update(&d.layers, 10, &all, Quality::Exact);
         let entries: usize = p.levels.iter().map(HashMap::len).sum();
         assert_eq!((entries, p.keys_built), (1, 0));
+    }
+
+    /// A document of a white canvas `size` pixels square and an image object of distinct
+    /// pixels, turned by `turn` and scaled by `scale` about the canvas's centre, drawn with
+    /// `sampling`.
+    fn picture_over_white(size: i64, picture: RasterImage, turn: f64, scale: f64, sampling: Sampling) -> Document {
+        use crate::document::{ImageObject, Object};
+        let mut ids = IdGen::default();
+        let mut d = Document::new(size as u32, size as u32);
+        add(&mut d, &mut ids, shared(IRect::from_size(size, size), [1.0; 4]).0);
+        let half = (picture.content_bounds().unwrap().width() / 2) as f64;
+        let image = ImageObject {
+            frame: picture.content_bounds().unwrap(),
+            image: Arc::new(picture),
+            transform: Affine::translate(-half, -half)
+                .then(Affine::rotate(turn))
+                .then(Affine::scale(scale, scale))
+                .then(Affine::translate(size as f64 / 2.0, size as f64 / 2.0)),
+            sampling,
+        };
+        let object = Object { id: ids.object(), kind: ObjectKind::Image(image) };
+        let index = d.layers.len();
+        d.insert(Position { parent: None, index }, Layer::with_objects(ids.layer(), "picture", vec![object])).unwrap();
+        d
+    }
+
+    #[test]
+    fn an_image_object_too_costly_to_reduce_is_drawn_at_the_level_close_to_the_reduction() {
+        // Over 8 × 8 level-3 tiles; the cache's budget so small that the picture's tiles
+        // beneath are too costly, so the tiles it draws into are drawn at the level.
+        let size: i64 = 8192;
+        let px: Vec<Pixel> = (0..1024 * 1024)
+            .map(|i| {
+                let (x, y) = ((i % 1024) as f32 / 1024.0, (i / 1024) as f32 / 1024.0);
+                pixel_from_f32([x, y, 0.5 + 0.5 * (x * 40.0).sin() * (y * 30.0).cos(), 1.0])
+            })
+            .collect();
+        let picture = RasterImage::from_pixels(1024, 1024, &px);
+        let d = picture_over_white(size, picture, 0.6, 3.0, Sampling::default());
+        let mut p = Projection::new();
+        p.set_budget(Some(4 * TILE_BYTES));
+        let all = IRect::from_size(size, size);
+        let shown: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 3, &all, Quality::Exact).into_iter().collect();
+        let (drawn, _) = costly_image_tiles(&d.layers, 3, &all, p.drawn_limit());
+        // The picture's bounds reach more tiles than it draws into, turned: only those are drawn.
+        let ObjectKind::Image(i) = &d.layers[1].objects()[0].kind else { panic!() };
+        let bounds = resample::footprint(&i.image, &i.transform, &i.sampling).unwrap();
+        let boxed = TileCoord::covering(&bounds.intersect(&all), 3).count();
+        assert!(!drawn.is_empty() && drawn.len() < boxed, "{} of the {boxed} its bounds reach drawn", drawn.len());
+        let want = from_every_tile(&d.layers, 3);
+        assert_eq!(shown.len(), want[3].len());
+        for (c, t) in &want[3] {
+            let got = &shown[c];
+            if !drawn.contains(c) {
+                // Where the picture draws nothing (its turned corners' tiles too), exact.
+                assert!(**got == *t, "tile {c:?}, which the picture does not reach, differs");
+                continue;
+            }
+            let (mut sum, mut worst) = (0.0f32, 0.0f32);
+            for (a, b) in got.pixels().iter().zip(t.pixels()) {
+                for i in 0..4 {
+                    let e = (a[i].to_f32() - b[i].to_f32()).abs();
+                    sum += e;
+                    worst = worst.max(e);
+                }
+            }
+            let mean = sum / (4 * TILE_PIXELS) as f32;
+            assert!(mean < 0.01 && worst < 0.35, "tile {c:?} drawn at the level: mean {mean}, worst {worst}");
+        }
+    }
+
+    #[test]
+    fn a_settled_view_never_point_samples_an_image_object_it_shrinks() {
+        // A one-pixel checkerboard drawn with Nearest, shrunk to a quarter: averaged, grey.
+        let px: Vec<Pixel> = (0..512 * 512)
+            .map(|i| {
+                if (i % 512 + i / 512) % 2 == 0 {
+                    pixel_from_f32([1.0; 4])
+                } else {
+                    pixel_from_f32([0.0, 0.0, 0.0, 1.0])
+                }
+            })
+            .collect();
+        let nearest = Sampling { method: resample::Method::Nearest, anti_ringing: false };
+        let d = picture_over_white(4096, RasterImage::from_pixels(512, 512, &px), 0.0, 4.0, nearest);
+        let mut p = Projection::new();
+        p.set_budget(Some(4 * TILE_BYTES));
+        let shown = p.update(&d.layers, 4, &IRect::from_size(4096, 4096), Quality::Exact);
+        let t = &shown[0].1;
+        for (x, y) in [(128, 128), (100, 140), (150, 90)] {
+            let v = pixel_to_f32(t.get(x, y))[0];
+            assert!((v - 0.5).abs() < 0.1, "({x}, {y}) is {v}: point-sampled, not averaged");
+        }
     }
 
     #[test]
