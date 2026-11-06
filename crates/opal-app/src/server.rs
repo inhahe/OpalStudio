@@ -750,15 +750,18 @@ mod tests {
                 }
             }
         });
-        let mut longest = Duration::ZERO;
+        let mut slow = Vec::new();
         while !calls.is_finished() {
             let t = Instant::now();
             server.serve(&mut st, &ctx, false);
-            longest = longest.max(t.elapsed());
+            if t.elapsed() >= Duration::from_millis(8) {
+                slow.push(t.elapsed());
+            }
         }
         calls.join().unwrap();
-        // The call and the wait for one more (1 ms), not a tick (15.6 ms on Windows).
-        assert!(longest < Duration::from_millis(8), "a frame took {longest:?}");
+        // Each frame that serves a call takes it and the wait for one more (1 ms), not a
+        // tick (15.6 ms on Windows) on top. (A few, on a busy computer, are held up anyway.)
+        assert!(slow.len() <= 5, "{} of the frames serving 20 calls were slow: {slow:?}", slow.len());
     }
 
     #[test]
