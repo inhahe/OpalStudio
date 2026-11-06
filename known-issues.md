@@ -16,6 +16,15 @@ convert from the embedded profile into the working space on import.
 `crates/opal-app/src/gpu_memory.rs`. **Fix:** query `VK_EXT_memory_budget` through wgpu's
 Vulkan backend (and Metal's `recommendedMaxWorkingSetSize`) on other platforms.
 
+## The scratch drive's free space is only known on Windows
+
+`crates/opal-app/src/memory.rs` (`disk_free`). Elsewhere it is not known, and is counted as
+unlimited: work may then be admitted whose tiles the disk cannot hold. Writing to the
+scratch file failing is caught (tiles are no longer written, and the user is told), but
+the tiles that could not go stay in memory past what was planned. **Fix:** `statvfs` on
+the temporary folder on Linux and macOS (through `libc`, or `rustix`), once a non-Windows
+build exists to test it on.
+
 ## Building on Linux and macOS needs the target override removed
 
 `.cargo/config.toml` sets the MSVC target, because the MinGW toolchain's test binary
