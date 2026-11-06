@@ -1081,13 +1081,18 @@ server. Both rest on one language-neutral API.
   something from, ends a line). The states stay separate while it runs, so a script's own
   undo takes back one step.
 - **Steps.** `begin_step` (with a `name`) and `end_step`, which the connection's thread
-  answers itself, make what the calls between them change in each image one state, called
-  as named (even a step of one call), joined as a script run is (`History::join`, as the
-  group the step is, its states told apart from the run's); a step begun inside another is
-  part of it, and one left open ends with the connection. Inside a script run, the run's
-  own calls before and after a step join on their own. The Python package wraps them as
-  `with editor.step(name):`; an assistant has them as tools, to make several of its calls
-  one undo.
+  answers itself (their arguments checked as any method's), make what the calls between
+  them change in each image one state, called as named. A call is recorded for each group
+  it is in, its step and its connection's script run: a step's states are joined when it
+  ends, and kept apart when the run's are (`History::join`'s `apart`), so a script's
+  history reads as its run before a step, the step, and its run after (each line named for
+  its group, even a line of one state), and a step the script undid goes with the run. A
+  step begun inside another is part of it; one left open ends with the connection, or
+  before the next call once it has gone 10 minutes without one (an assistant's forgotten
+  `end_step` would otherwise take in all it does after); the status bar names the steps
+  open. The Python package wraps them as `with editor.step(name):` (ended even when the
+  body fails, its error not hidden); an assistant has them as tools, to make several of
+  its calls one undo.
 - **Who is connected.** Disconnecting (the status bar) drops every client, refuses what
   they asked that is still waiting, makes a new token, and shuts scripts out until the user
   lets them in again (a client that rereads `api.json`, as the MCP shim does, cannot come

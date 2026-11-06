@@ -235,11 +235,22 @@ class Editor:
 
         A step inside another is part of it. Outside any step, a script's calls are joined
         into one state when it ends, and an interactive session's are each a state."""
-        self.call("begin_step", name=name)
+        try:
+            self.call("begin_step", name=name)
+        except BaseException:
+            # It may have reached the editor before this went wrong (an interrupt while its
+            # answer was awaited): ended, to be sure, unless the connection is gone.
+            with contextlib.suppress(OpalError, OSError, ValueError):
+                self.call("end_step")
+            raise
         try:
             yield self
-        finally:
-            self.call("end_step")
+        except BaseException:
+            # Ended, if it can be, without hiding what went wrong.
+            with contextlib.suppress(OpalError, OSError, ValueError):
+                self.call("end_step")
+            raise
+        self.call("end_step")
 
     def pixels(
         self,

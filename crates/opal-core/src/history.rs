@@ -173,7 +173,7 @@ impl History {
     }
 
     /// The state redo would move to from `id`.
-    fn redo_target_of(&self, id: NodeId) -> Option<NodeId> {
+    pub fn redo_target_of(&self, id: NodeId) -> Option<NodeId> {
         let n = self.node(id);
         n.last_child.or_else(|| n.children.last().copied())
     }
@@ -273,25 +273,27 @@ impl History {
     /// go. A state joins the next only if all else descending from it is in `made` too (what
     /// the script undid and did otherwise, which goes with it): one something else was made
     /// from stays, and ends its line. A line's last state keeps its identifier (it is the
-    /// same document, given an earlier parent), so whatever refers to it still does. A line
-    /// of one state is left as it is, unless `name_lone` (what made it was named, and so is
-    /// it). Returns how many states went.
-    pub fn join(&mut self, made: &HashSet<NodeId>, label: &str, name_lone: bool) -> usize {
+    /// same document, given an earlier parent), so whatever refers to it still does; a line
+    /// of one state is labeled too. A state of `made` that is also `apart` (a step a script
+    /// named, inside the script's run) is no part of a line, and ends one, but goes with what
+    /// the script undid like the rest. Returns how many states went.
+    pub fn join(&mut self, made: &HashSet<NodeId>, label: &str, apart: &HashSet<NodeId>) -> usize {
         let path = self.path_from_root(self.current);
+        let joinable = |n: &NodeId| made.contains(n) && !apart.contains(n);
         let mut gone = 0;
         let mut first = None;
         for (i, &id) in path.iter().enumerate() {
-            if !made.contains(&id) {
+            if !joinable(&id) {
                 continue;
             }
             let start = *first.get_or_insert(id);
-            let next = path.get(i + 1).filter(|n| made.contains(n));
+            let next = path.get(i + 1).filter(|n| joinable(n));
             let joins =
                 next.is_some_and(|&next| self.node(id).children.iter().all(|&c| c == next || self.all_made(c, made)));
             if !joins {
                 if start != id {
                     gone += self.join_line(start, id, label);
-                } else if name_lone {
+                } else {
                     self.node_mut(id).label = label.to_owned();
                 }
                 first = None;
@@ -904,7 +906,7 @@ mod tests {
         scripted(&mut h, &mut made, 1);
         let last = [2, 3].map(|x| scripted(&mut h, &mut made, x))[1];
         let memory = h.memory();
-        assert_eq!(h.join(&made, "Script: go.py", false), 2);
+        assert_eq!(h.join(&made, "Script: go.py", &HashSet::new()), 2);
         assert_eq!(h.current(), last, "the last state is the same one");
         assert_eq!(h.node(last).parent, Some(before));
         assert_eq!(h.node(before).children, vec![last]);
@@ -924,7 +926,7 @@ mod tests {
         let undone = scripted(&mut h, &mut made, 600);
         h.undo();
         let last = scripted(&mut h, &mut made, 900);
-        assert_eq!(h.join(&made, "Script", false), 2);
+        assert_eq!(h.join(&made, "Script", &HashSet::new()), 2);
         assert!(!h.contains(first) && !h.contains(undone));
         assert_eq!(h.path_from_root(last).len(), 3);
         assert!(counted_right(&h));
@@ -932,15 +934,17 @@ mod tests {
 
     #[test]
     fn a_state_someone_else_made_between_or_from_ends_a_line() {
-        // The user's change between two of the script's: nothing to join.
+        // The user's change between two of the script's: nothing to join, each of the
+        // script's a line of its own (named as its run).
         let mut h = painted_history(1);
         let mut made = HashSet::new();
         let a = scripted(&mut h, &mut made, 300);
         let d = painted(h.doc(), 400);
-        h.commit(d, "Paint by hand");
+        let theirs = h.commit(d, "Paint by hand");
         let b = scripted(&mut h, &mut made, 600);
-        assert_eq!(h.join(&made, "Script", false), 0);
-        assert_eq!((h.node(a).label.as_str(), h.node(b).label.as_str()), ("Paint 300", "Paint 600"));
+        assert_eq!(h.join(&made, "Script", &HashSet::new()), 0);
+        let labels = [a, theirs, b].map(|n| h.node(n).label.clone());
+        assert_eq!(labels, ["Script", "Paint by hand", "Script"]);
         // The user went back to one of the script's states and made something from it: it
         // stays (what was made from it depends on it), and the script's line starts after it.
         let mut h = painted_history(1);
@@ -952,7 +956,7 @@ mod tests {
         let d = painted(h.doc(), 400);
         let theirs = h.commit(d, "Paint by hand");
         h.goto(last);
-        assert_eq!(h.join(&made, "Script", false), 1);
+        assert_eq!(h.join(&made, "Script", &HashSet::new()), 1);
         assert!(!h.contains(gone));
         assert_eq!(h.node(kept).children, vec![last, theirs]);
         assert_eq!(h.node(theirs).parent, Some(kept));
@@ -969,7 +973,7 @@ mod tests {
         // script's first state is the root.
         h.set_budget(0);
         assert_eq!(h.root(), first);
-        assert_eq!(h.join(&made, "Script", false), 1);
+        assert_eq!(h.join(&made, "Script", &HashSet::new()), 1);
         assert_eq!(h.root(), last);
         assert!(!h.can_undo());
         assert_eq!(h.nodes().map(|(id, _)| id).collect::<Vec<_>>(), [last]);
@@ -977,14 +981,34 @@ mod tests {
     }
 
     #[test]
-    fn a_line_of_one_state_is_named_only_if_asked_to_be() {
+    fn a_state_kept_apart_ends_a_line_and_a_lone_one_is_named_too() {
         let mut h = painted_history(1);
         let mut made = HashSet::new();
-        let lone = scripted(&mut h, &mut made, 300);
-        assert_eq!(h.join(&made, "Script", false), 0);
-        assert_eq!(h.node(lone).label, "Paint 300", "a script's one change keeps what it was");
-        assert_eq!(h.join(&made, "Two strokes", true), 0);
-        assert_eq!(h.node(lone).label, "Two strokes", "a named step is called as named");
+        let before = scripted(&mut h, &mut made, 300);
+        let step = scripted(&mut h, &mut made, 600);
+        h.node_mut(step).label = "A step".to_owned();
+        let after = scripted(&mut h, &mut made, 900);
+        assert_eq!(h.join(&made, "Script", &HashSet::from([step])), 0);
+        assert_eq!(
+            [&h.node(before).label, &h.node(step).label, &h.node(after).label].map(|l| l.as_str()),
+            ["Script", "A step", "Script"],
+            "the step is kept as it is, the run on either side of it each a line"
+        );
+    }
+
+    #[test]
+    fn what_a_script_undid_in_a_step_goes_with_its_run() {
+        let mut h = painted_history(1);
+        let before = h.current();
+        let mut made = HashSet::new();
+        let first = scripted(&mut h, &mut made, 1);
+        let stepped = scripted(&mut h, &mut made, 2);
+        h.undo();
+        let last = scripted(&mut h, &mut made, 3);
+        assert_eq!(h.join(&made, "Script", &HashSet::from([stepped])), 2);
+        assert!(!h.contains(first) && !h.contains(stepped));
+        assert_eq!(h.undo_label(), Some("Script"));
+        assert_eq!(h.node(last).parent, Some(before));
     }
 
     #[test]
@@ -1004,7 +1028,7 @@ mod tests {
             h.undo();
         }
         commit(&mut h, &mut made);
-        assert_eq!(h.join(&made, "Script", false), 50_001);
+        assert_eq!(h.join(&made, "Script", &HashSet::new()), 50_001);
         assert_eq!(h.nodes().count(), 2);
     }
 

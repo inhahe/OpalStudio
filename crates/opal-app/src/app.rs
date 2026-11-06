@@ -590,11 +590,17 @@ impl OpalApp {
                         {
                             server.disconnect_all();
                         }
-                        let who = if n == 1 {
+                        let mut who = if n == 1 {
                             "A script is connected".to_owned()
                         } else {
                             format!("{n} scripts are connected")
                         };
+                        // A step open is told, so that one a script or assistant forgot is seen.
+                        let steps = server.open_steps();
+                        if !steps.is_empty() {
+                            let names: Vec<String> = steps.iter().map(|s| format!("\u{201c}{s}\u{201d}")).collect();
+                            who += &format!(", in step {}", names.join(", "));
+                        }
                         ui.label(
                             RichText::new(format!("{}  {who}", crate::icons::INFO)).color(self.st.palette.strong_text),
                         );

@@ -139,10 +139,13 @@ pub struct DocState {
     pub notice: Option<String>,
     /// Whether the user has been told that history states are being dropped.
     told_dropped: bool,
-    /// The script run (by number) a call being carried out is from, if one is.
-    pub(crate) script: Option<u64>,
-    /// The states each script run going on has made, joined into one when it ends.
+    /// The groups (by number) a call being carried out is in: the script run its
+    /// connection is, and the step it is in, if they are.
+    pub(crate) groups: Vec<u64>,
+    /// The states each group going on has made, joined into one when it ends.
     made_by: HashMap<u64, HashSet<NodeId>>,
+    /// The states steps made (each one step's), which the run they are in keeps apart.
+    named: HashSet<NodeId>,
 }
 
 impl DocState {
@@ -169,8 +172,9 @@ impl DocState {
             crop_drag: None,
             notice: None,
             told_dropped: false,
-            script: None,
+            groups: Vec::new(),
             made_by: HashMap::new(),
+            named: HashSet::new(),
         }
     }
 
@@ -332,21 +336,25 @@ impl DocState {
         let mut d = before.clone();
         f(&mut d, &mut self.ids)?;
         let id = self.history.commit(d, label);
-        if let Some(run) = self.script {
-            self.made_by.entry(run).or_default().insert(id);
+        for &group in &self.groups {
+            self.made_by.entry(group).or_default().insert(id);
         }
         self.revision += 1;
         self.fix_active_layer(Some(&before));
         Ok(())
     }
 
-    /// Joins the states group `run` (a script run, or a step of one) made one after another
-    /// into one, labeled `label` (one alone too, if `name_lone`: see [`History::join`]), now
-    /// that it has ended.
-    pub fn group_ended(&mut self, run: u64, label: &str, name_lone: bool) {
-        if let Some(made) = self.made_by.remove(&run) {
-            self.history.join(&made, label, name_lone);
+    /// Joins the states group `group` made one after another into one, labeled `label` (see
+    /// [`History::join`]), now that it has ended. What a `step` made is kept apart from the
+    /// run it is in, when that ends.
+    pub fn group_ended(&mut self, group: u64, label: &str, step: bool) {
+        let Some(made) = self.made_by.remove(&group) else { return };
+        self.history.join(&made, label, &self.named);
+        if step {
+            self.named.extend(made);
         }
+        let history = &self.history;
+        self.named.retain(|&id| history.contains(id));
     }
 
     /// Changes the pending edit (starting one labeled `label` if none is in progress), for

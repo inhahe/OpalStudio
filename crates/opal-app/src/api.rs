@@ -385,6 +385,18 @@ const CONNECTION: &[(&str, &str, &[Param])] = &[
     ("end_step", "Ends the step begin_step began (the outermost, if they are inside one another).", &[]),
 ];
 
+/// The role of method `name`, if there is one by that name.
+pub fn role_of(name: &str) -> Option<Role> {
+    methods().iter().find(|m| m.name == name).map(|m| m.role)
+}
+
+/// Whether `given` are arguments method `name` takes (as every call's are checked): why
+/// not, if they are not.
+pub fn check_args(name: &str, given: &Map<String, Value>) -> Result<(), String> {
+    let method = methods().iter().find(|m| m.name == name).ok_or_else(|| format!("There is no method \"{name}\"."))?;
+    Args::check(method.params, given).map(|_| ()).map_err(|why| format!("{name}: {why}."))
+}
+
 /// What a method's role is called in its description.
 fn role_name(role: Role) -> &'static str {
     match role {
@@ -608,7 +620,7 @@ fn pixels_go_into(doc: &opal_core::document::Document, target: LayerId) -> Resul
 
 /// Puts `content` into image `id` (made ready by `put_pixels`), at `rect` of the canvas: as
 /// a new layer above the active one (called `name`), or into layer `target`, replacing its
-/// pixels there; as made by script run `script`, if the call was. The layer's id.
+/// pixels there; as made in `groups`, the call's (a script run, a step). The layer's id.
 fn put_pixels_now(
     st: &mut AppState,
     id: DocId,
@@ -616,11 +628,11 @@ fn put_pixels_now(
     rect: IRect,
     content: Content,
     name: Option<String>,
-    script: Option<u64>,
+    groups: Vec<u64>,
 ) -> Result<Value, String> {
     let d = st.doc_mut(id).ok_or("The image was closed before the pixels could be put in.")?;
-    // The call's run, as when it was carried out (its changes join the run's).
-    let before = std::mem::replace(&mut d.script, script);
+    // The call's groups, as when it was carried out (its changes join theirs).
+    let before = std::mem::replace(&mut d.groups, groups);
     let into = (|| match (target, content) {
         (None, Content::Image(image)) => {
             let pos = AppState::above_active(d);
@@ -659,7 +671,7 @@ fn put_pixels_now(
         }
         _ => unreachable!("an image is made for a new layer, pixels for one there"),
     })();
-    d.script = before;
+    d.groups = before;
     into.map(|layer| json!({ "layer": layer.0 }))
 }
 
@@ -865,6 +877,9 @@ impl AppState {
         let Some(method) = methods().iter().find(|m| m.name == name) else {
             return Reply::Now(Err(format!("There is no method \"{name}\".")));
         };
+        if method.role == Role::Connection {
+            return Reply::Now(Err(format!("{name} is about a connection to the editor, which answers it.")));
+        }
         let args = match Args::check(method.params, given) {
             Ok(args) => args,
             Err(why) => return Reply::Now(Err(format!("{name}: {why}."))),
@@ -920,33 +935,33 @@ impl AppState {
         reply
     }
 
-    /// [`call`](Self::call), made by script run `script` if it is one (its changes to each
-    /// image are joined into one history state when the run ends: see
-    /// [`script_ended`](Self::script_ended)), and `heard` unless it is a notification. A
-    /// file opened by a notification (one handed over by an editor started to open it)
-    /// brings the window to the front.
+    /// [`call`](Self::call), made in `groups` (the script run the connection is, the step
+    /// the call is in: what it changes in each image is joined into one history state when
+    /// each ends: see [`group_ended`](Self::group_ended)), and `heard` unless it is a
+    /// notification. A file opened by a notification (one handed over by an editor started
+    /// to open it) brings the window to the front.
     pub fn call_from(
         &mut self,
-        script: Option<u64>,
+        groups: &[u64],
         heard: bool,
         name: &str,
         given: &Map<String, Value>,
         ctx: &egui::Context,
     ) -> Reply {
-        self.docs.iter_mut().for_each(|d| d.script = script);
+        self.docs.iter_mut().for_each(|d| d.groups = groups.to_vec());
         let reply = self.call_heard(heard, name, given, ctx);
-        self.docs.iter_mut().for_each(|d| d.script = None);
+        self.docs.iter_mut().for_each(|d| d.groups.clear());
         if !heard && name == "open" {
             self.raise_window = true;
         }
         reply
     }
 
-    /// Group `run` (a script run, or a step a client began) has ended: in each image, the
-    /// states it made one after another become one, labeled `label` (one alone too, if
-    /// `name_lone`), so that one undo takes back what it did.
-    pub fn group_ended(&mut self, run: u64, label: &str, name_lone: bool) {
-        self.docs.iter_mut().for_each(|d| d.group_ended(run, label, name_lone));
+    /// Group `group` (a script run, or a step a client began: `step`) has ended: in each
+    /// image, the states it made one after another become one, labeled `label`, so that one
+    /// undo takes back what it did.
+    pub fn group_ended(&mut self, group: u64, label: &str, step: bool) {
+        self.docs.iter_mut().for_each(|d| d.group_ended(group, label, step));
     }
 
     /// Whether scripts' calls wait now: while the user has a dialog open, holds a button
@@ -985,7 +1000,6 @@ impl AppState {
                 Ok(history_json(d))
             }
             "methods" => Ok(describe()),
-            "begin_step" | "end_step" => Err(format!("{name} is about a connection to the editor, which answers it.")),
             "release_pixels" => {
                 // Whether or not it is still kept (it goes by itself after a while).
                 self.shared_out.remove(args.text("shm").expect("required"));
@@ -1354,7 +1368,7 @@ impl AppState {
         let (x0, y0) = (canvas.x0 + args.int("x"), canvas.y0 + args.int("y"));
         let rect = IRect::new(x0, y0, x0 + width, y0 + height);
         let name = args.text("name").map(str::to_owned);
-        let script = d.script;
+        let groups = d.groups.clone();
         let (w, h) = (width as u32, height as u32);
         self.off_thread("put", ctx, move || {
             // What they are read into, and the tiles they become.
@@ -1386,7 +1400,7 @@ impl AppState {
                     made(&raw)
                 }
             };
-            let finish: Finish = Box::new(move |st| put_pixels_now(st, id, target, rect, content, name, script));
+            let finish: Finish = Box::new(move |st| put_pixels_now(st, id, target, rect, content, name, groups));
             Ok(Made { done: Done::Finish(finish), keep: None })
         })
     }
@@ -1489,7 +1503,7 @@ fn history_json(d: &crate::doc::DocState) -> Value {
                 "time": time,
                 "parent": node.parent.map(id),
                 "children": node.children.iter().copied().map(id).collect::<Vec<_>>(),
-                "redo": node.last_child.or_else(|| node.children.last().copied()).map(id),
+                "redo": h.redo_target_of(n).map(id),
             })
         })
         .collect();
@@ -1746,13 +1760,11 @@ mod tests {
              then a script run, and once it closes, what it changed in each image one change after another\n\
              becomes one history state, `Script: <name>`. Without it, each call is a state of its own.\n",
         );
-        for kind in ["command", "query", "connection"] {
-            out += match kind {
-                "command" => "\n## Commands\n",
-                "query" => "\n## Queries\n",
-                _ => "\n## The connection\n",
-            };
-            for m in describe().as_array().unwrap().iter().filter(|m| m["kind"] == json!(kind)) {
+        for (role, heading) in
+            [(Role::Command, "Commands"), (Role::Query, "Queries"), (Role::Connection, "The connection")]
+        {
+            out += &format!("\n## {heading}\n");
+            for m in describe().as_array().unwrap().iter().filter(|m| m["kind"] == json!(role_name(role))) {
                 out += &format!("\n### `{}`\n\n{}\n", m["name"].as_str().unwrap(), m["help"].as_str().unwrap());
                 let params = m["params"].as_array().unwrap();
                 if !params.is_empty() {
@@ -2107,7 +2119,7 @@ mod tests {
         let missing = std::env::temp_dir().join("opal-api-no-such-file.png");
         let given = args(json!({ "path": missing.display().to_string() }));
         // A notification: no one hears its answer, so the user is told, as by a dialog.
-        st.call_from(None, false, "open", &given, &egui::Context::default());
+        st.call_from(&[], false, "open", &given, &egui::Context::default());
         assert!(st.messages.iter().any(|m| m.kind == MessageKind::Error), "what opening it said was lost");
         assert!(st.raise_window);
     }
