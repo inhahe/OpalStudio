@@ -33,6 +33,7 @@ mod projector;
 mod ribbon;
 mod server;
 mod settings;
+mod shared_memory;
 mod state;
 mod theme;
 mod thumbs;

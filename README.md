@@ -86,7 +86,9 @@ cargo test --workspace                     # all tests, interface tests included
 
   Most commands can be called this way, with their settings as named parameters, as can
   the queries `documents`, `layers` and `image` (what an image looks like, as a PNG);
-  `python/API.md` lists them all. What a script changes in an image becomes one history
+  `python/API.md` lists them all. `editor.pixels()` gives an image's pixels, or a layer's,
+  as a numpy array, and `editor.put_pixels(array)` puts some in, as a new layer or into a
+  layer; on Windows they pass through shared memory, so even large images move at once. What a script changes in an image becomes one history
   state, named after it, when it ends, so one undo takes it back (from an interactive
   Python session, or with `connect(script=None)`, each call is a step of its own). Only
   programs of the user's own can connect (through a token in the settings folder), and the

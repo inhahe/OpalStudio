@@ -148,8 +148,12 @@ pub struct AppState {
     pub next_answer: u64,
     /// The answers to such calls whose writes have finished, by number, until taken.
     pub answered: Vec<(u64, Result<serde_json::Value, String>)>,
-    /// The images being made for such calls (`image`), by number: where each will come.
-    pub images_made: Vec<(u64, std::sync::mpsc::Receiver<Result<serde_json::Value, String>>)>,
+    /// The answers being made off this thread for such calls (`image`, `pixels`), by
+    /// number: where each will come.
+    pub made: Vec<(u64, std::sync::mpsc::Receiver<Result<crate::api::Made, String>>)>,
+    /// The shared memory holding pixels a call asked for, by name, until the caller releases
+    /// it, and since when.
+    pub shared_out: HashMap<String, (crate::shared_memory::Mapping, std::time::Instant)>,
     /// Whether the window should come to the front (a file was handed to it to open).
     pub raise_window: bool,
     /// Scripts run from the editor, and what they printed.
@@ -257,7 +261,8 @@ impl AppState {
             messages: VecDeque::new(),
             next_answer: 0,
             answered: Vec::new(),
-            images_made: Vec::new(),
+            made: Vec::new(),
+            shared_out: HashMap::new(),
             raise_window: false,
             console: crate::console::Console::default(),
             scripts_file: None,

@@ -77,8 +77,9 @@ impl Caller for Pipe {
     }
 }
 
-/// The tools: each method of the API but `methods` (which the tool list is), with a JSON
-/// Schema of its parameters. Made once.
+/// The tools: each method of the API but those clients give in their own way
+/// ([`crate::api::OWN_WAY`]: `methods`, which the tool list is, and pixels, which an
+/// assistant sees through `image`), with a JSON Schema of its parameters. Made once.
 pub fn tools() -> &'static Value {
     static TOOLS: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
     TOOLS.get_or_init(made_tools)
@@ -89,7 +90,7 @@ fn made_tools() -> Value {
         .as_array()
         .expect("a list")
         .iter()
-        .filter(|m| m["name"] != json!("methods"))
+        .filter(|m| !crate::api::OWN_WAY.contains(&m["name"].as_str().expect("named")))
         .map(|m| {
             let mut properties = Map::new();
             let mut required = Vec::new();

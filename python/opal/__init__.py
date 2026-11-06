@@ -17,6 +17,13 @@ lists them all, ``opal/__init__.pyi`` describes them for editors and type checke
 ``API.md`` documents them. A command that fails raises :class:`OpalError` with the
 editor's reason.
 
+``editor.pixels()`` gives an image's pixels (or a layer's) as a numpy array, and
+``editor.put_pixels(array)`` puts some in, as a new layer or into a layer's pixels; on
+Windows they pass through shared memory rather than the connection. ::
+
+    sky = editor.pixels(format="linear")          # height × width × 4, float32
+    editor.put_pixels(sky[::-1], name="Upside down")
+
 What a script changes in an image becomes one history state when it ends (or
 disconnects), so that one undo takes back the whole run; in an interactive session each
 call is a step of its own.
@@ -27,6 +34,7 @@ user's settings folder; only the user's own programs can read it.
 
 from __future__ import annotations
 
+import base64
 import itertools
 import json
 import operator
@@ -77,6 +85,19 @@ def _running_script() -> str | None:
 
 #: ``connect``'s default script name: the running script's, found when it connects.
 _RUNNING: Any = object()
+
+
+def _numpy() -> Any:
+    """numpy, which pixels come as."""
+    try:
+        import numpy
+    except ImportError:
+        raise OpalError("Pixels come as numpy arrays: install numpy (pip install numpy).") from None
+    return numpy
+
+
+#: The numpy type of each pixel format's values (little-endian, as the editor gives them).
+_DTYPES = {"srgb8": "u1", "srgb16": "<u2", "linear": "<f4"}
 
 
 def _plain(value: Any) -> Any:
@@ -183,6 +204,87 @@ class Editor:
     def methods(self) -> list[dict]:
         """Every method, with its help and parameters (as the editor describes them)."""
         return list(self._methods.values())
+
+    def pixels(
+        self,
+        document: int | None = None,
+        layer: int | None = None,
+        x: int = 0,
+        y: int = 0,
+        width: int | None = None,
+        height: int | None = None,
+        format: str = "srgb8",
+    ) -> Any:
+        """The pixels of an image as shown (or of one ``layer`` alone, at full opacity) in a
+        rectangle of its canvas (the whole canvas by default; ``x`` and ``y`` from its top
+        left): a numpy array of height × width × 4 (red, green, blue, alpha, not
+        premultiplied). ``format`` is ``"srgb8"`` (uint8), ``"srgb16"`` (uint16) or
+        ``"linear"`` (float32, in linear light). On Windows they come through shared memory,
+        without being copied through the connection."""
+        np = _numpy()
+        given = dict(document=document, layer=layer, width=width, height=height)
+        params = {k: v for k, v in given.items() if v is not None}
+        shared = sys.platform == "win32"
+        got = self.call("pixels", x=x, y=y, format=format, shared=shared, **params)
+        dtype = _DTYPES[got["format"]]
+        shape = (got["height"], got["width"], 4)
+        if "shm" in got:
+            import mmap
+
+            try:
+                # Opened before it is released: the editor's goes, this one stays.
+                view = mmap.mmap(-1, got["bytes"], tagname=got["shm"])
+            finally:
+                self.call("release_pixels", shm=got["shm"])
+            return np.frombuffer(view, dtype=dtype).reshape(shape)
+        return np.frombuffer(base64.b64decode(got["data"]), dtype=dtype).reshape(shape).copy()
+
+    def put_pixels(
+        self,
+        pixels: Any,
+        document: int | None = None,
+        layer: int | None = None,
+        x: int = 0,
+        y: int = 0,
+        name: str | None = None,
+    ) -> int:
+        """Puts ``pixels`` into an image at ``x``, ``y`` of its canvas: as a new layer above
+        the active one (called ``name``), or into the pixels of ``layer``, which they replace
+        there. ``pixels`` is height × width × 4 (red, green, blue, alpha, not premultiplied)
+        or × 3 (opaque): uint8 or uint16 for sRGB values, floats for linear light. Returns
+        the layer's id."""
+        np = _numpy()
+        a = np.asarray(pixels)
+        if a.ndim != 3 or a.shape[2] not in (3, 4):
+            raise OpalError(f"Pixels are height × width × 4 (or 3), not {' × '.join(map(str, a.shape))}.")
+        if a.dtype == np.uint8:
+            format, dtype, opaque = "srgb8", np.uint8, 255
+        elif a.dtype == np.uint16:
+            format, dtype, opaque = "srgb16", np.uint16, 65535
+        elif np.issubdtype(a.dtype, np.floating):
+            format, dtype, opaque = "linear", np.float32, 1.0
+        else:
+            raise OpalError(f"Pixels are uint8, uint16 or floats, not {a.dtype}.")
+        if a.shape[2] == 3:
+            a = np.concatenate([a, np.full(a.shape[:2] + (1,), opaque, dtype=a.dtype)], axis=2)
+        a = np.ascontiguousarray(a, dtype=np.dtype(dtype).newbyteorder("<"))
+        height, width = a.shape[:2]
+        params = dict(width=width, height=height, x=x, y=y, format=format)
+        params.update({k: v for k, v in dict(document=document, layer=layer, name=name).items() if v is not None})
+        if sys.platform == "win32":
+            import mmap
+            import secrets
+
+            tag = f"Local\\opal-pixels-in-{os.getpid()}-{secrets.token_hex(12)}"
+            with mmap.mmap(-1, a.nbytes, tagname=tag) as view:
+                target = np.frombuffer(view, dtype=a.dtype).reshape(a.shape)
+                target[...] = a
+                # The view must go before the memory can be closed.
+                del target
+                got = self.call("put_pixels", shm=tag, **params)
+        else:
+            got = self.call("put_pixels", data=base64.b64encode(a.tobytes()).decode("ascii"), **params)
+        return got["layer"]
 
     def __getattr__(self, name: str):
         methods = self.__dict__.get("_methods", {})

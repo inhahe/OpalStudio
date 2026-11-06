@@ -1026,8 +1026,26 @@ server. Both rest on one language-neutral API.
   with a kind (a number in a range, one of some words, text that is not blank, a path, an
   image's or layers' ids), and either a default or what the editor holds now (`document`:
   the active image; `layers`: the selected ones); `methods` lists them all, which is what
-  the stubs and tools are made from. Queries so far: `documents`, `layers`, `image` (made
-  in memory on a thread of its own, out of the user's sight, unlike an export).
+  the stubs and tools are made from. Queries so far: `documents`, `layers`, `image` (of
+  the image as shown or of one layer alone, made in memory on a thread of its own, out of
+  the user's sight, unlike an export), and `pixels`.
+- **Pixels.** `pixels` reads a rectangle of the canvas (the whole of it by default), of the
+  image as shown or of one layer alone (as if shown, at full opacity), as `srgb8` (bytes),
+  `srgb16` (16-bit values) or `linear` (32-bit floats in linear light), always red, green,
+  blue and alpha, straight, little-endian, row by row. It composites and converts on a
+  thread of its own, into a named section of shared memory (the user's own, named
+  `Local\opal-pixels-<pid>-<random>`) that the answer names, kept until the caller releases it
+  (`release_pixels`) or for a minute; or, with `shared` false (and on systems without
+  shared memory yet), into the answer in base64. `put_pixels` takes them back the same two
+  ways (shared memory the caller made, opened for reading and checked to hold what is
+  said, or base64, within a request's 1 MB): as a new layer above the active one, placed at
+  `x`, `y` of the canvas, or into a pixel layer, replacing its pixels there (refused for a
+  locked layer or one that is not of pixels alone), as one history state. The Python
+  package wraps both as numpy arrays (`editor.pixels()`, `editor.put_pixels(array)`, the
+  format from the array's type: `uint8`, `uint16` or floats; three channels taken as
+  opaque), opening the memory before releasing it; these and `release_pixels` are left out
+  of the generated stubs (written by hand) and of the MCP tools (an assistant sees an
+  image through `image`).
 - **Carrying out a call.** Between frames, as the interface would, without a dialog (a
   frame goes on with the calls that follow one another for a few milliseconds, looking for
   the next rather than sleeping, since a sleep shorter than the timer's tick lasts the

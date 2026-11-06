@@ -49,7 +49,7 @@ pub(crate) const CLIPPED: &str = "Part of an image reached so far past the canva
 
 impl AppState {
     /// Where a new layer goes: just above the active layer, in its group.
-    fn above_active(d: &DocState) -> Position {
+    pub(crate) fn above_active(d: &DocState) -> Position {
         d.active_layer()
             .and_then(|a| d.doc().position(a))
             .map(|p| Position { parent: p.parent, index: p.index + 1 })

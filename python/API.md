@@ -342,6 +342,23 @@ Give the active layer a new name.
 | `layer` | layer | The layer, by id. Default: the active layer. |
 | `name` (required) | text | Its new name. |
 
+### `put_pixels`
+
+Puts pixels into an image, at a place on its canvas: as a new layer above the active one, or into a pixel layer, replacing its pixels there. They come in shared memory the caller made, or in base64.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `layer` | layer | A pixel layer, by id, whose pixels they replace there. Default: a new layer, above the active one. |
+| `x` | int | Where their left edge goes, in pixels from the canvas's. From -300000 to 600000. Default: 0. |
+| `y` | int | Where their top edge goes, in pixels from the canvas's. From -300000 to 600000. Default: 0. |
+| `width` (required) | int | How many pixels across. From 1 to 300000. |
+| `height` (required) | int | How many pixels down. From 1 to 300000. |
+| `format` | `srgb8`, `srgb16`, `linear` | How each pixel is given, row by row from the top left, red, green, blue and alpha (straight, not premultiplied): srgb8 as bytes in sRGB; srgb16 as 16-bit values in sRGB, little-endian; linear as 32-bit floats in linear light, little-endian. Default: "srgb8". |
+| `shm` | text | The shared memory holding them, by name: made by the caller, with width × height pixels. Default: none: they are in data. |
+| `data` | text | The pixels in base64, if not in shared memory (a request is at most 1 MB). Default: none: they are in shm. |
+| `name` | text | The new layer's name. Default: a numbered one. |
+
 ## Queries
 
 ### `documents`
@@ -358,12 +375,36 @@ An image's layers, top first: for each, its id, name, kind, whether it is shown 
 
 ### `image`
 
-What an image shows, as a PNG, scaled down to fit a size (never enlarged): its bytes in base64, with its width and height.
+What an image shows (or one of its layers alone), as a PNG, scaled down to fit a size (never enlarged): its bytes in base64, with its width and height.
 
 | Parameter | Kind | |
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
+| `layer` | layer | One layer alone, by id: as if shown, at full opacity. Default: the image as shown, all its visible layers together. |
 | `max_side` | int | The most pixels it may be across or down. From 16 to 8192. Default: 1024. |
+
+### `pixels`
+
+The pixels of an image, as shown, or of one layer alone, within a rectangle of the canvas: in shared memory that the answer names (to be released once opened), or in the answer, in base64.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `layer` | layer | One layer alone, by id: as if shown, at full opacity. Default: the image as shown, all its visible layers together. |
+| `x` | int | The rectangle's left edge, in pixels from the canvas's. From -300000 to 600000. Default: 0. |
+| `y` | int | The rectangle's top edge, in pixels from the canvas's. From -300000 to 600000. Default: 0. |
+| `width` | int | The rectangle's width, in pixels. From 1 to 300000. Default: the canvas's. |
+| `height` | int | The rectangle's height, in pixels. From 1 to 300000. Default: the canvas's. |
+| `format` | `srgb8`, `srgb16`, `linear` | How each pixel is given, row by row from the top left, red, green, blue and alpha (straight, not premultiplied): srgb8 as bytes in sRGB; srgb16 as 16-bit values in sRGB, little-endian; linear as 32-bit floats in linear light, little-endian. Default: "srgb8". |
+| `shared` | bool | In shared memory (on Windows), which the answer names as shm, rather than in the answer. Default: true. |
+
+### `release_pixels`
+
+Lets go of the shared memory pixels gave, once it has been opened (it goes by itself a minute after).
+
+| Parameter | Kind | |
+|---|---|---|
+| `shm` (required) | text | The shared memory, by the name pixels gave it. |
 
 ### `methods`
 

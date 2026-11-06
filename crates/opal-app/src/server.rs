@@ -1049,7 +1049,8 @@ class Count:
 with opal.connect() as editor:
     # No method of the editor's is hidden by the client's own, or is a keyword.
     names = [m["name"] for m in editor.methods()]
-    assert not [n for n in names if n != "methods" and hasattr(opal.Editor, n)], names
+    own_way = {"methods", "pixels", "put_pixels", "release_pixels"}
+    assert not [n for n in names if n not in own_way and hasattr(opal.Editor, n)], names
     assert not [n for n in names if keyword.iskeyword(n)], names
     doc = editor.new(width=Count(), height=200)["document"]
     sky = editor.new_layer(name="Sky")["layer"]
@@ -1077,6 +1078,26 @@ with opal.connect() as editor:
     bad.unlink()
     exported = editor.export(path=pathlib.Path(sys.argv[1]).name)
     editor.close(document=doc, discard=True)
+    # Pixels, through shared memory, as numpy arrays.
+    import numpy as np
+    pic = editor.new(width=4, height=3, background="transparent")["document"]
+    red = np.zeros((3, 4, 4), dtype=np.uint8)
+    red[..., 0] = 255
+    red[..., 3] = 255
+    red[0, 0] = [0, 0, 255, 128]
+    put = editor.put_pixels(red, name="Red")
+    back = editor.pixels()
+    assert back.shape == (3, 4, 4) and (back == red).all(), back
+    linear = editor.pixels(layer=put, format="linear")
+    assert linear.dtype == np.float32 and abs(linear[1, 1, 0] - 1) < 1e-3 and abs(linear[0, 0, 3] - 128 / 255) < 1e-2
+    sixteen = editor.pixels(format="srgb16")
+    assert sixteen.dtype == np.uint16 and sixteen[1, 1, 0] == 65535 and sixteen[1, 1, 1] == 0, sixteen[1, 1]
+    # Into the layer, replacing its pixels there; and opaque ones, from floats.
+    editor.put_pixels(np.array([[[0, 255, 0, 255]]], dtype=np.uint8), layer=put, x=2, y=1)
+    assert (editor.pixels(x=2, y=1, width=1, height=1) == [0, 255, 0, 255]).all()
+    editor.put_pixels(np.ones((1, 2, 3)), layer=put, x=0, y=2)
+    assert (editor.pixels(x=0, y=2, width=2, height=1) == 255).all()
+    editor.close(document=pic, discard=True)
     left = editor.documents()
     # Changes to an image the script leaves open, one history state once it ends.
     editor.new(width=8, height=8)
