@@ -529,8 +529,10 @@ Editable content does not mean recomputing everything on each change.
 - **Previews first:** while something is dragged (the transform box, the Move tool), the
   tiles it changes are drawn at the resolution on screen, so the drag costs what the
   screen holds rather than what the image does. Pixel layers are reduced only under those
-  tiles, for the drag's length; image objects are drawn through their transform with their
-  own resampling. Tiles the drag leaves alone stay exact, and the full-resolution result
+  tiles, for the drag's length, and where a layer repeats one tile its reduced tile is that
+  tile halved, made once a level, with nothing beneath it reduced (a drag over a
+  300,000-pixel white canvas shown whole: 23 ms a frame); image objects are drawn through
+  their transform with their own resampling. Tiles the drag leaves alone stay exact, and the full-resolution result
   follows on release. A tile over a uniform block is made exactly even during a drag,
   costing no more than a preview. A 24-megapixel image dragged at 25% takes about 13 ms a frame this
   way, against about 90 ms. Heavy effects will preview the same way while their settings

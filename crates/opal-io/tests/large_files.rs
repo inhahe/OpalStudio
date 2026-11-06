@@ -186,6 +186,15 @@ fn huge_white_canvas() {
     measure("Shown whole after a layer is added", || {
         p.update(&d.layers, 9, &whole, Quality::Exact);
     });
+    // Dragged: the tile over it drawn at the level, the white beneath it reduced.
+    if let opal_core::document::LayerContent::Objects(objects) = &mut d.layer_mut(d.layers[1].id).unwrap().content
+        && let opal_core::document::ObjectKind::Pixels(dot) = &mut objects[0].kind
+    {
+        dot.offset = [5000, 3000];
+    }
+    measure("Shown whole while the layer is dragged", || {
+        p.update(&d.layers, 9, &whole, Quality::Preview);
+    });
     let mut cost = 0;
     measure("Cost of merging, found", || cost = composite_cost(&d.layers, None));
     eprintln!("  merging makes {} MB", cost >> 20);

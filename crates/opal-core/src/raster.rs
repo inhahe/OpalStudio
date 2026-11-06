@@ -249,6 +249,16 @@ impl RasterImage {
         self.runs().all_rows(r, |s| s != Span::Mixed && *first.get_or_insert(s) == s)
     }
 
+    /// The tile under every place of `area` (pixels), `Some(None)` if none is under any, or
+    /// `None` if they are not alike (see [`alike_under`](Self::alike_under)).
+    pub fn alike_tile_under(&self, area: &IRect) -> Option<Option<&Arc<Tile>>> {
+        if !self.alike_under(area) {
+            return None;
+        }
+        let [x0, y0, x1, y1] = tiles_under(area);
+        Some(if x1 > x0 && y1 > y0 { self.tiles.get(&TileCoord::new(x0, y0)) } else { None })
+    }
+
     /// Whether any tile lies under `area` (pixels). A large area is asked of the runs, as
     /// for [`alike_under`](Self::alike_under).
     pub fn any_under(&self, area: &IRect) -> bool {

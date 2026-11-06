@@ -137,8 +137,9 @@ fn at_level(o: &Object, level: u32) -> (&Arc<RasterImage>, Affine, Sampling) {
 struct Reduced {
     tiles: HashMap<(usize, u32, TileCoord), Option<Arc<Tile>>>,
     held: HashMap<usize, Arc<RasterImage>>,
-    /// For each image, by level: the tiles with some of the image under them.
-    occupied: HashMap<usize, Vec<HashSet<TileCoord>>>,
+    /// For each stored tile repeated over an area (by address): it halved from four copies
+    /// of itself, by level, as far as asked.
+    halved: HashMap<usize, Vec<Option<Arc<Tile>>>>,
 }
 
 /// Tile `c` of `image` reduced to `level`, from `tiles` (a [`Reduced`]'s), if it was made
@@ -165,30 +166,38 @@ impl Reduced {
     }
 
     /// Makes the level-`level` tiles `need` of `image`, and the finer ones they are made
-    /// from, each from the four below it. Only tiles with some of the image under them are
-    /// made; the rest of `need` is recorded as empty.
+    /// from, each from the four below it; from the top down, a tile over an area where the
+    /// image has one stored tile repeated (or none) is that tile halved to its level, made
+    /// once a level, with nothing made beneath it. So a reduced copy of a large uniform
+    /// area costs a tile a level, not every tile beneath (as an exact view's uniform blocks).
     fn make(&mut self, image: &Arc<RasterImage>, level: u32, need: HashSet<TileCoord>) {
         let id = Arc::as_ptr(image) as usize;
-        let Reduced { tiles, held, occupied } = self;
+        let Reduced { tiles, held, halved } = self;
         held.entry(id).or_insert_with(|| image.clone());
-        let occupied = occupied.entry(id).or_insert_with(|| vec![image.tiles().map(|(c, _)| c).collect()]);
-        while occupied.len() <= level as usize {
-            let up = occupied.last().expect("level 0").iter().map(|c| c.parent()).collect();
-            occupied.push(up);
-        }
-        // What each level needs, from the top down.
-        let (full, empty): (HashSet<TileCoord>, HashSet<TileCoord>) =
-            need.into_iter().partition(|c| occupied[level as usize].contains(c));
-        tiles.extend(empty.into_iter().map(|c| ((id, level, c), None)));
         let mut wanted = vec![HashSet::new(); level as usize + 1];
-        wanted[level as usize] = full;
-        for l in (2..=level).rev() {
-            let below: HashSet<TileCoord> = wanted[l as usize]
-                .iter()
-                .flat_map(|c| c.children())
-                .filter(|k| occupied[l as usize - 1].contains(k) && !tiles.contains_key(&(id, l - 1, *k)))
-                .collect();
-            wanted[l as usize - 1] = below;
+        wanted[level as usize] = need;
+        for l in (1..=level).rev() {
+            let mut mixed = HashSet::new();
+            for c in std::mem::take(&mut wanted[l as usize]) {
+                if tiles.contains_key(&(id, l, c)) {
+                    continue;
+                }
+                match image.alike_tile_under(&c.rect(l)) {
+                    Some(one) => {
+                        let tile = one.and_then(|t| halved_to(halved, t, l));
+                        tiles.insert((id, l, c), tile);
+                    }
+                    None => {
+                        mixed.insert(c);
+                    }
+                }
+            }
+            // Below, only where some of the image lies (the rest reads as nothing).
+            if l > 1 {
+                wanted[l as usize - 1] =
+                    mixed.iter().flat_map(|c| c.children()).filter(|k| image.any_under(&k.rect(l - 1))).collect();
+            }
+            wanted[l as usize] = mixed;
         }
         // Made from the bottom up, each level in parallel.
         for l in 1..=level {
@@ -202,6 +211,17 @@ impl Reduced {
             tiles.extend(made.into_iter().map(|(c, t)| ((id, l, c), t)));
         }
     }
+}
+
+/// `tile` halved from four copies of itself `level` times, as reducing an area of it
+/// repeated makes it; each level's made once, kept in `halved`.
+fn halved_to(halved: &mut HashMap<usize, Vec<Option<Arc<Tile>>>>, tile: &Arc<Tile>, level: u32) -> Option<Arc<Tile>> {
+    let chain = halved.entry(Arc::as_ptr(tile) as usize).or_insert_with(|| vec![Some(tile.clone())]);
+    while chain.len() <= level as usize {
+        let below = chain.last().expect("the tile itself").as_deref();
+        chain.push(below.and_then(|t| downsample([Some(t); 4])).map(Arc::new));
+    }
+    chain[level as usize].clone()
 }
 
 /// The tiles of pixel object `p`'s image, reduced to level `level`, that tile `c` of that
@@ -2606,6 +2626,46 @@ mod tests {
         for (c, t) in &want {
             assert!(*c == over_dot || **t == *preview[c], "block {c:?} differs from one drawn exactly");
         }
+    }
+
+    #[test]
+    fn a_preview_over_a_uniform_layer_reduces_it_without_the_tiles_beneath() {
+        use crate::document::{ImageObject, Object};
+        // A white canvas of one tile shared, or of copies of it: the second reduces four
+        // tiles at a time, as a layer of different tiles would; the first halves the one.
+        let scene = |shared_tile: bool| {
+            let mut ids = IdGen::default();
+            let size: i64 = 256 * 8;
+            let mut d = Document::new(size as u32, size as u32);
+            let (mut white, tile) = shared(IRect::from_size(size, size), [1.0, 0.9, 0.8, 1.0]);
+            if !shared_tile {
+                for c in TileCoord::covering(&IRect::from_size(size, size), 0) {
+                    white.set_tile(c, Some(Arc::new((*tile).clone())));
+                }
+            }
+            add(&mut d, &mut ids, white);
+            // An image object, so that the tile over it is drawn at the level.
+            let image = ImageObject {
+                image: Arc::new(shared(IRect::from_size(256, 256), [1.0, 0.0, 0.0, 1.0]).0),
+                frame: IRect::from_size(256, 256),
+                transform: Affine::scale(0.5, 0.5).then(Affine::translate(100.0, 100.0)),
+                sampling: Sampling::default(),
+            };
+            let object = Object { id: ids.object(), kind: ObjectKind::Image(image) };
+            let index = d.layers.len();
+            d.insert(Position { parent: None, index }, Layer::with_objects(ids.layer(), "image", vec![object]))
+                .unwrap();
+            let mut p = Projection::new();
+            let shown = p.update(&d.layers, 3, &IRect::from_size(size, size), Quality::Preview);
+            (shown, p.reduced.tiles.len())
+        };
+        let (one, made) = scene(true);
+        let (copies, made_from_copies) = scene(false);
+        assert_eq!(one.len(), 1);
+        assert!(*one[0].1 == *copies[0].1, "the halved tile shows otherwise than reducing its copies");
+        // The tiles asked for (the level-3 tile and those around it the filter reaches),
+        // and nothing beneath; reducing copies makes every tile beneath.
+        assert_eq!((made, made_from_copies), (9, 9 + 4 + 16));
     }
 
     #[test]
