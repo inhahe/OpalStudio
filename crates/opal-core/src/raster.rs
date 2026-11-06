@@ -301,7 +301,13 @@ impl RasterImage {
         assert_eq!(rgba.len(), w * h, "buffer size");
         let n = TILE_SIZE as usize;
         let coords: Vec<TileCoord> = TileCoord::covering(&IRect::from_size(w as i64, h as i64), 0).collect();
-        let made: Vec<(TileCoord, Tile)> = coords
+        // A tile of one colour is told by its pixels before it is made: made, past the
+        // memory budget, it could be on disk by the time it was looked at.
+        enum Made {
+            Flat([u8; 4]),
+            Own(Tile),
+        }
+        let made: Vec<(TileCoord, Made)> = coords
             .into_par_iter()
             .filter_map(|c| {
                 let r = c.rect(0);
@@ -310,20 +316,21 @@ impl RasterImage {
                     let row = &rgba[y * w + r.x0 as usize..y * w + (r.x1 as usize).min(w)];
                     px[(y - r.y0 as usize) * n..][..row.len()].copy_from_slice(row);
                 }
-                px.iter().any(|p| p[3] != 0).then(|| (c, Tile::from_srgb8(px)))
+                if !px.iter().any(|p| p[3] != 0) {
+                    return None;
+                }
+                let flat = px.iter().all(|p| *p == px[0]);
+                Some((c, if flat { Made::Flat(px[0]) } else { Made::Own(Tile::from_srgb8(px)) }))
             })
             .collect();
         let mut flat: HashMap<[u8; 4], Arc<Tile>> = HashMap::new();
         let mut img = RasterImage::new();
-        for (c, t) in made {
-            let flat_colour = {
-                let r = t.reader();
-                let px = r.srgb8().expect("made at 8 bits");
-                px.iter().all(|p| *p == px[0]).then_some(px[0])
-            };
-            let tile = match flat_colour {
-                Some(colour) => flat.entry(colour).or_insert_with(|| Arc::new(t)).clone(),
-                None => Arc::new(t),
+        for (c, made) in made {
+            let tile = match made {
+                Made::Flat(colour) => {
+                    flat.entry(colour).or_insert_with(|| Arc::new(Tile::from_srgb8(vec![colour; TILE_PIXELS]))).clone()
+                }
+                Made::Own(t) => Arc::new(t),
             };
             img.tiles.insert(c, tile);
         }

@@ -201,6 +201,21 @@ fn what_a_tile_on_disk_holds_is_known_without_bringing_it_back() {
 }
 
 #[test]
+fn an_eight_bit_image_made_past_the_budget_reads_no_tile_back() {
+    with_budget(4, || {
+        let (w, h) = (256 * 8, 256 * 4);
+        // Half its tiles one colour, the rest each of their own.
+        let rgba: Vec<[u8; 4]> =
+            (0..w * h).map(|i| if i % w < w / 2 { [9, 8, 7, 255] } else { [(i % 251) as u8, 4, 3, 255] }).collect();
+        let before = status().read_back;
+        let img = opal_core::raster::RasterImage::from_srgb8(w as u32, h as u32, &rgba);
+        assert_eq!(status().read_back, before, "tiles were read back while being made");
+        assert_eq!(img.tile_count(), 32);
+        assert_eq!(img.read_rect_srgb8(&opal_core::geom::IRect::from_size(w as i64, h as i64)), Some(rgba));
+    });
+}
+
+#[test]
 fn without_a_budget_nothing_goes() {
     let _turn = TURN.lock();
     let tiles: Vec<Arc<Tile>> = (0..20).map(|n| Arc::new(tile(n))).collect();
