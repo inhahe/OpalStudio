@@ -406,6 +406,28 @@ Lets go of the shared memory pixels gave, once it has been opened (it goes by it
 |---|---|---|
 | `shm` (required) | text | The shared memory, by the name pixels gave it. |
 
+### `history`
+
+An image's history, a tree: each state kept (its id, what made it, when, the state before it and those after, the one redo goes to), the state it is in, the one last saved, and how many states were dropped to keep within the memory the history may use.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+
 ### `methods`
 
 Every method of the API, with its parameters: what this list is generated from.
+
+## The connection
+
+### `begin_step`
+
+Begins a step of history: what the calls until end_step change in each image becomes one state, called name, which one undo takes back. A step begun inside another is part of it. One left open ends when the connection does.
+
+| Parameter | Kind | |
+|---|---|---|
+| `name` (required) | text | The step's name, as the History panel shows it. |
+
+### `end_step`
+
+Ends the step begin_step began (the outermost, if they are inside one another).

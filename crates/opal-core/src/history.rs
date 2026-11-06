@@ -273,9 +273,10 @@ impl History {
     /// go. A state joins the next only if all else descending from it is in `made` too (what
     /// the script undid and did otherwise, which goes with it): one something else was made
     /// from stays, and ends its line. A line's last state keeps its identifier (it is the
-    /// same document, given an earlier parent), so whatever refers to it still does.
-    /// Returns how many states went.
-    pub fn join(&mut self, made: &HashSet<NodeId>, label: &str) -> usize {
+    /// same document, given an earlier parent), so whatever refers to it still does. A line
+    /// of one state is left as it is, unless `name_lone` (what made it was named, and so is
+    /// it). Returns how many states went.
+    pub fn join(&mut self, made: &HashSet<NodeId>, label: &str, name_lone: bool) -> usize {
         let path = self.path_from_root(self.current);
         let mut gone = 0;
         let mut first = None;
@@ -290,6 +291,8 @@ impl History {
             if !joins {
                 if start != id {
                     gone += self.join_line(start, id, label);
+                } else if name_lone {
+                    self.node_mut(id).label = label.to_owned();
                 }
                 first = None;
             }
@@ -901,7 +904,7 @@ mod tests {
         scripted(&mut h, &mut made, 1);
         let last = [2, 3].map(|x| scripted(&mut h, &mut made, x))[1];
         let memory = h.memory();
-        assert_eq!(h.join(&made, "Script: go.py"), 2);
+        assert_eq!(h.join(&made, "Script: go.py", false), 2);
         assert_eq!(h.current(), last, "the last state is the same one");
         assert_eq!(h.node(last).parent, Some(before));
         assert_eq!(h.node(before).children, vec![last]);
@@ -921,7 +924,7 @@ mod tests {
         let undone = scripted(&mut h, &mut made, 600);
         h.undo();
         let last = scripted(&mut h, &mut made, 900);
-        assert_eq!(h.join(&made, "Script"), 2);
+        assert_eq!(h.join(&made, "Script", false), 2);
         assert!(!h.contains(first) && !h.contains(undone));
         assert_eq!(h.path_from_root(last).len(), 3);
         assert!(counted_right(&h));
@@ -936,7 +939,7 @@ mod tests {
         let d = painted(h.doc(), 400);
         h.commit(d, "Paint by hand");
         let b = scripted(&mut h, &mut made, 600);
-        assert_eq!(h.join(&made, "Script"), 0);
+        assert_eq!(h.join(&made, "Script", false), 0);
         assert_eq!((h.node(a).label.as_str(), h.node(b).label.as_str()), ("Paint 300", "Paint 600"));
         // The user went back to one of the script's states and made something from it: it
         // stays (what was made from it depends on it), and the script's line starts after it.
@@ -949,7 +952,7 @@ mod tests {
         let d = painted(h.doc(), 400);
         let theirs = h.commit(d, "Paint by hand");
         h.goto(last);
-        assert_eq!(h.join(&made, "Script"), 1);
+        assert_eq!(h.join(&made, "Script", false), 1);
         assert!(!h.contains(gone));
         assert_eq!(h.node(kept).children, vec![last, theirs]);
         assert_eq!(h.node(theirs).parent, Some(kept));
@@ -966,11 +969,22 @@ mod tests {
         // script's first state is the root.
         h.set_budget(0);
         assert_eq!(h.root(), first);
-        assert_eq!(h.join(&made, "Script"), 1);
+        assert_eq!(h.join(&made, "Script", false), 1);
         assert_eq!(h.root(), last);
         assert!(!h.can_undo());
         assert_eq!(h.nodes().map(|(id, _)| id).collect::<Vec<_>>(), [last]);
         assert!(counted_right(&h));
+    }
+
+    #[test]
+    fn a_line_of_one_state_is_named_only_if_asked_to_be() {
+        let mut h = painted_history(1);
+        let mut made = HashSet::new();
+        let lone = scripted(&mut h, &mut made, 300);
+        assert_eq!(h.join(&made, "Script", false), 0);
+        assert_eq!(h.node(lone).label, "Paint 300", "a script's one change keeps what it was");
+        assert_eq!(h.join(&made, "Two strokes", true), 0);
+        assert_eq!(h.node(lone).label, "Two strokes", "a named step is called as named");
     }
 
     #[test]
@@ -990,7 +1004,7 @@ mod tests {
             h.undo();
         }
         commit(&mut h, &mut made);
-        assert_eq!(h.join(&made, "Script"), 50_001);
+        assert_eq!(h.join(&made, "Script", false), 50_001);
         assert_eq!(h.nodes().count(), 2);
     }
 

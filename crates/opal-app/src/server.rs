@@ -53,8 +53,9 @@ enum Request {
         heard: bool,
         answer: Sender<Result<Value, String>>,
     },
-    /// Script run `run`, named `name`, has ended: its connection has closed.
-    Ended { run: u64, name: String },
+    /// Group `run` (a script run, its connection closed, or a step, ended) has ended: what
+    /// it made is joined into one state labeled `label` (one alone too, if `name_lone`).
+    Ended { run: u64, label: String, name_lone: bool },
 }
 
 /// Who may connect, and who has. One lock for all of it, so that a disconnect cannot pass a
@@ -385,7 +386,7 @@ impl Server {
             let mut next = self.requests.try_recv().ok();
             while let Some(r) = next {
                 match r {
-                    Request::Ended { run, name } => st.script_ended(run, &name),
+                    Request::Ended { run, label, name_lone } => st.group_ended(run, &label, name_lone),
                     Request::Call { answer, generation: theirs, .. } if theirs != generation => {
                         let _ = answer.send(Err("Disconnected by the user.".to_owned()));
                     }
@@ -590,6 +591,8 @@ fn serve_connection(conn: Stream, shared: &Shared) {
     let mut hello: Option<(u64, bool)> = None;
     // The script run it is, if its hello named a script: its number and the script's name.
     let mut script: Option<(u64, String)> = None;
+    // The step it has begun, if one: its number, its name, and how many begun inside it.
+    let mut step: Option<(u64, String, usize)> = None;
     loop {
         let line = match hello {
             None => read_first_line(&mut reader, &conn),
@@ -622,10 +625,15 @@ fn serve_connection(conn: Stream, shared: &Shared) {
                     (Some(method), Some(_)) if hello.is_some_and(|(_, counted)| !counted) && method != "open" => {
                         Err((NOT_ALLOWED, "This connection only opens files.".to_owned()))
                     }
+                    (Some(method), Some(params)) if method == "begin_step" || method == "end_step" => {
+                        step_answer(shared, &method, &params, &mut step)
+                    }
                     (Some(method), Some(params)) => {
                         let (generation, _) = hello.expect("said hello");
                         let heard = id.is_some();
-                        pass_on(shared, method, params, generation, script.as_ref().map(|s| s.0), heard)
+                        // A call in a step is the step's; out of one, the script run's.
+                        let group = step.as_ref().map(|s| s.0).or(script.as_ref().map(|s| s.0));
+                        pass_on(shared, method, params, generation, group, heard)
                     }
                     _ => Err((INVALID_REQUEST, "A request needs a method, and its params as an object.".to_owned())),
                 };
@@ -642,11 +650,15 @@ fn serve_connection(conn: Stream, shared: &Shared) {
             break;
         }
     }
-    // After all its calls (each was answered before the next was read).
-    if let Some((run, name)) = script {
-        let _ = shared.requests.send(Request::Ended { run, name });
-        shared.ctx.request_repaint();
+    // After all its calls (each was answered before the next was read): a step left open,
+    // then the run.
+    if let Some((run, label, _)) = step {
+        let _ = shared.requests.send(Request::Ended { run, label, name_lone: true });
     }
+    if let Some((run, name)) = script {
+        let _ = shared.requests.send(Request::Ended { run, label: format!("Script: {name}"), name_lone: false });
+    }
+    shared.ctx.request_repaint();
     match hello {
         None => {
             shared.strangers.fetch_sub(1, Ordering::Relaxed);
@@ -663,8 +675,43 @@ fn serve_connection(conn: Stream, shared: &Shared) {
     }
 }
 
-/// Passes a request to the interface thread (from a connection of `generation`, of script
-/// run `script` if it is one, `heard` unless a notification), and waits for its answer.
+/// Answers `begin_step` or `end_step` (`method`, with `params`) for a connection whose step
+/// is `step`: begun (inside the one there, if one is), or ended, its states then joined.
+fn step_answer(
+    shared: &Shared,
+    method: &str,
+    params: &Map<String, Value>,
+    step: &mut Option<(u64, String, usize)>,
+) -> Result<Value, (i64, String)> {
+    if method == "begin_step" {
+        let name = params.get("name").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty());
+        let Some(name) = name else {
+            return Err((FAILED, "begin_step: \"name\" must be text that is not blank.".to_owned()));
+        };
+        match step {
+            Some((_, _, inside)) => *inside += 1,
+            None => *step = Some((shared.runs.fetch_add(1, Ordering::Relaxed), name.to_owned(), 0)),
+        }
+        return Ok(json!({}));
+    }
+    match step {
+        None => Err((FAILED, "end_step: no step has begun.".to_owned())),
+        Some((_, _, inside)) if *inside > 0 => {
+            *inside -= 1;
+            Ok(json!({}))
+        }
+        Some(_) => {
+            let (run, label, _) = step.take().expect("there");
+            // Joined before the next call (the channel keeps their order).
+            let _ = shared.requests.send(Request::Ended { run, label, name_lone: true });
+            shared.ctx.request_repaint();
+            Ok(json!({}))
+        }
+    }
+}
+
+/// Passes a request to the interface thread (from a connection of `generation`, of group
+/// `script` if it is in one, `heard` unless a notification), and waits for its answer.
 fn pass_on(
     shared: &Shared,
     method: String,
@@ -995,6 +1042,75 @@ mod tests {
     }
 
     #[test]
+    fn a_step_a_client_begins_and_ends_is_one_history_state_named_as_it_says() {
+        let file = std::env::temp_dir().join(format!("opal-api-step-{}.json", std::process::id()));
+        let mut server = Server::start(file.clone(), egui::Context::default()).unwrap();
+        let (pipe, token) = info(&file);
+        let mut st = AppState::new();
+        let ctx = egui::Context::default();
+        let call = |id: u64, method: &str, params: &str| {
+            format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}","params":{params}}}"#)
+        };
+        // A client that is no script (each call its own state, but for its steps), then a
+        // script (its run one state, but for its steps).
+        for script in [None, Some("go.py")] {
+            let (pipe, token, call) = (pipe.clone(), token.clone(), call);
+            with_client(&mut server, &mut st, move || {
+                let mut client = Client::connect(&pipe);
+                let named = script.map_or(String::new(), |s| format!(r#","script":"{s}""#));
+                client.send(&format!(
+                    r#"{{"jsonrpc":"2.0","id":1,"method":"hello","params":{{"token":"{token}"{named}}}}}"#
+                ));
+                let layer = call(9, "new_layer", "{}");
+                let ok = |client: &mut Client, line: String| {
+                    let r = client.send(&line).unwrap();
+                    assert!(r.get("result").is_some(), "{line}: {r}");
+                };
+                if script.is_none() {
+                    ok(&mut client, call(2, "new", r#"{"width":8,"height":8}"#));
+                    ok(&mut client, call(3, "begin_step", r#"{"name":"Two layers"}"#));
+                    ok(&mut client, call(4, "begin_step", r#"{"name":"Inner"}"#));
+                    ok(&mut client, layer.clone());
+                    ok(&mut client, call(5, "end_step", "{}"));
+                    ok(&mut client, layer.clone());
+                    ok(&mut client, call(6, "end_step", "{}"));
+                    ok(&mut client, call(7, "begin_step", r#"{"name":"Just one"}"#));
+                    ok(&mut client, layer.clone());
+                    ok(&mut client, call(8, "end_step", "{}"));
+                    ok(&mut client, layer.clone());
+                    let r = client.send(&call(10, "end_step", "{}")).unwrap();
+                    assert!(r["error"]["message"].as_str().unwrap().contains("no step"), "{r}");
+                    // Left open when the connection ends: ended with it.
+                    ok(&mut client, call(11, "begin_step", r#"{"name":"Left open"}"#));
+                    ok(&mut client, layer.clone());
+                } else {
+                    ok(&mut client, layer.clone());
+                    ok(&mut client, layer.clone());
+                    ok(&mut client, call(3, "begin_step", r#"{"name":"S"}"#));
+                    ok(&mut client, layer.clone());
+                    ok(&mut client, call(4, "end_step", "{}"));
+                    ok(&mut client, layer.clone());
+                }
+            });
+            let until = std::time::Instant::now() + Duration::from_secs(5);
+            let want: &[&str] = if script.is_none() {
+                &["Two layers", "Just one", "New layer", "Left open"]
+            } else {
+                &["Two layers", "Just one", "New layer", "Left open", "Script: go.py", "S", "New layer"]
+            };
+            let labels = |st: &AppState| {
+                let h = &st.docs[0].history;
+                h.path_from_root(h.current()).iter().skip(1).map(|&n| h.node(n).label.clone()).collect::<Vec<_>>()
+            };
+            while labels(&st) != want && std::time::Instant::now() < until {
+                server.serve(&mut st, &ctx, false);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert_eq!(labels(&st), want);
+        }
+    }
+
+    #[test]
     fn requests_wait_while_the_user_is_busy_and_are_refused_while_quitting() {
         let file = std::env::temp_dir().join(format!("opal-api-busy-{}.json", std::process::id()));
         let mut server = Server::start(file.clone(), egui::Context::default()).unwrap();
@@ -1088,6 +1204,14 @@ with opal.connect() as editor:
     # No method of the editor's is hidden by the client's own, or is a keyword.
     names = [m["name"] for m in editor.methods()]
     own_way = {"methods", "pixels", "put_pixels", "release_pixels"}
+    # A step, as the client gives it: two layers, one state.
+    stepped = editor.new(width=4, height=4)["document"]
+    with editor.step("Sky and sea"):
+        editor.new_layer(name="Sky")
+        editor.new_layer(name="Sea")
+    labels = [s["label"] for s in editor.history(document=stepped)["states"]]
+    assert labels == ["New image", "Sky and sea"], labels
+    editor.close(document=stepped, discard=True)
     assert not [n for n in names if n not in own_way and hasattr(opal.Editor, n)], names
     assert not [n for n in names if keyword.iskeyword(n)], names
     doc = editor.new(width=Count(), height=200)["document"]

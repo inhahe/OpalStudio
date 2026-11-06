@@ -151,7 +151,8 @@ pub fn handle(message: &Value, caller: &mut dyn Caller) -> Option<Value> {
             "instructions": "Drives the Opal Studio graphics editor running on this computer. Images and layers \
                              are named by id: `documents` and `layers` tell them; most tools act on the active \
                              image and the selected layers when none is named. `image` shows what an image \
-                             looks like.",
+                             looks like. Calls between begin_step and end_step are one step of the image's \
+                             history, which one undo takes back.",
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools() })),

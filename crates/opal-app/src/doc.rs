@@ -340,11 +340,12 @@ impl DocState {
         Ok(())
     }
 
-    /// Joins the states script run `run` made one after another into one, labeled `label`
-    /// (see [`History::join`]), now that it has ended.
-    pub fn script_ended(&mut self, run: u64, label: &str) {
+    /// Joins the states group `run` (a script run, or a step of one) made one after another
+    /// into one, labeled `label` (one alone too, if `name_lone`: see [`History::join`]), now
+    /// that it has ended.
+    pub fn group_ended(&mut self, run: u64, label: &str, name_lone: bool) {
         if let Some(made) = self.made_by.remove(&run) {
-            self.history.join(&made, label);
+            self.history.join(&made, label, name_lone);
         }
     }
 

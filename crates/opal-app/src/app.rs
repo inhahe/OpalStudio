@@ -455,7 +455,7 @@ impl OpalApp {
     }
 
     /// Adds tabs for newly opened documents and shows the start page when none is open.
-    fn sync_panes(&mut self) {
+    fn sync_panes(&mut self, ctx: &egui::Context) {
         // A closed document's pane is still in the tree until the next frame drops it (see
         // `retain_pane`), so the documents' container can still be found through it now.
         let anchor = find_docs_container(&self.tree.tiles);
@@ -496,13 +496,17 @@ impl OpalApp {
         // The active document is the one on screen: a document a command made active has
         // its tab brought to the front; otherwise, if the tab shown changed some other way,
         // the active document follows it.
+        // The panel tree is drawn already this frame: a tab brought to the front shows in
+        // the next, which is asked for.
         if std::mem::take(&mut self.st.show_console) {
             show_pane(&mut self.tree.tiles, Pane::Console);
+            ctx.request_repaint();
         }
         let reveal = std::mem::take(&mut self.st.reveal);
         let shown = shown_docs(&self.tree.tiles);
         if let Some(id) = reveal.filter(|id| self.st.doc(*id).is_some()) {
             show_pane(&mut self.tree.tiles, Pane::Document(id));
+            ctx.request_repaint();
         } else if self.st.active_doc.is_none_or(|a| !shown.contains(&a))
             && let Some(&first) = shown.iter().find(|id| self.st.doc(**id).is_some())
         {
@@ -731,7 +735,7 @@ impl eframe::App for OpalApp {
         if std::mem::take(&mut self.st.reset_panels) {
             self.tree = default_tree(&self.st);
         }
-        self.sync_panes();
+        self.sync_panes(&ctx);
         self.handle_exit(&ctx);
         self.save_settings_if_due(&ctx);
         self.st.between_frames(ctx.input(|i| i.pointer.any_down()));

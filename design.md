@@ -1028,7 +1028,10 @@ server. Both rest on one language-neutral API.
   the active image; `layers`: the selected ones); `methods` lists them all, which is what
   the stubs and tools are made from. Queries so far: `documents`, `layers`, `image` (of
   the image as shown or of one layer alone, made in memory on a thread of its own, out of
-  the user's sight, unlike an export), and `pixels`.
+  the user's sight, unlike an export), `pixels`, and `history` (an image's history as a
+  tree: each state kept, with its id, its label, when it was made, the state before it,
+  those after and the one redo goes to; the state the image is in, the one last saved, and
+  how many were dropped).
 - **Pixels.** `pixels` reads a rectangle of the canvas (the whole of it by default), of the
   image as shown or of one layer alone (as if shown, at full opacity), as `srgb8` (bytes),
   `srgb16` (16-bit values) or `linear` (32-bit floats in linear light), always red, green,
@@ -1077,6 +1080,14 @@ server. Both rest on one language-neutral API.
   first's place; what the script undid goes with it; a state the user made, or made
   something from, ends a line). The states stay separate while it runs, so a script's own
   undo takes back one step.
+- **Steps.** `begin_step` (with a `name`) and `end_step`, which the connection's thread
+  answers itself, make what the calls between them change in each image one state, called
+  as named (even a step of one call), joined as a script run is (`History::join`, as the
+  group the step is, its states told apart from the run's); a step begun inside another is
+  part of it, and one left open ends with the connection. Inside a script run, the run's
+  own calls before and after a step join on their own. The Python package wraps them as
+  `with editor.step(name):`; an assistant has them as tools, to make several of its calls
+  one undo.
 - **Who is connected.** Disconnecting (the status bar) drops every client, refuses what
   they asked that is still waiting, makes a new token, and shuts scripts out until the user
   lets them in again (a client that rereads `api.json`, as the MCP shim does, cannot come
@@ -1116,7 +1127,9 @@ server. Both rest on one language-neutral API.
   shows what it prints as it comes, its errors in red, and how it ended (its exit code,
   how long it took); it can stop it, and every process it started (on Windows, all of them
   are in a job object; what they did stays), run the last one again, copy everything
-  shown, and clear; it keeps the last 5000 lines. A script still running when the editor
+  shown, and clear; it keeps the last 5000 lines. Its Recent menu holds the last
+  ten scripts run (each once, the last first, kept in `settings.json`), one no longer there
+  shown but not offered, and a way to forget them. A script still running when the editor
   closes is stopped the same way (one that ended by itself leaves what it started running). The grouping (see *Script runs*, above) holds for every
   script run, whoever started it.
 - **MCP server.** The editor serves MCP (streamable HTTP on localhost) to clients that

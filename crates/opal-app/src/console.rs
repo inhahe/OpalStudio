@@ -14,6 +14,9 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
+/// How many scripts run lately the console remembers.
+pub const RECENT: usize = 10;
+
 /// The most lines the console keeps; older ones go.
 const MAX_LINES: usize = 5000;
 
@@ -142,8 +145,9 @@ impl Drop for Tree {
 pub struct Console {
     lines: VecDeque<Line>,
     running: Option<Running>,
-    /// The script run last, for Run Again.
-    pub last: Option<PathBuf>,
+    /// The scripts run lately, the last first, each once: at most [`RECENT`], kept between
+    /// sessions (see `config`).
+    pub recent: Vec<PathBuf>,
 }
 
 /// A command running `script` (with `args`) in `python` (see [`python_program`]),
@@ -262,8 +266,15 @@ impl Console {
         self.say(Said::Editor, format!("Running {name}."));
         self.running =
             Some(Running { name, child, lines, open: 2, started: Instant::now(), ended: None, stopped: false, tree });
-        self.last = Some(script.to_owned());
+        self.remember(script);
         Ok(())
+    }
+
+    /// Puts `script` first among the recent ones.
+    fn remember(&mut self, script: &Path) {
+        self.recent.retain(|p| p != script);
+        self.recent.insert(0, script.to_owned());
+        self.recent.truncate(RECENT);
     }
 
     /// Takes what the script has printed since asked last; once it has ended (and what it
@@ -330,6 +341,8 @@ impl AppState {
         let python = self.prefs.text("scripting.python");
         match self.console.run(script, &python, &api, ctx) {
             Ok(()) => {
+                // The recent scripts are kept with the settings.
+                self.settings_touched();
                 self.show_console = true;
                 // The user's own doing: if they had shut scripts out, this one is let in.
                 self.let_scripts_in = true;
@@ -358,11 +371,45 @@ pub fn test_python() -> Option<String> {
 /// Why Run Script is not available in an editor that does not serve scripts.
 pub const NOT_SERVING: &str = "Another Opal Studio was open first, and scripts connect to that one: run them there.";
 
+/// A path's file name, for a button.
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+/// The scripts run lately, to run one again (if `can_run`), and a way to forget them.
+fn recent_menu(ui: &mut egui::Ui, st: &mut AppState, can_run: bool) {
+    ui.menu_button(format!("{}  Recent", icons::HISTORY), |ui| {
+        for script in st.console.recent.clone() {
+            let there = script.is_file();
+            let item = ui.add_enabled(can_run && there, egui::Button::new(file_name(&script)));
+            let shown = script.display().to_string();
+            let item = if there {
+                item.on_hover_text(shown)
+            } else {
+                item.on_disabled_hover_text(format!("No longer there: {shown}"))
+            };
+            if item.clicked() {
+                st.run_script(&script, ui.ctx());
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui.button("Forget them").clicked() {
+            st.console.recent.clear();
+            st.settings_touched();
+            ui.close();
+        }
+    })
+    .response
+    .on_hover_text("The scripts run lately, to run one again.");
+}
+
 /// The Console panel: the script running (and a way to stop it), or ways to run one; then
 /// what scripts printed.
 pub fn console_panel(ui: &mut egui::Ui, st: &mut AppState) {
     let weak = st.palette.weak_text;
-    ui.horizontal(|ui| {
+    // Wrapped: in a narrow panel, a long script name would push the rest past its edge.
+    ui.horizontal_wrapped(|ui| {
         match st.console.running() {
             Some(name) => {
                 ui.label(RichText::new(format!("{}  {name} is running", icons::PLAY)).color(st.palette.strong_text));
@@ -385,30 +432,31 @@ pub fn console_panel(ui: &mut egui::Ui, st: &mut AppState) {
                 if run.clicked() {
                     st.queue.push(Cmd::RunScript);
                 }
-                if let Some(last) = st.console.last.clone() {
-                    let name = last.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                if let Some(last) = st.console.recent.first().cloned() {
                     let again = ui
-                        .add_enabled(available.is_ok(), egui::Button::new(format!("{}  Run {name} again", icons::PLAY)))
+                        .add_enabled(
+                            available.is_ok() && last.is_file(),
+                            egui::Button::new(format!("{}  Run {} again", icons::PLAY, file_name(&last))),
+                        )
                         .on_hover_text(last.display().to_string());
                     if again.clicked() {
                         st.run_script(&last, ui.ctx());
                     }
+                    recent_menu(ui, st, available.is_ok());
                 }
             }
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let some = !st.console.lines().is_empty();
-            if ui.add_enabled(some, egui::Button::new(format!("{}  Clear", icons::BROOM))).clicked() {
-                st.console.clear();
-            }
-            if ui
-                .add_enabled(some, egui::Button::new(format!("{}  Copy", icons::COPY)))
-                .on_hover_text("Copy everything shown, to paste into a bug report or an editor.")
-                .clicked()
-            {
-                ui.ctx().copy_text(st.console.text());
-            }
-        });
+        let some = !st.console.lines().is_empty();
+        if ui
+            .add_enabled(some, egui::Button::new(format!("{}  Copy", icons::COPY)))
+            .on_hover_text("Copy everything shown, to paste into a bug report or an editor.")
+            .clicked()
+        {
+            ui.ctx().copy_text(st.console.text());
+        }
+        if ui.add_enabled(some, egui::Button::new(format!("{}  Clear", icons::BROOM))).clicked() {
+            st.console.clear();
+        }
     });
     ui.separator();
     let lines = st.console.lines();
@@ -526,7 +574,7 @@ mod tests {
         assert_eq!(said(Said::Error), ["oops"]);
         let told = said(Said::Editor);
         assert!(told.last().is_some_and(|l| l.contains("speak.py ended with exit code 3")), "{told:?}");
-        assert_eq!(console.last.as_deref(), Some(path.as_path()));
+        assert_eq!(console.recent, std::slice::from_ref(&path));
     }
 
     #[test]
@@ -614,6 +662,19 @@ mod tests {
             let _ = Command::new("taskkill").args(["/F", "/PID", pid.trim()]).output();
         }
         assert!(!alive, "what the script started went on after Stop");
+    }
+
+    #[test]
+    fn the_scripts_run_lately_are_kept_the_last_first_each_once() {
+        let mut console = Console::default();
+        let at = |i: usize| PathBuf::from(format!("C:/scripts/{i}.py"));
+        for i in 0..RECENT + 3 {
+            console.remember(&at(i));
+        }
+        console.remember(&at(RECENT));
+        assert_eq!(console.recent.len(), RECENT);
+        assert_eq!(console.recent[..3], [at(RECENT), at(RECENT + 2), at(RECENT + 1)]);
+        assert_eq!(console.recent.iter().filter(|p| **p == at(RECENT)).count(), 1);
     }
 
     #[test]

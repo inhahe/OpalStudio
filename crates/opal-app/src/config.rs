@@ -23,6 +23,9 @@ struct Saved {
     presets: BTreeMap<String, BTreeMap<String, Map>>,
     #[serde(default)]
     last_new: Option<(u32, u32, bool)>,
+    /// The scripts run lately, the last first.
+    #[serde(default)]
+    recent_scripts: Vec<PathBuf>,
 }
 
 /// Where the settings are kept: `settings.json` in the per-user configuration folder.
@@ -96,6 +99,9 @@ fn apply_json(st: &mut AppState, text: &str) -> Result<(), String> {
         let background = if white { Background::White } else { Background::Transparent };
         st.last_new = NewImage { width, height, background };
     }
+    if let Some(Ok(recent)) = obj.get("recent_scripts").map(|v| serde_json::from_value::<Vec<PathBuf>>(v.clone())) {
+        st.console.recent = recent.into_iter().take(crate::console::RECENT).collect();
+    }
     Ok(())
 }
 
@@ -112,6 +118,7 @@ pub fn save(st: &AppState) -> std::io::Result<()> {
             .collect(),
         presets: st.presets.iter().map(|(t, p)| (t.info().id.to_owned(), p.clone())).collect(),
         last_new: Some((st.last_new.width, st.last_new.height, st.last_new.background == Background::White)),
+        recent_scripts: st.console.recent.clone(),
     };
     let json = serde_json::to_string_pretty(&saved).map_err(std::io::Error::other)?;
     if let Some(dir) = path.parent() {
@@ -135,6 +142,7 @@ mod tests {
             tools: st.tool_settings.iter().map(|(t, s)| (t.info().id.to_owned(), s.to_map())).collect(),
             presets: BTreeMap::new(),
             last_new: None,
+            recent_scripts: vec![PathBuf::from("C:/scripts/sky.py")],
         };
         let json = serde_json::to_string(&saved).unwrap();
         let back: Saved = serde_json::from_str(&json).unwrap();
@@ -142,6 +150,8 @@ mod tests {
         fresh.prefs.load_map(&back.prefs);
         assert_eq!(fresh.prefs.choice("ui.theme"), "light");
         assert_eq!(back.tools["zoom"].get("zoom.drag"), Some(&Value::Bool(false)));
+        apply_json(&mut fresh, &json).unwrap();
+        assert_eq!(fresh.console.recent, [PathBuf::from("C:/scripts/sky.py")], "the recent scripts were lost");
         // An empty or partial file still loads.
         let partial: Saved = serde_json::from_str("{}").unwrap();
         assert!(partial.prefs.is_empty());

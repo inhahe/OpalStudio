@@ -2,6 +2,7 @@
 # registry by the test `api::tests::the_python_stubs_and_api_page_are_current`: run
 # it with OPAL_WRITE_STUBS=1 to make this again. Do not edit by hand.
 
+import contextlib
 import os
 from pathlib import Path
 from typing import Any, Literal
@@ -20,6 +21,7 @@ class Editor:
     def __init__(self, pipe: str, token: str, script: str | None = None) -> None: ...
     def call(self, method: str, **params: Any) -> Any: ...
     def methods(self) -> list[dict[str, Any]]: ...
+    def step(self, name: str) -> contextlib.AbstractContextManager[Editor]: ...
     def pixels(self, document: int | None = None, layer: int | None = None, x: int = 0, y: int = 0, width: int | None = None, height: int | None = None, format: Literal["srgb8", "srgb16", "linear"] = "srgb8") -> Any: ...
     def put_pixels(self, pixels: Any, document: int | None = None, layer: int | None = None, x: int = 0, y: int = 0, name: str | None = None) -> int: ...
     def disconnect(self) -> None: ...
@@ -255,3 +257,15 @@ class Editor:
         layer: One layer alone, by id: as if shown, at full opacity. Default: the image as shown, all its visible layers together.
         max_side: The most pixels it may be across or down. From 16 to 8192. Default: 1024.
         """
+    def history(self, *, document: int | None = None) -> Any:
+        """An image's history, a tree: each state kept (its id, what made it, when, the state before it and those after, the one redo goes to), the state it is in, the one last saved, and how many states were dropped to keep within the memory the history may use.
+
+        document: The image, by id. Default: the active image.
+        """
+    def begin_step(self, *, name: str) -> Any:
+        """Begins a step of history: what the calls until end_step change in each image becomes one state, called name, which one undo takes back. A step begun inside another is part of it. One left open ends when the connection does.
+
+        name: The step's name, as the History panel shows it.
+        """
+    def end_step(self) -> Any:
+        """Ends the step begin_step began (the outermost, if they are inside one another)."""

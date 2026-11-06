@@ -24,6 +24,13 @@ Windows they pass through shared memory rather than the connection. ::
     sky = editor.pixels(format="linear")          # height × width × 4, float32
     editor.put_pixels(sky[::-1], name="Upside down")
 
+Several calls become one step of history, which one undo takes back, inside
+``editor.step(name)``::
+
+    with editor.step("Sky and sea"):
+        editor.new_layer(name="Sky")
+        editor.new_layer(name="Sea")
+
 What a script changes in an image becomes one history state when it ends (or
 disconnects), so that one undo takes back the whole run; in an interactive session each
 call is a step of its own.
@@ -35,6 +42,7 @@ user's settings folder; only the user's own programs can read it.
 from __future__ import annotations
 
 import base64
+import contextlib
 import itertools
 import json
 import operator
@@ -215,6 +223,23 @@ class Editor:
     def methods(self) -> list[dict]:
         """Every method, with its help and parameters (as the editor describes them)."""
         return list(self._methods.values())
+
+    @contextlib.contextmanager
+    def step(self, name: str):
+        """What the calls inside the ``with`` change in each image becomes one state of its
+        history, called ``name``, which one undo takes back. ::
+
+            with editor.step("Sky and sea"):
+                editor.new_layer(name="Sky")
+                editor.new_layer(name="Sea")
+
+        A step inside another is part of it. Outside any step, a script's calls are joined
+        into one state when it ends, and an interactive session's are each a state."""
+        self.call("begin_step", name=name)
+        try:
+            yield self
+        finally:
+            self.call("end_step")
 
     def pixels(
         self,

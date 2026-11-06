@@ -1570,3 +1570,28 @@ fn the_largest_canvas_fits_the_window() {
     v.fit(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(side, side)), viewport, 1.0);
     assert!(side * v.zoom <= viewport.y, "zoom {} leaves it {} pixels tall", v.zoom, side * v.zoom);
 }
+
+#[test]
+fn the_console_offers_the_scripts_run_lately() {
+    use egui_kittest::kittest::NodeT;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    // One there (any file will do: none is run), and one gone.
+    let here = std::env::current_exe().unwrap();
+    let gone = here.with_file_name("no-such-script.py");
+    let st = h.state_mut().state_mut();
+    st.console.recent = vec![here.clone(), gone];
+    st.scripts_file = Some(std::env::temp_dir().join("opal-ui-recent.json"));
+    st.show_console = true;
+    h.run();
+    let name = here.file_name().unwrap().to_string_lossy().into_owned();
+    let again = format!("{}  Run {name} again", crate::icons::PLAY);
+    assert!(!h.get_by_label(&again).accesskit_node().is_disabled(), "the last one is not offered again");
+    h.get_by_label(&format!("{}  Recent", crate::icons::HISTORY)).click();
+    h.run();
+    assert!(!h.get_by_label(&name).accesskit_node().is_disabled());
+    assert!(h.get_by_label("no-such-script.py").accesskit_node().is_disabled(), "one gone is offered");
+    h.get_by_label("Forget them").click();
+    h.run();
+    assert!(h.state().state().console.recent.is_empty());
+}

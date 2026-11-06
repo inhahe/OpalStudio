@@ -77,8 +77,19 @@ pub struct Method {
     pub params: &'static [Param],
     /// The command it carries out; `None` for a query, or a change the API alone makes.
     pub cmd: Option<Cmd>,
-    /// Whether it changes images (a command), rather than asking about them (a query).
-    pub changes: bool,
+    /// What it is.
+    pub role: Role,
+}
+
+/// What a method of the API is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Role {
+    /// It changes images.
+    Command,
+    /// It asks about them.
+    Query,
+    /// It is about the caller's connection, which the server answers itself.
+    Connection,
 }
 
 const SIDE: i64 = MAX_SIDE as i64;
@@ -346,8 +357,42 @@ const QUERIES: &[(&str, &str, &[Param])] = &[
             otherwise: Otherwise::Required,
         }],
     ),
+    (
+        "history",
+        "An image's history, a tree: each state kept (its id, what made it, when, the state before it and \
+         those after, the one redo goes to), the state it is in, the one last saved, and how many states were \
+         dropped to keep within the memory the history may use.",
+        &[DOCUMENT],
+    ),
     ("methods", "Every method of the API, with its parameters: what this list is generated from.", &[]),
 ];
+
+/// The methods about the caller's connection, which the server answers itself (see
+/// `server::serve_connection`): their names, what they do, and their parameters.
+const CONNECTION: &[(&str, &str, &[Param])] = &[
+    (
+        "begin_step",
+        "Begins a step of history: what the calls until end_step change in each image becomes one state, \
+         called name, which one undo takes back. A step begun inside another is part of it. One left open \
+         ends when the connection does.",
+        &[Param {
+            name: "name",
+            kind: Kind::Text,
+            help: "The step's name, as the History panel shows it.",
+            otherwise: Otherwise::Required,
+        }],
+    ),
+    ("end_step", "Ends the step begin_step began (the outermost, if they are inside one another).", &[]),
+];
+
+/// What a method's role is called in its description.
+fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::Command => "command",
+        Role::Query => "query",
+        Role::Connection => "connection",
+    }
+}
 
 /// The changes the API alone makes (no command of the interface makes them): their names,
 /// what they do, and their parameters.
@@ -657,19 +702,14 @@ fn make_methods() -> Vec<Method> {
             help: cmd.info().description,
             params,
             cmd: Some(cmd),
-            changes: true,
+            role: Role::Command,
         })
     });
-    let others = QUERIES.iter().map(|&(name, help, params)| (name, help, params, false));
-    let others = others.chain(CHANGES.iter().map(|&(name, help, params)| (name, help, params, true)));
+    let others = QUERIES.iter().map(|&(name, help, params)| (name, help, params, Role::Query));
+    let others = others.chain(CHANGES.iter().map(|&(name, help, params)| (name, help, params, Role::Command)));
+    let others = others.chain(CONNECTION.iter().map(|&(name, help, params)| (name, help, params, Role::Connection)));
     commands
-        .chain(others.map(|(name, help, params, changes)| Method {
-            name: name.to_owned(),
-            help,
-            params,
-            cmd: None,
-            changes,
-        }))
+        .chain(others.map(|(name, help, params, role)| Method { name: name.to_owned(), help, params, cmd: None, role }))
         .collect()
 }
 
@@ -902,11 +942,11 @@ impl AppState {
         reply
     }
 
-    /// Script run `run`, named `name` (its file's), has ended: in each image, the states it
-    /// made one after another become one, so that one undo takes back what it did.
-    pub fn script_ended(&mut self, run: u64, name: &str) {
-        let label = format!("Script: {name}");
-        self.docs.iter_mut().for_each(|d| d.script_ended(run, &label));
+    /// Group `run` (a script run, or a step a client began) has ended: in each image, the
+    /// states it made one after another become one, labeled `label` (one alone too, if
+    /// `name_lone`), so that one undo takes back what it did.
+    pub fn group_ended(&mut self, run: u64, label: &str, name_lone: bool) {
+        self.docs.iter_mut().for_each(|d| d.group_ended(run, label, name_lone));
     }
 
     /// Whether scripts' calls wait now: while the user has a dialog open, holds a button
@@ -940,7 +980,12 @@ impl AppState {
                 let d = self.doc(self.which(args)?).expect("found");
                 Ok(json!(d.doc().layers.iter().rev().map(|l| layer_json(l, d)).collect::<Vec<_>>()))
             }
+            "history" => {
+                let d = self.doc(self.which(args)?).expect("found");
+                Ok(history_json(d))
+            }
             "methods" => Ok(describe()),
+            "begin_step" | "end_step" => Err(format!("{name} is about a connection to the editor, which answers it.")),
             "release_pixels" => {
                 // Whether or not it is still kept (it goes by itself after a while).
                 self.shared_out.remove(args.text("shm").expect("required"));
@@ -1430,6 +1475,29 @@ impl AppState {
     }
 }
 
+/// Image `d`'s history, as the `history` query gives it.
+fn history_json(d: &crate::doc::DocState) -> Value {
+    let h = &d.history;
+    let id = |n: opal_core::history::NodeId| n.0;
+    let states: Vec<Value> = h
+        .nodes()
+        .map(|(n, node)| {
+            let time = node.created.duration_since(std::time::UNIX_EPOCH).map_or(0.0, |t| t.as_secs_f64());
+            json!({
+                "state": id(n),
+                "label": node.label,
+                "time": time,
+                "parent": node.parent.map(id),
+                "children": node.children.iter().copied().map(id).collect::<Vec<_>>(),
+                "redo": node.last_child.or_else(|| node.children.last().copied()).map(id),
+            })
+        })
+        .collect();
+    // Saved at a state no longer kept: as good as at none.
+    let saved = d.saved_at.filter(|&s| h.contains(s)).map(id);
+    json!({ "current": id(h.current()), "saved": saved, "dropped": h.dropped(), "states": states })
+}
+
 /// The layers a query about `doc` shows: the one `args` names (alone, shown, at full
 /// opacity), or all of them.
 fn shown_layers(doc: &opal_core::document::Document, args: &Args) -> Result<Vec<Arc<Layer>>, String> {
@@ -1532,7 +1600,7 @@ pub fn describe() -> Value {
                         v
                     })
                     .collect();
-                json!({ "name": m.name, "help": m.help, "kind": if m.changes { "command" } else { "query" }, "params": params })
+                json!({ "name": m.name, "help": m.help, "kind": role_name(m.role), "params": params })
             })
             .collect::<Vec<_>>()
     )
@@ -1600,7 +1668,7 @@ mod tests {
             "# The editor's methods, for editors and type checkers. Made from its command\n\
              # registry by the test `api::tests::the_python_stubs_and_api_page_are_current`: run\n\
              # it with OPAL_WRITE_STUBS=1 to make this again. Do not edit by hand.\n\n\
-             import os\nfrom pathlib import Path\nfrom typing import Any, Literal\n\n\
+             import contextlib\nimport os\nfrom pathlib import Path\nfrom typing import Any, Literal\n\n\
              PROTOCOL: int\n\n\
              class OpalError(Exception):\n    code: int | None\n    def __init__(self, message: str, code: int | None = None) -> None: ...\n\n\
              def connection_file() -> Path: ...\n\
@@ -1609,6 +1677,7 @@ mod tests {
              \x20   def __init__(self, pipe: str, token: str, script: str | None = None) -> None: ...\n\
              \x20   def call(self, method: str, **params: Any) -> Any: ...\n\
              \x20   def methods(self) -> list[dict[str, Any]]: ...\n\
+             \x20   def step(self, name: str) -> contextlib.AbstractContextManager[Editor]: ...\n\
              \x20   def pixels(self, document: int | None = None, layer: int | None = None, x: int = 0, y: int = 0, \
              width: int | None = None, height: int | None = None, \
              format: Literal[\"srgb8\", \"srgb16\", \"linear\"] = \"srgb8\") -> Any: ...\n\
@@ -1677,8 +1746,12 @@ mod tests {
              then a script run, and once it closes, what it changed in each image one change after another\n\
              becomes one history state, `Script: <name>`. Without it, each call is a state of its own.\n",
         );
-        for kind in ["command", "query"] {
-            out += if kind == "command" { "\n## Commands\n" } else { "\n## Queries\n" };
+        for kind in ["command", "query", "connection"] {
+            out += match kind {
+                "command" => "\n## Commands\n",
+                "query" => "\n## Queries\n",
+                _ => "\n## The connection\n",
+            };
             for m in describe().as_array().unwrap().iter().filter(|m| m["kind"] == json!(kind)) {
                 out += &format!("\n### `{}`\n\n{}\n", m["name"].as_str().unwrap(), m["help"].as_str().unwrap());
                 let params = m["params"].as_array().unwrap();
@@ -1974,6 +2047,27 @@ mod tests {
         }
         assert!(matches!(answered.as_slice(), [(m, Err(why))] if *m == n && why.contains("closing")), "{answered:?}");
         assert_eq!(layers(&st), before + 1);
+    }
+
+    #[test]
+    fn the_history_is_told_as_a_tree() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 8, "height": 8 })).unwrap();
+        now(&mut st, "new_layer", json!({ "name": "A" })).unwrap();
+        now(&mut st, "undo", json!({})).unwrap();
+        now(&mut st, "new_layer", json!({ "name": "B" })).unwrap();
+        let h = now(&mut st, "history", json!({})).unwrap();
+        let states = h["states"].as_array().unwrap();
+        let labels: Vec<&str> = states.iter().map(|s| s["label"].as_str().unwrap()).collect();
+        assert_eq!(labels, ["New image", "New layer", "New layer"]);
+        // The first has the other two after it, a branch; the image is in the last.
+        let (root, a, b) = (&states[0], &states[1], &states[2]);
+        assert_eq!(root["children"], json!([a["state"], b["state"]]));
+        assert_eq!((a["parent"].clone(), root["redo"].clone()), (root["state"].clone(), b["state"].clone()));
+        assert_eq!(h["current"], b["state"]);
+        // New, it is as saved where it began.
+        assert_eq!(h["saved"], root["state"]);
+        assert!(root["time"].as_f64().unwrap() > 1.7e9 && h["dropped"] == json!(0));
     }
 
     #[test]
