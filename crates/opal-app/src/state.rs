@@ -161,6 +161,9 @@ pub struct AppState {
     /// The connection file of this editor's server, which scripts it runs connect through;
     /// `None` while it serves none (another editor does).
     pub scripts_file: Option<PathBuf>,
+    /// Why this editor serves no scripts though no other does (its connection could not be
+    /// opened), if that is why.
+    pub scripts_unserved: Option<String>,
     /// Whether the Console panel should come to the front (a script was started).
     pub show_console: bool,
     /// Whether scripts shut out should be let in again (the user started one).
@@ -273,6 +276,7 @@ impl AppState {
             console: crate::console::Console::default(),
             scripts_file: None,
             show_console: false,
+            scripts_unserved: None,
             let_scripts_in: false,
             assistant_open: false,
             mcp_http: None,
@@ -361,6 +365,18 @@ impl AppState {
         ctx.global_style_mut(|s| {
             s.interaction.tooltip_delay = if tooltips { delay as f32 } else { f32::INFINITY };
         });
+    }
+
+    /// What is done between frames, with or without a window: the copies and writes that
+    /// have finished reported (`pointer_held` as for [`poll_writes`](Self::poll_writes)), and
+    /// each image's history kept within the memory the preferences give it.
+    pub fn between_frames(&mut self, pointer_held: bool) {
+        self.poll_copies();
+        self.poll_writes(pointer_held);
+        let budget = crate::prefs::bytes(&self.prefs, "history.memory");
+        for d in &mut self.docs {
+            d.set_history_budget(budget);
+        }
     }
 
     /// Lets images' tiles take the share of memory the preference says, before they go to
@@ -953,6 +969,22 @@ pub(crate) fn with_extension(mut path: PathBuf, ext: &str) -> PathBuf {
         path.set_file_name(name);
     }
     path
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn between_frames_each_image_s_history_keeps_to_the_preference() {
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 8, height: 8, background: Background::White });
+        assert_eq!(st.active().unwrap().history.budget(), u64::MAX);
+        st.prefs.set("history.memory", crate::settings::Value::Float(0.5));
+        // As a run with no window has it (see `headless`), as well as the window.
+        st.between_frames(false);
+        assert_eq!(st.active().unwrap().history.budget(), 500_000_000);
+    }
 }
 
 #[cfg(test)]

@@ -80,19 +80,27 @@ pub fn run(given: Vec<OsString>) -> i32 {
             return 1;
         }
     };
-    let python = run.python.clone().unwrap_or_else(|| st.prefs.text("scripting.python").into());
+    let python = run.python.as_ref().map_or_else(|| st.prefs.text("scripting.python"), |p| p.to_string_lossy().into());
     let mut child = match crate::console::script_command(&python, &run.script, &run.args, &file).spawn() {
         Ok(child) => child,
         Err(e) => {
-            eprintln!("{} could not be run: {e}", python.to_string_lossy());
+            eprintln!("{python} could not be run: {e}");
             return 1;
         }
     };
+    // Until the script has ended and every client of this run has gone (a process the
+    // script started may go on calling), each call carried out: a client's connection lasts
+    // until its last call is answered.
+    let mut ended = None;
     let status = loop {
         server.serve(&mut st, &ctx, false);
-        st.poll_writes(false);
-        st.poll_copies();
-        if let Ok(Some(status)) = child.try_wait() {
+        st.between_frames(false);
+        if ended.is_none() {
+            ended = child.try_wait().ok().flatten();
+        }
+        if let Some(status) = ended
+            && server.clients() == 0
+        {
             break status;
         }
         std::thread::sleep(std::time::Duration::from_millis(1));

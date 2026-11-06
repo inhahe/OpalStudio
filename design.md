@@ -1083,17 +1083,24 @@ server. Both rest on one language-neutral API.
 - **Python package** `opal-studio` (module `opal`): connects to the running editor or starts
   a headless one (`opal-studio --headless script.py` for batch work). *Built:* headless mode
   runs the editor's state and its server with no window, the user's preferences loaded
-  (not saved back), and runs the script (with `--python`, `OPAL_PYTHON` or the Python
-  preference) with the package on its `PYTHONPATH` and a connection file of the run's own;
-  it ends with the
-  script, with its exit code, once the files the script asked for are written, printing
-  what a dialog would have said.
+  (not saved back) and applied as the window applies them between frames (the history's
+  memory, the tiles'), and runs the script (with `--python`, `OPAL_PYTHON` or the Python
+  preference) with the package on its `PYTHONPATH` and a connection file of the run's own.
+  It ends once the script has ended and every client of the run has gone (a worker the
+  script started may go on calling), with the script's exit code, once the files asked for
+  are written, printing what a dialog would have said. The editor being a windowed
+  program, which a command prompt does not wait for, `opal-studio.com` beside it (the
+  `opal-studio-console` binary, which a prompt finds first) runs it with the same
+  arguments on the same console, waiting for `--headless` and `--mcp` and ending with
+  their exit code.
 - **In the editor:** a Run Script command, a console panel showing output and errors, and a
   preference for which Python interpreter to use. A script's changes are grouped into one
   history state, so one undo takes back a whole script run. *Built:* all of it. Run Script
   (File › Scripts) asks for a `.py` file and runs it in its own folder with the Python
-  preference (Preferences › Scripting: a command on the `PATH` or a `python.exe`'s path,
-  never blank), with the package on its `PYTHONPATH`, its output unbuffered and in UTF-8,
+  preference (Preferences › Scripting: a command on the `PATH`, with arguments if need be,
+  such as `py -3.12`, or a `python.exe`'s path, quoted or not; never blank), with the
+  package first on its `PYTHONPATH` (an empty entry dropped, which Python would read as
+  the current folder), its output unbuffered and in UTF-8,
   and no console window of its own; one at a time, and only in the editor that serves
   scripts. Starting one lets scripts in again if the user had shut them out. The Console
   panel (a tab beside Layers and History, brought to the front when a script starts)

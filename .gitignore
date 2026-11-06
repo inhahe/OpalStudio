@@ -5,6 +5,7 @@
 /models/
 *.onnx
 /opal-studio*.exe
+/opal-studio*.com
 
 # Images made for trying the application out
 /test-images/

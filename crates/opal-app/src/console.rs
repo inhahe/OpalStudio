@@ -73,25 +73,50 @@ pub struct Console {
     pub last: Option<PathBuf>,
 }
 
-/// A command running `script` (with `args`) in `python`, connected to the editor whose
-/// connection file is `api`, with the `opal` package on its path, its output unbuffered and
-/// in UTF-8.
-pub fn script_command(python: &OsStr, script: &OsStr, args: &[std::ffi::OsString], api: &Path) -> Command {
-    let mut command = Command::new(python);
+/// A command running `script` (with `args`) in `python` (see [`python_program`]),
+/// connected to the editor whose connection file is `api`, with the `opal` package on its
+/// path, its output unbuffered and in UTF-8.
+pub fn script_command(python: &str, script: &OsStr, args: &[std::ffi::OsString], api: &Path) -> Command {
+    let (program, python_args) = python_program(python);
+    let mut command = Command::new(program);
     command
+        .args(python_args)
         .arg(script)
         .args(args)
         .env("OPAL_STUDIO_API", api)
         .env("PYTHONUNBUFFERED", "1")
         .env("PYTHONIOENCODING", "utf-8");
-    if let Some(package) = crate::headless::package_dir() {
-        let mut path = std::env::split_paths(&std::env::var_os("PYTHONPATH").unwrap_or_default()).collect::<Vec<_>>();
-        path.insert(0, package);
-        if let Ok(joined) = std::env::join_paths(path) {
-            command.env("PYTHONPATH", joined);
-        }
+    if let Some(package) = crate::headless::package_dir()
+        && let Some(path) = python_path(package, std::env::var_os("PYTHONPATH").as_deref())
+    {
+        command.env("PYTHONPATH", path);
     }
     command
+}
+
+/// The program and its arguments that `python` (the preference, or `--python`) names: a
+/// path, in quotes or not (as Explorer's Copy as Path gives one), or a command with
+/// arguments (`py -3.12`).
+pub fn python_program(python: &str) -> (String, Vec<String>) {
+    let python = python.trim();
+    if let Some(rest) = python.strip_prefix('"')
+        && let Some((program, args)) = rest.split_once('"')
+    {
+        return (program.to_owned(), args.split_whitespace().map(str::to_owned).collect());
+    }
+    if Path::new(python).is_file() {
+        return (python.to_owned(), Vec::new());
+    }
+    let mut words = python.split_whitespace();
+    (words.next().unwrap_or("python").to_owned(), words.map(str::to_owned).collect())
+}
+
+/// `PYTHONPATH` with `package` first, before `existing`'s folders. An empty one is left
+/// out: Python reads it as the current folder, ahead of its own library, where a script's
+/// `json.py` would hide the real one.
+fn python_path(package: PathBuf, existing: Option<&OsStr>) -> Option<std::ffi::OsString> {
+    let rest = existing.map(std::env::split_paths).into_iter().flatten().filter(|p| !p.as_os_str().is_empty());
+    std::env::join_paths(std::iter::once(package).chain(rest)).ok()
 }
 
 impl Console {
@@ -121,7 +146,7 @@ impl Console {
         assert!(self.running.is_none(), "a script is running already");
         let name =
             script.file_name().map_or_else(|| script.display().to_string(), |n| n.to_string_lossy().into_owned());
-        let mut command = script_command(python.as_ref(), script.as_os_str(), &[], api);
+        let mut command = script_command(python, script.as_os_str(), &[], api);
         command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(folder) = script.parent().filter(|f| !f.as_os_str().is_empty()) {
             command.current_dir(folder);
@@ -226,7 +251,8 @@ impl AppState {
     /// Runs `script` (Run Script, or Run Again), telling the user if it cannot be.
     pub fn run_script(&mut self, script: &Path, ctx: &egui::Context) {
         let Some(api) = self.scripts_file.clone() else {
-            self.message(MessageKind::Info, "Scripts run in the other Opal Studio", NOT_SERVING);
+            let why = self.scripts_unserved.clone().unwrap_or_else(|| NOT_SERVING.to_owned());
+            self.message(MessageKind::Info, "Scripts cannot run here", why);
             return;
         };
         let python = self.prefs.text("scripting.python");
@@ -248,6 +274,13 @@ impl AppState {
             self.run_script(&script, ctx);
         }
     }
+}
+
+/// The Python to try scripts with in tests, if there is one (`OPAL_PYTHON`, or `python`).
+#[cfg(test)]
+pub fn test_python() -> Option<String> {
+    let python = std::env::var("OPAL_PYTHON").unwrap_or_else(|_| "python".to_owned());
+    Command::new(&python).arg("--version").output().is_ok_and(|o| o.status.success()).then_some(python)
 }
 
 /// Why Run Script is not available in an editor that does not serve scripts.
@@ -341,10 +374,53 @@ pub fn console_panel(ui: &mut egui::Ui, st: &mut AppState) {
 mod tests {
     use super::*;
 
-    /// The Python to try scripts with, if there is one.
-    fn python() -> Option<String> {
-        let python = std::env::var("OPAL_PYTHON").unwrap_or_else(|_| "python".to_owned());
-        Command::new(&python).arg("--version").output().is_ok_and(|o| o.status.success()).then_some(python)
+    use super::test_python as python;
+
+    /// A folder of a test's own for its scripts, removed when it goes.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(test: &str) -> Scratch {
+            let dir = std::env::temp_dir().join(format!("opal-console-{}-{test}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+
+        fn script(&self, name: &str, text: &str) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, text).unwrap();
+            path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_python_is_a_path_quoted_or_not_or_a_command_with_arguments() {
+        let words = |p: &str| python_program(p);
+        assert_eq!(words("py -3.12"), ("py".to_owned(), vec!["-3.12".to_owned()]));
+        assert_eq!(
+            words(r#""C:\Program Files\Python\python.exe""#),
+            (r"C:\Program Files\Python\python.exe".to_owned(), vec![])
+        );
+        assert_eq!(
+            words(r#""C:\Py\python.exe" -X utf8"#),
+            (r"C:\Py\python.exe".to_owned(), vec!["-X".to_owned(), "utf8".to_owned()])
+        );
+        let here = std::env::current_exe().unwrap().display().to_string();
+        assert_eq!(words(&here), (here.clone(), vec![]), "a path with spaces, not split");
+        let package = PathBuf::from("pkg");
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        assert_eq!(python_path(package.clone(), None), Some("pkg".into()));
+        assert_eq!(python_path(package.clone(), Some(OsStr::new(""))), Some("pkg".into()), "an empty folder added");
+        assert_eq!(
+            python_path(package, Some(OsStr::new(&format!("a{sep}{sep}b")))),
+            Some(format!("pkg{sep}a{sep}b").into())
+        );
     }
 
     /// Polls `console` until its script has ended (at most 30 s).
@@ -358,18 +434,11 @@ mod tests {
         assert!(console.running().is_none(), "the script did not end");
     }
 
-    fn script(name: &str, text: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("opal-console-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, text).unwrap();
-        path
-    }
-
     #[test]
     fn what_a_script_prints_is_shown_and_how_it_ended() {
         let Some(python) = python() else { return eprintln!("No Python found (set OPAL_PYTHON).") };
-        let path = script(
+        let scratch = Scratch::new("speak");
+        let path = scratch.script(
             "speak.py",
             "import os, sys\nprint('hello', os.path.basename(os.getcwd()))\n\
              print('oops', file=sys.stderr)\nprint('é')\nsys.exit(3)\n",
@@ -391,7 +460,8 @@ mod tests {
     #[test]
     fn a_script_can_be_stopped() {
         let Some(python) = python() else { return eprintln!("No Python found (set OPAL_PYTHON).") };
-        let path = script("forever.py", "import time\nprint('started', flush=True)\ntime.sleep(60)\n");
+        let scratch = Scratch::new("forever");
+        let path = scratch.script("forever.py", "import time\nprint('started', flush=True)\ntime.sleep(60)\n");
         let mut console = Console::default();
         console.run(&path, &python, Path::new("unused.json"), &egui::Context::default()).unwrap();
         let started = Instant::now();
@@ -411,7 +481,8 @@ mod tests {
         st.prefs.set("scripting.python", crate::settings::Value::Text(python));
         assert!(crate::commands::availability(&st, Cmd::RunScript).is_err(), "available without a server");
         st.scripts_file = Some(file);
-        let path = script(
+        let scratch = Scratch::new("draw");
+        let path = scratch.script(
             "draw.py",
             "import opal\nwith opal.connect() as e:\n    e.new(width=8, height=8)\n    \
              e.new_layer(name='A')\n    e.new_layer(name='B')\nprint('done')\n",
@@ -436,7 +507,8 @@ mod tests {
     #[test]
     fn a_python_that_is_not_there_is_said_so() {
         let mut console = Console::default();
-        let path = script("any.py", "");
+        let scratch = Scratch::new("any");
+        let path = scratch.script("any.py", "");
         let err = console
             .run(&path, "no-such-python-anywhere", Path::new("unused.json"), &egui::Context::default())
             .unwrap_err();

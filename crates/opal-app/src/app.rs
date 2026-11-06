@@ -734,8 +734,7 @@ impl eframe::App for OpalApp {
         self.sync_panes();
         self.handle_exit(&ctx);
         self.save_settings_if_due(&ctx);
-        self.st.poll_copies();
-        self.st.poll_writes(ctx.input(|i| i.pointer.any_down()));
+        self.st.between_frames(ctx.input(|i| i.pointer.any_down()));
         self.st.console.poll(&ctx);
         // After the writes, whose answers it passes on.
         if let Some(server) = &mut self.server {
@@ -754,10 +753,6 @@ impl eframe::App for OpalApp {
         }
         self.st.poll_paste(ctx.input(|i| i.pointer.any_down()));
         self.st.thumbs.end_frame();
-        let budget = crate::prefs::bytes(&self.st.prefs, "history.memory");
-        for d in &mut self.st.docs {
-            d.set_history_budget(budget);
-        }
         self.st.apply_tile_budget();
         // What operations on documents asked to say.
         let notices: Vec<String> = self.st.docs.iter_mut().filter_map(|d| d.notice.take()).collect();
@@ -995,11 +990,9 @@ fn start_server(st: &mut AppState, ctx: &egui::Context) -> (Option<crate::server
             (None, true)
         }
         Err(e) => {
-            st.message(
-                crate::state::MessageKind::Warning,
-                "Scripts cannot connect",
-                format!("The connection for scripts and assistants could not be opened: {e}"),
-            );
+            let why = format!("The connection for scripts and assistants could not be opened: {e}");
+            st.message(crate::state::MessageKind::Warning, "Scripts cannot connect", why.clone());
+            st.scripts_unserved = Some(why);
             (None, false)
         }
     }

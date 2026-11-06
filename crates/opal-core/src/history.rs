@@ -222,6 +222,11 @@ impl History {
         }
     }
 
+    /// The budget set: what the states other than the current one may hold beyond it.
+    pub fn budget(&self) -> u64 {
+        self.budget
+    }
+
     /// How many states have been dropped to keep within the budget.
     pub fn dropped(&self) -> usize {
         self.dropped
@@ -240,6 +245,11 @@ impl History {
     /// goes through from here, the newest work, which undoing to look back must not lose;
     /// past the budget, the history waits for the next action to trim it.
     fn trim(&mut self) {
+        // Within the budget (as almost always), nothing to look for: the states to keep are
+        // as many as redo goes through, which a script's undoing can make many.
+        if self.usage.extra() <= self.budget {
+            return;
+        }
         let mut keep: HashSet<NodeId> =
             [Some(self.current), self.node(self.current).parent].into_iter().flatten().collect();
         let mut at = self.current;
@@ -289,7 +299,15 @@ impl History {
 
     /// Whether state `id` and everything descending from it are in `made`.
     fn all_made(&self, id: NodeId, made: &HashSet<NodeId>) -> bool {
-        made.contains(&id) && self.node(id).children.iter().all(|&c| self.all_made(c, made))
+        // Walked with a stack of its own: a script's undone states can hang many deep.
+        let mut to_see = vec![id];
+        while let Some(at) = to_see.pop() {
+            if !made.contains(&at) {
+                return false;
+            }
+            to_see.extend(&self.node(at).children);
+        }
+        true
     }
 
     /// Puts `end` in the place of `start`, an earlier state on its way from the root,
@@ -320,10 +338,11 @@ impl History {
         let e = self.node_mut(end);
         e.parent = parent;
         e.label = label.to_owned();
-        let mut going = line.clone();
+        let on_line: HashSet<NodeId> = line.iter().copied().collect();
+        let mut going = line;
         let mut i = 0;
         while i < going.len() {
-            let side = self.node(going[i]).children.iter().filter(|&&c| c != end && !line.contains(&c));
+            let side = self.node(going[i]).children.iter().filter(|&&c| c != end && !on_line.contains(&c));
             going.extend(side.copied().collect::<Vec<_>>());
             i += 1;
         }
@@ -952,6 +971,27 @@ mod tests {
         assert!(!h.can_undo());
         assert_eq!(h.nodes().map(|(id, _)| id).collect::<Vec<_>>(), [last]);
         assert!(counted_right(&h));
+    }
+
+    #[test]
+    fn a_script_s_long_undone_branch_goes_without_overflowing_the_stack() {
+        let mut h = History::new(Document::new(10, 10), "New");
+        let mut made = HashSet::new();
+        let commit = |h: &mut History, made: &mut HashSet<NodeId>| {
+            let d = h.doc().clone();
+            made.insert(h.commit(d, "Rename"));
+        };
+        commit(&mut h, &mut made);
+        // Many states, all undone: a branch that deep hangs off the first.
+        for _ in 0..50_000 {
+            commit(&mut h, &mut made);
+        }
+        for _ in 0..50_000 {
+            h.undo();
+        }
+        commit(&mut h, &mut made);
+        assert_eq!(h.join(&made, "Script"), 50_001);
+        assert_eq!(h.nodes().count(), 2);
     }
 
     #[test]

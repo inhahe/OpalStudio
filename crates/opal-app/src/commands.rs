@@ -808,7 +808,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         | StampVisible | ResizeCanvas | CropToContent => needs_doc(),
         Paste | PasteInPlace => Ok(()),
         RunScript => match (&st.scripts_file, st.console.running()) {
-            (None, _) => Err(crate::console::NOT_SERVING.to_owned()),
+            (None, _) => Err(st.scripts_unserved.clone().unwrap_or_else(|| crate::console::NOT_SERVING.to_owned())),
             (_, Some(name)) => Err(format!("{name} is running: stop it in the Console panel first.")),
             _ => Ok(()),
         },

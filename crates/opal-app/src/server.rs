@@ -174,7 +174,8 @@ fn hello_to(info: &ConnectionInfo, files_only: bool, tries: usize) -> Hello {
     let mut line = String::new();
     if conn.get_mut().write_all(format!("{hello}\n").as_bytes()).is_err() || conn.read_line(&mut line).unwrap_or(0) == 0
     {
-        return gone();
+        // Someone took the connection: an editor with no room for it just then.
+        return Hello::Refused("Opal Studio did not answer: try again in a moment.".to_owned());
     }
     let Ok(answer) = serde_json::from_str::<Value>(&line) else {
         return Hello::Refused("The editor's answer is not JSON.".to_owned());
@@ -213,10 +214,16 @@ fn connect(name: interprocess::local_socket::Name<'_>, tries: usize) -> Result<S
     Err(Unconnected::Busy)
 }
 
-/// Whether an editor is running as `file` tells: one answers (even if it refuses), or its
-/// pipe is busy. Asked without waiting, so that the interface thread can ask.
+/// Whether an editor is running as `file` tells: someone listens on its pipe (each editor's
+/// is of its own, named after its process). Only connected to, not said hello to, so that
+/// nothing waits on an answer (an editor stopped in a debugger never gives one), and the
+/// interface thread can ask.
 pub fn is_running(file: &Path) -> bool {
-    read_connection_file(file).is_ok_and(|info| !matches!(hello_to(&info, true, 1), Hello::Nobody(_)))
+    let Ok(info) = read_connection_file(file) else { return false };
+    let Some(name) = info.pipe.rsplit(['\\', '/']).next().and_then(|n| n.to_ns_name::<GenericNamespaced>().ok()) else {
+        return false;
+    };
+    !matches!(connect(name, 1), Err(Unconnected::Absent))
 }
 
 /// Hands `files` to the editor already running (as `file` tells), to be opened there, and
@@ -820,6 +827,37 @@ mod tests {
     }
 
     #[test]
+    fn an_editor_is_seen_running_though_it_has_no_room_or_never_answers() {
+        // Every place among the strangers taken: the editor takes a connection and drops it.
+        let file = std::env::temp_dir().join(format!("opal-api-full-{}.json", std::process::id()));
+        let server = Server::start(file.clone(), egui::Context::default()).unwrap();
+        let (pipe, _) = info(&file);
+        let silent: Vec<Client> = (0..MAX_STRANGERS).map(|_| Client::connect(&pipe)).collect();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(is_running(&file), "taken for gone while full");
+        drop((silent, server));
+        // One that takes the connection and never answers (stopped in a debugger, say).
+        let name = format!("opal-api-mute-{}.sock", std::process::id());
+        let listener = ListenerOptions::new()
+            .name(name.as_str().to_ns_name::<GenericNamespaced>().unwrap())
+            .create_sync()
+            .unwrap();
+        let held = std::thread::spawn(move || {
+            let taken = listener.incoming().next();
+            std::thread::sleep(Duration::from_secs(2));
+            drop(taken);
+        });
+        let mute = std::env::temp_dir().join(format!("opal-api-mute-{}.json", std::process::id()));
+        std::fs::write(&mute, json!({ "pipe": format!(r"\\.\pipe\{name}"), "token": "t" }).to_string()).unwrap();
+        let (told, asked) = std::sync::mpsc::channel();
+        let probe = mute.clone();
+        std::thread::spawn(move || told.send(is_running(&probe)));
+        assert_eq!(asked.recv_timeout(Duration::from_secs(1)), Ok(true), "waited on an editor that never answers");
+        let _ = held.join();
+        std::fs::remove_file(&mute).ok();
+    }
+
+    #[test]
     fn a_disconnect_keeps_the_token_the_file_could_not_be_given() {
         let file = std::env::temp_dir().join(format!("opal-api-locked-{}.json", std::process::id()));
         let server = Server::start(file.clone(), egui::Context::default()).unwrap();
@@ -1019,11 +1057,7 @@ mod tests {
     }
 
     /// The Python to run the package's test with: `OPAL_PYTHON`, or `python` if it runs.
-    fn python() -> Option<String> {
-        let python = std::env::var("OPAL_PYTHON").unwrap_or_else(|_| "python".to_owned());
-        let runs = std::process::Command::new(&python).arg("--version").output().is_ok_and(|o| o.status.success());
-        runs.then_some(python)
-    }
+    use crate::console::test_python as python;
 
     #[test]
     fn the_python_package_drives_the_editor() {
@@ -1035,7 +1069,6 @@ mod tests {
         let file = std::env::temp_dir().join(format!("opal-api-py-{}.json", std::process::id()));
         let mut server = Server::start(file.clone(), egui::Context::default()).unwrap();
         let mut st = AppState::new();
-        let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../python");
         let png = std::env::temp_dir().join(format!("opal-api-py-{}.png", std::process::id()));
         let script = r#"
 import ast, json, keyword, os, pathlib, sys
@@ -1108,12 +1141,8 @@ with opal.connect() as editor:
         // Run from a file, as a script is (its name names its history state).
         let file_of_script = std::env::temp_dir().join(format!("opal-api-py-{}.py", std::process::id()));
         std::fs::write(&file_of_script, script).unwrap();
-        let child = std::process::Command::new(&python)
-            .arg(&file_of_script)
-            .arg(&png)
-            .env("PYTHONPATH", &package)
-            .env("OPAL_STUDIO_API", &file)
-            .env("PYTHONIOENCODING", "utf-8")
+        // As Run Script and headless runs start it.
+        let child = crate::console::script_command(&python, file_of_script.as_os_str(), &[png.clone().into()], &file)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
