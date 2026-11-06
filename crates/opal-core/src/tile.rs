@@ -232,7 +232,8 @@ impl Clone for Tile {
     }
 }
 
-/// Tiles are alike when their pixels are, however they are stored.
+/// Tiles are alike when their pixels are, however they are stored (an 8-bit pixel fully
+/// transparent is the clear pixel, whatever colour it keeps).
 impl PartialEq for Tile {
     fn eq(&self, other: &Tile) -> bool {
         if Arc::ptr_eq(&self.slot, &other.slot) {
@@ -241,7 +242,7 @@ impl PartialEq for Tile {
         let (a, b) = (self.reader(), other.reader());
         match (a.data(), b.data()) {
             (Data::Wide(x), Data::Wide(y)) => x == y,
-            (Data::Srgb8(x), Data::Srgb8(y)) => x == y,
+            (Data::Srgb8(x), Data::Srgb8(y)) => x.iter().zip(y.iter()).all(|(p, q)| p == q || (p[3] == 0 && q[3] == 0)),
             (x, y) => (0..TILE_PIXELS).all(|i| x.get(i) == y.get(i)),
         }
     }
@@ -593,5 +594,15 @@ mod tests {
         let mut want = wide.clone();
         want.set(5, 5, pixel_from_f32([1.0; 4]));
         assert!(changed == want);
+    }
+
+    #[test]
+    fn eight_bit_pixels_fully_transparent_are_alike_whatever_colour_they_keep() {
+        let white_clear = Tile::from_srgb8(vec![[255, 255, 255, 0]; TILE_PIXELS]);
+        let black_clear = Tile::from_srgb8(vec![[0, 0, 0, 0]; TILE_PIXELS]);
+        assert!(white_clear == Tile::transparent() && black_clear == Tile::transparent());
+        assert!(white_clear == black_clear, "alike as they are, not only through working pixels");
+        let shown = Tile::from_srgb8(vec![[255, 255, 255, 1]; TILE_PIXELS]);
+        assert!(shown != black_clear);
     }
 }
