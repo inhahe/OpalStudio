@@ -165,6 +165,12 @@ pub struct AppState {
     pub show_console: bool,
     /// Whether scripts shut out should be let in again (the user started one).
     pub let_scripts_in: bool,
+    /// Whether Connect an Assistant is open.
+    pub assistant_open: bool,
+    /// MCP over HTTP while it is served: the port, and the token clients give.
+    pub mcp_http: Option<(u16, String)>,
+    /// Whether that token should be replaced (clients given it are then refused).
+    pub renew_mcp_token: bool,
     /// For each copy on its way to the clipboard, in order, the call it answers, if any.
     pub copies_answered: VecDeque<Option<u64>>,
     pub confirm: Option<Confirm>,
@@ -268,6 +274,9 @@ impl AppState {
             scripts_file: None,
             show_console: false,
             let_scripts_in: false,
+            assistant_open: false,
+            mcp_http: None,
+            renew_mcp_token: false,
             copies_answered: VecDeque::new(),
             confirm: None,
             new_image: None,
@@ -450,6 +459,7 @@ impl AppState {
             }
             Cmd::Preferences => self.prefs_open = true,
             Cmd::RunScript => self.run_script_dialog(ctx),
+            Cmd::ConnectAssistant => self.assistant_open = true,
             Cmd::Exit => self.exit_requested = true,
             Cmd::Undo => {
                 self.active_mut().expect("available").undo();

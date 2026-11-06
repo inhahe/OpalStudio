@@ -33,6 +33,7 @@ pub fn show_all(ctx: &egui::Context, st: &mut AppState) {
     }
     preferences(ctx, st);
     about(ctx, st);
+    crate::assistant::window(ctx, st);
     gallery(ctx, st);
 }
 

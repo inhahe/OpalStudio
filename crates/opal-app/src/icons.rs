@@ -80,3 +80,5 @@ pub const CONSOLE: char = '\u{ee6f}';
 pub const PLAY: char = '\u{f605}';
 pub const STOP: char = '\u{f72a}';
 pub const BROOM: char = '\u{f201}';
+pub const BOT: char = '\u{e1b8}';
+pub const KEY: char = '\u{f4b6}';

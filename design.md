@@ -1105,13 +1105,31 @@ server. Both rest on one language-neutral API.
 - **MCP server.** The editor serves MCP (streamable HTTP on localhost) to clients that
   connect to it, and `opal-studio --mcp` is a stdio shim for clients that launch their
   servers. Its tools are the command registry; it can return the canvas, or a layer, as an
-  image, so an assistant can see what it is doing. *Built so far:* the stdio shim, which
-  opens no window: its tools are the API's methods (but `methods`, which the tool list is),
-  each with a JSON Schema of its parameters, made from the registry; each call goes to the
-  editor running on this computer through its pipe and token, as a script's would, and a
-  refusal (or no editor running) comes back as the tool's error text. The `image` query
-  (the canvas as a PNG, scaled to fit a size) comes back as an image. A layer's image, and
-  the HTTP transport, are still to come.
+  image, so an assistant can see what it is doing. *Built:* the stdio shim, which opens no
+  window: its tools are the API's methods (but those clients give in their own way:
+  `methods`, which the tool list is, and the pixels methods), each with a JSON Schema of its
+  parameters, made from the registry; each call goes to the editor running on this
+  computer through its pipe and token, as a script's would, and a refusal (or no editor
+  running) comes back as the tool's error text. The `image` query (the canvas, or a layer
+  alone, as a PNG scaled to fit a size) comes back as an image. And MCP over HTTP
+  (`mcp_http.rs`), off unless the preference turns it on (Preferences › Scripting, with its
+  port, 47860 by default), served only by the editor that serves scripts: on 127.0.0.1
+  alone, at `/mcp`, the streamable HTTP transport answering every request in JSON (`POST`;
+  `DELETE` ends a session; nothing is streamed, so `GET` is refused). An `initialize` makes
+  a session (`Mcp-Session-Id`), each with a connection of its own to the editor's pipe, as
+  the shim has; at most 32 are kept, the one used longest ago going first. The HTTP is read
+  strictly, by code of its own (the small crates were found to have open CVEs for request
+  smuggling and header injection): request and header lines ended by CR LF, with no control
+  characters, at most 8 KB and 64 of them; bodies framed by `Content-Length` alone, at most
+  1 MB (`Transfer-Encoding` is refused, and so is a framing header given twice); at most 16
+  connections at once, each closed after 30 seconds idle. A request is refused unless its
+  `Host` is `127.0.0.1` or `localhost` at the port, its `Origin` (if any) the same, and it
+  gives `Authorization: Bearer` with the token from `mcp-http-token.txt` beside `api.json`:
+  made the first time and kept from one start to the next, so a client is set up once
+  (Connect an Assistant can make a new one, which refuses clients given the old). Connect an
+  Assistant (File › Scripts) shows what to put in a client's settings for either: the
+  shim's command and JSON, or the HTTP address, header and Claude Code command, each with a
+  Copy button.
 - **Safety.** Local connections only; clients authenticate with a random token kept in a
   file only the user can read; MCP requests with a foreign `Origin` are refused (against
   DNS rebinding). While a script or assistant is connected, the status bar says so and can

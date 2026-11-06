@@ -51,6 +51,10 @@ pub struct OpalApp {
     server_waits: bool,
     /// When this one last looked whether it could, and last asked the other one.
     server_looked: (std::time::Instant, std::time::Instant),
+    /// MCP over HTTP, while the preference has it served (and this editor serves scripts).
+    mcp_http: Option<crate::mcp_http::HttpServer>,
+    /// The port it could not be served on, not tried again until the preferences change.
+    mcp_http_failed: Option<u16>,
 }
 
 impl OpalApp {
@@ -102,6 +106,8 @@ impl OpalApp {
             server,
             server_waits,
             server_looked: (std::time::Instant::now(), std::time::Instant::now()),
+            mcp_http: None,
+            mcp_http_failed: None,
         }
     }
 
@@ -539,6 +545,7 @@ impl OpalApp {
             .hash(&mut h);
         (st.new_image.is_some(), st.export.is_some(), st.prefs_open, st.about_open, st.gallery_open, &st.help)
             .hash(&mut h);
+        (st.assistant_open, &st.mcp_http).hash(&mut h);
         (st.resize_image.is_some(), st.resize_canvas.is_some(), st.rotate_by.is_some()).hash(&mut h);
         st.reading.is_some().hash(&mut h);
         st.writer.busy().hash(&mut h);
@@ -740,6 +747,7 @@ impl eframe::App for OpalApp {
         } else if self.server_waits {
             self.take_over_serving(&ctx);
         }
+        self.sync_mcp_http();
         if std::mem::take(&mut self.st.raise_window) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -1004,6 +1012,48 @@ const LOOK_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 const ASK_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 
 impl OpalApp {
+    /// Serves MCP over HTTP as the preferences say: started, moved to another port, given a
+    /// new token or stopped. Not in tests, and only by the editor that serves scripts (its
+    /// sessions are that editor's clients).
+    fn sync_mcp_http(&mut self) {
+        let wanted = self.persist && self.server.is_some() && self.st.prefs.bool("scripting.mcp_http");
+        let port = self.st.prefs.f64("scripting.mcp_port") as u16;
+        let renew = std::mem::take(&mut self.st.renew_mcp_token);
+        if !wanted {
+            (self.mcp_http, self.mcp_http_failed, self.st.mcp_http) = (None, None, None);
+            return;
+        }
+        let serving = self.mcp_http.as_ref().is_some_and(|h| h.port() == port);
+        if (serving && !renew) || (!serving && self.mcp_http_failed == Some(port)) {
+            return;
+        }
+        // The old one goes first, freeing its port.
+        (self.mcp_http, self.st.mcp_http) = (None, None);
+        let (Some(token_file), Some(api)) = (crate::mcp_http::token_file(), self.st.scripts_file.clone()) else {
+            return;
+        };
+        let started = crate::mcp_http::token(&token_file, renew).and_then(|token| {
+            let server = crate::mcp_http::HttpServer::start(port, token.clone(), move || {
+                Box::new(crate::mcp::pipe_to(api.clone()))
+            })?;
+            Ok((server, token))
+        });
+        match started {
+            Ok((server, token)) => {
+                self.st.mcp_http = Some((port, token));
+                (self.mcp_http, self.mcp_http_failed) = (Some(server), None);
+            }
+            Err(e) => {
+                self.mcp_http_failed = Some(port);
+                self.st.message(
+                    crate::state::MessageKind::Warning,
+                    "MCP over HTTP is not served",
+                    format!("Port {port} could not be opened: {e}. Preferences › Scripting chooses another."),
+                );
+            }
+        }
+    }
+
     /// Starts serving scripts once the editor that served them has gone.
     fn take_over_serving(&mut self, ctx: &egui::Context) {
         ctx.request_repaint_after(LOOK_EVERY);

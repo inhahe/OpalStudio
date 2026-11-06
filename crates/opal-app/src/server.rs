@@ -103,7 +103,7 @@ pub fn connection_file() -> Option<PathBuf> {
 }
 
 /// A random token: 32 bytes from the operating system's generator, in hex.
-fn new_token() -> std::io::Result<String> {
+pub(crate) fn new_token() -> std::io::Result<String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
@@ -443,7 +443,7 @@ fn write_connection_file(shared: &Shared, token: &str) -> std::io::Result<()> {
 
 /// Writes `bytes` to `path`, readable by the user alone where the system lets a program say so
 /// (on Windows, a file in the user's own profile already is).
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]

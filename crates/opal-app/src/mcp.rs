@@ -68,6 +68,12 @@ impl Pipe {
     }
 }
 
+/// What carries calls to the editor whose connection file is `file`, connecting when first
+/// needed and again after the connection drops.
+pub fn pipe_to(file: std::path::PathBuf) -> impl Caller + Send {
+    Pipe { file: Some(file), ..Pipe::default() }
+}
+
 impl Caller for Pipe {
     fn call(&mut self, method: &str, params: Map<String, Value>) -> Result<Value, String> {
         if self.conn.is_none() {

@@ -19,6 +19,7 @@ pub enum Cmd {
     Preferences,
     Exit,
     RunScript,
+    ConnectAssistant,
     Undo,
     Redo,
     Copy,
@@ -101,7 +102,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 56] = [
+    pub const ALL: [Cmd; 57] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -111,6 +112,7 @@ impl Cmd {
         Cmd::Preferences,
         Cmd::Exit,
         Cmd::RunScript,
+        Cmd::ConnectAssistant,
         Cmd::Undo,
         Cmd::Redo,
         Cmd::Copy,
@@ -227,6 +229,15 @@ impl Cmd {
                  stop it, and what it changes in an image becomes one step of history, which \
                  one Undo takes back. Scripts use the opal package; python/API.md lists what \
                  they can call.",
+                &[],
+            ),
+            Cmd::ConnectAssistant => i(
+                "Connect an Assistant",
+                icons::BOT,
+                "Set up an AI assistant to drive Opal Studio.",
+                "Shows what to put in an assistant's settings (Claude Code, Claude Desktop, Cursor and \
+                 others) so that it can use Opal Studio's commands and see the image, through MCP: by \
+                 starting opal-studio --mcp, or over HTTP on this computer, with a token.",
                 &[],
             ),
             Cmd::Undo => i(
@@ -629,7 +640,7 @@ pub static RIBBON: &[Tab] = &[
                 description: "Running Python scripts that drive Opal Studio. What they print \
                               shows in the Console panel.",
                 large: 1,
-                cmds: &[Cmd::RunScript],
+                cmds: &[Cmd::RunScript, Cmd::ConnectAssistant],
             },
             Group {
                 name: "Application",
@@ -791,8 +802,8 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
     use Cmd::*;
     let needs_doc = || st.active().map(|_| ()).ok_or_else(|| "Open or create an image first.".to_owned());
     match cmd {
-        New | Open | Preferences | Exit | ToggleOffCanvas | ToggleTheme | ToggleRibbon | CycleToolsPlace
-        | ResetPanels | Search | Help | Shortcuts | About | WidgetGallery => Ok(()),
+        New | Open | Preferences | Exit | ConnectAssistant | ToggleOffCanvas | ToggleTheme | ToggleRibbon
+        | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts | About | WidgetGallery => Ok(()),
         Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup | CopyMerged
         | StampVisible | ResizeCanvas | CropToContent => needs_doc(),
         Paste | PasteInPlace => Ok(()),

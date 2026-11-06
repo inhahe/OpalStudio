@@ -442,6 +442,26 @@ pub static PREFS: &[Def] = &[
         default: Init::Text("python"),
         advanced: false,
     },
+    Def {
+        key: "scripting.mcp_http",
+        label: "MCP over HTTP",
+        help: "Serve MCP on this computer's own address, for AI assistants whose clients connect to a \
+               server by its URL; those that start opal-studio --mcp need nothing. Only programs here \
+               that give the token can connect: Connect an Assistant (File › Scripts) shows it.",
+        section: "Scripting",
+        kind: Kind::Bool,
+        default: Init::Bool(false),
+        advanced: false,
+    },
+    Def {
+        key: "scripting.mcp_port",
+        label: "MCP port",
+        help: "The port MCP over HTTP listens on, on this computer's own address (127.0.0.1).",
+        section: "Scripting",
+        kind: Kind::Float { min: 1024.0, max: 65535.0, decimals: 0, suffix: "", log: false },
+        default: Init::Float(crate::mcp_http::PORT as f64),
+        advanced: true,
+    },
 ];
 
 #[cfg(test)]

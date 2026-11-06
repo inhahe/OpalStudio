@@ -1,10 +1,7 @@
 # Opal Studio — roadmap
 
-What each milestone delivers is specified in `design.md`. Status: milestones 0 and 1 are
-done; milestone S is under way (the API over its pipe, the Python package, the MCP stdio
-shim, the canvas or a layer as an image, pixels through shared memory, headless batch
-mode, Run Script with its console and a script run as one history state are built; left is
-the HTTP MCP transport); everything after it is planned.
+What each milestone delivers is specified in `design.md`. Status: milestones 0, 1 and S
+are done; everything after them is planned.
 
 **Order:** 0, 1, S, 2, A, 3, 4, and so on. Photo editing comes first, with vector shapes
 taken early (milestone 4), because by then the outline tool has built most of the curve
@@ -55,7 +52,7 @@ selection core it builds on.
   Group, Stamp Visible.
 - Rasterize Layer.
 
-## S. Scripting and MCP (right after milestone 1)
+## S. Scripting and MCP (done)
 - Parameterized commands: every command callable with parameters as well as from the
   interface; Python stubs, API documentation and MCP tools generated from the registry.
 - The JSON-RPC API over a local pipe or socket, with token authentication; document queries;

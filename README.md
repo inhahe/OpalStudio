@@ -4,10 +4,11 @@ A 2D graphics editor that aims to be more intuitive than the usual ones: everyth
 editable, every setting that affects a result can be adjusted, and the interface always
 says what a command does and, when it cannot run, why.
 
-Early days: milestones 0 (the foundation) and 1 (paste and place) of the roadmap are
-built. You can open and create images, paste and place images, move, scale, rotate, crop
-and resize, arrange and merge layers, undo through a branching history, and save and
-export; scripting, selections and painting come next. See `roadmap.md` for what is planned
+Early days: milestones 0 (the foundation), 1 (paste and place) and S (scripting and MCP)
+of the roadmap are built. You can open and create images, paste and place images, move,
+scale, rotate, crop and resize, arrange and merge layers, undo through a branching
+history, save and export, and drive it all from Python scripts or an AI assistant;
+selections and painting come next. See `roadmap.md` for what is planned
 and `design.md` for how it is built. Known problems are listed in `known-issues.md`.
 
 Free software under the GNU General Public License, version 3 or later (`LICENSE`).
@@ -104,8 +105,10 @@ cargo test --workspace                     # all tests, interface tests included
 - **AI assistants.** `opal-studio --mcp` is an MCP server for assistants whose clients
   launch their servers, its tools the same commands and queries, the image coming back as
   an image so the assistant sees what it is doing. For Claude Code, for example:
-  `claude mcp add opal-studio -- "C:\path\to\opal-studio.exe" --mcp`. The editor itself
-  must be running for a tool to act.
+  `claude mcp add opal-studio -- "C:\path\to\opal-studio.exe" --mcp`. For clients that
+  connect by URL, Preferences › Scripting can serve MCP over HTTP on this computer, with a
+  token. Connect an Assistant (File › Scripts) shows what to put in a client's settings
+  either way. The editor itself must be running for a tool to act.
 
 ## Layout
 

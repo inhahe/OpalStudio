@@ -4,6 +4,7 @@
 
 mod api;
 mod app;
+mod assistant;
 mod background;
 mod canvas;
 mod clipboard;
@@ -23,6 +24,7 @@ mod icons;
 mod image_ops;
 mod layer_ops;
 mod mcp;
+mod mcp_http;
 mod memory;
 mod move_tool;
 mod panels;
