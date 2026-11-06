@@ -39,3 +39,19 @@ program pasting a copy from Opal Studio gets 8 bits a channel (Opal Studio itsel
 its full-precision copy back). Waits on a non-Windows build to test against. **Fix:** offer
 `image/png` at 16 bits through the platform's clipboard directly (X11 and Wayland
 selections, `NSPasteboard`'s `public.png`).
+
+## Pixels pass through shared memory only on Windows
+
+`crates/opal-app/src/shared_memory.rs`. Elsewhere `pixels` and `put_pixels` carry the pixels
+in base64 in the connection's lines, and a request's line is at most 1 MB, so a script can
+give only small images there. Waits on a non-Windows build to test against. **Fix:** POSIX
+shared memory (`shm_open` and `mmap`, through `rustix`), which Python reaches through
+`multiprocessing.shared_memory`; the Python package then uses it there as on Windows.
+
+## The scripting connection's Unix side is untried
+
+`crates/opal-app/src/server.rs` (`read_first_line`, and the socket's permissions). The
+non-Windows path of the hello deadline uses the socket's receive timeout and has never been
+built; the Unix socket lives in the abstract namespace, which any local user can connect to
+(the token still keeps them out). Waits on a non-Windows build. **Fix:** build and test it
+there; consider a socket file in the user's runtime folder (mode 0600) instead.
