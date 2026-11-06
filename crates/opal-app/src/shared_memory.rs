@@ -18,12 +18,10 @@ pub struct Mapping {
 // thread; `Mapping` hands out the bytes only through `&self`/`&mut self`.
 unsafe impl Send for Mapping {}
 
-/// A name for a new section: `Local\` (this session's), made unguessable.
-pub fn new_name() -> String {
-    let mut bytes = [0u8; 12];
-    let _ = getrandom::fill(&mut bytes);
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    format!("Local\\opal-pixels-{}-{hex}", std::process::id())
+/// A name for a new section: `Local\` (this session's), made unguessable (so none could have
+/// taken it first); an error if the system gives no random bytes.
+pub fn new_name() -> std::io::Result<String> {
+    Ok(format!("Local\\opal-pixels-{}-{}", std::process::id(), crate::server::random_hex(12)?))
 }
 
 impl Mapping {
@@ -156,7 +154,7 @@ mod tests {
 
     #[test]
     fn a_section_made_is_read_through_another_view_of_it() {
-        let name = new_name();
+        let name = new_name().unwrap();
         let mut made = Mapping::create(&name, 10).unwrap();
         made.bytes_mut().copy_from_slice(b"0123456789");
         let opened = Mapping::open(&name, 10).unwrap();

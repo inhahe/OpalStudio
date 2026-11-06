@@ -104,7 +104,12 @@ pub fn connection_file() -> Option<PathBuf> {
 
 /// A random token: 32 bytes from the operating system's generator, in hex.
 pub(crate) fn new_token() -> std::io::Result<String> {
-    let mut bytes = [0u8; 32];
+    random_hex(32)
+}
+
+/// `n` bytes from the operating system's generator, in hex.
+pub(crate) fn random_hex(n: usize) -> std::io::Result<String> {
+    let mut bytes = vec![0u8; n];
     getrandom::fill(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
@@ -1141,6 +1146,19 @@ with opal.connect() as editor:
     assert len(editor.layers(document=wide)) == 2, "a layer a band"
     opal._SHARED = True
     editor.close(document=wide, discard=True)
+    try:
+        editor.put_pixels(np.zeros((0, 4, 4), np.uint8))
+        raise SystemExit("put no pixels without a word")
+    except opal.OpalError as e:
+        assert "no pixels" in str(e), e
+    unreadable = pathlib.Path(sys.argv[1]).with_suffix(".dir")
+    unreadable.mkdir(exist_ok=True)
+    try:
+        opal.connect(unreadable)
+        raise SystemExit("connected through a folder")
+    except opal.OpalError as e:
+        assert "not readable" in str(e), e
+    unreadable.rmdir()
     left = editor.documents()
     # Changes to an image the script leaves open, one history state once it ends.
     editor.new(width=8, height=8)

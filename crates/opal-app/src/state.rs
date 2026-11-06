@@ -177,6 +177,10 @@ pub struct AppState {
     pub mcp_http: Option<(u16, String)>,
     /// Whether that token should be replaced (clients given it are then refused).
     pub renew_mcp_token: bool,
+    /// Why MCP over HTTP is not served though the preference asks for it, if it could not
+    /// be; and whether to try again.
+    pub mcp_http_trouble: Option<String>,
+    pub retry_mcp_http: bool,
     /// For each copy on its way to the clipboard, in order, the call it answers, if any.
     pub copies_answered: VecDeque<Option<u64>>,
     pub confirm: Option<Confirm>,
@@ -285,6 +289,8 @@ impl AppState {
             assistant_open: false,
             mcp_http: None,
             renew_mcp_token: false,
+            mcp_http_trouble: None,
+            retry_mcp_http: false,
             copies_answered: VecDeque::new(),
             confirm: None,
             new_image: None,

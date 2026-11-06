@@ -35,6 +35,11 @@ const SESSIONS: usize = 32;
 /// they trickle in), before it is closed.
 const IDLE: Duration = if cfg!(test) { Duration::from_secs(1) } else { Duration::from_secs(30) };
 
+/// How long a session may go unused before it goes (its client gone without ending it, as
+/// one restarted does), and how often that is looked for.
+const SESSION_IDLE: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(30 * 60) };
+const SWEEP_EVERY: Duration = if cfg!(test) { Duration::from_millis(50) } else { Duration::from_secs(60) };
+
 /// The port served on by default.
 pub const PORT: u16 = 47860;
 
@@ -86,8 +91,10 @@ fn is_token(name: &str) -> bool {
     !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
 }
 
-/// Reads the next request from `reader`: `Ok(None)` if the connection ended before one.
-fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>, Unreadable> {
+/// Reads the next request from `reader`: `Ok(None)` if the connection ended before one. A
+/// client that waits to be told to send its body (`Expect: 100-continue`) is told so on
+/// `out`.
+fn read_request(reader: &mut impl BufRead, out: &mut impl Write) -> Result<Option<Request>, Unreadable> {
     let Some(first) = read_line(reader)? else { return Ok(None) };
     let mut parts = first.split(' ');
     let (Some(method), Some(path), Some(version), None) = (parts.next(), parts.next(), parts.next(), parts.next())
@@ -143,6 +150,16 @@ fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>, Unreadable
     if len > BODY {
         return Err(Unreadable(Some(413), "The body is longer than 1 MB."));
     }
+    if let Some(expect) = headers.get("expect") {
+        if !expect.eq_ignore_ascii_case("100-continue") {
+            return Err(Unreadable(Some(417), "Only 100-continue is expected."));
+        }
+        if len > 0 {
+            out.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                .and_then(|()| out.flush())
+                .map_err(|_| Unreadable(None, "The connection failed."))?;
+        }
+    }
     let mut body = vec![0; len];
     reader.read_exact(&mut body).map_err(|_| Unreadable(None, "The connection ended in the body."))?;
     if let Some(c) = headers.get("connection") {
@@ -183,6 +200,7 @@ fn respond(out: &mut impl Write, answer: &Answer, keep_alive: bool) -> std::io::
         405 => "Method Not Allowed",
         413 => "Content Too Large",
         415 => "Unsupported Media Type",
+        417 => "Expectation Failed",
         431 => "Request Header Fields Too Large",
         501 => "Not Implemented",
         503 => "Service Unavailable",
@@ -225,6 +243,8 @@ struct Shared {
 pub struct HttpServer {
     shared: Arc<Shared>,
     listener: Option<std::thread::JoinHandle<()>>,
+    /// Drops the sessions gone unused.
+    sweeper: Option<std::thread::JoinHandle<()>>,
 }
 
 impl HttpServer {
@@ -272,7 +292,26 @@ impl HttpServer {
             }
         };
         let thread = std::thread::Builder::new().name("mcp http".into()).spawn(listen)?;
-        Ok(HttpServer { shared, listener: Some(thread) })
+        let sweeping = shared.clone();
+        let sweep = move || {
+            while !sweeping.stop.load(Ordering::Relaxed) {
+                std::thread::park_timeout(SWEEP_EVERY);
+                // A session in use (its lock held) is not gone.
+                sweeping
+                    .sessions
+                    .lock()
+                    .expect("not poisoned")
+                    .retain(|_, s| s.try_lock().map_or(true, |s| s.used.elapsed() < SESSION_IDLE));
+            }
+        };
+        let sweeper = match std::thread::Builder::new().name("mcp http sweep".into()).spawn(sweep) {
+            Ok(sweeper) => Some(sweeper),
+            Err(e) => {
+                drop(HttpServer { shared, listener: Some(thread), sweeper: None });
+                return Err(e);
+            }
+        };
+        Ok(HttpServer { shared, listener: Some(thread), sweeper })
     }
 
     /// The port it listens on.
@@ -289,6 +328,10 @@ impl Drop for HttpServer {
         let _ = TcpStream::connect_timeout(&SocketAddrV4::new(Ipv4Addr::LOCALHOST, self.shared.port).into(), IDLE);
         if let Some(thread) = self.listener.take() {
             let _ = thread.join();
+        }
+        if let Some(sweeper) = self.sweeper.take() {
+            sweeper.thread().unpark();
+            let _ = sweeper.join();
         }
     }
 }
@@ -320,7 +363,7 @@ fn serve(conn: TcpStream, shared: &Shared) {
     let mut reader = BufReader::new(Timed { conn, until: Instant::now() });
     loop {
         reader.get_mut().until = Instant::now() + IDLE;
-        let request = match read_request(&mut reader) {
+        let request = match read_request(&mut reader, &mut out) {
             Ok(Some(request)) => request,
             Ok(None) | Err(Unreadable(None, _)) => return,
             Err(Unreadable(Some(status), why)) => {
@@ -591,6 +634,38 @@ mod tests {
         for (raw, want) in cases {
             assert_eq!(exchange(port, &raw).0, want, "{raw:.80}");
         }
+    }
+
+    #[test]
+    fn a_session_unused_goes_and_a_client_waiting_to_send_its_body_is_told_to() {
+        let server = HttpServer::start(0, TOKEN.to_owned(), || Box::new(Echo)).unwrap();
+        let port = server.port();
+        let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+        let (_, head, _) = post(port, None, init, "");
+        let session = head.lines().find_map(|l| l.strip_prefix("Mcp-Session-Id: ")).expect("a session").to_owned();
+        let ping = r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#;
+        assert_eq!(post(port, Some(&session), ping, "").0, 200);
+        std::thread::sleep(SESSION_IDLE + SWEEP_EVERY * 4);
+        assert_eq!(post(port, Some(&session), ping, "").0, 404, "the session stayed");
+        // Told to go on before sending the body; any other expectation refused.
+        let mut conn = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let head = format!(
+            "POST /mcp HTTP/1.1\r\nHost: localhost:{port}\r\nAuthorization: Bearer {TOKEN}\r\n\
+             Content-Type: application/json\r\nExpect: 100-continue\r\nConnection: close\r\n\
+             Content-Length: {}\r\n\r\n",
+            init.len()
+        );
+        conn.write_all(head.as_bytes()).unwrap();
+        let mut reader = BufReader::new(conn.try_clone().unwrap());
+        let mut told = String::new();
+        reader.read_line(&mut told).unwrap();
+        assert!(told.starts_with("HTTP/1.1 100"), "{told}");
+        conn.write_all(init.as_bytes()).unwrap();
+        let mut rest = String::new();
+        reader.read_to_string(&mut rest).unwrap();
+        assert!(rest.contains("HTTP/1.1 200"), "{rest}");
+        let other = format!("POST /mcp HTTP/1.1\r\nHost: localhost:{port}\r\nExpect: something\r\n\r\n");
+        assert_eq!(exchange(port, &other).0, 417);
     }
 
     #[test]

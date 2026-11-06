@@ -978,7 +978,10 @@ fn welcome(ui: &mut egui::Ui, st: &mut AppState) {
 /// Opens the API's connection, telling the user if it cannot be; and whether another editor
 /// serves scripts already (which they connect to, until it goes).
 fn start_server(st: &mut AppState, ctx: &egui::Context) -> (Option<crate::server::Server>, bool) {
-    let Some(file) = crate::server::connection_file() else { return (None, false) };
+    let Some(file) = crate::server::connection_file() else {
+        st.scripts_unserved = Some("There is no settings folder to keep the connection's file in.".to_owned());
+        return (None, false);
+    };
     match crate::server::Server::start(file.clone(), ctx.clone()) {
         Ok(server) => {
             st.scripts_file = Some(file);
@@ -1011,8 +1014,13 @@ impl OpalApp {
         let wanted = self.persist && self.server.is_some() && self.st.prefs.bool("scripting.mcp_http");
         let port = self.st.prefs.f64("scripting.mcp_port") as u16;
         let renew = std::mem::take(&mut self.st.renew_mcp_token);
+        // Asked to try again (Connect an Assistant): what failed is tried once more.
+        if std::mem::take(&mut self.st.retry_mcp_http) {
+            self.mcp_http_failed = None;
+        }
         if !wanted {
-            (self.mcp_http, self.mcp_http_failed, self.st.mcp_http) = (None, None, None);
+            (self.mcp_http, self.mcp_http_failed, self.st.mcp_http, self.st.mcp_http_trouble) =
+                (None, None, None, None);
             return;
         }
         let serving = self.mcp_http.as_ref().is_some_and(|h| h.port() == port);
@@ -1029,6 +1037,7 @@ impl OpalApp {
                 self.mcp_http_failed = Some(port);
                 let why = format!("Its token could not be kept in {}: {e}", token_file.display());
                 let title = if serving { "No new MCP token was made" } else { "MCP over HTTP is not served" };
+                self.st.mcp_http_trouble = (!serving).then(|| why.clone());
                 return self.st.message(crate::state::MessageKind::Warning, title, why);
             }
         };
@@ -1037,16 +1046,14 @@ impl OpalApp {
         let new_caller = move || -> Box<dyn crate::mcp::Caller + Send> { Box::new(crate::mcp::pipe_to(api.clone())) };
         match crate::mcp_http::HttpServer::start(port, token.clone(), new_caller) {
             Ok(server) => {
-                self.st.mcp_http = Some((port, token));
+                (self.st.mcp_http, self.st.mcp_http_trouble) = (Some((port, token)), None);
                 (self.mcp_http, self.mcp_http_failed) = (Some(server), None);
             }
             Err(e) => {
                 self.mcp_http_failed = Some(port);
-                self.st.message(
-                    crate::state::MessageKind::Warning,
-                    "MCP over HTTP is not served",
-                    format!("Port {port} could not be opened: {e}. Preferences › Scripting chooses another."),
-                );
+                let why = format!("Port {port} could not be opened: {e}. Preferences › Scripting chooses another.");
+                self.st.mcp_http_trouble = Some(why.clone());
+                self.st.message(crate::state::MessageKind::Warning, "MCP over HTTP is not served", why);
             }
         }
     }
@@ -1063,13 +1070,24 @@ impl OpalApp {
         let ask = now - asked >= ASK_EVERY;
         self.server_looked = (now, if ask { now } else { asked });
         // Starting asks the other editor first (without waiting), and fails while it is there.
-        if (ask || !file.exists())
-            && let Ok(server) = crate::server::Server::start(file.clone(), ctx.clone())
-        {
-            self.st.scripts_file = Some(file);
-            self.server = Some(server);
-            self.server_waits = false;
-            self.st.notify("The other Opal Studio has closed: scripts and assistants now connect to this one.");
+        if !ask && file.exists() {
+            return;
+        }
+        match crate::server::Server::start(file.clone(), ctx.clone()) {
+            Ok(server) => {
+                self.st.scripts_file = Some(file);
+                self.server = Some(server);
+                self.server_waits = false;
+                self.st.notify("The other Opal Studio has closed: scripts and assistants now connect to this one.");
+            }
+            // Still there.
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(e) => {
+                self.server_waits = false;
+                let why = format!("The connection for scripts and assistants could not be opened: {e}");
+                self.st.message(crate::state::MessageKind::Warning, "Scripts cannot connect", why.clone());
+                self.st.scripts_unserved = Some(why);
+            }
         }
     }
 }

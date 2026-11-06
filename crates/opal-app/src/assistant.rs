@@ -84,9 +84,17 @@ fn contents(ui: &mut egui::Ui, st: &mut AppState) {
             let why = st.scripts_unserved.as_deref().unwrap_or(crate::console::NOT_SERVING);
             ui.label(RichText::new(why).color(weak));
         }
-        (None, true) => {
-            ui.label(RichText::new("Starting… (if it does not, the port may be taken: choose another).").color(weak));
-        }
+        (None, true) => match st.mcp_http_trouble.clone() {
+            Some(why) => {
+                ui.label(RichText::new(why).color(weak));
+                if ui.button("Try again").on_hover_text("Once whatever held the port has let it go.").clicked() {
+                    st.retry_mcp_http = true;
+                }
+            }
+            None => {
+                ui.label(RichText::new("Starting…").color(weak));
+            }
+        },
         (_, false) => {}
     }
 }

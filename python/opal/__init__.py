@@ -276,6 +276,8 @@ class Editor:
         a = np.asarray(pixels)
         if a.ndim != 3 or a.shape[2] not in (3, 4):
             raise OpalError(f"Pixels are height × width × 4 (or 3), not {' × '.join(map(str, a.shape))}.")
+        if a.shape[0] == 0 or a.shape[1] == 0:
+            raise OpalError("There are no pixels to put in: the array is empty.")
         # By kind and size, whatever the byte order (FITS data is big-endian, say).
         if a.dtype.kind == "u" and a.dtype.itemsize == 1:
             format, dtype, opaque = "srgb8", np.uint8, 255
@@ -356,7 +358,7 @@ def connect(file: str | os.PathLike | None = None, *, script: str | None = _RUNN
         info = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise OpalError(f"Opal Studio is not running (there is no {path}).") from None
-    except ValueError as e:
+    except (OSError, ValueError) as e:
         raise OpalError(f"{path} is not readable: {e}") from None
     if not isinstance(info, dict) or not isinstance(info.get("pipe"), str) or not isinstance(info.get("token"), str):
         raise OpalError(f"{path} does not name a pipe and a token.")

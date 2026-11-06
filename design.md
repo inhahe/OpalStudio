@@ -1114,9 +1114,10 @@ server. Both rest on one language-neutral API.
   scripts. Starting one lets scripts in again if the user had shut them out. The Console
   panel (a tab beside Layers and History, brought to the front when a script starts)
   shows what it prints as it comes, its errors in red, and how it ended (its exit code,
-  how long it took); it can stop it (what it did stays), run the last one again, copy
-  everything shown, and clear; it keeps the last 5000 lines. A script still running when
-  the editor closes is stopped. The grouping (see *Script runs*, above) holds for every
+  how long it took); it can stop it, and every process it started (on Windows, all of them
+  are in a job object; what they did stays), run the last one again, copy everything
+  shown, and clear; it keeps the last 5000 lines. A script still running when the editor
+  closes is stopped the same way (one that ended by itself leaves what it started running). The grouping (see *Script runs*, above) holds for every
   script run, whoever started it.
 - **MCP server.** The editor serves MCP (streamable HTTP on localhost) to clients that
   connect to it, and `opal-studio --mcp` is a stdio shim for clients that launch their
@@ -1133,17 +1134,20 @@ server. Both rest on one language-neutral API.
   alone, at `/mcp`, the streamable HTTP transport answering every request in JSON (`POST`;
   `DELETE` ends a session; nothing is streamed, so `GET` is refused). An `initialize` makes
   a session (`Mcp-Session-Id`), each with a connection of its own to the editor's pipe, as
-  the shim has; at most 32 are kept, the one used longest ago going first. The HTTP is read
+  the shim has; one unused for 30 minutes goes (its client gone without ending it, as one
+  restarted is), and at most 32 are kept, the one used longest ago going first. The HTTP is read
   strictly, by code of its own (the small crates were found to have open CVEs for request
   smuggling and header injection): request and header lines ended by CR LF, with no control
   characters, at most 8 KB and 64 of them; bodies framed by `Content-Length` alone, at most
-  1 MB (`Transfer-Encoding` is refused, and so is a framing header given twice); at most 16
+  1 MB (`Transfer-Encoding` is refused, and so is a framing header given twice; a client
+  sending `Expect: 100-continue` is told to go on, any other expectation refused); at most 16
   connections at once, each given 30 seconds to send a request, every byte of it (however
   they trickle in), and closed past that. A request is refused unless its
   `Host` is `127.0.0.1` or `localhost` at the port, its `Origin` (if any) the same, and it
   gives `Authorization: Bearer` (the scheme's name in any case) with the token from `mcp-http-token.txt` beside `api.json`:
   made the first time and kept from one start to the next, so a client is set up once
-  (Connect an Assistant can make a new one, which refuses clients given the old). Connect an
+  (Connect an Assistant can make a new one, which refuses clients given the old). A port
+  that cannot be opened is said so there, with a Try again. Connect an
   Assistant (File › Scripts) shows what to put in a client's settings for either: the
   shim's command and JSON, or the HTTP address, header and Claude Code command, each with a
   Copy button.

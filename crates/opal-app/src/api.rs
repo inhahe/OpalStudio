@@ -507,13 +507,28 @@ impl PixelFormat {
     }
 }
 
-/// What a method made off the interface thread answers with; the shared memory to keep until
-/// the caller has opened it, if any; and, for a change, what is left to do on the interface
-/// thread, whose result is the answer instead.
+/// What a method made off the interface thread: its answer, or (for a change) what is left
+/// to do on the interface thread, which answers; and the shared memory to keep until the
+/// caller has opened it, if any.
 pub struct Made {
-    answer: Value,
+    done: Done,
     keep: Option<(String, crate::shared_memory::Mapping)>,
-    finish: Option<Finish>,
+}
+
+/// What a method made off the interface thread has done.
+enum Done {
+    /// Answered, with this.
+    Answer(Value),
+    /// Made a change ready, which this makes, answering.
+    Finish(Finish),
+}
+
+/// Where `put_pixels` takes its pixels from.
+enum Source {
+    /// Shared memory the caller made, by name.
+    Shared(String),
+    /// The request itself, in base64.
+    Data(String),
 }
 
 /// What a change made ready off the interface thread does on it: its answer.
@@ -1207,9 +1222,8 @@ impl AppState {
             memory.take(opal_io::image_files::export_memory(&doc, size.as_ref()))?;
             let png = opal_io::image_files::png_in_memory(&doc, size.as_ref(), Some(crate::background::pool()))?;
             Ok(Made {
-                answer: json!({ "png": base64(&png), "width": width, "height": height }),
+                done: Done::Answer(json!({ "png": base64(&png), "width": width, "height": height })),
                 keep: None,
-                finish: None,
             })
         })
     }
@@ -1248,17 +1262,17 @@ impl AppState {
             let pixels = pool.install(|| opal_core::composite::flatten(&layers, &rect));
             let mut answer = json!({ "width": rect.width(), "height": rect.height(), "format": format.name() });
             if shared {
-                let name = crate::shared_memory::new_name();
+                let name = crate::shared_memory::new_name().map_err(|e| format!("pixels: {e}"))?;
                 let mut mapping = crate::shared_memory::Mapping::create(&name, len)?;
                 pool.install(|| format.write(&pixels, mapping.bytes_mut()));
                 answer["shm"] = json!(name);
                 answer["bytes"] = json!(len);
-                Ok(Made { answer, keep: Some((name, mapping)), finish: None })
+                Ok(Made { done: Done::Answer(answer), keep: Some((name, mapping)) })
             } else {
                 let mut out = vec![0u8; len];
                 pool.install(|| format.write(&pixels, &mut out));
                 answer["data"] = json!(base64(&out));
-                Ok(Made { answer, keep: None, finish: None })
+                Ok(Made { done: Done::Answer(answer), keep: None })
             }
         })
     }
@@ -1287,13 +1301,13 @@ impl AppState {
             return now(Err("put_pixels: that is more than this computer can hold.".to_owned()));
         };
         let source = match (args.text("shm"), args.text("data")) {
-            (Some(name), None) => Ok(name.to_owned()),
-            (None, Some(data)) => Err(data.to_owned()),
+            (Some(name), None) => Source::Shared(name.to_owned()),
+            (None, Some(data)) => Source::Data(data.to_owned()),
             _ => return now(Err("put_pixels: give the pixels in shm or in data, one of them.".to_owned())),
         };
         let canvas = d.doc().canvas.rect();
-        let rect = IRect::new(canvas.x0 + args.int("x"), canvas.y0 + args.int("y"), 0, 0);
-        let rect = IRect::new(rect.x0, rect.y0, rect.x0 + width, rect.y0 + height);
+        let (x0, y0) = (canvas.x0 + args.int("x"), canvas.y0 + args.int("y"));
+        let rect = IRect::new(x0, y0, x0 + width, y0 + height);
         let name = args.text("name").map(str::to_owned);
         let script = d.script;
         let (w, h) = (width as u32, height as u32);
@@ -1302,19 +1316,20 @@ impl AppState {
             let mut memory = crate::memory::Allowance::now();
             memory.take(crate::memory::Need::at_once(count * 16))?;
             let pool = crate::background::pool();
-            let made = |bytes: &[u8]| match (target, format) {
-                // Kept at 8 bits, as an 8-bit image file's pixels are.
-                (None, PixelFormat::Srgb8) => {
-                    Content::Image(Box::new(RasterImage::from_srgb8(w, h, bytemuck::cast_slice(bytes))))
-                }
-                (None, _) => {
-                    Content::Image(Box::new(RasterImage::from_pixels(w, h, &pool.install(|| format.read(bytes)))))
-                }
-                (Some(_), _) => Content::Pixels(pool.install(|| format.read(bytes))),
+            // All their parallel work in the background pool, not the interface thread's.
+            let made = |bytes: &[u8]| {
+                pool.install(|| match (target, format) {
+                    // Kept at 8 bits, as an 8-bit image file's pixels are.
+                    (None, PixelFormat::Srgb8) => {
+                        Content::Image(Box::new(RasterImage::from_srgb8(w, h, bytemuck::cast_slice(bytes))))
+                    }
+                    (None, _) => Content::Image(Box::new(RasterImage::from_pixels(w, h, &format.read(bytes)))),
+                    (Some(_), _) => Content::Pixels(format.read(bytes)),
+                })
             };
             let content = match source {
-                Ok(shm) => made(&crate::shared_memory::Mapping::open(&shm, len)?.bytes()[..len]),
-                Err(data) => {
+                Source::Shared(shm) => made(&crate::shared_memory::Mapping::open(&shm, len)?.bytes()[..len]),
+                Source::Data(data) => {
                     let raw = unbase64(&data).ok_or("put_pixels: data is not base64.")?;
                     if raw.len() != len {
                         return Err(format!(
@@ -1327,7 +1342,7 @@ impl AppState {
                 }
             };
             let finish: Finish = Box::new(move |st| put_pixels_now(st, id, target, rect, content, name, script));
-            Ok(Made { answer: Value::Null, keep: None, finish: Some(finish) })
+            Ok(Made { done: Done::Finish(finish), keep: None })
         })
     }
 
@@ -1374,9 +1389,9 @@ impl AppState {
                 if let Some((name, mapping)) = made.keep {
                     shared_out.insert(name, (mapping, std::time::Instant::now()));
                 }
-                match made.finish {
-                    Some(finish) => finishing.push_back((*n, finish)),
-                    None => answered.push((*n, Ok(made.answer))),
+                match made.done {
+                    Done::Finish(finish) => finishing.push_back((*n, finish)),
+                    Done::Answer(answer) => answered.push((*n, Ok(answer))),
                 }
                 false
             }
@@ -1912,7 +1927,7 @@ mod tests {
         // Again, or after it went by itself: no harm.
         assert!(now(&mut st, "release_pixels", json!({ "shm": name })).is_ok());
         // Given through shared memory the caller made.
-        let given = crate::shared_memory::new_name();
+        let given = crate::shared_memory::new_name().unwrap();
         let mut made = crate::shared_memory::Mapping::create(&given, 4).unwrap();
         made.bytes_mut().copy_from_slice(&[10, 20, 30, 255]);
         let put = json!({ "width": 1, "height": 1, "shm": given });

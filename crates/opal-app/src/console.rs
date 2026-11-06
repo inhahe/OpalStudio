@@ -52,14 +52,87 @@ struct Running {
     ended: Option<(ExitStatus, Instant)>,
     /// Whether the user stopped it.
     stopped: bool,
+    /// It and the processes it starts, to be ended together.
+    tree: Tree,
+}
+
+impl Running {
+    /// Ends the script and every process it started.
+    fn end(&mut self) {
+        self.tree.end();
+        let _ = self.child.kill();
+    }
 }
 
 impl Drop for Running {
-    /// A script the editor started does not outlive it.
+    /// A script the editor started does not outlive it, while it runs (once it has ended by
+    /// itself, a process it left running goes on).
     fn drop(&mut self) {
         if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
+            self.end();
             let _ = self.child.wait();
+        }
+    }
+}
+
+/// A script's process and those it starts (on Windows, a job object: what a process starts
+/// joins its job); elsewhere, the script alone.
+struct Tree {
+    #[cfg(windows)]
+    job: Option<windows::Win32::Foundation::HANDLE>,
+}
+
+impl Tree {
+    /// The tree `child` heads, just started. (A process it starts in the moment before it is
+    /// put in the job is not in it: a script has hardly begun by then.)
+    fn of(child: &Child) -> Tree {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+            // SAFETY: a new job of the default security, and the child's own handle, open
+            // while `child` is; the job is closed if it cannot be given the child.
+            let job = unsafe {
+                CreateJobObjectW(None, windows::core::PCWSTR::null()).ok().filter(|&job| {
+                    let assigned =
+                        AssignProcessToJobObject(job, windows::Win32::Foundation::HANDLE(child.as_raw_handle()))
+                            .is_ok();
+                    if !assigned {
+                        let _ = windows::Win32::Foundation::CloseHandle(job);
+                    }
+                    assigned
+                })
+            };
+            Tree { job }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = child;
+            Tree {}
+        }
+    }
+
+    /// Ends every process of the tree (the script's own is ended by its caller too).
+    fn end(&self) {
+        #[cfg(windows)]
+        if let Some(job) = self.job {
+            // SAFETY: the job is this tree's own, open until it is dropped.
+            unsafe {
+                let _ = windows::Win32::System::JobObjects::TerminateJobObject(job, 1);
+            }
+        }
+    }
+}
+
+impl Drop for Tree {
+    /// Lets go of the job (which, made without a limit, ends nothing by going).
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(job) = self.job {
+            // SAFETY: as in `end`; not used again.
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(job);
+            }
         }
     }
 }
@@ -160,17 +233,14 @@ impl Console {
         let mut child = command.spawn().map_err(|e| {
             format!("\"{python}\" could not be started: {e}. Preferences › Scripting names the Python to use.")
         })?;
+        let tree = Tree::of(&child);
         let (send, lines) = channel();
-        let streams: [(Option<Box<dyn Read + Send>>, Said); 2] = [
-            (child.stdout.take().map(|s| Box::new(s) as Box<dyn Read + Send>), Said::Output),
-            (child.stderr.take().map(|s| Box::new(s) as Box<dyn Read + Send>), Said::Error),
+        let streams: [(Box<dyn Read + Send>, Said); 2] = [
+            (Box::new(child.stdout.take().expect("piped")), Said::Output),
+            (Box::new(child.stderr.take().expect("piped")), Said::Error),
         ];
         for (stream, said) in streams {
             let (out, ctx) = (send.clone(), ctx.clone());
-            let Some(stream) = stream else {
-                let _ = send.send(None);
-                continue;
-            };
             let read = move || {
                 let mut reader = BufReader::new(stream);
                 let mut bytes = Vec::new();
@@ -191,7 +261,7 @@ impl Console {
         }
         self.say(Said::Editor, format!("Running {name}."));
         self.running =
-            Some(Running { name, child, lines, open: 2, started: Instant::now(), ended: None, stopped: false });
+            Some(Running { name, child, lines, open: 2, started: Instant::now(), ended: None, stopped: false, tree });
         self.last = Some(script.to_owned());
         Ok(())
     }
@@ -232,12 +302,14 @@ impl Console {
     }
 
     /// Stops the script running, at once; what it has done so far stays.
+    /// Stops the script running, and every process it started, at once; what they have done
+    /// so far stays.
     pub fn stop(&mut self) {
         if let Some(r) = &mut self.running
             && r.ended.is_none()
         {
             r.stopped = true;
-            let _ = r.child.kill();
+            r.end();
         }
     }
 
@@ -502,6 +574,46 @@ mod tests {
         let printed: Vec<&str> = st.console.lines().iter().map(|l| l.text.as_str()).collect();
         assert!(printed.contains(&"done"), "{printed:?}");
         assert!(joined(&st), "not one step: {:?}", st.docs.first().map(|d| d.history.undo_label()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stopping_a_script_ends_what_it_started_too() {
+        let Some(python) = python() else { return eprintln!("No Python found (set OPAL_PYTHON).") };
+        let scratch = Scratch::new("tree");
+        let beat = scratch.0.join("beat.txt");
+        scratch.script(
+            "worker.py",
+            "import os, sys, time\nopen(sys.argv[2], 'w').write(str(os.getpid()))\n\
+             while True:\n    open(sys.argv[1], 'a').write('.')\n    time.sleep(0.05)\n",
+        );
+        let path = scratch.script(
+            "starts.py",
+            "import pathlib, subprocess, sys, time\nhere = pathlib.Path(__file__).parent\n\
+             subprocess.Popen([sys.executable, str(here / 'worker.py'), str(here / 'beat.txt'), str(here / 'pid.txt')])\n\
+             print('started', flush=True)\ntime.sleep(60)\n",
+        );
+        let mut console = Console::default();
+        console.run(&path, &python, Path::new("unused.json"), &egui::Context::default()).unwrap();
+        let until = Instant::now() + Duration::from_secs(20);
+        while !beat.is_file() && Instant::now() < until {
+            console.poll(&egui::Context::default());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(beat.is_file(), "the worker never began");
+        console.stop();
+        until_ended(&mut console);
+        std::thread::sleep(Duration::from_millis(300));
+        let size = || std::fs::metadata(&beat).map_or(0, |m| m.len());
+        let before = size();
+        std::thread::sleep(Duration::from_millis(500));
+        let alive = size() != before;
+        if alive {
+            // Not left running whatever the test finds.
+            let pid = std::fs::read_to_string(scratch.0.join("pid.txt")).unwrap_or_default();
+            let _ = Command::new("taskkill").args(["/F", "/PID", pid.trim()]).output();
+        }
+        assert!(!alive, "what the script started went on after Stop");
     }
 
     #[test]
