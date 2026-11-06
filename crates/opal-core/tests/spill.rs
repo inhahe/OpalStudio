@@ -212,6 +212,8 @@ fn an_eight_bit_image_made_past_the_budget_reads_no_tile_back() {
         let before = status().read_back;
         let img = opal_core::raster::RasterImage::from_srgb8(w as u32, h as u32, &rgba);
         assert_eq!(status().read_back, before, "tiles were read back while being made");
+        assert_eq!(img.content_bounds(), Some(opal_core::geom::IRect::from_size(w as i64, h as i64)));
+        assert_eq!(status().read_back, before, "tiles were read back to find what they hold");
         assert_eq!(img.tile_count(), 32);
         assert_eq!(img.read_rect_srgb8(&opal_core::geom::IRect::from_size(w as i64, h as i64)), Some(rgba));
     });

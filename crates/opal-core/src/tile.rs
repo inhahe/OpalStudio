@@ -144,6 +144,19 @@ impl Data {
         }
     }
 
+    /// The smallest rectangle (`[x0, y0, x1, y1]`) holding every pixel not fully
+    /// transparent, or `None` if there is none.
+    fn content(&self) -> Option<[u32; 4]> {
+        let n = TILE_SIZE as usize;
+        let opaque_row = |y: usize| (y * n..(y + 1) * n).any(|i| self.shows(i));
+        let y0 = (0..n).find(|&y| opaque_row(y))?;
+        let y1 = (y0..n).rev().find(|&y| opaque_row(y)).unwrap_or(y0) + 1;
+        let opaque_col = |x: usize| (y0..y1).any(|y| self.shows(y * n + x));
+        let x0 = (0..n).find(|&x| opaque_col(x)).unwrap_or(0);
+        let x1 = (x0..n).rev().find(|&x| opaque_col(x)).unwrap_or(x0) + 1;
+        Some([x0 as u32, y0 as u32, x1 as u32, y1 as u32])
+    }
+
     /// Whether pixel `i` (row by row) is not fully transparent.
     fn shows(&self, i: usize) -> bool {
         match self {
@@ -224,11 +237,11 @@ impl Reader<'_> {
 
 impl Clone for Tile {
     fn clone(&self) -> Tile {
-        let copy = Tile::of(self.reader().data().clone());
-        if let Some(content) = self.slot.content() {
-            copy.slot.found_content(content);
+        let data = self.reader().data().clone();
+        match self.slot.content() {
+            Some(content) => Tile::holding(data, content),
+            None => Tile::of(data),
         }
-        copy
     }
 }
 
@@ -258,8 +271,18 @@ impl std::fmt::Debug for Tile {
 }
 
 impl Tile {
+    /// A tile holding `data`, what it holds found from the pixels first: known so even if
+    /// the tile goes to disk as soon as it is made.
     fn of(data: Data) -> Tile {
-        Tile { slot: Slot::new(data) }
+        let content = data.content();
+        Tile::holding(data, content)
+    }
+
+    /// A tile holding `data`, whose pixels not fully transparent lie within `content`.
+    fn holding(data: Data, content: Option<[u32; 4]>) -> Tile {
+        let tile = Tile { slot: Slot::new(data) };
+        tile.slot.found_content(content);
+        tile
     }
 
     /// The pixels held for reading (brought back from disk first if they are there).
@@ -284,12 +307,13 @@ impl Tile {
 
     /// A fully transparent tile.
     pub fn transparent() -> Tile {
-        Tile::of(Data::empty(false))
+        Tile::holding(Data::empty(false), None)
     }
 
     /// A tile filled with one pixel value.
     pub fn filled(p: Pixel) -> Tile {
-        Tile::of(Data::Wide(vec![p; TILE_PIXELS].into_boxed_slice()))
+        let content = (p[3] != f16::ZERO).then_some([0, 0, TILE_SIZE, TILE_SIZE]);
+        Tile::holding(Data::Wide(vec![p; TILE_PIXELS].into_boxed_slice()), content)
     }
 
     /// A tile of `TILE_PIXELS` 8-bit sRGB pixels with straight alpha, row by row, kept as
@@ -394,22 +418,9 @@ impl Tile {
         if let Some(known) = self.slot.content() {
             return known;
         }
-        let found = self.find_content();
+        let found = self.reader().data().content();
         self.slot.found_content(found);
         found
-    }
-
-    fn find_content(&self) -> Option<[u32; 4]> {
-        let r = self.reader();
-        let shows = |i: usize| r.data().shows(i);
-        let n = TILE_SIZE as usize;
-        let opaque_row = |y: usize| (y * n..(y + 1) * n).any(shows);
-        let y0 = (0..n).find(|&y| opaque_row(y))?;
-        let y1 = (y0..n).rev().find(|&y| opaque_row(y)).unwrap_or(y0) + 1;
-        let opaque_col = |x: usize| (y0..y1).any(|y| shows(y * n + x));
-        let x0 = (0..n).find(|&x| opaque_col(x)).unwrap_or(0);
-        let x1 = (x0..n).rev().find(|&x| opaque_col(x)).unwrap_or(x0) + 1;
-        Some([x0 as u32, y0 as u32, x1 as u32, y1 as u32])
     }
 }
 
