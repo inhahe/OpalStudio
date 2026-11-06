@@ -35,6 +35,7 @@ mod paste_keys;
 mod prefs;
 mod projector;
 mod ribbon;
+mod rulers;
 mod server;
 mod settings;
 mod shared_memory;

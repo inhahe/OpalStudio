@@ -458,6 +458,13 @@ curve editors.
 - One accent color, slightly rounded corners, subtle hover and press animations.
 - Fluent UI System Icons (Microsoft's, MIT), rendered sharp at any display scaling.
 - The system font: Segoe UI on Windows; a bundled open font elsewhere.
+- **Rulers** (`rulers.rs`) along the top and left of each image's view, outside it, which
+  is that much smaller (View › Rulers, Ctrl+R; a preference, shown by default). They count
+  from the canvas's top-left corner in the unit sizes are shown in, at the image's
+  resolution, labeled at 1, 2 or 5 times a power of ten of the unit (of pixels, at least
+  one) far enough apart for the labels (64 points), divided in tens, quarters or fifths
+  (fewer where those would crowd); the corner names the unit, and the pointer's place is
+  marked on both.
 
 ## Layers UI
 

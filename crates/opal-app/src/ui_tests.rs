@@ -65,6 +65,30 @@ fn a_paper_size_makes_an_image_of_its_size_at_its_resolution() {
 }
 
 #[test]
+fn the_rulers_take_a_strip_beside_the_view_and_ctrl_r_hides_them() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    h.state_mut().state_mut().create_image(&crate::state::NewImage {
+        width: 400,
+        height: 300,
+        background: crate::state::Background::White,
+        resolution: 100.0,
+    });
+    h.state_mut().state_mut().set_unit(opal_core::units::Unit::In);
+    h.run();
+    let view = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().view.screen_rect;
+    let with = view(&h);
+    render(&mut h, "rulers");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::R);
+    h.run();
+    assert!(!h.state().state().prefs.bool("canvas.rulers"), "Ctrl+R did not hide them");
+    let without = view(&h);
+    let inset = crate::rulers::THICK;
+    assert_eq!((with.min - without.min), egui::vec2(inset, inset), "the rulers took no strip");
+    assert_eq!(with.max, without.max);
+}
+
+#[test]
 fn ribbon_tabs_switch_and_commands_run() {
     let _gpu = gpu_lock();
     let mut h = harness();

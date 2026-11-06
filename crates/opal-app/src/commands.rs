@@ -59,6 +59,7 @@ pub enum Cmd {
     ZoomFit,
     Zoom100,
     ToggleOffCanvas,
+    ToggleRulers,
     ToggleTheme,
     ToggleRibbon,
     CycleToolsPlace,
@@ -103,7 +104,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 58] = [
+    pub const ALL: [Cmd; 59] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -153,6 +154,7 @@ impl Cmd {
         Cmd::ZoomFit,
         Cmd::Zoom100,
         Cmd::ToggleOffCanvas,
+        Cmd::ToggleRulers,
         Cmd::ToggleTheme,
         Cmd::ToggleRibbon,
         Cmd::CycleToolsPlace,
@@ -557,6 +559,15 @@ impl Cmd {
                  Preferences › Canvas.",
                 &[],
             ),
+            Cmd::ToggleRulers => i(
+                "Rulers",
+                icons::RULER,
+                "Show or hide the rulers along the image's view.",
+                "Along the top and left of the view, outside the image: in the unit sizes are shown in \
+                 (Preferences › Interface, or the menu beside any size), counted from the canvas's \
+                 top-left corner at the image's resolution, with the pointer's place marked on both.",
+                const { &[ctrl(Key::R)] },
+            ),
             Cmd::ToggleTheme => i(
                 "Dark/Light",
                 icons::MOON,
@@ -781,7 +792,7 @@ pub static RIBBON: &[Tab] = &[
                 name: "Canvas",
                 description: "What is shown around the canvas.",
                 large: 1,
-                cmds: &[Cmd::ToggleOffCanvas],
+                cmds: &[Cmd::ToggleOffCanvas, Cmd::ToggleRulers],
             },
             Group {
                 name: "Interface",
@@ -815,8 +826,8 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
     use Cmd::*;
     let needs_doc = || st.active().map(|_| ()).ok_or_else(|| "Open or create an image first.".to_owned());
     match cmd {
-        New | Open | Preferences | Exit | ConnectAssistant | ToggleOffCanvas | ToggleTheme | ToggleRibbon
-        | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts | About | WidgetGallery => Ok(()),
+        New | Open | Preferences | Exit | ConnectAssistant | ToggleOffCanvas | ToggleRulers | ToggleTheme
+        | ToggleRibbon | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts | About | WidgetGallery => Ok(()),
         Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup | CopyMerged
         | StampVisible | ResizeCanvas | CropToContent | Place => needs_doc(),
         Paste | PasteInPlace => Ok(()),
@@ -977,6 +988,7 @@ fn active_layer(st: &AppState) -> Result<&opal_core::document::Layer, String> {
 pub fn checked(st: &AppState, cmd: Cmd) -> Option<bool> {
     match cmd {
         Cmd::ToggleOffCanvas => Some(st.prefs.bool("canvas.off_canvas_shown")),
+        Cmd::ToggleRulers => Some(st.prefs.bool("canvas.rulers")),
         Cmd::ToggleTheme => Some(!st.palette.dark),
         Cmd::ToggleRibbon => Some(st.prefs.choice("ui.ribbon") == "single"),
         Cmd::ToggleVisible => active_layer(st).ok().map(|l| !l.visible),

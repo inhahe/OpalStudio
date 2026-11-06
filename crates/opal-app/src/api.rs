@@ -457,8 +457,8 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
         ],
         Transform => &[DOCUMENT, LAYERS, BOX_X, BOX_Y, BOX_WIDTH, BOX_HEIGHT, BOX_ANGLE, BOX_FIT, BOX_ANCHOR, UNIT],
         Preferences | Exit | RunScript | ConnectAssistant | ZoomIn | ZoomOut | ZoomFit | Zoom100 | ToggleOffCanvas
-        | ToggleTheme | ToggleRibbon | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts | About
-        | WidgetGallery => return None,
+        | ToggleRulers | ToggleTheme | ToggleRibbon | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts
+        | About | WidgetGallery => return None,
     })
 }
 

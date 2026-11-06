@@ -245,6 +245,16 @@ pub static PREFS: &[Def] = &[
         advanced: false,
     },
     Def {
+        key: "canvas.rulers",
+        label: "Rulers",
+        help: "Rulers along the top and left of the image's view (outside it), in the unit sizes are \
+               shown in, counted from the canvas's top-left corner, with the pointer's place marked.",
+        section: "Canvas",
+        kind: Kind::Bool,
+        default: Init::Bool(true),
+        advanced: false,
+    },
+    Def {
         key: "canvas.off_canvas_shown",
         label: "Show content beyond the canvas",
         help: "Whether the parts of layers that lie outside the canvas are shown. They are kept \

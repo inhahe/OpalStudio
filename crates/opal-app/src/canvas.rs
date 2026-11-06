@@ -79,9 +79,12 @@ pub fn level_for(zoom: f32, sharper: bool) -> u32 {
 pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let ctx = ui.ctx().clone();
     let ppp = ctx.pixels_per_point();
-    // Align the viewport with device pixels, so 100% zoom maps pixels one to one.
+    // The rulers, if shown, take a strip along the top and the left; the view the rest.
     let avail = ui.available_rect_before_wrap();
-    let min_px = (avail.min.to_vec2() * ppp).round();
+    let rulers = st.prefs.bool("canvas.rulers");
+    let inset = if rulers { crate::rulers::THICK } else { 0.0 };
+    // Align the viewport with device pixels, so 100% zoom maps pixels one to one.
+    let min_px = ((avail.min.to_vec2() + Vec2::splat(inset)) * ppp).round();
     let max_px = (avail.max.to_vec2() * ppp).round();
     let rect = Rect::from_min_max((min_px / ppp).to_pos2(), (max_px / ppp).to_pos2());
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
@@ -103,6 +106,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let snapping = st.prefs.bool("transform.snapping");
     let snap_points = st.prefs.f64("transform.snap_distance") as f32;
     let palette = st.palette;
+    let unit = st.unit();
     let space = ctx.input(|i| i.key_down(Key::Space)) && !ctx.egui_wants_keyboard_input();
     let chosen = st.tool;
     let tool = if space { ToolId::Hand } else { chosen };
@@ -392,6 +396,19 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
             Stroke::new(1.0, palette.separator),
             egui::StrokeKind::Outside,
         );
+    }
+    if rulers {
+        let corner = Rect::from_min_max(avail.min, rect.min);
+        let top = Rect::from_min_max(Pos2::new(rect.left(), avail.top()), rect.right_top());
+        let left = Rect::from_min_max(Pos2::new(avail.left(), rect.top()), rect.left_bottom());
+        let ruling = crate::rulers::Ruling {
+            origin: rect.min + view.to_screen(canvas.min.to_vec2()) / ppp,
+            per_point: f64::from(ppp / view.zoom),
+            unit,
+            ppi: d.doc().resolution,
+            pointer: response.hover_pos(),
+        };
+        crate::rulers::draw(ui, corner, top, left, &ruling, &palette);
     }
     let to_screen = |p: [f64; 2]| rect.min + view.to_screen(Vec2::new(p[0] as f32, p[1] as f32)) / ppp;
     if !boxed && !cropping {

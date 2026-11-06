@@ -67,7 +67,9 @@ selection core it builds on.
   resolution. Exact numbers for the transform and crop boxes, by the box; Place. Nothing a
   script needs is left to the window: `paste`, `place`, `transform` and `crop` take exact
   boxes, the preferences can be read and set, `--headless -c` and `-` run code given
-  directly, and `--mcp` starts an editor of its own when none is running.
+  directly, and `--mcp` starts an editor of its own when none is running. Then: a plain
+  `python script.py` starts a windowless editor when none runs (`--serve`); the boxes'
+  reference point and fitting into a typed rectangle; rulers.
 
 ## 2. Selection core
 - The mask, and the blend through it that every operation uses.
