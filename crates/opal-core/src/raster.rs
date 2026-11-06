@@ -13,14 +13,104 @@ pub const MAX_REDUCTION: u32 = 24;
 /// A bitmap with no edges: only tiles with content exist, at any coordinates, negative
 /// included. Cloning copies the tile map (pointers), not the pixels.
 ///
-/// An image also keeps, built when first asked for, its content bounds and a pyramid of
-/// half-size copies (for drawing it shrunk); changing a pixel discards both.
+/// An image also keeps, built when first asked for, its content bounds, a pyramid of
+/// half-size copies (for drawing it shrunk) and where one tile repeats along each row (see
+/// [`alike_under`](RasterImage::alike_under)); changing a pixel discards them.
 #[derive(Default)]
 pub struct RasterImage {
     tiles: HashMap<TileCoord, Arc<Tile>>,
     /// `pyramid[k - 1]` is the image halved `k` times.
     pyramid: [OnceLock<Box<Level>>; MAX_REDUCTION as usize],
     bounds: OnceLock<Option<IRect>>,
+    runs: OnceLock<Runs>,
+}
+
+/// The tiles of an image along each tile row, as runs of one tile repeated: by row, the
+/// runs `(x0, x1, tile's address)` in order (`x1` past the run's last tile).
+#[derive(Clone, Default)]
+struct Runs(HashMap<i32, Vec<(i32, i32, usize)>>);
+
+/// What a row of tiles holds over a span of it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Span {
+    Empty,
+    /// One tile throughout (its address).
+    One(usize),
+    /// Anything else.
+    Mixed,
+}
+
+impl Runs {
+    fn of(tiles: &HashMap<TileCoord, Arc<Tile>>) -> Runs {
+        let mut at: Vec<(i32, i32, usize)> = tiles.iter().map(|(c, t)| (c.y, c.x, Arc::as_ptr(t) as usize)).collect();
+        at.sort_unstable();
+        let mut runs = Runs::default();
+        for (y, x, p) in at {
+            let row = runs.0.entry(y).or_default();
+            match row.last_mut() {
+                Some(last) if last.1 == x && last.2 == p => last.1 = x + 1,
+                _ => row.push((x, x + 1, p)),
+            }
+        }
+        runs
+    }
+
+    /// What `row` holds over `x0..x1`.
+    fn span(row: &[(i32, i32, usize)], x0: i32, x1: i32) -> Span {
+        if x1 <= x0 {
+            return Span::Empty;
+        }
+        // The first run ending past `x0`: it holds `x0`, or lies after it.
+        match row.get(row.partition_point(|r| r.1 <= x0)) {
+            Some(&(rx0, rx1, p)) if rx0 <= x0 => {
+                if rx1 >= x1 {
+                    Span::One(p)
+                } else {
+                    Span::Mixed
+                }
+            }
+            Some(r) if r.0 < x1 => Span::Mixed,
+            _ => Span::Empty,
+        }
+    }
+
+    /// Whether `f` holds of what every row of the rectangle `[x0, y0, x1, y1]` (tile
+    /// coordinates) holds, a row without tiles holding nothing; asked while it holds. Given
+    /// more rows than the image has, it visits the image's rows, and one empty row stands
+    /// for the others.
+    fn all_rows(&self, [x0, y0, x1, y1]: [i32; 4], mut f: impl FnMut(Span) -> bool) -> bool {
+        if i64::from(y1) - i64::from(y0) <= self.0.len() as i64 {
+            (y0..y1).all(|y| f(self.0.get(&y).map_or(Span::Empty, |row| Self::span(row, x0, x1))))
+        } else {
+            f(Span::Empty)
+                && self.0.iter().filter(|(y, _)| (y0..y1).contains(*y)).all(|(_, row)| f(Self::span(row, x0, x1)))
+        }
+    }
+}
+
+/// Up to how many tiles a question about a rectangle of them looks at each tile, rather than
+/// at the runs (which are built for it, at the cost of sorting every tile of the image).
+const LOOKED_AT_ONE_BY_ONE: i64 = 64;
+
+/// The tiles any pixel of `area` lies in, as `[x0, y0, x1, y1]` (tile coordinates, the
+/// ends past the last).
+fn tiles_under(area: &IRect) -> [i32; 4] {
+    if area.is_empty() {
+        return [0; 4];
+    }
+    let t = i64::from(TILE_SIZE);
+    let at = |v: i64| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    [
+        at(area.x0.div_euclid(t)),
+        at(area.y0.div_euclid(t)),
+        at((area.x1 - 1).div_euclid(t) + 1),
+        at((area.y1 - 1).div_euclid(t) + 1),
+    ]
+}
+
+/// How many tiles `[x0, y0, x1, y1]` holds.
+fn cells([x0, y0, x1, y1]: [i32; 4]) -> i64 {
+    (i64::from(x1) - i64::from(x0)).max(0) * (i64::from(y1) - i64::from(y0)).max(0)
 }
 
 /// A level of an image's pyramid, and how many tiles it holds (each once, however many
@@ -34,7 +124,12 @@ struct Level {
 /// `Arc::make_mut`) to be changed, which would discard the pyramid at once.
 impl Clone for RasterImage {
     fn clone(&self) -> RasterImage {
-        RasterImage { tiles: self.tiles.clone(), pyramid: Default::default(), bounds: self.bounds.clone() }
+        RasterImage {
+            tiles: self.tiles.clone(),
+            pyramid: Default::default(),
+            bounds: self.bounds.clone(),
+            runs: self.runs.clone(),
+        }
     }
 }
 
@@ -53,6 +148,47 @@ impl RasterImage {
     fn changed(&mut self) {
         self.pyramid = Default::default();
         self.bounds = OnceLock::new();
+        self.runs = OnceLock::new();
+    }
+
+    /// Whether the tiles under `area` (pixels) are alike: one tile at every place, or none
+    /// at any. A large area is asked of the runs of tiles along each row (built on first
+    /// use), at a lookup a row however wide.
+    pub fn alike_under(&self, area: &IRect) -> bool {
+        let r = tiles_under(area);
+        if cells(r) <= LOOKED_AT_ONE_BY_ONE {
+            return self.alike_one_by_one(r);
+        }
+        let mut first = None;
+        self.runs().all_rows(r, |s| s != Span::Mixed && *first.get_or_insert(s) == s)
+    }
+
+    /// Whether any tile lies under `area` (pixels). A large area is asked of the runs, as
+    /// for [`alike_under`](Self::alike_under).
+    pub fn any_under(&self, area: &IRect) -> bool {
+        let r = tiles_under(area);
+        if cells(r) <= LOOKED_AT_ONE_BY_ONE {
+            return self.any_one_by_one(r);
+        }
+        !self.runs().all_rows(r, |s| s == Span::Empty)
+    }
+
+    fn runs(&self) -> &Runs {
+        self.runs.get_or_init(|| Runs::of(&self.tiles))
+    }
+
+    fn alike_one_by_one(&self, [x0, y0, x1, y1]: [i32; 4]) -> bool {
+        let mut first = None;
+        (y0..y1).all(|y| {
+            (x0..x1).all(|x| {
+                let here = self.tiles.get(&TileCoord::new(x, y)).map(|t| Arc::as_ptr(t) as usize);
+                *first.get_or_insert(here) == here
+            })
+        })
+    }
+
+    fn any_one_by_one(&self, [x0, y0, x1, y1]: [i32; 4]) -> bool {
+        (y0..y1).any(|y| (x0..x1).any(|x| self.tiles.contains_key(&TileCoord::new(x, y))))
     }
 
     /// The tile at `c`, if it exists.
@@ -495,6 +631,68 @@ mod tests {
         assert!(Arc::ptr_eq(img.tile(TileCoord::new(0, 0)).unwrap(), img.tile(TileCoord::new(0, 1)).unwrap()));
         assert_eq!(img.read_rect_srgb8(&whole).unwrap()[..(w * h) as usize], rgba[..]);
         assert!(wide.read_rect_srgb8(&whole).is_none(), "working pixels are not 8-bit");
+    }
+
+    #[test]
+    fn the_runs_of_tiles_say_what_looking_at_each_tile_says() {
+        let white = Arc::new(Tile::filled(pixel_from_f32([1.0; 4])));
+        let blue = Arc::new(Tile::filled(pixel_from_f32([0.0, 0.0, 1.0, 1.0])));
+        // Rows of one tile, of another, of both, with gaps, and missing; the white tile also
+        // where blue is at the end of a row (runs of one tile, apart).
+        let mut img = RasterImage::new();
+        for (y, row) in
+            ["wwwwwwww", "wwwwwwww", "bbbbbbbb", "", "wwwbwwww", "  www   ", "wwwwwwww", "www  www", "bbbbwwww"]
+                .iter()
+                .enumerate()
+        {
+            for (x, t) in row.chars().enumerate() {
+                let tile = match t {
+                    'w' => white.clone(),
+                    'b' => blue.clone(),
+                    _ => continue,
+                };
+                img.set_tile(TileCoord::new(x as i32, y as i32), Some(tile));
+            }
+        }
+        let runs = Runs::of(&img.tiles);
+        for y0 in -2..11 {
+            for y1 in y0..12 {
+                for x0 in -2..10 {
+                    for x1 in x0..11 {
+                        let r = [x0, y0, x1, y1];
+                        let mut first = None;
+                        let alike = runs.all_rows(r, |s| s != Span::Mixed && *first.get_or_insert(s) == s);
+                        assert_eq!(alike, img.alike_one_by_one(r), "alike over {r:?}");
+                        let any = !runs.all_rows(r, |s| s == Span::Empty);
+                        assert_eq!(any, img.any_one_by_one(r), "any over {r:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_area_is_alike_when_one_tile_or_none_is_under_every_place() {
+        let white = pixel_from_f32([1.0; 4]);
+        let mut img = RasterImage::filled(&IRect::from_size(256 * 20, 256 * 12), white);
+        let tiles = |x0: i64, y0: i64, x1: i64, y1: i64| IRect::new(x0 * 256, y0 * 256, x1 * 256, y1 * 256);
+        // Small areas are looked at tile by tile, large ones asked of the runs: both kinds.
+        for (area, alike, any) in [
+            (tiles(0, 0, 20, 12), true, true),
+            (tiles(3, 2, 7, 5), true, true),
+            (IRect::new(300, 300, 301, 301), true, true),
+            (tiles(30, 0, 60, 12), true, false),
+            (tiles(18, 0, 22, 2), false, true),
+            (tiles(-12, -12, 0, 0), true, false),
+            (tiles(-12, -12, 1, 1), false, true),
+            (IRect::new(-1, 0, 1, 1), false, true),
+        ] {
+            assert_eq!((img.alike_under(&area), img.any_under(&area)), (alike, any), "{area:?}");
+        }
+        // A tile of its own in the middle.
+        img.set_pixel(256 * 10 + 3, 256 * 6 + 3, pixel_from_f32([1.0, 0.0, 0.0, 1.0]));
+        assert!(!img.alike_under(&tiles(0, 0, 20, 12)), "the runs were not built again");
+        assert!(img.alike_under(&tiles(0, 0, 10, 12)) && img.alike_under(&tiles(11, 0, 20, 12)));
     }
 
     #[test]

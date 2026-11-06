@@ -153,9 +153,20 @@ not a goal.
   a layer's own tile shown as it is is held weakly too, so the cache never keeps alive
   what the document has let go of. A pyramid tile is
   keyed on the versions of the four below it (a version names what a tile shows), so the
-  pixels of a tile can be let go while its key stays. The cache may hold a set amount of
-  memory (a preference, 2 GB by default), counting each tile it made once (a layer's own
-  tile shown as it is costs nothing); past it, the tiles farthest from the view go first,
+  pixels of a tile can be let go while its key stays. Zoomed out, the tiles are worked out
+  from the level shown down: a tile over a **uniform block**, where each pixel object
+  repeats one stored tile (or none) and no image object reaches, would have every level-0
+  tile beneath it alike, so it is made from one of them, halved to its level, and keyed on
+  that tile's key, with nothing cached beneath it. Only the tiles over mixed blocks are
+  made from the four below, down to level 0. Whether a block is uniform, and whether a
+  tile has content under it at all, is asked of the pixel objects' own tiles (a large
+  area of an index each image keeps, built on first use, of its tile rows as runs of one
+  tile, at a lookup a row) and of rectangles covering the image objects, so the view never
+  lists the tiles beneath it: a huge, mostly blank canvas costs about what the screen
+  shows (a 300,000-pixel white canvas shown whole: 17 ms after an edit, 10 MB). The cache
+  may hold a set amount of memory (a preference, 2 GB by default), counting each tile it
+  made once (a layer's own tile shown as it is costs nothing); past it, the tiles farthest
+  from the view go first,
   then the pixels of the finer levels under the view, which are made again, locally, only
   when an edit or a zoom needs them. Entries without pixels (keys, a layer's own tiles)
   cost little, but are bounded too, at four times as many as the budget holds in tiles,
@@ -474,8 +485,9 @@ Editable content does not mean recomputing everything on each change.
 - **Only what changed is recomputed.** Every cached tile of the projection knows the
   source tiles that produced it (see *Compositing*), so an edit recomputes the tiles it
   touches and nothing else. A tile also remembers the set of layers it was last checked
-  against, and where the layers' content lies is worked out once for each set, so panning
-  an unchanged document checks only the tiles newly in view.
+  against, and where image objects draw is worked out once for each set (pixel objects
+  are asked of their own tiles), so panning an unchanged document checks only the tiles
+  newly in view.
 - **Editable objects are cached as pixels.** Shapes, text, effects and image objects are
   drawn per tile and redrawn only when they or what they are composited with change; for
   display they cost what a pixel layer costs. Editability costs memory more than time.
@@ -489,7 +501,8 @@ Editable content does not mean recomputing everything on each change.
   screen holds rather than what the image does. Pixel layers are reduced only under those
   tiles, for the drag's length; image objects are drawn through their transform with their
   own resampling. Tiles the drag leaves alone stay exact, and the full-resolution result
-  follows on release. A 24-megapixel image dragged at 25% takes about 13 ms a frame this
+  follows on release. A tile over a uniform block is made exactly even during a drag,
+  costing no more than a preview. A 24-megapixel image dragged at 25% takes about 13 ms a frame this
   way, against about 90 ms. Heavy effects will preview the same way while their settings
   are dragged.
 - **Saying what is slow:** a performance view lists the layers that cost the most time and

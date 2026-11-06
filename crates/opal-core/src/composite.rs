@@ -16,7 +16,7 @@
 //! go unnoticed, and nothing has to report changes to the cache. Keys hold what they refer
 //! to alive, so a freed address can never be reused while a key still refers to it.
 
-use crate::document::{Layer, LayerContent, Object, ObjectKind, PixelObject};
+use crate::document::{ImageObject, Layer, LayerContent, Object, ObjectKind, PixelObject};
 use crate::geom::{Affine, FRect, IRect};
 use crate::raster::RasterImage;
 use crate::resample::{self, Sampling};
@@ -460,42 +460,54 @@ fn each_occupied_rect(layers: &[Arc<Layer>], f: &mut dyn FnMut(IRect, bool)) {
                 f(c.rect(0).translate(p.offset[0], p.offset[1]), true);
             }
         }
-        ObjectKind::Image(i) => {
-            let r = resample::reach(&i.transform, &i.sampling);
-            for (c, _) in i.image.tiles() {
-                let t = c.rect(0);
-                f(IRect::covering(&i.transform.bounds(&t.to_f().expand(r))), false);
-            }
-        }
+        ObjectKind::Image(i) => image_rects(i, &mut |r| f(r, false)),
     });
 }
 
-/// Where the content of a set of layers lies, worked out once for them and asked of each
-/// area shown: the tiles pixel objects occupy, and the rectangles image objects cover
-/// (which, transformed, may span more tiles than are worth listing).
+/// Calls `f` with rectangles (canvas pixels) that together cover what image object `i`
+/// draws, one per tile of its image.
+fn image_rects(i: &ImageObject, f: &mut dyn FnMut(IRect)) {
+    let r = resample::reach(&i.transform, &i.sampling);
+    for (c, _) in i.image.tiles() {
+        f(IRect::covering(&i.transform.bounds(&c.rect(0).to_f().expand(r))));
+    }
+}
+
+/// Appends the visible pixel objects of `layers`, at any depth, to `out`.
+fn visible_pixel_objects<'a>(layers: &'a [Arc<Layer>], out: &mut Vec<&'a PixelObject>) {
+    for layer in layers.iter().filter(|l| l.visible && l.opacity > 0.0) {
+        match &layer.content {
+            LayerContent::Objects(objects) => out.extend(objects.iter().filter_map(|o| match &o.kind {
+                ObjectKind::Pixels(p) => Some(p),
+                ObjectKind::Image(_) => None,
+            })),
+            LayerContent::Group(children) => visible_pixel_objects(children, out),
+        }
+    }
+}
+
+/// Where the image objects of a set of layers draw, worked out once for them and asked of
+/// each area shown: rectangles, one per tile of each image (which, transformed, may span
+/// more tiles than are worth listing). Pixel objects are asked of their own tiles.
 #[derive(Debug, Default)]
 struct Occupancy {
-    tiles: HashSet<TileCoord>,
     rects: Vec<IRect>,
 }
 
 impl Occupancy {
     fn of(layers: &[Arc<Layer>]) -> Occupancy {
-        let mut o = Occupancy::default();
-        each_occupied_rect(layers, &mut |r, pixels| {
-            if pixels {
-                o.tiles.extend(TileCoord::covering(&r, 0));
-            } else {
-                o.rects.push(r);
+        let mut rects = Vec::new();
+        for_each_visible_object(layers, &mut |o| {
+            if let ObjectKind::Image(i) = &o.kind {
+                image_rects(i, &mut |r| rects.push(r));
             }
         });
-        o
+        Occupancy { rects }
     }
 
-    /// The level-0 tiles occupied within `range`.
+    /// The level-0 tiles image objects draw into within `range`.
     fn within(&self, range: &IRect) -> HashSet<TileCoord> {
-        let mut out: HashSet<TileCoord> =
-            self.tiles.iter().filter(|c| !c.rect(0).intersect(range).is_empty()).copied().collect();
+        let mut out = HashSet::new();
         for r in &self.rects {
             let r = r.intersect(range);
             if !r.is_empty() {
@@ -786,6 +798,105 @@ enum Key {
     /// as for a level-0 tile. It never equals an exact key, so the next exact update
     /// replaces the tile.
     Preview(Vec<Token>),
+    /// A tile over a uniform block (see [`uniform_block`]): the key every level-0 tile in
+    /// it has. Made from one such tile, with nothing cached below it.
+    Uniform(Vec<Token>),
+}
+
+/// Whether every level-0 tile under level-`level` tile `c` composites alike, wherever it
+/// is: each visible pixel object has one stored tile repeated under it, or none, and no
+/// image object (drawn differently at each place) reaches into it. Then every tile in it
+/// has the same key.
+fn uniform_block(layers: &[Arc<Layer>], c: TileCoord, level: u32) -> bool {
+    fn alike(layers: &[Arc<Layer>], block: &IRect) -> bool {
+        layers.iter().filter(|l| l.visible && l.opacity > 0.0).all(|layer| match &layer.content {
+            LayerContent::Group(children) => alike(children, block),
+            LayerContent::Objects(objects) => objects.iter().all(|o| match &o.kind {
+                ObjectKind::Pixels(p) => p.image.alike_under(&block.translate(-p.offset[0], -p.offset[1])),
+                ObjectKind::Image(i) => resample::footprint(&i.image, &i.transform, &i.sampling)
+                    .is_none_or(|f| f.intersect(block).is_empty()),
+            }),
+        })
+    }
+    alike(layers, &c.rect(level))
+}
+
+/// The first level-0 tile under level-`level` tile `c`.
+fn first_under(c: TileCoord, level: u32) -> TileCoord {
+    let r = c.rect(level);
+    TileCoord::containing(r.x0, r.y0)
+}
+
+/// The key of level-`level` tile `c` over a uniform block of `layers`: that of every
+/// level-0 tile in it.
+fn uniform_key(layers: &[Arc<Layer>], c: TileCoord, level: u32) -> Key {
+    let Key::Base(tokens) = base_key(layers, first_under(c, level)) else { unreachable!("a level-0 key") };
+    Key::Uniform(tokens)
+}
+
+/// The tiles of uniform blocks made during one update, for each key ([`Key::Uniform`]):
+/// at every level from 0 up to the highest asked for, each the one below halved from four
+/// copies of itself, as the pyramid makes it from such tiles. A block a level up then costs
+/// one halving, not all of them again from level 0.
+#[derive(Debug, Default)]
+struct Chains(Vec<Chain>);
+
+/// A key's tiles in [`Chains`], by level.
+#[derive(Debug)]
+struct Chain {
+    key: Vec<Token>,
+    tiles: Vec<Option<Arc<Tile>>>,
+}
+
+/// The tiles an exact update makes at each level up to the one shown, from the top down:
+/// where `layers` cover a block uniformly ([`uniform_block`]) its tile is made at its
+/// level from one level-0 tile, and nothing beneath it is needed; the other tiles are made
+/// from the four below, down to level 0. Only tiles with content under them are made, as
+/// the content's own tiles say, so the plan costs what it holds, not the tiles beneath.
+struct Plan<'a> {
+    /// By level, the tiles made there.
+    need: Vec<HashSet<TileCoord>>,
+    /// By level, those of `need` made as uniform blocks.
+    uniform: Vec<HashSet<TileCoord>>,
+    /// The visible pixel objects.
+    pixels: Vec<&'a PixelObject>,
+    /// By level, the tiles image objects draw into, within the area shown.
+    images: Vec<HashSet<TileCoord>>,
+}
+
+impl<'a> Plan<'a> {
+    /// The plan for showing the level-`level` tiles over `outer` (whole tiles of that
+    /// level), where `occupancy` says the image objects of `layers` draw.
+    fn of(layers: &'a [Arc<Layer>], level: u32, outer: &IRect, occupancy: &Occupancy) -> Plan<'a> {
+        let top = level as usize;
+        let mut pixels = Vec::new();
+        visible_pixel_objects(layers, &mut pixels);
+        let mut images = vec![occupancy.within(outer)];
+        for l in 1..=top {
+            let up = images[l - 1].iter().map(|c| c.parent()).collect();
+            images.push(up);
+        }
+        let empty = vec![HashSet::new(); top + 1];
+        let mut plan = Plan { need: empty.clone(), uniform: empty, pixels, images };
+        // Each question costs a few lookups: in parallel, they would cost more.
+        plan.need[top] = TileCoord::covering(outer, level).filter(|&c| plan.occupied(c, level)).collect();
+        for l in (1..=top).rev() {
+            let (alike, mixed): (Vec<TileCoord>, Vec<TileCoord>) =
+                plan.need[l].iter().partition(|&&c| uniform_block(layers, c, l as u32));
+            let below: HashSet<TileCoord> =
+                mixed.into_iter().flat_map(|c| c.children()).filter(|&k| plan.occupied(k, l as u32 - 1)).collect();
+            plan.uniform[l] = alike.into_iter().collect();
+            plan.need[l - 1] = below;
+        }
+        plan
+    }
+
+    /// Whether content lies in level-`level` tile `c` (within the area shown).
+    fn occupied(&self, c: TileCoord, level: u32) -> bool {
+        let r = c.rect(level);
+        self.images[level as usize].contains(&c)
+            || self.pixels.iter().any(|p| p.image.any_under(&r.translate(-p.offset[0], -p.offset[1])))
+    }
 }
 
 /// A cached tile's pixels.
@@ -827,6 +938,57 @@ impl Entry {
     }
 }
 
+/// The level-`level` tiles over uniform blocks of `layers` at `todo`, each with its key
+/// ([`Key::Uniform`]): each key's tile made once, from one level-0 tile of a block with it,
+/// or from what `chains` already holds of it.
+fn uniform_tiles<'k>(
+    layers: &[Arc<Layer>],
+    level: u32,
+    todo: impl Iterator<Item = (TileCoord, &'k Key)>,
+    chains: &mut Chains,
+) -> HashMap<TileCoord, Option<Arc<Tile>>> {
+    let mut by_key: Vec<(&'k Vec<Token>, Vec<TileCoord>)> = Vec::new();
+    for (c, key) in todo {
+        let Key::Uniform(tokens) = key else { unreachable!("a uniform key") };
+        match by_key.iter_mut().find(|(k, _)| *k == tokens) {
+            Some((_, at)) => at.push(c),
+            None => by_key.push((tokens, vec![c])),
+        }
+    }
+    // Each key's chain, taken out to be carried up to the level in parallel.
+    let work: Vec<_> = by_key
+        .into_iter()
+        .map(|(tokens, at)| {
+            let had = chains.0.iter().position(|c| c.key == *tokens);
+            (tokens, at, had.map(|i| chains.0.swap_remove(i).tiles).unwrap_or_default())
+        })
+        .collect();
+    let done: Vec<_> = work
+        .into_par_iter()
+        .map(|(tokens, at, mut chain)| {
+            if chain.is_empty() {
+                chain.push(match base_pixels(layers, first_under(at[0], level), tokens) {
+                    Pixels::Layer(t) => t.upgrade(),
+                    Pixels::Held(t) => Some(t),
+                    Pixels::Empty | Pixels::Dropped => None,
+                });
+            }
+            while chain.len() <= level as usize {
+                let below = chain.last().expect("a tile at level 0").as_deref();
+                chain.push(below.and_then(|t| downsample([Some(t); 4])).map(Arc::new));
+            }
+            (tokens, at, chain)
+        })
+        .collect();
+    let mut made = HashMap::new();
+    for (tokens, at, chain) in done {
+        let tile = &chain[level as usize];
+        made.extend(at.into_iter().map(|c| (c, tile.clone())));
+        chains.0.push(Chain { key: tokens.clone(), tiles: chain });
+    }
+    made
+}
+
 /// What a level-0 tile with key `tokens` shows, composited at `c` from `layers` (whose tiles
 /// are those the key names): a lone source tile is shown as it is, without a copy.
 fn base_pixels(layers: &[Arc<Layer>], c: TileCoord, tokens: &[Token]) -> Pixels {
@@ -862,6 +1024,8 @@ pub struct Projection {
     keys_built: usize,
     /// How many bytes of tiles the cache may hold (see [`set_budget`](Self::set_budget)).
     budget: Option<u64>,
+    /// The uniform tiles made during the update under way; empty between updates.
+    chains: Chains,
 }
 
 use crate::raster::TILE_BYTES;
@@ -953,23 +1117,18 @@ impl Projection {
             (rect.x1 + span - 1).div_euclid(span) * span,
             (rect.y1 + span - 1).div_euclid(span) * span,
         );
-        let base = self.occupancy.within(&outer);
         let result = match quality {
             Quality::Exact => {
                 self.reduced = Reduced::default();
                 prepare(layers, Some(&outer));
-                self.update_base(layers, &base, &outer);
-                let mut coords = base;
-                for l in 1..=level {
-                    coords = coords.iter().map(|c| c.parent()).collect();
-                    self.update_pyramid(layers, l, &coords, &outer, &HashSet::new());
-                }
+                let coords = self.update_exact(layers, level, &outer);
                 self.restore(layers, level, coords.iter().copied());
                 self.shown(level, coords.iter())
             }
-            Quality::Preview => self.update_preview(layers, level, &outer, base),
+            Quality::Preview => self.update_preview(layers, level, &outer),
         };
         self.trim(level, &outer);
+        self.chains = Chains::default();
         self.last = Some(LastUpdate {
             generation: self.generation,
             level,
@@ -984,41 +1143,40 @@ impl Projection {
     /// [`Quality::Preview`]: the level-`level` tiles over `outer` with anything out of date
     /// under them are drawn at that level; the others come from the exact pyramid, which is
     /// brought up to date for them alone (their level-0 tiles are current, so that costs
-    /// little). `base` holds the level-0 tiles content occupies.
-    fn update_preview(
-        &mut self,
-        layers: &[Arc<Layer>],
-        level: u32,
-        outer: &IRect,
-        base: HashSet<TileCoord>,
-    ) -> Vec<(TileCoord, Arc<Tile>)> {
-        let up = |mut c: TileCoord| {
-            for _ in 0..level {
+    /// little).
+    fn update_preview(&mut self, layers: &[Arc<Layer>], level: u32, outer: &IRect) -> Vec<(TileCoord, Arc<Tile>)> {
+        // The level-`level` tile over tile `c` of level `from`.
+        let up = |mut c: TileCoord, from: u32| {
+            for _ in from..level {
                 c = c.parent();
             }
             c
         };
-        // The level-`level` tiles with a level-0 tile under them out of date, or emptied.
+        // The level-`level` tiles with a level-0 tile under them out of date, or emptied:
+        // of those an exact update would make. A tile over a uniform block is made exactly
+        // whatever happened, being made from one level-0 tile: no dearer than a preview.
         let generation = self.generation;
+        let plan = Plan::of(layers, level, outer, &self.occupancy);
         let mut dirty: HashSet<TileCoord> = HashSet::new();
-        for &c in &base {
-            if self.check_base(layers, c).is_some() {
-                dirty.insert(up(c));
+        for c in self.levels[0].keys() {
+            if !c.rect(0).intersect(outer).is_empty() && !plan.occupied(*c, 0) {
+                dirty.insert(up(*c, 0));
             }
         }
-        let cache = &self.levels[0];
-        for c in cache.keys() {
-            if !base.contains(c) && !c.rect(0).intersect(outer).is_empty() {
-                dirty.insert(up(*c));
+        for &c in &plan.need[0] {
+            if self.check_base(layers, c).is_some() {
+                dirty.insert(up(c, 0));
             }
         }
         // The exact pyramid for the rest; previews already drawn at the level are kept.
-        let mut coords: HashSet<TileCoord> = base.into_iter().filter(|&c| !dirty.contains(&up(c))).collect();
         for l in 1..=level {
-            coords = coords.iter().map(|c| c.parent()).collect();
+            let clean = |c: &&TileCoord| !dirty.contains(&up(**c, l));
+            let coords: HashSet<TileCoord> = plan.need[l as usize].iter().filter(clean).copied().collect();
+            let uniform: HashSet<TileCoord> = plan.uniform[l as usize].iter().filter(clean).copied().collect();
             let keep = if l == level { dirty.clone() } else { HashSet::new() };
-            self.update_pyramid(layers, l, &coords, outer, &keep);
+            self.update_pyramid(layers, l, &coords, &uniform, outer, &keep);
         }
+        let coords: Vec<TileCoord> = plan.need[level as usize].iter().filter(|c| !dirty.contains(c)).copied().collect();
         self.restore(layers, level, coords.iter().copied());
         // The dirty ones whose key changed since they were last drawn, drawn at the level.
         let token = |o: &Object, c: TileCoord| level_token(o, c, level);
@@ -1211,8 +1369,11 @@ impl Projection {
             return;
         }
         for l in (1..=level).rev() {
+            // A uniform tile is made from the layers, not from the tiles below.
+            let cache = &self.levels[l as usize];
             let below: HashSet<TileCoord> = need[l as usize]
                 .iter()
+                .filter(|c| !matches!(cache[c].key, Key::Uniform(..)))
                 .flat_map(|c| c.children())
                 .filter(|k| dropped(&self.levels, l - 1, k))
                 .collect();
@@ -1231,14 +1392,22 @@ impl Projection {
                     })
                     .collect()
             } else {
-                let below = &self.levels[l - 1];
-                todo.into_par_iter()
+                // Uniform tiles from one tile of their block; the others from the four below.
+                let (cache, below) = (&self.levels[l], &self.levels[l - 1]);
+                let (alike, rest): (Vec<TileCoord>, Vec<TileCoord>) =
+                    todo.into_iter().partition(|c| matches!(cache[c].key, Key::Uniform(..)));
+                let alike =
+                    uniform_tiles(layers, l as u32, alike.iter().map(|c| (*c, &cache[c].key)), &mut self.chains);
+                let mut made: Vec<(TileCoord, Pixels)> = rest
+                    .into_par_iter()
                     .map(|c| {
                         let kids = c.children().map(|k| below.get(&k).and_then(Entry::held));
                         let tile = downsample(kids.each_ref().map(|k| k.as_deref()));
                         (c, tile.map_or(Pixels::Empty, |t| Pixels::Held(Arc::new(t))))
                     })
-                    .collect()
+                    .collect();
+                made.extend(alike.into_iter().map(|(c, t)| (c, t.map_or(Pixels::Empty, Pixels::Held))));
+                made
             };
             for (c, pixels) in made {
                 self.levels[l].get_mut(&c).expect("dropped, so cached").pixels = pixels;
@@ -1277,6 +1446,43 @@ impl Projection {
         }
     }
 
+    /// Brings the level-`level` tiles over `outer` up to date, and returns those over
+    /// content. As [`Plan`] says, from the top down: a tile over a uniform block is made at
+    /// its level from one tile of it ([`Key::Uniform`]), with nothing cached below it; the
+    /// others are made from the four below, as far down as level 0. So a large area of one
+    /// colour costs a tile, not every tile beneath it.
+    fn update_exact(&mut self, layers: &[Arc<Layer>], level: u32, outer: &IRect) -> HashSet<TileCoord> {
+        let mut plan = Plan::of(layers, level, outer, &self.occupancy);
+        self.update_base(layers, &plan.need[0], outer);
+        for l in 1..=level as usize {
+            self.update_pyramid(layers, l as u32, &plan.need[l], &plan.uniform[l], outer, &HashSet::new());
+        }
+        plan.need.pop().expect("a set a level")
+    }
+
+    /// Makes the uniform tiles at level `level` whose key changed ([`Key::Uniform`]), each
+    /// key's tile once. `coords` are uniform blocks of `layers`.
+    fn update_uniform(&mut self, layers: &[Arc<Layer>], level: u32, coords: &HashSet<TileCoord>) {
+        if coords.is_empty() {
+            return;
+        }
+        let cache = &self.levels[level as usize];
+        let stale: Vec<(TileCoord, Key)> = coords
+            .par_iter()
+            .filter_map(|&c| {
+                let key = uniform_key(layers, c, level);
+                cache.get(&c).is_none_or(|e| e.key != key).then_some((c, key))
+            })
+            .collect();
+        let made = uniform_tiles(layers, level, stale.iter().map(|(c, k)| (*c, k)), &mut self.chains);
+        for (c, key) in stale {
+            let tile = made[&c].clone();
+            let version = if tile.is_some() { self.next_version() } else { 0 };
+            let pixels = tile.map_or(Pixels::Empty, Pixels::Held);
+            self.levels[level as usize].insert(c, Entry { key, pixels, version, checked: 0 });
+        }
+    }
+
     fn update_base(&mut self, layers: &[Arc<Layer>], coords: &HashSet<TileCoord>, outer: &IRect) {
         let generation = self.generation;
         // Tiles inside the area that nothing occupies any more.
@@ -1299,21 +1505,25 @@ impl Projection {
 
     /// Brings the level-`level` tiles at `coords` up to date from the level below (made
     /// again from `layers` where their pixels were dropped), dropping other cached tiles
-    /// within `outer` except those in `keep`.
+    /// within `outer` except those in `keep`. Those of `coords` in `uniform`, over uniform
+    /// blocks, are made from the layers instead ([`update_uniform`](Self::update_uniform)).
     fn update_pyramid(
         &mut self,
         layers: &[Arc<Layer>],
         level: u32,
         coords: &HashSet<TileCoord>,
+        uniform: &HashSet<TileCoord>,
         outer: &IRect,
         keep: &HashSet<TileCoord>,
     ) {
         let l = level as usize;
         self.levels[l]
             .retain(|c, _| coords.contains(c) || keep.contains(c) || c.rect(level).intersect(outer).is_empty());
+        self.update_uniform(layers, level, uniform);
         let (below, cache) = (&self.levels[l - 1], &self.levels[l]);
         let stale: Vec<(TileCoord, [u64; 4])> = coords
             .iter()
+            .filter(|c| !uniform.contains(c))
             .filter_map(|&c| {
                 let kids = c.children().map(|k| below.get(&k).map_or(0, |e| e.version));
                 let current = cache.get(&c).is_some_and(|e| e.key == Key::Pyramid(kids));
@@ -2234,5 +2444,180 @@ mod tests {
         let shown = p.update(&d.layers, 1, &IRect::from_size(2048, 2048), Quality::Exact);
         assert_eq!(shown.len(), 16);
         assert!(shown.iter().all(|(_, t)| Arc::ptr_eq(t, &shown[0].1)), "each reduced tile was computed separately");
+    }
+
+    /// Every level up to `top` as the pyramid would show it made from every level-0 tile:
+    /// each composited, then reduced four at a time.
+    fn from_every_tile(layers: &[Arc<Layer>], top: u32) -> Vec<HashMap<TileCoord, Tile>> {
+        let base: HashMap<TileCoord, Tile> =
+            occupied_tiles(layers, None).into_iter().filter_map(|c| Some((c, composite_tile(layers, c)?))).collect();
+        let mut levels = vec![base];
+        for _ in 0..top {
+            let below = levels.last().unwrap();
+            let up: HashSet<TileCoord> = below.keys().map(|c| c.parent()).collect();
+            let next =
+                up.into_iter().filter_map(|c| Some((c, downsample(c.children().map(|k| below.get(&k)))?))).collect();
+            levels.push(next);
+        }
+        levels
+    }
+
+    /// The image of pixel layer `l`, for changing.
+    fn image_mut(d: &mut Document, l: LayerId) -> &mut RasterImage {
+        Arc::make_mut(&mut pixels_mut(d, l).image)
+    }
+
+    #[test]
+    fn uniform_blocks_show_what_reducing_every_tile_beneath_shows() {
+        use crate::document::{ImageObject, Object};
+        let mut ids = IdGen::default();
+        let size: i64 = 256 * 16;
+        let mut d = Document::new(size as u32, size as u32);
+        let (white, white_tile) = shared(IRect::from_size(size, size), [1.0; 4]);
+        let white = add(&mut d, &mut ids, white);
+        let mut dot = RasterImage::new();
+        dot.set_pixel(3000, 1234, pixel_from_f32([1.0, 0.0, 0.0, 1.0]));
+        add(&mut d, &mut ids, dot);
+        // Off the tile grid: alike where the four tiles under each tile are all its one tile.
+        let shifted = add(&mut d, &mut ids, shared(IRect::from_size(2048, 2048), [0.0, 0.5, 0.0, 0.5]).0);
+        pixels_mut(&mut d, shifted).offset = [700, 333];
+        // Translucent, in a translucent group.
+        let g = ids.layer();
+        d.insert(Position { parent: None, index: d.layers.len() }, Layer::new_group(g, "g")).unwrap();
+        let child = ids.layer();
+        let blue = shared(IRect::new(2048, 2048, size, size), [0.0, 0.0, 1.0, 1.0]).0;
+        d.insert(Position { parent: Some(g), index: 0 }, Layer::new_raster(child, ids.object(), "c", blue)).unwrap();
+        d.layer_mut(child).unwrap().opacity = 0.4;
+        d.layer_mut(g).unwrap().opacity = 0.5;
+        // An image object, over tiles each of its own.
+        let image = ImageObject {
+            image: Arc::new(shared(IRect::from_size(256, 256), [1.0, 0.0, 1.0, 1.0]).0),
+            frame: IRect::from_size(256, 256),
+            transform: Affine::rotate(0.3).then(Affine::scale(3.0, 3.0)).then(Affine::translate(3000.0, 600.0)),
+            sampling: Sampling::default(),
+        };
+        let object = Object { id: ids.object(), kind: ObjectKind::Image(image) };
+        let picture = ids.layer();
+        let index = d.layers.len();
+        d.insert(Position { parent: None, index }, Layer::with_objects(picture, "image", vec![object])).unwrap();
+        let mut p = Projection::new();
+        let views =
+            [IRect::from_size(size, size), IRect::new(1000, 1500, 3900, 3700), IRect::new(-500, -500, 300, 300)];
+        let check = |p: &mut Projection, d: &Document, what: &str| {
+            let want = from_every_tile(&d.layers, 4);
+            for level in [3, 0, 1, 4, 2] {
+                for view in &views {
+                    let shown: HashMap<TileCoord, Arc<Tile>> =
+                        p.update(&d.layers, level, view, Quality::Exact).into_iter().collect();
+                    let want: Vec<(&TileCoord, &Tile)> = want[level as usize]
+                        .iter()
+                        .filter(|(c, _)| !c.rect(level).intersect(view).is_empty())
+                        .collect();
+                    assert_eq!(shown.len(), want.len(), "{what}: level {level}, {view:?}");
+                    for (c, t) in want {
+                        assert!(shown.get(c).is_some_and(|s| **s == *t), "{what}: level {level}, tile {c:?} differs");
+                    }
+                }
+            }
+        };
+        check(&mut p, &d, "as made");
+        // A tile of the uniform layer changed, then put back: its block is mixed, then alike.
+        let at = TileCoord::containing(3500, 3500);
+        image_mut(&mut d, white).set_pixel(3500, 3500, pixel_from_f32([0.0, 0.0, 0.0, 1.0]));
+        check(&mut p, &d, "a pixel changed");
+        image_mut(&mut d, white).set_tile(at, Some(white_tile));
+        check(&mut p, &d, "put back");
+        // Moved onto the tile grid, off it again, and translucent.
+        pixels_mut(&mut d, shifted).offset = [512, 256];
+        check(&mut p, &d, "on the grid");
+        pixels_mut(&mut d, shifted).offset = [-100, 1800];
+        d.layer_mut(white).unwrap().opacity = 0.7;
+        check(&mut p, &d, "moved, and the white translucent");
+        // The image object moved over what was alike.
+        let LayerContent::Objects(objects) = &mut d.layer_mut(picture).unwrap().content else { panic!() };
+        let ObjectKind::Image(i) = &mut objects[0].kind else { panic!() };
+        i.transform = Affine::rotate(-0.2).then(Affine::translate(3300.0, 3300.0));
+        check(&mut p, &d, "the image moved");
+        // After a preview, exact again.
+        d.layer_mut(child).unwrap().opacity = 0.9;
+        p.update(&d.layers, 3, &views[0], Quality::Preview);
+        check(&mut p, &d, "after a preview");
+    }
+
+    #[test]
+    fn zoomed_out_a_uniform_canvas_costs_a_tile_a_block_not_every_tile_beneath() {
+        let mut ids = IdGen::default();
+        let size: i64 = 256 * 64;
+        let mut d = Document::new(size as u32, size as u32);
+        let white = add(&mut d, &mut ids, shared(IRect::from_size(size, size), [1.0; 4]).0);
+        let all = IRect::from_size(size, size);
+        let entries = |p: &Projection| p.levels.iter().map(HashMap::len).sum::<usize>();
+        let mut p = Projection::new();
+        let shown = p.update(&d.layers, 6, &all, Quality::Exact);
+        assert_eq!(shown.len(), 1);
+        assert_eq!((entries(&p), p.keys_built), (1, 0), "tiles beneath the block were made");
+        // Asked again over part of it, nothing is made again.
+        let again = p.update(&d.layers, 6, &IRect::new(10, 10, 500, 500), Quality::Exact);
+        assert!(Arc::ptr_eq(&again[0].1, &shown[0].1));
+        // A dot: the tiles over it are made from the four below, down to level 0; the
+        // others at each level are blocks.
+        let red = pixel_from_f32([1.0, 0.0, 0.0, 1.0]);
+        image_mut(&mut d, white).set_pixel(5000, 9000, red);
+        p.update(&d.layers, 6, &all, Quality::Exact);
+        assert_eq!((entries(&p), p.keys_built), (1 + 5 * 4 + 4, 4));
+        // At level 4, sixteen tiles: fifteen blocks, and the one over the dot.
+        let exact: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 4, &all, Quality::Exact).into_iter().collect();
+        assert_eq!(exact.len(), 16);
+        let over_dot = TileCoord::new(5000 >> 12, 9000 >> 12);
+        // Dragged on: a preview keys the level-0 tiles an exact update would make alone,
+        // and keeps the blocks, which nothing changed.
+        image_mut(&mut d, white).set_pixel(5001, 9000, red);
+        let built = p.keys_built;
+        let preview: HashMap<TileCoord, Arc<Tile>> =
+            p.update(&d.layers, 4, &all, Quality::Preview).into_iter().collect();
+        assert!(p.shows_previews());
+        assert_eq!(p.keys_built - built, 4, "a preview built the keys of the tiles beneath the blocks");
+        for (c, t) in &exact {
+            assert!(*c == over_dot || Arc::ptr_eq(t, &preview[c]), "block {c:?} was drawn again");
+        }
+        // A change to every block: during a preview, blocks are made exactly (from a tile
+        // each), as an exact update makes them.
+        d.layer_mut(white).unwrap().opacity = 0.5;
+        let preview: HashMap<TileCoord, Arc<Tile>> =
+            p.update(&d.layers, 4, &all, Quality::Preview).into_iter().collect();
+        let want: HashMap<TileCoord, Arc<Tile>> =
+            Projection::new().update(&d.layers, 4, &all, Quality::Exact).into_iter().collect();
+        assert_eq!(preview.len(), 16);
+        for (c, t) in &want {
+            assert!(*c == over_dot || **t == *preview[c], "block {c:?} differs from one drawn exactly");
+        }
+    }
+
+    #[test]
+    fn dropped_uniform_tiles_are_made_again_from_the_layers() {
+        let mut ids = IdGen::default();
+        let size: i64 = 256 * 16;
+        let mut d = Document::new(size as u32, size as u32);
+        let mut white = shared(IRect::from_size(size, size), [1.0, 1.0, 1.0, 0.5]).0;
+        white.set_pixel(100, 100, pixel_from_f32([1.0, 0.0, 0.0, 1.0]));
+        add(&mut d, &mut ids, white);
+        let all = IRect::from_size(size, size);
+        let mut p = Projection::new();
+        // The blocks at levels 1 to 3, under the view, have their pixels dropped.
+        p.set_budget(Some(TILE_BYTES));
+        p.update(&d.layers, 4, &all, Quality::Exact);
+        let dropped = (1..4).flat_map(|l| p.levels[l].values()).filter(|e| matches!(e.pixels, Pixels::Dropped)).count();
+        assert!(dropped >= 3, "only {dropped} tiles were dropped");
+        // Zoomed in, shown again: made again from the layers, for none is made below them.
+        p.set_budget(None);
+        for level in [2, 1] {
+            let got: HashMap<TileCoord, Arc<Tile>> =
+                p.update(&d.layers, level, &all, Quality::Exact).into_iter().collect();
+            let want = Projection::new().update(&d.layers, level, &all, Quality::Exact);
+            assert_eq!(got.len(), want.len(), "level {level}");
+            for (c, t) in want {
+                assert!(got.get(&c).is_some_and(|g| **g == *t), "level {level}: tile {c:?}");
+            }
+        }
     }
 }
