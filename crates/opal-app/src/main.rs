@@ -2,6 +2,7 @@
 
 //! Opal Studio, a 2D graphics editor. See `design.md` for the architecture.
 
+mod api;
 mod app;
 mod background;
 mod canvas;
@@ -27,6 +28,7 @@ mod paste_keys;
 mod prefs;
 mod projector;
 mod ribbon;
+mod server;
 mod settings;
 mod state;
 mod theme;

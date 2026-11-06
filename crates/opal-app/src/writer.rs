@@ -30,6 +30,11 @@ pub enum Then {
     Nothing,
     /// Close the document saved (asking again if it changed meanwhile).
     Close,
+    /// Answer the API call of this number (see [`AppState::answers`]), with what became of
+    /// the write.
+    ///
+    /// [`AppState::answers`]: crate::state::AppState::answers
+    Answer(u64),
 }
 
 /// The work of a write: writes the file, telling the progress how far it has got and

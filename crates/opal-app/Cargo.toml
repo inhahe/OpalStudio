@@ -25,6 +25,8 @@ directories = "6"
 mimalloc = { workspace = true }
 rayon = { workspace = true }
 arboard = { version = "3.7", default-features = false, features = ["image-data"] }
+interprocess = "2.4.7"
+getrandom = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4"

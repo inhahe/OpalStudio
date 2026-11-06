@@ -144,6 +144,10 @@ pub struct AppState {
     /// be brought to the front, so the panels never act on a document that is not on screen.
     pub reveal: Option<DocId>,
     pub messages: VecDeque<Message>,
+    /// The last number given an API call answered once its write is done.
+    pub next_answer: u64,
+    /// The answers to such calls whose writes have finished, by number, until taken.
+    pub answered: Vec<(u64, Result<serde_json::Value, String>)>,
     pub confirm: Option<Confirm>,
     pub new_image: Option<NewImage>,
     pub last_new: NewImage,
@@ -236,6 +240,8 @@ impl AppState {
             opened: Vec::new(),
             reveal: None,
             messages: VecDeque::new(),
+            next_answer: 0,
+            answered: Vec::new(),
             confirm: None,
             new_image: None,
             last_new: NewImage { width: 1920, height: 1080, background: Background::White },
@@ -684,6 +690,10 @@ impl AppState {
                         // Changed while it was written: asked about again.
                         Then::Close => self.close_queue.push_back(doc),
                         Then::Nothing => self.notify(format!("Saved \"{title}\".")),
+                        Then::Answer(n) => {
+                            self.notify(format!("Saved \"{title}\"."));
+                            self.answered.push((n, Ok(serde_json::json!({ "path": path.display().to_string() }))));
+                        }
                     }
                 }
                 (Written::Save { doc, path, before, .. }, Err(failure)) => {
@@ -697,20 +707,39 @@ impl AppState {
                         }
                         None => {}
                     }
-                    match failure {
-                        Failure::Cancelled => self.notify(format!(
+                    match (failure, f.then) {
+                        (Failure::Cancelled, Then::Answer(n)) => {
+                            self.answered.push((n, Err("The save was cancelled; the file was left as it was.".into())))
+                        }
+                        (Failure::Error(e), Then::Answer(n)) => {
+                            self.answered.push((n, Err(format!("Could not save: {e}"))))
+                        }
+                        (Failure::Cancelled, _) => self.notify(format!(
                             "Saving \"{}\" was cancelled; the file was left as it was.",
                             file_title(&path)
                         )),
-                        Failure::Error(e) => self.message(MessageKind::Error, "Could not save", e),
+                        (Failure::Error(e), _) => self.message(MessageKind::Error, "Could not save", e),
                     }
                 }
-                (Written::Export { path }, Ok(())) => self.notify(format!("Exported \"{}\".", file_title(&path))),
-                (Written::Export { path }, Err(Failure::Cancelled)) => self
-                    .notify(format!("Exporting \"{}\" was cancelled; the file was left as it was.", file_title(&path))),
-                (Written::Export { .. }, Err(Failure::Error(e))) => {
-                    self.message(MessageKind::Error, "Could not export", e)
+                (Written::Export { path }, Ok(())) => {
+                    self.notify(format!("Exported \"{}\".", file_title(&path)));
+                    if let Then::Answer(n) = f.then {
+                        self.answered.push((n, Ok(serde_json::json!({ "path": path.display().to_string() }))));
+                    }
                 }
+                (Written::Export { path }, Err(failure)) => match (failure, f.then) {
+                    (Failure::Cancelled, Then::Answer(n)) => {
+                        self.answered.push((n, Err("The export was cancelled; the file was left as it was.".into())))
+                    }
+                    (Failure::Error(e), Then::Answer(n)) => {
+                        self.answered.push((n, Err(format!("Could not export: {e}"))))
+                    }
+                    (Failure::Cancelled, _) => self.notify(format!(
+                        "Exporting \"{}\" was cancelled; the file was left as it was.",
+                        file_title(&path)
+                    )),
+                    (Failure::Error(e), _) => self.message(MessageKind::Error, "Could not export", e),
+                },
             }
         }
         if self.exit_after_writes && !self.writer.busy() {
@@ -767,12 +796,13 @@ impl AppState {
             height: spec.height,
             sampling: crate::prefs::sampling(&self.prefs, "export"),
         });
-        self.export_to(doc, path, format, size, None, ctx);
+        self.export_to(doc, path, format, size, None, Then::Nothing, ctx);
     }
 
     /// Writes `doc`'s canvas to `path` (off the interface thread; a failure inside the
     /// encoders is reported like any other), or says why not if it would need more memory
-    /// than is free when its turn comes (or than `memory`, for tests).
+    /// than is free when its turn comes (or than `memory`, for tests); then does `then`.
+    #[allow(clippy::too_many_arguments)]
     pub fn export_to(
         &mut self,
         doc: Document,
@@ -780,6 +810,7 @@ impl AppState {
         format: ExportFormat,
         size: Option<image_files::ExportSize>,
         memory: Option<crate::memory::Allowance>,
+        then: Then,
         ctx: &egui::Context,
     ) {
         let written = Written::Export { path: path.clone() };
@@ -791,7 +822,7 @@ impl AppState {
             let pool = Some(crate::background::pool());
             image_files::export_in(&doc, &path, &format, size.as_ref(), pool, p).map_err(|e| e.to_string())
         });
-        self.writer.write(written, Then::Nothing, job, ctx);
+        self.writer.write(written, then, job, ctx);
     }
 
     /// Closes a document, first asking about unsaved changes (after the question on screen,
@@ -893,7 +924,15 @@ mod tests {
         let doc = st.active().unwrap().doc().clone();
         let path = std::env::temp_dir().join(format!("opal-refused-{}.png", std::process::id()));
         let png = ExportFormat::Png { sixteen_bit: false };
-        st.export_to(doc, path.clone(), png, None, Some(crate::memory::Allowance::memory(Some(1000))), &ctx());
+        st.export_to(
+            doc,
+            path.clone(),
+            png,
+            None,
+            Some(crate::memory::Allowance::memory(Some(1000))),
+            Then::Nothing,
+            &ctx(),
+        );
         for _ in 0..1000 {
             st.poll_writes(false);
             if !st.writer.busy() {

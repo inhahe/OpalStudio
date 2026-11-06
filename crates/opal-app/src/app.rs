@@ -41,6 +41,9 @@ pub struct OpalApp {
     alt_alone: bool,
     /// Whether settings are saved (not in tests).
     persist: bool,
+    /// The API's connection for scripts and assistants (not in tests); `None` if it could
+    /// not be opened.
+    server: Option<crate::server::Server>,
 }
 
 impl OpalApp {
@@ -80,7 +83,8 @@ impl OpalApp {
         }
         let tree = default_tree(&st);
         st.opened.clear();
-        OpalApp { st, tree, gpu_memory, last_gpu_poll: None, alt_down: false, alt_alone: false, persist }
+        let server = persist.then(|| start_server(&mut st, &cc.egui_ctx)).flatten();
+        OpalApp { st, tree, gpu_memory, last_gpu_poll: None, alt_down: false, alt_alone: false, persist, server }
     }
 
     /// The state, for tests.
@@ -539,6 +543,25 @@ impl OpalApp {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Scripts and assistants connected, and a way to send them off.
+                if let Some(server) = &self.server
+                    && server.clients() > 0
+                {
+                    if ui
+                        .small_button("Disconnect")
+                        .on_hover_text("Drop every connected script and assistant: each request after is refused.")
+                        .clicked()
+                    {
+                        server.disconnect_all();
+                    }
+                    let n = server.clients();
+                    let who =
+                        if n == 1 { "A script is connected".to_owned() } else { format!("{n} scripts are connected") };
+                    ui.label(
+                        RichText::new(format!("{}  {who}", crate::icons::INFO)).color(self.st.palette.strong_text),
+                    );
+                    ui.separator();
+                }
                 // The write under way: how far it has got, and a way to stop it.
                 if let Some((w, progress)) = self.st.writer.pending().next() {
                     let (doing, path) = match w {
@@ -666,6 +689,10 @@ impl eframe::App for OpalApp {
         self.save_settings_if_due(&ctx);
         self.st.poll_copies();
         self.st.poll_writes(ctx.input(|i| i.pointer.any_down()));
+        // After the writes, whose answers it passes on.
+        if let Some(server) = &mut self.server {
+            server.serve(&mut self.st, &ctx);
+        }
         self.st.poll_paste(ctx.input(|i| i.pointer.any_down()));
         self.st.thumbs.end_frame();
         let budget = crate::prefs::bytes(&self.st.prefs, "history.memory");
@@ -890,4 +917,20 @@ fn welcome(ui: &mut egui::Ui, st: &mut AppState) {
             ui.label(RichText::new(line).color(weak));
         }
     });
+}
+
+/// Opens the API's connection, telling the user if it cannot be.
+fn start_server(st: &mut AppState, ctx: &egui::Context) -> Option<crate::server::Server> {
+    let file = crate::server::connection_file()?;
+    match crate::server::Server::start(file, ctx.clone()) {
+        Ok(server) => Some(server),
+        Err(e) => {
+            st.message(
+                crate::state::MessageKind::Warning,
+                "Scripts cannot connect",
+                format!("The connection for scripts and assistants could not be opened: {e}"),
+            );
+            None
+        }
+    }
 }

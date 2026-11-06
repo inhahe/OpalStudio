@@ -1017,6 +1017,20 @@ server. Both rest on one language-neutral API.
   embedded or bundled, any Python version works, and a crashing script cannot take the
   editor down. Pixel data travels through shared memory and arrives as numpy arrays without
   copying.
+- **The protocol.** JSON-RPC 2.0, a request or response a line, over the pipe named in
+  `api.json` in the user's settings folder, beside a random token (32 bytes from the
+  system's generator) made at each start; the file goes when the editor closes. A
+  connection's first request is `hello` with the token; anything else first, or the wrong
+  token, is refused and the connection dropped. A command's method is its name in the
+  registry in snake case (`save_as`, `merge_down`), its parameters each with a kind (a
+  number in a range, one of some words, a path, an image's or layers' ids), and either a
+  default or what the editor holds now (`document`: the active image; `layers`: the
+  selected ones); `methods` lists them all, which is what the stubs and tools are made from.
+  Queries so far: `documents`, `layers`. A call is carried out between frames as the
+  interface would, without a dialog: what one would have said comes back as the call's
+  error (an error) or its `notes`; a save or export is answered once written. Commands
+  that need the transform box (Paste, Transform) and those of the view and panels are not
+  callable yet, or at all.
 - **Python package** `opal-studio` (module `opal`): connects to the running editor or starts
   a headless one (`opal-studio --headless script.py` for batch work).
 - **In the editor:** a Run Script command, a console panel showing output and errors, and a
