@@ -19,7 +19,7 @@
 use crate::document::{ImageObject, Layer, LayerContent, Object, ObjectId, ObjectKind, PixelObject};
 use crate::geom::{Affine, FRect, IRect};
 use crate::raster::RasterImage;
-use crate::resample::{self, Sampling};
+use crate::resample::{self, Drawing, Sampling};
 use crate::tile::{Pixel, PixelF32, TILE_PIXELS, TILE_SIZE, Tile, TileCoord, downsample};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -96,7 +96,7 @@ fn object_tile(o: &Object, c: TileCoord) -> Option<Shown<'_>> {
             (!tile.is_transparent()).then_some(Shown::Drawn(tile))
         }
         ObjectKind::Image(i) => {
-            if !touches(&i.image, &i.transform, &i.sampling, c) {
+            if !touches(&i.image, &i.transform, resample::reach(&i.transform, &i.sampling), c) {
                 return None;
             }
             resample::render_tile(&i.image, &i.transform, &i.sampling, c).map(Shown::Drawn)
@@ -104,40 +104,35 @@ fn object_tile(o: &Object, c: TileCoord) -> Option<Shown<'_>> {
     }
 }
 
-/// Whether `image`, drawn through `transform` with `sampling`, can draw anything into tile
-/// `c`: whether the tile, carried back into the image's pixels, comes within the filter's
-/// reach of its content.
-fn touches(image: &RasterImage, transform: &Affine, sampling: &Sampling, c: TileCoord) -> bool {
+/// Whether `image`, drawn through `transform`, can draw anything into tile `c`: whether the
+/// tile, carried back into the image's pixels, comes within `reach` (the filter's, in the
+/// image's pixels: see [`resample::reach`]) of its content.
+fn touches(image: &RasterImage, transform: &Affine, reach: f64, c: TileCoord) -> bool {
     let (Some(content), Some(inv)) = (image.content_bounds(), transform.inverse()) else { return false };
     let back = inv.bounds(&c.rect(0).to_f());
-    let r = resample::reach(transform, sampling);
-    let content = content.to_f().expand(r);
+    let content = content.to_f().expand(reach);
     back.x0 < content.x1 && back.x1 > content.x0 && back.y0 < content.y1 && back.y1 > content.y0
 }
 
-/// Object `o` placed at pyramid level `level`: its pixels, carried by the transform into
-/// that level's pixels (a level-`level` tile is then drawn like a level-0 one), and how it
-/// is drawn there: pixel objects with Bilinear (exact on whole level pixels), image objects
-/// as they ask (during a drag, the faster method if the preference says so), but never
-/// point-sampled where shrunk: Nearest becomes Bilinear from the image's pyramid, which
-/// averages as reducing full resolution would. (Shrunk one way and enlarged the other, that
-/// softens the enlarged pixels, which reducing would keep hard; point-sampling instead
-/// would drop whole rows of the shrunk ones.)
-fn at_level(o: &Object, level: u32) -> (&Arc<RasterImage>, Affine, Sampling) {
+/// Object `o` placed at pyramid level `level` (above 0): its pixels, carried by the
+/// transform into that level's pixels (a level-`level` tile is then drawn like a level-0
+/// one), and how it is drawn there: pixel objects with Bilinear (exact on whole level
+/// pixels), image objects as they ask (during a drag, the faster method if the preference
+/// says so), but for Nearest, which is drawn by area: as reducing full resolution drawn
+/// with it averages, point sampling only where it enlarges.
+fn at_level(o: &Object, level: u32) -> (&Arc<RasterImage>, Affine, Drawing) {
     let down = Affine::scale(0.5f64.powi(level as i32), 0.5f64.powi(level as i32));
     match &o.kind {
         ObjectKind::Pixels(p) => {
-            (&p.image, Affine::translate(p.offset[0] as f64, p.offset[1] as f64).then(down), Sampling::DRAFT)
+            let t = Affine::translate(p.offset[0] as f64, p.offset[1] as f64).then(down);
+            (&p.image, t, Drawing::Sampled(Sampling::DRAFT))
         }
         ObjectKind::Image(i) => {
-            let t = i.transform.then(down);
-            let shrunk = t.inverse().is_some_and(|inv| inv.row_norms().iter().any(|&n| n > 1.0));
-            let s = if shrunk && matches!(i.sampling.method, resample::Method::Nearest) {
-                Sampling { method: resample::Method::Bilinear, ..i.sampling }
-            } else {
-                i.sampling
+            let drawing = match i.sampling.method {
+                resample::Method::Nearest => Drawing::ByArea,
+                _ => Drawing::Sampled(i.sampling),
             };
-            (&i.image, t, s)
+            (&i.image, i.transform.then(down), drawing)
         }
     }
 }
@@ -343,10 +338,10 @@ fn reduced_reads(
     }
     for_each_visible_object(layers, &mut |o| {
         let ObjectKind::Pixels(p) = &o.kind else { return };
-        let (image, t, s) = at_level(o, level);
+        let (image, t, d) = at_level(o, level);
         let reads: HashSet<TileCoord> = tiles
             .iter()
-            .filter(|&&c| touches(image, &t, &s, c))
+            .filter(|&&c| touches(image, &t, d.reach(&t), c))
             .flat_map(|&c| TileCoord::covering(&reduced_area(p, level, c), 0))
             .collect();
         if !reads.is_empty() {
@@ -360,8 +355,8 @@ fn reduced_reads(
 /// pixel object from its reduced tiles in `reduced` (made beforehand), an image object
 /// through its transform.
 fn level_tile<'o>(o: &'o Object, c: TileCoord, level: u32, reduced: &Reduced) -> Option<Shown<'o>> {
-    let (image, t, s) = at_level(o, level);
-    if !touches(image, &t, &s, c) {
+    let (image, t, d) = at_level(o, level);
+    if !touches(image, &t, d.reach(&t), c) {
         return None;
     }
     match &o.kind {
@@ -374,9 +369,9 @@ fn level_tile<'o>(o: &'o Object, c: TileCoord, level: u32, reduced: &Reduced) ->
             }
             let k = 0.5f64.powi(level as i32);
             let shift = Affine::translate(p.offset[0] as f64 * k, p.offset[1] as f64 * k);
-            resample::render_tile(&local, &shift, &s, c).map(Shown::Drawn)
+            d.render_tile(&local, &shift, c).map(Shown::Drawn)
         }
-        ObjectKind::Image(_) => resample::render_tile(image, &t, &s, c).map(Shown::Drawn),
+        ObjectKind::Image(_) => d.render_tile(image, &t, c).map(Shown::Drawn),
     }
 }
 
@@ -387,11 +382,11 @@ fn shown_at(level: u32, reduced: &Reduced) -> impl for<'o> Fn(&'o Object, TileCo
 
 /// The token for what object `o` shows in tile `c` of pyramid level `level`.
 fn level_token(o: &Object, c: TileCoord, level: u32) -> Option<Token> {
-    let (image, t, s) = at_level(o, level);
-    touches(image, &t, &s, c).then(|| Token::Image {
+    let (image, t, d) = at_level(o, level);
+    touches(image, &t, d.reach(&t), c).then(|| Token::Image {
         image: Arc::downgrade(image),
         transform: t.to_bits(),
-        sampling: s.key(),
+        sampling: d.key(),
     })
 }
 
@@ -678,8 +673,9 @@ fn costly_image_tiles(
             && at.objects.contains(&o.id)
             && let Some(f) = resample::footprint(&i.image, &i.transform, &i.sampling)
         {
-            let (image, t, s) = at_level(o, level);
-            at.tiles.extend(TileCoord::covering(&f.intersect(outer), level).filter(|&c| touches(image, &t, &s, c)));
+            let (image, t, d) = at_level(o, level);
+            let reach = d.reach(&t);
+            at.tiles.extend(TileCoord::covering(&f.intersect(outer), level).filter(|&c| touches(image, &t, reach, c)));
         }
     });
     at
@@ -1031,11 +1027,13 @@ fn object_token(o: &Object, c: TileCoord) -> Option<Token> {
             }
             Some(Token::Shifted { phase, tiles: sources.map(|t| t.map(Arc::downgrade)) })
         }
-        ObjectKind::Image(i) => touches(&i.image, &i.transform, &i.sampling, c).then(|| Token::Image {
-            image: Arc::downgrade(&i.image),
-            transform: i.transform.to_bits(),
-            sampling: i.sampling.key(),
-        }),
+        ObjectKind::Image(i) => {
+            touches(&i.image, &i.transform, resample::reach(&i.transform, &i.sampling), c).then(|| Token::Image {
+                image: Arc::downgrade(&i.image),
+                transform: i.transform.to_bits(),
+                sampling: i.sampling.key(),
+            })
+        }
     }
 }
 
@@ -1540,8 +1538,8 @@ impl Projection {
             if let ObjectKind::Image(_) = &o.kind
                 && o.extent().is_some_and(|e| !e.intersect(&extent).is_empty())
             {
-                let (image, t, s) = at_level(o, level);
-                resample::prepare(image, &t, &s);
+                let (image, t, d) = at_level(o, level);
+                d.prepare(image, &t);
             }
         });
         for (id, image, tiles) in reduced_reads(layers, level, &coords) {
@@ -3406,6 +3404,44 @@ mod tests {
         // Let go of: exact again, and nothing at the level drawn, nothing kept.
         p.update(&d.layers, 2, &all, Quality::Exact);
         assert!(reduced_tiles(&p).is_empty());
+    }
+
+    #[test]
+    fn nearest_drawn_at_the_level_is_what_reducing_it_from_full_resolution_gives() {
+        // Stripes a pixel wide, each row its own value, stretched 8 times across and kept as
+        // tall: at level 2, enlarged one way and shrunk the other.
+        let (w, h) = (256u32, 1024u32);
+        let px: Vec<Pixel> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                pixel_from_f32([(x % 2) as f32, (y % 7) as f32 / 7.0, 0.5, 1.0])
+            })
+            .collect();
+        let nearest = Sampling { method: resample::Method::Nearest, anti_ringing: false };
+        let mut ids = IdGen::default();
+        let mut d = Document::new(4096, 4096);
+        let stripes = Arc::new(RasterImage::from_pixels(w, h, &px));
+        d.insert(
+            Position { parent: None, index: 0 },
+            picture_layer(&mut ids, stripes, Affine::scale(8.0, 1.0), nearest),
+        )
+        .unwrap();
+        let all = IRect::from_size(4096, 4096);
+        let mut p = Projection::new();
+        p.set_budget(Some(4 * TILE_BYTES));
+        let shown: HashMap<TileCoord, Arc<Tile>> = p.update(&d.layers, 2, &all, Quality::Exact).into_iter().collect();
+        assert!(!p.costly.is_empty());
+        let want = from_every_tile(&d.layers, 2);
+        for (c, t) in &want[2] {
+            let worst = shown[c]
+                .pixels()
+                .iter()
+                .zip(t.pixels())
+                .flat_map(|(a, b)| (0..4).map(move |i| (a[i].to_f32() - b[i].to_f32()).abs()))
+                .fold(0.0f32, f32::max);
+            assert!(worst < 0.01, "tile {c:?} is {worst} from the reduction");
+        }
+        assert_eq!(shown.len(), want[2].len(), "drawn past the stripes' edge");
     }
 
     #[test]

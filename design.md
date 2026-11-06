@@ -189,8 +189,9 @@ not a goal.
   cross) would together take more than half the cache's budget (1 GB without one), the
   largest of them, until the rest fit, have the tiles they draw into drawn at the level
   shown instead, as a preview draws them (each object from its own copy at the level: a
-  pixel object's reduced tiles, an image object's pyramid with its own sampling, never
-  point-sampled when shrunk), kept while their key holds. An object drawn so stays so
+  pixel object's reduced tiles, an image object's pyramid with its own sampling, but
+  Nearest by area: each pixel the average of what its footprint covers, which is what
+  reducing it from full resolution gives), kept while their key holds. An object drawn so stays so
   until the rest would fit in half that, so that panning or zooming near the limit does
   not switch it back and forth, making all of it in view at full resolution each time.
   The reduced tiles those tiles read stay, at that level alone, kept by image (so layers
@@ -553,7 +554,7 @@ Editable content does not mean recomputing everything on each change.
   none beneath), and where a layer repeats one tile its reduced tile is that tile halved, made
   once a level, with nothing beneath it reduced (a drag over a 300,000-pixel white canvas
   shown whole: 23 ms a frame); image objects are drawn through their transform with their
-  own resampling, never point-sampled when shrunk. Tiles the drag leaves alone stay exact,
+  own resampling (Nearest by area, as above). Tiles the drag leaves alone stay exact,
   and the full-resolution result follows on release (but for the tiles of image objects
   too costly to reduce, which stay drawn at the level: see *Compositing*). A tile over a
   uniform block is made exactly even during a drag, costing no more than a preview. A

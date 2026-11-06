@@ -173,12 +173,86 @@ fn sinc(x: f64) -> f64 {
 /// How far past its own pixels an image drawn through `transform` can reach, in its own
 /// pixels: the kernel's reach, widened where the image shrinks.
 pub fn reach(transform: &Affine, sampling: &Sampling) -> f64 {
-    let radius = sampling.method.radius();
+    reach_of(sampling.method.radius(), transform)
+}
+
+/// [`reach`] for a kernel of `radius` (source pixels at unit scale).
+fn reach_of(radius: f64, transform: &Affine) -> f64 {
     let stretch = transform.inverse().map_or(1.0, |inv| {
         let [fu, fv] = inv.row_norms();
         fu.max(fv).max(1.0)
     });
     (radius + 2.0) * stretch
+}
+
+/// How an image is drawn: as its [`Sampling`] says, or by area.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Drawing {
+    Sampled(Sampling),
+    /// Each pixel the average of the source pixels its footprint covers, each weighed by
+    /// how much of the footprint it covers: point sampling where the image is enlarged
+    /// (but for the pixels a source pixel's edge crosses), averaging where it is shrunk.
+    /// That is what drawing it with Nearest at full resolution and reducing the result
+    /// gives, drawn directly at a pyramid level.
+    ByArea,
+}
+
+impl Drawing {
+    /// [`render_tile`], drawn this way.
+    pub(crate) fn render_tile(&self, image: &RasterImage, transform: &Affine, c: TileCoord) -> Option<Tile> {
+        match self {
+            Drawing::Sampled(s) => render_tile(image, transform, s, c),
+            Drawing::ByArea => {
+                if image.is_empty() {
+                    return None;
+                }
+                let dest = c.rect(0);
+                if let Some(g) = transform.grid_map() {
+                    return render_exact(image, &g, &dest);
+                }
+                render_filtered(image, &transform.inverse()?, Filter::Area, false, &dest)
+            }
+        }
+    }
+
+    /// [`prepare`], for drawing this way.
+    pub(crate) fn prepare(&self, image: &RasterImage, transform: &Affine) {
+        match self {
+            Drawing::Sampled(s) => prepare(image, transform, s),
+            Drawing::ByArea => {
+                if transform.grid_map().is_none()
+                    && let Some(inv) = transform.inverse()
+                {
+                    image.reduced(pyramid_level(&inv));
+                }
+            }
+        }
+    }
+
+    /// [`reach`], drawn this way.
+    pub(crate) fn reach(&self, transform: &Affine) -> f64 {
+        match self {
+            Drawing::Sampled(s) => reach(transform, s),
+            Drawing::ByArea => reach_of(0.5, transform),
+        }
+    }
+
+    /// [`Sampling::key`], told apart from every sampling's.
+    pub(crate) fn key(&self) -> [u32; 4] {
+        match self {
+            Drawing::Sampled(s) => s.key(),
+            Drawing::ByArea => [4, 0, 0, 0],
+        }
+    }
+}
+
+/// How [`render_filtered`] weighs the source pixels along each axis.
+#[derive(Clone, Copy, PartialEq)]
+enum Filter {
+    /// By a method's kernel, widened where the image shrinks.
+    Kernel(Method),
+    /// By area (see [`Drawing::ByArea`]).
+    Area,
 }
 
 /// Draws `image` into level-0 document tile `c`, its pixels carried into the document by
@@ -194,7 +268,7 @@ pub fn render_tile(image: &RasterImage, transform: &Affine, sampling: &Sampling,
     let inv = transform.inverse()?;
     match sampling.method {
         Method::Nearest => render_nearest(image, &inv, &dest),
-        m => render_filtered(image, &inv, m, sampling.anti_ringing, &dest),
+        m => render_filtered(image, &inv, Filter::Kernel(m), sampling.anti_ringing, &dest),
     }
 }
 
@@ -390,6 +464,23 @@ impl Taps {
         Taps { first, weights }
     }
 
+    /// The taps averaging over `[u - width / 2, u + width / 2]` (source pixels, pixel `i`
+    /// covering `[i, i + 1]`), each pixel weighed by how much of that it covers; reusing
+    /// `weights`' allocation.
+    fn area(u: f64, width: f64, weights: Vec<f32>) -> Taps {
+        let w = width.max(1e-9);
+        let (a, b) = (u - w / 2.0, u + w / 2.0);
+        let first = a.floor() as i64;
+        let last = (b.ceil() as i64 - 1).max(first);
+        let mut weights = weights;
+        weights.clear();
+        for i in first..=last {
+            let covered = b.min(i as f64 + 1.0) - a.max(i as f64);
+            weights.push((covered.max(0.0) / w) as f32);
+        }
+        Taps { first, weights }
+    }
+
     fn end(&self) -> i64 {
         self.first + self.weights.len() as i64
     }
@@ -417,11 +508,14 @@ fn add(acc: &mut PixelF32, w: f32, p: PixelF32) {
 fn render_filtered(
     image: &RasterImage,
     inv: &Affine,
-    method: Method,
+    filter: Filter,
     anti_ringing: bool,
     dest: &IRect,
 ) -> Option<Tile> {
-    let kernel = Kernel::new(method);
+    let kernel = match filter {
+        Filter::Kernel(method) => Some(Kernel::new(method)),
+        Filter::Area => None,
+    };
     // How many source pixels one result pixel spans along each source axis.
     let [fu, fv] = inv.row_norms();
     let level = pyramid_level(inv);
@@ -436,7 +530,14 @@ fn render_filtered(
     // capped there, aliasing a little, rather than with billions of taps.
     let cap = widening_cap(&inv);
     let (wu, wv) = ((fu * scale).clamp(1.0, cap), (fv * scale).clamp(1.0, cap));
-    let margin = (kernel.radius * wu.max(wv)).ceil() as i64 + 2;
+    // By area, the footprint itself, however narrow (a fraction of a pixel, enlarged).
+    let (au, av) = ((fu * scale).min(cap), (fv * scale).min(cap));
+    let taps = |u: f64, widen: f64, width: f64, weights: Vec<f32>| match &kernel {
+        Some(k) => Taps::new(k, u, widen, weights),
+        None => Taps::area(u, width, weights),
+    };
+    let radius = kernel.as_ref().map_or(0.5, |k| k.radius);
+    let margin = (radius * wu.max(wv)).ceil() as i64 + 2;
     let reach = |r: &IRect| IRect::covering(&inv.bounds(&r.to_f())).expand(margin).intersect(&bounds);
     if reach(dest).is_empty() {
         return None;
@@ -448,7 +549,7 @@ fn render_filtered(
     // vertical ones, so rows are filtered first, then columns.
     let us: Vec<f64> = (0..n).map(|x| inv.a * center(x, dest.x0) + inv.e).collect();
     let cols: Vec<Taps> =
-        if axis_aligned { us.iter().map(|&u| Taps::new(&kernel, u, wu, Vec::new())).collect() } else { Vec::new() };
+        if axis_aligned { us.iter().map(|&u| taps(u, wu, au, Vec::new())).collect() } else { Vec::new() };
 
     with_scratch(|s| {
         let Scratch { region: region_buf, across, band } = s;
@@ -466,7 +567,7 @@ fn render_filtered(
             band.resize(BAND * n, [0.0; 4]);
             if axis_aligned {
                 let vs: Vec<f64> = (0..BAND).map(|y| inv.d * center(y0 + y, dest.y0) + inv.f).collect();
-                let row_taps: Vec<Taps> = vs.iter().map(|&v| Taps::new(&kernel, v, wv, Vec::new())).collect();
+                let row_taps: Vec<Taps> = vs.iter().map(|&v| taps(v, wv, av, Vec::new())).collect();
                 let j0 = row_taps.iter().map(|t| t.first).min().unwrap_or(r.y0).max(r.y0);
                 let j1 = row_taps.iter().map(Taps::end).max().unwrap_or(r.y0).min(r.y1);
                 if j0 >= j1 {
@@ -501,7 +602,7 @@ fn render_filtered(
                         *a = finish(*a, anti_ringing, &region, us[x], vs[y]);
                     }
                 }
-            } else if method == Method::Bilinear && wu == 1.0 && wv == 1.0 {
+            } else if filter == Filter::Kernel(Method::Bilinear) && wu == 1.0 && wv == 1.0 {
                 // Plain bilinear interpolation between the four nearest pixels: what the
                 // general sum below computes in this case, without the kernel table.
                 for y in 0..BAND {
@@ -523,8 +624,8 @@ fn render_filtered(
                 for y in 0..BAND {
                     for x in 0..n {
                         let [u, v] = inv.apply([center(x, dest.x0), center(y0 + y, dest.y0)]);
-                        let tu = Taps::new(&kernel, u, wu, std::mem::take(&mut wx));
-                        let tv = Taps::new(&kernel, v, wv, std::mem::take(&mut wy));
+                        let tu = taps(u, wu, au, std::mem::take(&mut wx));
+                        let tv = taps(v, wv, av, std::mem::take(&mut wy));
                         let (cs, cw) = tu.clipped(r.x0, r.x1);
                         let (rs, rw) = tv.clipped(r.y0, r.y1);
                         let mut acc = [0.0f32; 4];
