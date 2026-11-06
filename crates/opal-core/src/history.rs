@@ -278,21 +278,31 @@ impl History {
 }
 
 /// The pixels the states hold, counted once per distinct tile, and the reduced copies their
-/// images keep. Layers, tiles and images are known by address: what a state holds never
-/// changes, and an address counted here belongs to something a kept state holds, so it
-/// cannot be reused while it is counted.
+/// images keep. Layers, chunks of tiles, tiles and images are known by address: what a state
+/// holds never changes, and an address counted here belongs to something a kept state holds,
+/// so it cannot be reused while it is counted.
+///
+/// Tiles are counted by the chunks images keep them in (see `RasterImage::chunks`), which
+/// an image shares with its edited copy but for the chunks the edit changed: so counting a
+/// new state walks the tiles of the chunks new to the account alone, not every tile of each
+/// layer it changed.
 #[derive(Clone, Debug, Default)]
 struct Usage {
-    /// Each distinct layer the states hold: in how many states, its tiles and its images.
+    /// Each distinct layer the states hold: in how many states, its chunks and its images.
     layers: HashMap<usize, Held>,
-    /// Each distinct tile (with the memory it takes) and image: in how many of those layers.
+    /// Each distinct chunk: in how many of those layers, with its tiles (each once) and the
+    /// memory each takes.
+    chunks: Counted<Vec<(usize, u64)>>,
+    /// Each distinct tile (with the memory it takes): in how many of those chunks.
     tiles: Counted<u64>,
+    /// Each distinct image: in how many of those layers.
     images: Counted<Arc<RasterImage>>,
     /// The memory those tiles take.
     tile_bytes: u64,
-    /// The current state's layers, and their tiles and images, each with how many of
-    /// those layers hold it, and the memory those tiles take.
+    /// The current state's layers, and their chunks, tiles and images, each with how many
+    /// of its holders hold it, and the memory those tiles take.
     current_layers: HashSet<usize>,
+    current_chunks: Counted<()>,
     current: Counted<u64>,
     current_images: Counted<()>,
     current_bytes: u64,
@@ -301,8 +311,8 @@ struct Usage {
 #[derive(Clone, Debug)]
 struct Held {
     states: usize,
-    /// Its tiles' addresses, with the memory each takes.
-    tiles: Vec<(usize, u64)>,
+    /// Its images' chunks, by address (one two images share, twice).
+    chunks: Vec<usize>,
     images: Vec<Arc<RasterImage>>,
 }
 
@@ -331,6 +341,10 @@ impl<V> Counted<V> {
         if e.0 == 0 { self.0.remove(&key).map(|(_, v)| v) } else { None }
     }
 
+    fn get(&self, key: usize) -> &V {
+        &self.0.get(&key).expect("counted").1
+    }
+
     fn contains(&self, key: usize) -> bool {
         self.0.contains_key(&key)
     }
@@ -341,21 +355,28 @@ fn address<T>(a: &Arc<T>) -> usize {
 }
 
 impl Usage {
-    /// Counts a new state's document (only its layers not counted already are walked).
+    /// Counts a new state's document (only its layers not counted already are walked, and
+    /// of their chunks, only the tiles of those not counted already).
     fn add(&mut self, doc: &Document) {
         for l in layers_of(doc) {
-            let (tiles, images, bytes) = (&mut self.tiles, &mut self.images, &mut self.tile_bytes);
-            let e = self.layers.entry(address(l)).or_insert_with(|| {
-                let (t, im) = held_by(l);
-                for &(k, b) in &t {
-                    if tiles.add(k, || b) {
-                        *bytes += b;
+            let Usage { layers, chunks, tiles, images, tile_bytes, .. } = self;
+            let e = layers.entry(address(l)).or_insert_with(|| {
+                let held = images_of(l);
+                let mut ids = Vec::new();
+                for image in &held {
+                    images.add(address(image), || image.clone());
+                    for (id, chunk) in image.chunks() {
+                        ids.push(id);
+                        if chunks.add(id, || distinct(chunk)) {
+                            for &(t, b) in chunks.get(id) {
+                                if tiles.add(t, || b) {
+                                    *tile_bytes += b;
+                                }
+                            }
+                        }
                     }
                 }
-                im.iter().for_each(|i| {
-                    images.add(address(i), || i.clone());
-                });
-                Held { states: 0, tiles: t, images: im }
+                Held { states: 0, chunks: ids, images: held }
             });
             e.states += 1;
         }
@@ -371,9 +392,11 @@ impl Usage {
                 continue;
             }
             let held = self.layers.remove(&key).expect("counted");
-            for (k, _) in held.tiles {
-                if let Some(b) = self.tiles.remove(k) {
-                    self.tile_bytes -= b;
+            for id in held.chunks {
+                for (t, _) in self.chunks.remove(id).into_iter().flatten() {
+                    if let Some(b) = self.tiles.remove(t) {
+                        self.tile_bytes -= b;
+                    }
                 }
             }
             held.images.iter().for_each(|i| {
@@ -383,32 +406,42 @@ impl Usage {
     }
 
     /// Makes `doc` (a counted state's) the current one. Only the layers it does not share
-    /// with the state current before are walked.
+    /// with the state current before are walked, and of their chunks, only the tiles of
+    /// those the current state did not hold.
     fn visit(&mut self, doc: &Document) {
         let now: HashSet<usize> = layers_of(doc).into_iter().map(address).collect();
-        for k in self.current_layers.difference(&now) {
-            let h = &self.layers[k];
-            for &(t, _) in &h.tiles {
-                if let Some(b) = self.current.remove(t) {
-                    self.current_bytes -= b;
+        let Usage { layers, chunks, current_layers, current_chunks, current, current_images, current_bytes, .. } = self;
+        for k in current_layers.difference(&now) {
+            let h = &layers[k];
+            for &id in &h.chunks {
+                if current_chunks.remove(id).is_some() {
+                    for &(t, _) in chunks.get(id) {
+                        if let Some(b) = current.remove(t) {
+                            *current_bytes -= b;
+                        }
+                    }
                 }
             }
             h.images.iter().for_each(|i| {
-                self.current_images.remove(address(i));
+                current_images.remove(address(i));
             });
         }
-        for k in now.difference(&self.current_layers) {
-            let h = &self.layers[k];
-            for &(t, b) in &h.tiles {
-                if self.current.add(t, || b) {
-                    self.current_bytes += b;
+        for k in now.difference(current_layers) {
+            let h = &layers[k];
+            for &id in &h.chunks {
+                if current_chunks.add(id, || ()) {
+                    for &(t, b) in chunks.get(id) {
+                        if current.add(t, || b) {
+                            *current_bytes += b;
+                        }
+                    }
                 }
             }
             h.images.iter().for_each(|i| {
-                self.current_images.add(address(i), || ());
+                current_images.add(address(i), || ());
             });
         }
-        self.current_layers = now;
+        *current_layers = now;
     }
 
     /// The bytes the current state does not hold: tiles, and the reduced copies of images
@@ -441,9 +474,9 @@ fn layers_of(doc: &Document) -> Vec<&Arc<Layer>> {
     out
 }
 
-/// The tiles (by address) and the images layer `l`'s own objects hold, each once.
-fn held_by(l: &Layer) -> (Vec<(usize, u64)>, Vec<Arc<RasterImage>>) {
-    let LayerContent::Objects(objects) = &l.content else { return (Vec::new(), Vec::new()) };
+/// The images layer `l`'s own objects hold, each once.
+fn images_of(l: &Layer) -> Vec<Arc<RasterImage>> {
+    let LayerContent::Objects(objects) = &l.content else { return Vec::new() };
     let mut images: Vec<Arc<RasterImage>> = objects
         .iter()
         .map(|o| match &o.kind {
@@ -453,11 +486,15 @@ fn held_by(l: &Layer) -> (Vec<(usize, u64)>, Vec<Arc<RasterImage>>) {
         .collect();
     images.sort_unstable_by_key(address);
     images.dedup_by_key(|i| address(i));
-    let mut tiles: Vec<(usize, u64)> =
-        images.iter().flat_map(|i| i.tiles().map(|(_, t)| (address(t), t.bytes()))).collect();
-    tiles.sort_unstable();
-    tiles.dedup();
-    (tiles, images)
+    images
+}
+
+/// The tiles of a chunk (by address) with the memory each takes, each once.
+fn distinct<'a>(tiles: impl Iterator<Item = &'a Arc<crate::tile::Tile>>) -> Vec<(usize, u64)> {
+    let mut out: Vec<(usize, u64)> = tiles.map(|t| (address(t), t.bytes())).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 #[cfg(test)]
@@ -694,6 +731,55 @@ mod tests {
         assert_eq!(h.memory(), before + TILE_BYTES + built);
     }
 
+    /// What the states other than the current one hold that it does not, counted tile by
+    /// tile, apart from the account: the distinct tiles of their images, and the reduced
+    /// copies of their images.
+    fn by_tile(h: &History) -> u64 {
+        let images =
+            |d: &Document| -> Vec<Arc<RasterImage>> { layers_of(d).into_iter().flat_map(|l| images_of(l)).collect() };
+        let tiles = |d: &Document| -> HashMap<usize, u64> {
+            images(d).iter().flat_map(|i| i.tiles().map(|(_, t)| (address(t), t.bytes())).collect::<Vec<_>>()).collect()
+        };
+        let current = tiles(h.doc());
+        let current_images: HashSet<usize> = images(h.doc()).iter().map(address).collect();
+        let mut others: HashMap<usize, u64> = HashMap::new();
+        let mut other_images: HashMap<usize, Arc<RasterImage>> = HashMap::new();
+        for (_, n) in h.nodes() {
+            others.extend(tiles(&n.doc).into_iter().filter(|(k, _)| !current.contains_key(k)));
+            other_images.extend(
+                images(&n.doc).into_iter().map(|i| (address(&i), i)).filter(|(k, _)| !current_images.contains(k)),
+            );
+        }
+        others.values().sum::<u64>() + other_images.values().map(|i| i.reduced_bytes()).sum::<u64>()
+    }
+
+    #[test]
+    fn one_tile_repeated_through_a_large_layer_is_counted_once_and_an_edit_one_tile() {
+        // 64 × 64 tiles, one tile everywhere: 16 chunks, each holding it.
+        let mut ids = IdGen::default();
+        let mut doc = Document::new(256 * 64, 256 * 64);
+        let white = RasterImage::filled(
+            &crate::geom::IRect::from_size(256 * 64, 256 * 64),
+            crate::tile::pixel_from_f32([1.0; 4]),
+        );
+        doc.insert(Position { parent: None, index: 0 }, Layer::new_raster(ids.layer(), ids.object(), "canvas", white))
+            .unwrap();
+        let mut h = History::new(doc, "new");
+        let mut edited = h.doc().clone();
+        let canvas = edited.layers[0].id;
+        let crate::document::LayerContent::Objects(objects) = &mut edited.layer_mut(canvas).unwrap().content else {
+            panic!()
+        };
+        let ObjectKind::Pixels(p) = &mut objects[0].kind else { panic!() };
+        Arc::make_mut(&mut p.image).set_pixel(5000, 5000, crate::tile::pixel_from_f32([1.0, 0.0, 0.0, 1.0]));
+        h.commit(edited, "paint");
+        // The state before holds only the white tile, which this one holds too.
+        assert_eq!((h.memory(), by_tile(&h)), (0, 0));
+        h.undo();
+        // This one holds the painted tile alone.
+        assert_eq!((h.memory(), by_tile(&h)), (TILE_BYTES, TILE_BYTES));
+    }
+
     #[test]
     fn the_running_count_matches_a_fresh_one() {
         let fresh = |h: &History| {
@@ -722,6 +808,7 @@ mod tests {
                 _ => h.set_budget(if step % 10 == 4 { 3 * TILE_BYTES } else { u64::MAX }),
             }
             assert_eq!(h.memory(), fresh(&h), "after step {step}");
+            assert_eq!(h.memory(), by_tile(&h), "after step {step}, counted tile by tile");
         }
         assert!(h.dropped() > 0);
     }

@@ -202,9 +202,10 @@ not a goal.
   start from its last one's, but for those over a tile the change touched (told apart by
   the two images' rows of tiles, which an edit shares where it leaves them alone), so an
   edit beneath makes again only the reduced tiles over what it changed, each from full
-  resolution (a tile a layer repeats is halved once a level, and kept halved while the
-  view reads it). So an image object across a huge canvas costs the tiles shown too (one
-  across a 300,000-pixel canvas shown whole: 80 ms; 6 ms when its opacity changes, 15 ms
+  resolution (a tile a layer repeats is halved once a level, and its halvings kept, and
+  counted against the budget, while a reduced tile kept is one of them). So an image object
+  across a huge canvas costs the tiles shown too (one across a 300,000-pixel canvas shown
+  whole: 80 ms; 4 ms when its opacity changes, 9 ms
   when a pixel of the canvas beneath does). Those tiles
   look very slightly different from reducing full resolution where layers overlap, and a
   pixel layer beneath them, off the level's pixel grid, slightly softer; everywhere else
@@ -951,7 +952,9 @@ qualities of ink, 浓淡干湿 (dense, light, dry, wet), are each part of the br
 - The tile store makes branches cheap. History can optionally be saved in the file. How much
   memory history may use is a setting (4 GB by default): what the other states hold that
   the current one does not, counted once per tile, with the reduced copies their images
-  keep. Past it, the oldest states are dropped first: the root when it has one child
+  keep. Tiles are counted by the chunks images keep them in, so committing an edit walks
+  the tiles of the chunks it changed, not every tile of the layer (a pixel of a
+  300,000-pixel canvas: under a millisecond). Past it, the oldest states are dropped first: the root when it has one child
   (which becomes the root), otherwise the oldest state with no children, so the history
   stays one tree. The current state, the one before it and every state redo leads to from
   it always stay, so the last action can be undone however large it is, and undoing to

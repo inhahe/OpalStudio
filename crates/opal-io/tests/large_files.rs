@@ -268,6 +268,17 @@ fn image_object_across_a_large_canvas() {
     measure("Let go of (exact again)", || {
         p.update(&d.layers, level, &whole, Quality::Exact);
     });
+    // An edit committed to the history, which counts what each state holds.
+    let mut history = opal_core::history::History::new(d.clone(), "new");
+    let mut edited = d.clone();
+    let opal_core::document::LayerContent::Objects(objects) = &mut edited.layer_mut(canvas).unwrap().content else {
+        panic!()
+    };
+    let ObjectKind::Pixels(o) = &mut objects[0].kind else { panic!() };
+    Arc::make_mut(&mut o.image).set_pixel(7, 7, pixel_from_f32([0.0, 1.0, 0.0, 1.0]));
+    measure("A pixel edit committed to the history", || {
+        history.commit(edited, "paint");
+    });
 }
 
 /// Opening a large PNG: more than 512 MiB once decoded.
