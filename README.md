@@ -89,6 +89,9 @@ cargo test --workspace                     # all tests, interface tests included
   `python/API.md` lists them all. Only programs of the user's own can connect (through a
   token in the settings folder), and the status bar says when one is connected, with a
   button to disconnect it.
+- **Batch work.** `opal-studio --headless script.py [arguments]` runs a script against an
+  editor with no window (the Python is `--python PATH`, or `OPAL_PYTHON`, or `python`), and
+  ends with the script's exit code once the files it asked for are written.
 - **AI assistants.** `opal-studio --mcp` is an MCP server for assistants whose clients
   launch their servers, its tools the same commands and queries, the image coming back as
   an image so the assistant sees what it is doing. For Claude Code, for example:

@@ -1042,7 +1042,12 @@ server. Both rest on one language-neutral API.
   quits. Commands that need the transform box (Paste, Transform) and those of the view and
   panels are not callable yet, or at all.
 - **Python package** `opal-studio` (module `opal`): connects to the running editor or starts
-  a headless one (`opal-studio --headless script.py` for batch work).
+  a headless one (`opal-studio --headless script.py` for batch work). *Built:* headless mode
+  runs the editor's state and its server with no window, the user's preferences loaded
+  (not saved back), and runs the script (with `--python`, `OPAL_PYTHON` or `python`) with
+  the package on its `PYTHONPATH` and a connection file of the run's own; it ends with the
+  script, with its exit code, once the files the script asked for are written, printing
+  what a dialog would have said.
 - **In the editor:** a Run Script command, a console panel showing output and errors, and a
   preference for which Python interpreter to use. A script's changes are grouped into one
   history state, so one undo takes back a whole script run.
