@@ -50,8 +50,16 @@ const TILES_PER_PART: usize = 8;
 /// How many tiles opening reads before making them (in parallel): what it holds at once of
 /// the file's bytes.
 const BATCH: usize = 64;
-/// The largest `document.json` accepted.
+/// The largest `document.json` always accepted (see [`json_limit`]).
 const MAX_JSON: usize = 256 << 20;
+
+/// The largest `document.json` accepted, given the memory `free`: [`MAX_JSON`], or a
+/// quarter of the memory free if more (reading it takes about three times its bytes: the
+/// text, and its tile places as read), so that large documents open and a damaged or
+/// hostile file still cannot take more than there is.
+fn json_limit(free: Option<Free>) -> usize {
+    free.map_or(MAX_JSON, |f| MAX_JSON.max(usize::try_from(f.memory / 4).unwrap_or(usize::MAX)))
+}
 
 #[derive(Serialize, Deserialize)]
 struct FileDoc {
@@ -196,7 +204,8 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path, progress: &Progress) -> Re
         next_id: ids.peek(),
         layers,
     };
-    let json = serde_json::to_vec_pretty(&file).expect("the document serializes");
+    // Compact: pretty, each number of a million tile places would take a line of its own.
+    let json = serde_json::to_vec(&file).expect("the document serializes");
     progress.begin(tiles.len() as u64);
 
     write_atomically(path, Some(progress), |out| {
@@ -324,7 +333,7 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
     if mime != MIME_TYPE.as_bytes() {
         return Err(bad("wrong mimetype".into()));
     }
-    let json = read_entry(&mut zip, "document.json", MAX_JSON, path)?;
+    let json = read_entry(&mut zip, "document.json", json_limit(free), path)?;
     let file: FileDoc = serde_json::from_slice(&json).map_err(|e| bad(format!("document.json: {e}")))?;
     if file.format != "opal-studio" {
         return Err(bad(format!("unknown format {:?}", file.format)));
@@ -673,6 +682,27 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(opened.is_ok(), "{:?}", opened.err());
         assert!(matches!(refused, Err(IoError::TooLarge { short, .. }) if !short.disk), "{:?}", refused.err());
+    }
+
+    #[test]
+    fn the_document_is_written_compactly_and_may_be_as_large_as_memory_allows() {
+        // Ten thousand places, of a few tiles.
+        let mut ids = IdGen::default();
+        let mut doc = Document::new(25_600, 25_600);
+        let white = RasterImage::filled(&IRect::from_size(25_600, 25_600), pixel_from_f32([1.0; 4]));
+        let layer = Layer::new_raster(ids.layer(), ids.object(), "white", white);
+        doc.insert(Position { parent: None, index: 0 }, layer).unwrap();
+        let path = std::env::temp_dir().join(format!("opal-native-compact-{}.opal", std::process::id()));
+        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        let mut zip = ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let size = zip.by_name("document.json").unwrap().size();
+        drop(zip);
+        assert!(load(&path, None).is_ok());
+        std::fs::remove_file(&path).unwrap();
+        assert!(size < 16 * 10_000, "{size} bytes for 10,000 places");
+        assert_eq!(json_limit(None), MAX_JSON);
+        assert_eq!(json_limit(Some(Free::memory(1 << 30))), MAX_JSON);
+        assert_eq!(json_limit(Some(Free::memory(8 << 30))), 2 << 30);
     }
 
     #[test]

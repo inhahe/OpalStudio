@@ -992,7 +992,9 @@ the tile's half floats byte-shuffled (all low bytes, then all high bytes), which
 deflate compress photos far better; a `.srgb8` tile (version 2) one kept at 8 bits, its
 reds, then greens, blues and alphas. Version 1 (no `.srgb8` tiles) is read as well. Saving compresses the tiles in parallel, a batch at a time, so it holds
 a batch of them beyond the document rather than a copy of every tile. Numbers are written
-so they read back exactly. Version 0 (pixel objects
+so they read back exactly. `document.json` is written compactly (about 12 bytes a tile
+place) and read without serde's buffering of tagged enums (`LayerRead`, `ObjectRead`), as
+large as 256 MB or a quarter of the memory free. Version 0 (pixel objects
 only, a canvas at the origin) is still read; a newer version is refused with a message
 rather than misread, and so are values out of range (a transform that cannot be inverted,
 say). The editor never makes a transform a file could not hold: the transform box stops
