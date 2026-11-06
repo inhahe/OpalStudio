@@ -18,7 +18,7 @@
 //! the program.
 
 use crate::tile::Data;
-use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, OnceLock, Weak};
@@ -88,8 +88,13 @@ impl Slot {
                 return body;
             }
         }
-        // Not here, so no thread is reading it, this one included.
-        let mut body = self.body.write();
+        // Not here, so no thread is reading it, this one included. One thread brings it back;
+        // another wanting it meanwhile waits for that alone, not for the first to read it.
+        let body = self.body.upgradable_read();
+        if matches!(*body, Body::Here { .. }) {
+            return RwLockUpgradableReadGuard::downgrade(body);
+        }
+        let mut body = RwLockUpgradableReadGuard::upgrade(body);
         let mut brought = 0;
         if let Body::Away { region, srgb8 } = *body {
             let data = STORE.load(region, srgb8);
@@ -257,12 +262,7 @@ impl Hold {
         if STORE.budget.load(Relaxed) == u64::MAX {
             return;
         }
-        while STORE.resident.load(Relaxed) > bytes && STORE.can_go() {
-            let until = STORE.resident.load(Relaxed).saturating_sub(BATCH).max(bytes);
-            if !STORE.take_away(|| STORE.resident.load(Relaxed) > until) {
-                break;
-            }
-        }
+        STORE.take_down_to(|| bytes);
         if STORE.over_target() {
             STORE.wake();
         }
@@ -460,12 +460,18 @@ impl Store {
                 }
                 *wanted = false;
             }
-            while self.over_target() {
-                // The target is asked again as tiles go: the budget may be raised meanwhile.
-                let until = self.resident.load(Relaxed).saturating_sub(BATCH);
-                if !self.take_away(|| self.resident.load(Relaxed) > until.max(self.target())) {
-                    break;
-                }
+            self.take_down_to(|| self.target());
+        }
+    }
+
+    /// Takes tiles away a batch at a time, letting other threads in between, while the
+    /// pixels in memory take more than `floor` and some can go; until a batch takes none.
+    /// `floor` is asked again as tiles go: a limit may be raised meanwhile.
+    fn take_down_to(&self, floor: impl Fn() -> u64) {
+        while self.resident.load(Relaxed) > floor() && self.can_go() {
+            let until = self.resident.load(Relaxed).saturating_sub(BATCH);
+            if !self.take_away(|| self.resident.load(Relaxed) > until.max(floor())) {
+                break;
             }
         }
     }
@@ -560,16 +566,18 @@ impl Store {
         self.give_back(region);
     }
 
-    /// `region` is free again; space freed at the file's end goes back to the disk.
+    /// `region` is free again; space freed at the file's end goes back to the disk, a large
+    /// stretch at a time (shrinking the file holds the lock every tile going to disk needs,
+    /// so it is done seldom; and under it, so that no tile is written past the new end
+    /// meanwhile, to be cut off).
     fn give_back(&self, region: Region) {
         let mut space = self.space.lock();
-        let end = space.end;
         space.give_back(region);
-        if space.end < end
+        if space.length - space.end >= SHRINK
             && let Some(Ok(file)) = self.scratch.get()
+            && file.set_len(space.end).is_ok()
         {
-            // Only space: if the file cannot shrink now, its end is reused later.
-            let _ = file.set_len(space.end);
+            space.length = space.end;
         }
     }
 
@@ -586,16 +594,21 @@ struct Space {
     /// Free blocks, and free halves of blocks whose other half is used, by offset.
     blocks: BTreeSet<u64>,
     halves: BTreeSet<u64>,
-    /// The file's end: what lies past it is free.
+    /// The end of what is used: what lies past it is free.
     end: u64,
+    /// How long the file is: past `end`, until shrunk.
+    length: u64,
 }
+
+/// How much free at the scratch file's end shrinks it.
+const SHRINK: u64 = 64 << 20;
 
 /// The bytes a tile of working pixels takes on disk; an 8-bit tile takes half.
 const BLOCK: u64 = crate::raster::TILE_BYTES;
 
 impl Space {
     const fn new() -> Space {
-        Space { blocks: BTreeSet::new(), halves: BTreeSet::new(), end: 0 }
+        Space { blocks: BTreeSet::new(), halves: BTreeSet::new(), end: 0, length: 0 }
     }
 
     /// A free region of `len` bytes: a block, or half of one.
@@ -616,6 +629,7 @@ impl Space {
     fn block(&mut self) -> u64 {
         self.blocks.pop_first().unwrap_or_else(|| {
             self.end += BLOCK;
+            self.length = self.length.max(self.end);
             self.end - BLOCK
         })
     }
