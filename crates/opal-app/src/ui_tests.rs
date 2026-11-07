@@ -204,7 +204,20 @@ fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
     // The grid of points the position counts from ends above the position's row.
     let from = h.get(by().label("From: Bottom left").predicate(|n| n.bounding_box().is_some_and(|b| b.x0 < 1000.0)));
     let field = h.get(field_at(at)).rect();
-    assert!(from.rect().bottom() <= field.top(), "the From grid reaches into the row below: {:?} {field:?}", from.rect());
+    assert!(
+        from.rect().bottom() <= field.top(),
+        "the From grid reaches into the row below: {:?} {field:?}",
+        from.rect()
+    );
+    // Its label is level with the menu it names.
+    let from_as = |role| {
+        h.get(by().label("From").role(role).predicate(|n| n.bounding_box().is_some_and(|b| b.x0 < 1000.0))).rect()
+    };
+    let (label, menu) = (from_as(egui::accesskit::Role::Label), from_as(egui::accesskit::Role::ComboBox));
+    assert!(
+        (label.center().y - menu.center().y).abs() < 1.0,
+        "the From label is not beside its menu: {label:?} {menu:?}"
+    );
     // A layer's edge, the box's own width, and a bare number in the field's unit (pixels),
     // the field as wide as what is typed, to be read.
     typed(&mut h, at, "Background.right - width - 10");

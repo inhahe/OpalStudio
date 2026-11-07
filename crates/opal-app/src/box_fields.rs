@@ -174,21 +174,22 @@ pub fn fields(
         ui.label("From").on_hover_text(
             "What the position counts from: a point of the canvas, or of what a layer holds (its bounds).",
         );
-        // Top-aligned: centered, the taller grid would reach into the row below.
-        ui.horizontal_top(|ui| {
-            egui::ComboBox::from_id_salt(("box-from", how.salt))
-                .selected_text(name.as_str())
-                .width(110.0)
-                .show_ui(ui, |ui| {
-                    // Listed only while the menu is open: a walk of every layer's bounds.
-                    for (b, name) in bases(doc) {
-                        ui.selectable_value(&mut m.origin.base, b, name);
-                    }
-                })
-                .response
-                .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "From"));
-            reference_grid(ui, &mut m.origin.point, Some("From"), &format!("{}-from", how.salt));
-        });
+        // The menu beside its label, the grid of its points in a row of its own below (in
+        // one row, the grid would stand taller than the label's row).
+        egui::ComboBox::from_id_salt(("box-from", how.salt))
+            .selected_text(name.as_str())
+            .width(110.0)
+            .show_ui(ui, |ui| {
+                // Listed only while the menu is open: a walk of every layer's bounds.
+                for (b, name) in bases(doc) {
+                    ui.selectable_value(&mut m.origin.base, b, name);
+                }
+            })
+            .response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "From"));
+        ui.end_row();
+        ui.label("");
+        reference_grid(ui, &mut m.origin.point, Some("From"), &format!("{}-from", how.salt));
         ui.end_row();
         let scope = Scope { doc: Some(doc), ppi, unit: m.unit, origin: counted, own: Some(own(&before)) };
         let mut field = |px: &mut f64, range, number: BoxNumber, ui: &mut egui::Ui| {
