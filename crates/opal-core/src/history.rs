@@ -50,6 +50,9 @@ pub struct History {
     dropped: usize,
     /// The tiles the states hold, kept up to date as states come, go and are visited.
     usage: Usage,
+    /// States not to be dropped to keep within the budget, however old: the one before an
+    /// action made of several commits, until they are joined (see [`hold`](Self::hold)).
+    held: Vec<NodeId>,
 }
 
 impl History {
@@ -67,7 +70,15 @@ impl History {
         let mut usage = Usage::default();
         usage.add(&root.doc);
         usage.visit(&root.doc);
-        History { nodes: vec![Some(root)], root: NodeId(0), current: NodeId(0), budget: u64::MAX, dropped: 0, usage }
+        History {
+            nodes: vec![Some(root)],
+            root: NodeId(0),
+            current: NodeId(0),
+            budget: u64::MAX,
+            dropped: 0,
+            usage,
+            held: Vec::new(),
+        }
     }
 
     pub fn root(&self) -> NodeId {
@@ -227,6 +238,22 @@ impl History {
         self.budget
     }
 
+    /// Keeps state `id` from being dropped to keep within the budget, until
+    /// [`release`](Self::release)d: the state before an action that commits several states
+    /// to be joined into one, so that undoing it still gets back to where it began.
+    pub fn hold(&mut self, id: NodeId) {
+        self.held.push(id);
+    }
+
+    /// Lets go of state `id` held by [`hold`](Self::hold) (once for each hold), and drops
+    /// what is past the budget now.
+    pub fn release(&mut self, id: NodeId) {
+        if let Some(i) = self.held.iter().position(|&h| h == id) {
+            self.held.remove(i);
+        }
+        self.trim();
+    }
+
     /// How many states have been dropped to keep within the budget.
     pub fn dropped(&self) -> usize {
         self.dropped
@@ -252,6 +279,7 @@ impl History {
         }
         let mut keep: HashSet<NodeId> =
             [Some(self.current), self.node(self.current).parent].into_iter().flatten().collect();
+        keep.extend(self.held.iter().copied());
         let mut at = self.current;
         while let Some(next) = self.redo_target_of(at) {
             keep.insert(next);
@@ -750,6 +778,22 @@ mod tests {
         let d = painted(h.doc(), 50);
         h.commit(d, "Paint 6");
         assert_eq!(h.nodes().map(|(_, n)| n.label.as_str()).collect::<Vec<_>>(), ["Paint 4", "Paint 5", "Paint 6"]);
+    }
+
+    #[test]
+    fn a_state_held_is_kept_past_the_budget_until_let_go() {
+        // The state before an action made of several commits, as Re-apply All holds it.
+        let mut h = painted_history(1);
+        h.set_budget(TILE_BYTES);
+        let before = h.current();
+        h.hold(before);
+        for i in 0..4 {
+            let d = painted(h.doc(), 60 + i);
+            h.commit(d, "Part");
+        }
+        assert!(h.contains(before), "the state held was dropped");
+        h.release(before);
+        assert!(!h.contains(before), "let go, it was not dropped as the budget says");
     }
 
     #[test]

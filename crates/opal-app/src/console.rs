@@ -282,9 +282,7 @@ impl Console {
 
     /// Puts `script` first among the recent ones.
     fn remember(&mut self, script: &Path) {
-        self.recent.retain(|p| p != script);
-        self.recent.insert(0, script.to_owned());
-        self.recent.truncate(RECENT);
+        crate::recent::latest_first(&mut self.recent, script.to_owned(), RECENT);
         self.looked = None;
     }
 

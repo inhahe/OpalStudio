@@ -233,7 +233,8 @@ fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
     h.key_press(egui::Key::Escape);
     h.run();
     // What was entered is kept with the settings, for the next session.
-    let kept = h.state().state().field_entries.get("box.x").cloned().unwrap_or_default();
+    // (A length's apart in each unit, as a bare number in it is in the unit.)
+    let kept = h.state().state().field_entries.get("box.x.px").cloned().unwrap_or_default();
     assert_eq!(kept.first().map(String::as_str), Some("Background.right - width - 10"), "{kept:?}");
 }
 
@@ -243,7 +244,10 @@ fn a_field_brings_back_what_was_entered_in_an_earlier_session() {
     let _gpu = gpu_lock();
     let mut h = harness();
     // As loaded from the settings at start.
-    let earlier = std::collections::BTreeMap::from([("box.x".to_owned(), vec!["canvas.width / 3".to_owned()])]);
+    let earlier = std::collections::BTreeMap::from([
+        ("box.x.px".to_owned(), vec!["canvas.width / 3".to_owned()]),
+        ("box.x.in".to_owned(), vec!["2".to_owned()]),
+    ]);
     crate::number_field::load_entries(&h.ctx, earlier);
     h.state_mut().state_mut().create_image(&crate::state::NewImage {
         width: 400,

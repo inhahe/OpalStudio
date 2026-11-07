@@ -7,17 +7,18 @@
 use eframe::egui::{self, Key, Modifiers};
 use opal_core::expr::{Expr, Scope, Want};
 use opal_core::units::Unit;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 
 /// How many entries a field remembers.
 pub const REMEMBERED: usize = 20;
 
-/// Where a field's entries are remembered: by name, kept between sessions; or by the field
-/// alone, for this session.
-#[derive(Clone)]
+/// Where a field's entries are remembered: under a name, shared and kept between sessions
+/// (a length's in each unit apart, as a bare number in it is in the unit it was typed in);
+/// or by the field alone, for this session.
 enum Remembered {
-    Named(String),
+    Named(Cow<'static, str>, Option<Unit>),
     Field(egui::Id),
 }
 
@@ -35,11 +36,20 @@ fn named_id() -> egui::Id {
 }
 
 impl Remembered {
+    /// The name its entries are kept under: a length's with its unit.
+    fn key(name: &str, unit: Option<Unit>) -> String {
+        match unit {
+            Some(u) => format!("{name}.{u}"),
+            None => name.to_owned(),
+        }
+    }
+
     /// Its entries, the latest first.
     fn entries(&self, ctx: &egui::Context) -> Vec<String> {
         match self {
-            Remembered::Named(name) => {
-                ctx.data(|d| d.get_temp::<Named>(named_id())).and_then(|n| n.entries.get(name).cloned())
+            Remembered::Named(name, unit) => {
+                let key = Remembered::key(name, *unit);
+                ctx.data_mut(|d| d.get_temp_mut_or_default::<Named>(named_id()).entries.get(&key).cloned())
             }
             Remembered::Field(id) => ctx.data(|d| d.get_temp(*id)),
         }
@@ -49,18 +59,15 @@ impl Remembered {
     /// Remembers `text` as entered, the latest first, once.
     fn keep(&self, ctx: &egui::Context, text: &str) {
         let text = text.trim().to_owned();
-        let keep = |entries: &mut Vec<String>| {
-            entries.retain(|e| *e != text);
-            entries.insert(0, text.clone());
-            entries.truncate(REMEMBERED);
-        };
         ctx.data_mut(|d| match self {
-            Remembered::Named(name) => {
+            Remembered::Named(name, unit) => {
                 let n = d.get_temp_mut_or_default::<Named>(named_id());
-                keep(n.entries.entry(name.clone()).or_default());
-                n.changed = true;
+                let list = n.entries.entry(Remembered::key(name, *unit)).or_default();
+                n.changed |= crate::recent::latest_first(list, text, REMEMBERED);
             }
-            Remembered::Field(id) => keep(d.get_temp_mut_or_default(*id)),
+            Remembered::Field(id) => {
+                crate::recent::latest_first(d.get_temp_mut_or_default(*id), text, REMEMBERED);
+            }
         });
     }
 }
@@ -90,7 +97,7 @@ pub struct NumberField<'a> {
     decimals: RangeInclusive<usize>,
     prefix: String,
     suffix: String,
-    remember: Option<String>,
+    remember: Option<Cow<'static, str>>,
 }
 
 /// What is being typed into a field.
@@ -179,7 +186,7 @@ impl<'a> NumberField<'a> {
 
     /// Remembers what is entered under the name `name`, shared by every field given it, and
     /// kept between sessions (else by the field alone, for this session).
-    pub fn remember(mut self, name: impl Into<String>) -> Self {
+    pub fn remember(mut self, name: impl Into<Cow<'static, str>>) -> Self {
         self.remember = Some(name.into());
         self
     }
@@ -239,7 +246,7 @@ impl<'a> NumberField<'a> {
 
     /// [`show`](Self::show), and what was entered in it this frame (its text, as typed), if
     /// something was.
-    pub fn show_entered(self, ui: &mut egui::Ui) -> (egui::Response, Option<String>) {
+    pub fn show_entered(mut self, ui: &mut egui::Ui) -> (egui::Response, Option<String>) {
         // One id whether it is a button or a text edit, as egui's DragValue keeps.
         let id = ui.next_auto_id();
         let editing = ui.is_enabled()
@@ -264,7 +271,11 @@ impl<'a> NumberField<'a> {
             }
         });
         let text = self.text_of(value);
-        let remembered = self.remember.clone().map_or_else(|| Remembered::Field(id.with("entries")), Remembered::Named);
+        let unit = (self.want == Want::Length).then_some(self.scope.unit);
+        let remembered = match self.remember.take() {
+            Some(name) => Remembered::Named(name, unit),
+            None => Remembered::Field(id.with("entries")),
+        };
         let mut entered = None;
         let mut response = if editing {
             let mut typing =

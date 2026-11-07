@@ -1117,13 +1117,17 @@ numbers (*Paste and transform*): a length such as `8.5in` is the simplest expres
     leaves the value as it was. Left with nothing typed, the value stays exactly as it is,
     not as it shows rounded.
   - Each field remembers its last 20 entries (Up and Down). One given a name
-    (`NumberField::remember`: `box.x`, `size.width`, `setting.<key>`) shares them with every
-    field of that name, so the tool settings' x and the numbers panel's x share theirs, and
-    keeps them between sessions, with the settings (`AppState::field_entries`, read in
-    through egui's memory at start and saved when they change); one without keeps them
-    for the session.
+    (`NumberField::remember`: `box.x`, `size.width`, a preference's key) shares them with
+    every field of that name, so the tool settings' x and the numbers panel's x share
+    theirs, and keeps them between sessions, with the settings (`AppState::field_entries`,
+    read in through egui's memory at start and saved when they change); one without keeps
+    them for the session. A length's are kept apart in each unit (`box.x.px`, `box.x.in`),
+    and a resolution's in each of its units, as a bare number in them is in the unit it was
+    typed in: brought back in another, it would mean another length. The rule of "the
+    latest first, each once, so many at most" is `recent::latest_first`, which the recent
+    scripts keep to as well.
   - The fields are `number_field::NumberField`, dragged as egui's `DragValue` is (and with
-    its accessibility), on every number the interface takes: lengths (`lengths::length`),
+    its accessibility), on every number the interface takes: lengths (`lengths::length_field`),
     angles, percentages, resolutions, the zoom and the layer's opacity, and the
     preferences' numbers beside their sliders. Each is given an `expr::Scope`: a box's
     fields the image as it was before the box opened, positions from what it counts from,
@@ -1165,9 +1169,17 @@ numbers (*Paste and transform*): a length such as `8.5in` is the simplest expres
     set is a loop: placed again, each would move the other, and no order places them all
     as they say, so its layers are left as they are and told (placing one of them with
     the box again breaks it); a set placed relative to one of them is placed by it as it
-    is. Sets that cannot be placed again, or are locked, are left and told too, and the
-    selection is left as it was. Once constraints exist, *keep linked* turns a placement
-    into a constraint without retyping, and a loop of them becomes something to solve.
+    is. A set whose layers are in, or hold, another's counts as placed relative to it both
+    ways (placing either moves the other), so the two are such a loop too. Sets that cannot
+    be placed again, or are locked, are left and told too, as are sets naming, or counting
+    from, a layer that moves with them now (one since put into a group they place:
+    `placement_group` refuses them, for Re-apply too, as placing them again would move them
+    again). The state it began from is held from history's trimming
+    (`History::hold`) until the states each set made are joined, so undoing it gets back
+    there; what placing the sets said (that some stay images, say) is told with the rest,
+    and the selection is left as it was. Once constraints exist, *keep linked* turns a
+    placement into a constraint without retyping, and a loop of them becomes something to
+    solve.
 - **The same from scripts.** Every number and length parameter of the API (Python and MCP)
   also takes an expression as text (*Scripting* has how).
   - The editor works it out when the call runs, with the same parser as the fields, so a

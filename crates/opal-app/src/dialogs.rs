@@ -408,7 +408,7 @@ fn size_fields(
     let (w, h) = size;
     let (ow, oh) = (f64::from(original.0), f64::from(original.1));
     let before = (*w, *h);
-    fn percent<'a>(pct: &'a mut f64, scope: Scope<'a>, name: &str) -> NumberField<'a> {
+    fn percent<'a>(pct: &'a mut f64, scope: Scope<'a>, name: &'static str) -> NumberField<'a> {
         NumberField::number(pct, scope).range(0.01..=10_000.0).suffix("%").decimals(0, 2).remember(name)
     }
     ui.label("Width");
@@ -555,12 +555,17 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
         ui.add_space(4.0);
         if spec.by_margins {
             egui::Grid::new("resize-canvas-margins").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                for (name, i) in [("Left", 0), ("Top", 1), ("Right", 2), ("Bottom", 3)] {
+                let sides = [
+                    ("Left", "canvas.left"),
+                    ("Top", "canvas.top"),
+                    ("Right", "canvas.right"),
+                    ("Bottom", "canvas.bottom"),
+                ];
+                for (i, (name, field)) in sides.into_iter().enumerate() {
                     ui.label(name);
                     let side = i64::from(MAX_SIDE);
                     let scope = lengths::image_scope(Some(doc), unit, ppi);
-                    let field = format!("canvas.{}", name.to_lowercase());
-                    lengths::whole(ui, &mut spec.margins[i], scope, -side..=side, &field);
+                    lengths::whole(ui, &mut spec.margins[i], scope, -side..=side, field);
                     ui.end_row();
                 }
             });

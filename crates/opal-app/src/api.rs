@@ -4084,8 +4084,46 @@ mod tests {
         assert_eq!([left(&st, d), left(&st, e)], [d_at, e_at], "a loop was re-applied");
         assert_eq!(left(&st, f), d_at + 10.0 + 20.0);
         let said = v["notes"].to_string();
-        assert!(said.contains("placed relative to one another in a loop"), "{said}");
-        assert!(said.contains("3 placements re-applied"), "{said}");
+        assert!(said.contains("placed relative to one another"), "{said}");
+        assert!(said.contains("3 placements re-applied") && said.contains("2 were not"), "{said}");
+        // A layer placed in a group that is placed too: placing either moves the other, a
+        // loop of its own kind.
+        let title = place(&mut st, "Title", "0");
+        let logo = place(&mut st, "Logo", "Title.right + 5");
+        now(&mut st, "group_layers", json!({ "layers": [logo.0] })).unwrap();
+        let card = st.active().unwrap().active_layer().unwrap();
+        now(&mut st, "transform", json!({ "layers": [card.0], "x": "canvas.width / 2" })).unwrap();
+        now(&mut st, "transform", json!({ "layers": [title.0], "x": 50 })).unwrap();
+        let (logo_at, card_at) = (left(&st, logo), left(&st, card));
+        let v = now(&mut st, "reapply_all_placements", json!({})).unwrap();
+        assert_eq!(
+            [left(&st, logo), left(&st, card)],
+            [logo_at, card_at],
+            "a layer and the group it is in were re-applied"
+        );
+        assert!(v["notes"].to_string().contains("one holds the other"), "{v}");
+        // A placement naming a layer since put into what it places would move it again:
+        // refused, not re-applied.
+        let pic = place(&mut st, "Pic", "0");
+        let row = place(&mut st, "Row", "Pic.right + 10");
+        now(&mut st, "group_layers", json!({ "layers": [row.0] })).unwrap();
+        let group = st.active().unwrap().active_layer().unwrap();
+        now(&mut st, "transform", json!({ "layers": [group.0], "x": "Pic.right + 10" })).unwrap();
+        let d = st.active_mut().unwrap();
+        d.apply("Move", |doc, _| doc.move_layer(pic, opal_core::document::Position { parent: Some(group), index: 0 }))
+            .unwrap();
+        let refused = now(&mut st, "reapply_placement", json!({ "layer": group.0 })).unwrap_err();
+        assert!(refused.contains("moves with it now"), "{refused}");
+        // With nothing selected, nothing is selected after.
+        let sampling = crate::prefs::sampling(&st.prefs, "transform");
+        let d = st.active_mut().unwrap();
+        d.set_selection_state((None, std::collections::HashSet::new()));
+        d.reapply_all_placements(sampling);
+        assert_eq!(
+            d.selection_state(),
+            (None, std::collections::HashSet::new()),
+            "the selection was not left as it was"
+        );
         std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).ok();
     }
 

@@ -46,7 +46,7 @@ pub fn whole_side(px: f64) -> u32 {
 
 /// A field for a canvas side of `n` pixels (1 to [`MAX_SIDE`]), in `scope`, its entries
 /// remembered as `name`.
-pub fn side(ui: &mut egui::Ui, n: &mut u32, scope: Scope, name: &str) -> egui::Response {
+pub fn side(ui: &mut egui::Ui, n: &mut u32, scope: Scope, name: &'static str) -> egui::Response {
     let mut px = f64::from(*n);
     let r = length_field(&mut px, scope, 1.0..=f64::from(MAX_SIDE), 0).remember(name).show(ui);
     if r.changed() {
@@ -57,7 +57,13 @@ pub fn side(ui: &mut egui::Ui, n: &mut u32, scope: Scope, name: &str) -> egui::R
 
 /// A field for a whole number of pixels `n` in `range`, in `scope`, its entries remembered
 /// as `name`.
-pub fn whole(ui: &mut egui::Ui, n: &mut i64, scope: Scope, range: RangeInclusive<i64>, name: &str) -> egui::Response {
+pub fn whole(
+    ui: &mut egui::Ui,
+    n: &mut i64,
+    scope: Scope,
+    range: RangeInclusive<i64>,
+    name: &'static str,
+) -> egui::Response {
     let mut px = *n as f64;
     let span = *range.start() as f64..=*range.end() as f64;
     let r = length_field(&mut px, scope, span, 0).remember(name).show(ui);
@@ -83,8 +89,8 @@ pub fn unit_menu(ui: &mut egui::Ui, unit: &mut Unit, id: &str) -> bool {
 }
 
 /// A field for a resolution of `ppi` pixels per inch, shown in `in_unit`, with a menu of
-/// the resolution units (`id` tells the menu apart, and names the field's entries); what is
-/// typed is worked out in `scope`. Returns whether the resolution changed (not just its
+/// the resolution units (`id` tells the menu apart); what is typed is worked out in
+/// `scope`. Returns whether the resolution changed (not just its
 /// unit).
 pub fn resolution(ui: &mut egui::Ui, ppi: &mut f64, in_unit: &mut ResolutionUnit, id: &str, scope: Scope) -> bool {
     let unit = *in_unit;
@@ -94,7 +100,11 @@ pub fn resolution(ui: &mut egui::Ui, ppi: &mut f64, in_unit: &mut ResolutionUnit
             .range(unit.from_ppi(MIN_PPI)..=unit.from_ppi(MAX_PPI))
             .speed(1.0)
             .decimals(0, 2)
-            .remember(id),
+            // Apart in each unit, as a number in it is in the unit it was typed in.
+            .remember(match unit {
+                ResolutionUnit::PerInch => "resolution.ppi",
+                ResolutionUnit::PerCm => "resolution.ppcm",
+            }),
     );
     if r.changed() {
         *ppi = unit.to_ppi(shown).clamp(MIN_PPI, MAX_PPI);

@@ -35,6 +35,7 @@ mod paste;
 mod paste_keys;
 mod prefs;
 mod projector;
+mod recent;
 mod ribbon;
 mod rulers;
 mod server;

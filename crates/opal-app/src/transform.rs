@@ -819,7 +819,7 @@ impl DocState {
         self.commit_pending();
         let (placement, layers) = placement_group(self.history.doc(), layer)?;
         let placement = placement.clone();
-        let selected = self.selection_with_active_last();
+        let selected = self.selection_state();
         self.select_layers(&layers, layer);
         let done = if self.begin_transform(sampling) {
             if let Some(p) = self.pending.as_mut() {
@@ -839,7 +839,7 @@ impl DocState {
                 Ok(())
             }
             Err(why) => {
-                self.select_layers(&selected, *selected.last().unwrap_or(&layer));
+                self.set_selection_state(selected);
                 Err(why)
             }
         }
@@ -848,11 +848,12 @@ impl DocState {
     /// Places every layer of the image placed by expressions so again, those placed
     /// together together, each after those it is placed relative to, as one history state;
     /// drawn as `sampling` says, as a transform is. Layers placed relative to one another
-    /// in a loop are left as they are: placed again, each would move the other, so no
-    /// order places them all as they say. Those placed relative to such a layer are placed
-    /// by it as it is. So too are left those that cannot be placed again (see
-    /// [`reapply_placement`](Self::reapply_placement)), or are locked. What was done, and
-    /// what was left and why, comes back. The selection is left as it was.
+    /// in a loop, or one in a group the other places, are left as they are: placed again,
+    /// each would move the other, so no order places them all as they say. Those placed
+    /// relative to such a layer are placed by it as it is. So too are left those that
+    /// cannot be placed again (see [`reapply_placement`](Self::reapply_placement)), or
+    /// are locked. What was done, what was left and why, and what placing them said comes
+    /// back. The selection is left as it was.
     pub fn reapply_all_placements(&mut self, sampling: Sampling) -> Reapplied {
         self.commit_pending();
         let doc = self.history.doc().clone();
@@ -867,33 +868,39 @@ impl DocState {
                 Ok(_) => {}
                 Err(why) if !broken.contains(&p.layers) => {
                     broken.push(p.layers.clone());
-                    out.left.push((l.id, why));
+                    out.left.push((l.id, reason(&why)));
                 }
                 Err(_) => {}
             }
         });
-        // What each set is placed relative to: the sets the layers it names, or counts
-        // from, move with.
-        let deps: Vec<Vec<usize>> = sets
-            .iter()
-            .map(|set| {
-                let placement = doc.layer(set[0]).and_then(|l| l.placed.as_ref()).expect("a set is placed");
-                let mut named: Vec<LayerId> = placement.numbers.iter().filter_map(|p| p.from_layer).collect();
-                for p in &placement.numbers {
-                    named.extend(opal_core::expr::Expr::parse(&p.expr).map(|e| e.layers()).unwrap_or_default());
-                }
+        // What each set is placed relative to: the sets that the layers it names, or counts
+        // from, move with; and the sets its own layers are in, or hold, which move it or
+        // which it moves.
+        let deps: Vec<Vec<usize>> = (0..sets.len())
+            .map(|i| {
+                let placement = doc.layer(sets[i][0]).and_then(|l| l.placed.as_ref()).expect("a set is placed");
+                let named = placement_names(placement);
                 (0..sets.len())
-                    .filter(|&j| sets[j] != *set && named.iter().any(|&n| moves_with(&doc, n, &sets[j])))
+                    .filter(|&j| j != i)
+                    .filter(|&j| {
+                        named.iter().any(|&n| moves_with(&doc, n, &sets[j]))
+                            || sets[i].iter().any(|&l| moves_with(&doc, l, &sets[j]))
+                    })
                     .collect()
             })
             .collect();
-        let selected = self.selection_with_active_last();
+        let selected = self.selection_state();
+        // The state it began from is kept, however many states it makes before joining them.
+        let start = self.history.current();
+        self.history.hold(start);
         let mut made = std::collections::HashSet::new();
         for component in components(&deps) {
             if let [i] = component[..] {
                 let layer = sets[i][0];
                 if let Some(l) = sets[i].iter().filter_map(|&l| doc.layer(l)).find_map(crate::commands::first_locked) {
-                    out.left.push((layer, format!("“{}” is locked", l.name)));
+                    let why =
+                        if l.id == layer { "it is locked".to_owned() } else { format!("“{}” is locked", l.name) };
+                    out.left.push((layer, why));
                     continue;
                 }
                 let before = self.history.current();
@@ -904,25 +911,37 @@ impl DocState {
                             made.insert(self.history.current());
                         }
                     }
-                    Err(why) => out.left.push((layer, why.trim_end_matches('.').to_owned())),
+                    Err(why) => out.left.push((layer, reason(&why))),
+                }
+                // What placing it said (it stays an image, say), each thing once.
+                if let Some(note) = self.notice.take()
+                    && !out.notes.contains(&note)
+                {
+                    out.notes.push(note);
                 }
             } else {
-                let names: Vec<String> =
-                    component.iter().filter_map(|&i| doc.layer(sets[i][0])).map(|l| format!("“{}”", l.name)).collect();
-                let why = format!(
-                    "it and {} are placed relative to one another in a loop: placed again, each would move the \
-                     other; place one of them with the box again",
-                    names[1..].join(", ")
-                );
-                out.left.push((sets[component[0]][0], why));
+                // Each set of the loop is told, with the others it loops with.
+                for &i in &component {
+                    let others: Vec<String> = component
+                        .iter()
+                        .filter(|&&j| j != i)
+                        .filter_map(|&j| doc.layer(sets[j][0]))
+                        .map(|l| format!("“{}”", l.name))
+                        .collect();
+                    let why = format!(
+                        "it and {} are placed relative to one another, or one holds the other: placed again, each \
+                         would move the other; place one of them with the box again",
+                        others.join(", ")
+                    );
+                    out.left.push((sets[i][0], why));
+                }
             }
         }
         if !made.is_empty() {
             self.join_states(&made, "Re-apply All Placements");
         }
-        if let Some(&active) = selected.last() {
-            self.select_layers(&selected, active);
-        }
+        self.history.release(start);
+        self.set_selection_state(selected);
         out
     }
 
@@ -1041,7 +1060,32 @@ pub fn placement_group(doc: &Document, layer: LayerId) -> Result<(&Placement, Ve
     if !together || !placement.layers.contains(&layer) {
         return Err("A layer placed with it has gone, or been placed again since: place it with the box again.".into());
     }
+    // Naming what moves with it now (a layer since put into, or around, what it places),
+    // placed again it would move again.
+    if placement_names(placement).iter().any(|&n| moves_with(doc, n, &placement.layers)) {
+        return Err(
+            "It names, or counts from, a layer that moves with it now: placed again, it would move again. Place it \
+             with the box again."
+                .into(),
+        );
+    }
     Ok((placement, placement.layers.clone()))
+}
+
+/// The layers `placement`'s expressions name, and those its numbers count from.
+fn placement_names(placement: &Placement) -> Vec<LayerId> {
+    let mut named: Vec<LayerId> = placement.numbers.iter().filter_map(|p| p.from_layer).collect();
+    for p in &placement.numbers {
+        named.extend(opal_core::expr::Expr::parse(&p.expr).map(|e| e.layers()).unwrap_or_default());
+    }
+    named
+}
+
+/// `why`, as said after a layer's name in a list: begun in lower case, with no full stop.
+fn reason(why: &str) -> String {
+    let why = why.trim_end_matches('.');
+    let mut c = why.chars();
+    c.next().map_or_else(String::new, |f| f.to_lowercase().chain(c).collect())
 }
 
 /// What re-applying every placement in an image did (see
@@ -1052,6 +1096,8 @@ pub struct Reapplied {
     pub done: usize,
     /// Those that were not, each by one of its layers, and why.
     pub left: Vec<(LayerId, String)>,
+    /// What placing them said (that some stay images, say), each once.
+    pub notes: Vec<String>,
 }
 
 /// The strongly connected components of the graph whose node `i` has an edge to each of

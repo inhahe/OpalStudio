@@ -191,7 +191,7 @@ pub fn fields(
         ui.end_row();
         let scope = Scope { doc: Some(doc), ppi, unit: m.unit, origin: counted, own: Some(own(&before)) };
         let mut field = |px: &mut f64, range, number: BoxNumber, ui: &mut egui::Ui| {
-            let f = lengths::length_field(px, scope, range, how.px_decimals).remember(format!("box.{}", number.name()));
+            let f = lengths::length_field(px, scope, range, how.px_decimals).remember(box_entries(number));
             let (r, text) = f.show_entered(ui);
             entered.extend(text.map(|t| (number, t)));
             r
@@ -240,6 +240,17 @@ pub fn fields(
         ui.end_row();
     });
     *p != before
+}
+
+/// The name what is entered for box number `n` is remembered under.
+fn box_entries(n: BoxNumber) -> &'static str {
+    match n {
+        BoxNumber::X => "box.x",
+        BoxNumber::Y => "box.y",
+        BoxNumber::Width => "box.width",
+        BoxNumber::Height => "box.height",
+        BoxNumber::Angle => "box.angle",
+    }
 }
 
 /// The box `p`, as an expression names its numbers.
@@ -404,8 +415,8 @@ struct Rect<'a> {
 fn fit_into(ui: &mut egui::Ui, rect: &mut Option<[f64; 4]>, how: &Rect, salt: &str) -> Option<crate::api::BoxArgs> {
     use crate::api::{BoxArgs, Fit};
     let (canvas, at, scope) = ([how.canvas.width(), how.canvas.height()], how.at, how.scope);
-    let field = |px: &mut f64, range, name: &str, ui: &mut egui::Ui| {
-        lengths::length_field(px, scope, range, 1).remember(format!("fit.{name}")).show(ui).changed()
+    let field = |px: &mut f64, range, name: &'static str, ui: &mut egui::Ui| {
+        lengths::length_field(px, scope, range, 1).remember(name).show(ui).changed()
     };
     // Kept from the canvas's corner; shown from the point positions count from.
     let shift = [how.canvas.x0 - how.from[0], how.canvas.y0 - how.from[1]];
@@ -418,16 +429,16 @@ fn fit_into(ui: &mut egui::Ui, rect: &mut Option<[f64; 4]>, how: &Rect, salt: &s
             ui.label("Position");
             ui.horizontal(|ui| {
                 ui.label("x");
-                edited |= field(&mut x, -FAR..=FAR, "x", ui);
+                edited |= field(&mut x, -FAR..=FAR, "fit.x", ui);
                 ui.label("y");
-                edited |= field(&mut y, -FAR..=FAR, "y", ui);
+                edited |= field(&mut y, -FAR..=FAR, "fit.y", ui);
             });
             ui.end_row();
             ui.label("Size");
             ui.horizontal(|ui| {
-                edited |= field(&mut w, 0.01..=1e6, "width", ui);
+                edited |= field(&mut w, 0.01..=1e6, "fit.width", ui);
                 ui.label("×");
-                edited |= field(&mut h, 0.01..=1e6, "height", ui);
+                edited |= field(&mut h, 0.01..=1e6, "fit.height", ui);
             });
             ui.end_row();
         });

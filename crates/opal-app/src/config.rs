@@ -128,23 +128,19 @@ fn apply_json(st: &mut AppState, text: &str) -> Result<(), String> {
         st.last_new.resolution = ppi;
     }
     // One by one: one that cannot be read is skipped, not all of them; each once.
-    let recent = obj.get("recent_scripts").and_then(serde_json::Value::as_array).into_iter().flatten();
-    for path in recent.filter_map(serde_json::Value::as_str).map(PathBuf::from) {
-        if !st.console.recent.contains(&path) && st.console.recent.len() < crate::console::RECENT {
-            st.console.recent.push(path);
-        }
-    }
+    let recent = obj.get("recent_scripts").and_then(serde_json::Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+    let paths = recent.iter().filter_map(serde_json::Value::as_str).map(PathBuf::from).collect::<Vec<_>>();
+    st.console.recent = crate::recent::latest_of(paths.into_iter(), crate::console::RECENT);
     // So too each field's entries: text that is not blank and could be an expression, each
     // once, as many as a field remembers.
     for (name, list) in obj.get("field_entries").and_then(serde_json::Value::as_object).into_iter().flatten() {
-        let mut kept: Vec<String> = Vec::new();
-        for e in list.as_array().into_iter().flatten().filter_map(serde_json::Value::as_str) {
-            let e = e.trim();
-            if !e.is_empty() && e.len() <= opal_core::expr::MAX_LEN && !kept.iter().any(|k| k == e) {
-                kept.push(e.to_owned());
-            }
-        }
-        kept.truncate(crate::number_field::REMEMBERED);
+        let texts = list.as_array().map(Vec::as_slice).unwrap_or(&[]).iter().filter_map(serde_json::Value::as_str);
+        let fit: Vec<String> = texts
+            .map(str::trim)
+            .filter(|e| !e.is_empty() && e.len() <= opal_core::expr::MAX_LEN)
+            .map(str::to_owned)
+            .collect();
+        let kept = crate::recent::latest_of(fit.into_iter(), crate::number_field::REMEMBERED);
         if !kept.is_empty() {
             st.field_entries.insert(name.clone(), kept);
         }
