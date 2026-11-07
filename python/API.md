@@ -218,6 +218,14 @@ Place the active layer again as the expressions it was placed by say, now.
 | `document` | document | The image, by id. Default: the active image. |
 | `layer` | layer | The layer, by id. Default: the active layer. |
 
+### `reapply_all_placements`
+
+Place every layer placed by expressions again, as they say now.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+
 ### `new_layer`
 
 Add an empty layer above the active one.

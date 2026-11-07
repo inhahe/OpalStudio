@@ -167,6 +167,11 @@ class Editor:
         document: The image, by id. Default: the active image.
         layer: The layer, by id. Default: the active layer.
         """
+    def reapply_all_placements(self, *, document: int | None = None) -> Any:
+        """Place every layer placed by expressions again, as they say now.
+
+        document: The image, by id. Default: the active image.
+        """
     def new_layer(self, *, document: int | None = None, name: str | None = None) -> Any:
         """Add an empty layer above the active one.
 

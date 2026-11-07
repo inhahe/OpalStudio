@@ -29,6 +29,7 @@ pub enum Cmd {
     Place,
     Transform,
     ReapplyPlacement,
+    ReapplyAllPlacements,
     NewLayer,
     NewGroup,
     Duplicate,
@@ -105,7 +106,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 60] = [
+    pub const ALL: [Cmd; 61] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -125,6 +126,7 @@ impl Cmd {
         Cmd::Place,
         Cmd::Transform,
         Cmd::ReapplyPlacement,
+        Cmd::ReapplyAllPlacements,
         Cmd::NewLayer,
         Cmd::NewGroup,
         Cmd::Duplicate,
@@ -328,6 +330,17 @@ impl Cmd {
                  they name has moved, this works them out again and puts the layer (and those \
                  placed with it) where they say now, as one step of history. The box's numbers \
                  list them, under Placed by. Placing the layer with the box again replaces them.",
+                &[],
+            ),
+            Cmd::ReapplyAllPlacements => i(
+                "Re-apply All Placements",
+                icons::REAPPLY_ALL,
+                "Place every layer placed by expressions again, as they say now.",
+                "Re-applies each placement in the image, as one step of history, each after those \
+                 it is placed relative to: a layer placed by another that is placed by a third \
+                 follows both. Layers placed relative to one another in a loop are left as they \
+                 are (placed again, each would move the other), as are those that cannot be: \
+                 what was left, and why, is told.",
                 &[],
             ),
             Cmd::NewLayer => i(
@@ -707,7 +720,7 @@ pub static RIBBON: &[Tab] = &[
                 name: "Transform",
                 description: "Moving, scaling and rotating layers. The Move tool (V) moves them too.",
                 large: 1,
-                cmds: &[Cmd::Transform, Cmd::ReapplyPlacement],
+                cmds: &[Cmd::Transform, Cmd::ReapplyPlacement, Cmd::ReapplyAllPlacements],
             },
             Group {
                 name: "Layers",
@@ -866,6 +879,18 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             }
             Ok(())
         }
+        ReapplyAllPlacements => {
+            let d = st.active().ok_or("Open or create an image first.")?;
+            if d.transform.is_some() {
+                return Err("Apply or cancel the box first.".into());
+            }
+            let mut any = false;
+            d.doc().for_each_layer(&mut |l, _| any |= l.placed.is_some());
+            if !any {
+                return Err("No layer in the image was placed by expressions naming the canvas or other layers.".into());
+            }
+            Ok(())
+        }
         Transform | Rasterize => {
             let (d, sel) = selection(st)?;
             let layers: Vec<&opal_core::document::Layer> = sel.iter().filter_map(|&l| d.doc().layer(l)).collect();
@@ -993,7 +1018,7 @@ pub fn locked_layer(doc: &opal_core::document::Document) -> Option<String> {
 }
 
 /// The layer itself if it is locked, or else the first locked layer inside it.
-fn first_locked(layer: &opal_core::document::Layer) -> Option<&opal_core::document::Layer> {
+pub(crate) fn first_locked(layer: &opal_core::document::Layer) -> Option<&opal_core::document::Layer> {
     if layer.locked {
         return Some(layer);
     }

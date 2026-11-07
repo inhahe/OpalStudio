@@ -1156,8 +1156,18 @@ numbers (*Paste and transform*): a length such as `8.5in` is the simplest expres
     was, if one of those layers has gone or been placed again since (the box they made is
     no more), is locked, or a layer it names or counts from is gone. With the box open on
     exactly the layers placed together, its numbers list how (*Placed by*, the layers by
-    their names now) with a Re-apply that does the same in the open box. Once constraints
-    exist, *keep linked* turns a placement into a constraint without retyping.
+    their names now) with a Re-apply that does the same in the open box.
+  - *Re-apply All Placements* (Home › Transform, `reapply_all_placements`) re-applies every
+    set of layers placed together, as one history state, each after the sets it is placed
+    relative to (those the layers it names or counts from move with): the sets ordered by
+    their strongly connected components (`transform::components`, Tarjan's), so a layer
+    placed by another that is placed by a third follows both. A component of more than one
+    set is a loop: placed again, each would move the other, and no order places them all
+    as they say, so its layers are left as they are and told (placing one of them with
+    the box again breaks it); a set placed relative to one of them is placed by it as it
+    is. Sets that cannot be placed again, or are locked, are left and told too, and the
+    selection is left as it was. Once constraints exist, *keep linked* turns a placement
+    into a constraint without retyping, and a loop of them becomes something to solve.
 - **The same from scripts.** Every number and length parameter of the API (Python and MCP)
   also takes an expression as text (*Scripting* has how).
   - The editor works it out when the call runs, with the same parser as the fields, so a

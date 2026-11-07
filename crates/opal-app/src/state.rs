@@ -553,6 +553,23 @@ impl AppState {
                     self.message(MessageKind::Info, "Re-apply Placement", why);
                 }
             }
+            Cmd::ReapplyAllPlacements => {
+                let sampling = crate::prefs::sampling(&self.prefs, "transform");
+                let d = self.active_mut().expect("available");
+                let done = d.reapply_all_placements(sampling);
+                let s = |n: usize| if n == 1 { "" } else { "s" };
+                let again = format!("{} placement{} re-applied.", done.done, s(done.done));
+                if done.left.is_empty() {
+                    self.notify(again);
+                } else {
+                    let name =
+                        |l| d.doc().layer(l).map_or_else(|| format!("layer {}", l.0), |x| format!("“{}”", x.name));
+                    let left: Vec<String> = done.left.iter().map(|(l, why)| format!("{}: {why}", name(*l))).collect();
+                    let n = left.len();
+                    let body = format!("{again} {n} {} not:\n{}", if n == 1 { "was" } else { "were" }, left.join("\n"));
+                    self.message(MessageKind::Warning, "Re-apply All Placements", body);
+                }
+            }
             Cmd::CropToContent => self.crop_to_content(),
             Cmd::ResizeImage => {
                 let doc = self.active().expect("available").doc();

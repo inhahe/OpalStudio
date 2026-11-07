@@ -362,7 +362,7 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             },
         ],
         Undo | Redo | Copy | CopyMerged | MergeVisible | StampVisible | Flatten | CropToContent | RotateCw
-        | RotateCcw | Rotate180 | FlipHorizontal | FlipVertical => &[DOCUMENT],
+        | RotateCcw | Rotate180 | FlipHorizontal | FlipVertical | ReapplyAllPlacements => &[DOCUMENT],
         NewLayer | NewGroup => &[
             DOCUMENT,
             Param { name: "name", kind: Kind::Text, help: "Its name.", otherwise: Otherwise::Now("a numbered one") },
@@ -4046,6 +4046,46 @@ mod tests {
         now(&mut st, "reapply_placement", json!({ "layer": group.0 })).unwrap();
         let b = st.active().unwrap().doc().layer(group).unwrap().bounds().unwrap();
         assert_eq!(b.x0, 10.0, "the group was not placed so again");
+        std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn re_applying_every_placement_follows_what_each_is_placed_by_and_leaves_loops() {
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 400, "height": 100, "resolution": 100 })).unwrap();
+        let path = png_file("piece.png", 10, 10).display().to_string();
+        let id = |v: &Value| LayerId(v["layer"].as_u64().unwrap());
+        let place = |st: &mut AppState, name: &str, x: &str| {
+            id(&now(st, "place", json!({ "path": path, "name": name, "x": x })).unwrap())
+        };
+        let left = |st: &AppState, l: LayerId| st.active().unwrap().doc().layer(l).unwrap().bounds().unwrap().x0;
+        // A chain: B is placed by A, and C by B; C lies below B, so found first.
+        let a = place(&mut st, "A", "0");
+        let b = place(&mut st, "B", "A.right + 5");
+        let c = place(&mut st, "C", "B.right + 5");
+        now(&mut st, "move_down", json!({ "layer": c.0 })).unwrap();
+        // A loop: E placed by D, then D by E; and F placed by D.
+        let d = place(&mut st, "D", "200");
+        let e = place(&mut st, "E", "D.right + 5");
+        now(&mut st, "transform", json!({ "layers": [d.0], "x": "E.right + 5" })).unwrap();
+        let f = place(&mut st, "F", "D.right + 20");
+        now(&mut st, "transform", json!({ "layers": [a.0], "x": 100 })).unwrap();
+        now(&mut st, "transform", json!({ "layers": [d.0], "x": 300 })).unwrap();
+        // (D placed again by a number, the loop is gone: placed by E alone, then D, again.)
+        now(&mut st, "transform", json!({ "layers": [d.0], "x": "E.right + 5" })).unwrap();
+        let (d_at, e_at) = (left(&st, d), left(&st, e));
+        let states = st.active().unwrap().history.nodes().count();
+        let v = now(&mut st, "reapply_all_placements", json!({})).unwrap();
+        // B after A, C after B, as one history state.
+        assert_eq!([left(&st, b), left(&st, c)], [115.0, 130.0], "not placed in the order they depend on");
+        assert_eq!(st.active().unwrap().history.nodes().count(), states + 1);
+        // D and E left as they were, and said; F placed by D as D is.
+        assert_eq!([left(&st, d), left(&st, e)], [d_at, e_at], "a loop was re-applied");
+        assert_eq!(left(&st, f), d_at + 10.0 + 20.0);
+        let said = v["notes"].to_string();
+        assert!(said.contains("placed relative to one another in a loop"), "{said}");
+        assert!(said.contains("3 placements re-applied"), "{said}");
         std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).ok();
     }
 

@@ -352,6 +352,13 @@ impl DocState {
         Ok(())
     }
 
+    /// Joins the states in `made`, made one after another, into one labeled `label` (see
+    /// [`History::join`]).
+    pub fn join_states(&mut self, made: &HashSet<NodeId>, label: &str) {
+        self.history.join(made, label, &self.named);
+        self.revision += 1;
+    }
+
     /// Joins the states group `group` made one after another into one, labeled `label` (see
     /// [`History::join`]), now that it has ended. What a `step` made is kept apart from the
     /// run it is in, when that ends.

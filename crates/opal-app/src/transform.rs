@@ -845,6 +845,87 @@ impl DocState {
         }
     }
 
+    /// Places every layer of the image placed by expressions so again, those placed
+    /// together together, each after those it is placed relative to, as one history state;
+    /// drawn as `sampling` says, as a transform is. Layers placed relative to one another
+    /// in a loop are left as they are: placed again, each would move the other, so no
+    /// order places them all as they say. Those placed relative to such a layer are placed
+    /// by it as it is. So too are left those that cannot be placed again (see
+    /// [`reapply_placement`](Self::reapply_placement)), or are locked. What was done, and
+    /// what was left and why, comes back. The selection is left as it was.
+    pub fn reapply_all_placements(&mut self, sampling: Sampling) -> Reapplied {
+        self.commit_pending();
+        let doc = self.history.doc().clone();
+        let mut out = Reapplied::default();
+        // The sets of layers placed together, each once; those that cannot be placed again
+        // are told once each.
+        let (mut sets, mut broken): (Vec<Vec<LayerId>>, Vec<Vec<LayerId>>) = (Vec::new(), Vec::new());
+        doc.for_each_layer(&mut |l, _| {
+            let Some(p) = &l.placed else { return };
+            match placement_group(&doc, l.id) {
+                Ok((_, layers)) if !sets.contains(&layers) => sets.push(layers),
+                Ok(_) => {}
+                Err(why) if !broken.contains(&p.layers) => {
+                    broken.push(p.layers.clone());
+                    out.left.push((l.id, why));
+                }
+                Err(_) => {}
+            }
+        });
+        // What each set is placed relative to: the sets the layers it names, or counts
+        // from, move with.
+        let deps: Vec<Vec<usize>> = sets
+            .iter()
+            .map(|set| {
+                let placement = doc.layer(set[0]).and_then(|l| l.placed.as_ref()).expect("a set is placed");
+                let mut named: Vec<LayerId> = placement.numbers.iter().filter_map(|p| p.from_layer).collect();
+                for p in &placement.numbers {
+                    named.extend(opal_core::expr::Expr::parse(&p.expr).map(|e| e.layers()).unwrap_or_default());
+                }
+                (0..sets.len())
+                    .filter(|&j| sets[j] != *set && named.iter().any(|&n| moves_with(&doc, n, &sets[j])))
+                    .collect()
+            })
+            .collect();
+        let selected = self.selection_with_active_last();
+        let mut made = std::collections::HashSet::new();
+        for component in components(&deps) {
+            if let [i] = component[..] {
+                let layer = sets[i][0];
+                if let Some(l) = sets[i].iter().filter_map(|&l| doc.layer(l)).find_map(crate::commands::first_locked) {
+                    out.left.push((layer, format!("“{}” is locked", l.name)));
+                    continue;
+                }
+                let before = self.history.current();
+                match self.reapply_placement(layer, sampling) {
+                    Ok(()) => {
+                        out.done += 1;
+                        if self.history.current() != before {
+                            made.insert(self.history.current());
+                        }
+                    }
+                    Err(why) => out.left.push((layer, why.trim_end_matches('.').to_owned())),
+                }
+            } else {
+                let names: Vec<String> =
+                    component.iter().filter_map(|&i| doc.layer(sets[i][0])).map(|l| format!("“{}”", l.name)).collect();
+                let why = format!(
+                    "it and {} are placed relative to one another in a loop: placed again, each would move the \
+                     other; place one of them with the box again",
+                    names[1..].join(", ")
+                );
+                out.left.push((sets[component[0]][0], why));
+            }
+        }
+        if !made.is_empty() {
+            self.join_states(&made, "Re-apply All Placements");
+        }
+        if let Some(&active) = selected.last() {
+            self.select_layers(&selected, active);
+        }
+        out
+    }
+
     /// Makes `layers` (those still in the image) the selected ones, `active` the active one.
     fn select_layers(&mut self, layers: &[LayerId], active: LayerId) {
         let doc = self.history.doc();
@@ -961,6 +1042,71 @@ pub fn placement_group(doc: &Document, layer: LayerId) -> Result<(&Placement, Ve
         return Err("A layer placed with it has gone, or been placed again since: place it with the box again.".into());
     }
     Ok((placement, placement.layers.clone()))
+}
+
+/// What re-applying every placement in an image did (see
+/// [`DocState::reapply_all_placements`]).
+#[derive(Debug, Default)]
+pub struct Reapplied {
+    /// How many sets of layers placed together were placed so again.
+    pub done: usize,
+    /// Those that were not, each by one of its layers, and why.
+    pub left: Vec<(LayerId, String)>,
+}
+
+/// The strongly connected components of the graph whose node `i` has an edge to each of
+/// `deps[i]` (Tarjan's, without recursion): each comes out after every one it has an edge
+/// to, so in an order that puts what a node depends on first.
+fn components(deps: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let n = deps.len();
+    let (mut index, mut low, mut on) = (vec![usize::MAX; n], vec![0; n], vec![false; n]);
+    let (mut stack, mut out, mut next) = (Vec::new(), Vec::new(), 0);
+    for root in 0..n {
+        if index[root] != usize::MAX {
+            continue;
+        }
+        index[root] = next;
+        low[root] = next;
+        next += 1;
+        stack.push(root);
+        on[root] = true;
+        // Each node being visited, with the next of its edges to follow.
+        let mut call = vec![(root, 0)];
+        while let Some(top) = call.last_mut() {
+            let v = top.0;
+            if top.1 < deps[v].len() {
+                let w = deps[v][top.1];
+                top.1 += 1;
+                if index[w] == usize::MAX {
+                    index[w] = next;
+                    low[w] = next;
+                    next += 1;
+                    stack.push(w);
+                    on[w] = true;
+                    call.push((w, 0));
+                } else if on[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+            } else {
+                call.pop();
+                if let Some(&(u, _)) = call.last() {
+                    low[u] = low[u].min(low[v]);
+                }
+                if low[v] == index[v] {
+                    let mut c = Vec::new();
+                    while let Some(w) = stack.pop() {
+                        on[w] = false;
+                        c.push(w);
+                        if w == v {
+                            break;
+                        }
+                    }
+                    out.push(c);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Whether layer `l` of `doc` moves with a box placing `placed`: it is one of them, in one

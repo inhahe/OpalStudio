@@ -53,7 +53,9 @@ cargo test --workspace                     # all tests, interface tests included
   `sqrt`, the trigonometric functions, `mid`, `lerp` and `dist` are there too. A layer
   placed by a box given expressions that name the canvas or other layers remembers them:
   once those have moved, Re-apply Placement (Home › Transform, or the box's numbers, under
-  Placed by) puts it where they say now.
+  Placed by) puts it where they say now, and Re-apply All Placements does so for every
+  layer, each after those it is placed relative to (layers placed relative to each other in
+  a loop are left as they are, and said).
 - **Paste and place.** Ctrl+V pastes an image (from Opal Studio, another program, or an
   image file copied in Explorer) into a box that moves, scales and rotates it, snapping to
   the canvas and other layers; Enter places it. A pasted image keeps its own pixels, so it
