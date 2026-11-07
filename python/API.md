@@ -159,6 +159,7 @@ Place an image file into this image, then position and size it.
 | `document` | document | The image, by id. Default: the active image. |
 | `path` (required) | path | The image file, a PNG or a JPEG, by its absolute path. |
 | `name` | text | The new layer's name. Default: the file's name. |
+| `print_size` | bool | Scale the file by its resolution against the image's, so it prints as large as it did (before a width or height given), rather than place it pixel for pixel. A file that does not say its resolution is placed pixel for pixel either way. Default: the preference (Transform › Place at the file's print size). |
 | `x` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, across from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
 | `y` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
 | `width` | length | The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is. |

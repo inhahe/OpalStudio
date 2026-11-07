@@ -656,7 +656,16 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   (`api::place_box`). A mirrored box's points are where their names say (its height runs
   the other way from its frame's).
 - **Place** (File, Ctrl+Alt+O) opens the transform box on an image file, as a paste of it
-  (onto a new layer named after the file; the history state is "Place").
+  (onto a new layer named after the file; the history state is "Place"), by default at
+  the file's **print size**, as most image editors place (scaled by its resolution against
+  the image's: a 2-inch logo at 300 ppi is 144 pixels in a 72 ppi image), before the fit
+  to the canvas a large one gets. A file that does not say its resolution is placed pixel
+  for pixel (taking it for 72 ppi, as some editors do, would make a screenshot tiny in a
+  300 ppi image). A preference (Transform › Place at the file's print size) chooses; a
+  button on the box, shown when the file's resolution is not the image's, switches one
+  placing between the two, scaling the box about its center (so a size given meanwhile
+  scales with it), and becomes the preference, as the box's other switches do. Scripts:
+  `place(print_size=…)`, the preference unless given.
 - **One history state:** the whole session in the box, from paste to commit, is one entry
   ("Paste" or "Transform"). Cancel leaves the document as it was.
 - **The clipboard:** PNG first (keeping 16-bit color and transparency), then the other

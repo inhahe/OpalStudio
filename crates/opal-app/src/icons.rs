@@ -76,6 +76,7 @@ pub const LINK: char = '\u{f4e4}';
 pub const SNAP: char = '\u{e6c4}';
 pub const RULER: char = '\u{f67c}';
 pub const NUMBERS: char = '\u{e748}';
+pub const PRINT_SIZE: char = '\u{f62a}';
 pub const PLACE: char = '\u{e97d}';
 pub const INTO_LAYER: char = '\u{e0dc}';
 pub const SCRIPT: char = '\u{f2ef}';

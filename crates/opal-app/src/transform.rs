@@ -56,6 +56,19 @@ pub struct PasteInto {
     pub active: Option<LayerId>,
     /// Whether it goes into `active` rather than onto the new layer.
     pub into_active: bool,
+    /// For a file placed whose resolution is not the image's: how its size at that
+    /// resolution and its size in pixels differ, and which it is at.
+    pub print: Option<PrintSize>,
+}
+
+/// A placed file's print size against its pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PrintSize {
+    /// The image's resolution ÷ the file's: what its pixels are scaled by to print as large
+    /// as they did.
+    pub factor: f64,
+    /// Whether the box is at the print size (else at the file's pixels).
+    pub on: bool,
 }
 
 /// What a drag on the box does.
@@ -530,7 +543,7 @@ impl DocState {
             start: place,
             current: place,
             sampling,
-            paste: Some(PasteInto { layer: layer_id, position, name, active: into, into_active: false }),
+            paste: Some(PasteInto { layer: layer_id, position, name, active: into, into_active: false, print: None }),
             was_selected,
             drag: None,
             guides: Guides::default(),
@@ -678,6 +691,25 @@ impl DocState {
         let active = t.layer;
         self.select_only(active);
         self.revision += 1;
+    }
+
+    /// For a placed file, switches the box between its print size and the file's pixels,
+    /// scaling it about its center (so a size given meanwhile scales with it). Returns
+    /// whether it did (not for a box with nothing to switch, nor one the scaling would put
+    /// past what an image file can hold).
+    pub fn toggle_print_size(&mut self) -> bool {
+        let Some(s) = self.transform.as_ref() else { return false };
+        let Some(print) = s.paste.as_ref().and_then(|p| p.print) else { return false };
+        let k = if print.on { 1.0 / print.factor } else { print.factor };
+        let [cx, cy] = s.current.apply(s.frame.center());
+        let m = s.current.then(Affine::scale(k, k).about(cx, cy));
+        if self.box_refused(&m).is_some() {
+            return false;
+        }
+        self.set_box(m, None);
+        let p = self.transform.as_mut().and_then(|s| s.paste.as_mut()).expect("checked above");
+        p.print = Some(PrintSize { on: !print.on, ..print });
+        true
     }
 
     /// Ends the session, leaving the document as it was.

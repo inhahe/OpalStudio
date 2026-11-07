@@ -464,6 +464,14 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
                 help: "The new layer's name.",
                 otherwise: Otherwise::Now("the file's name"),
             },
+            Param {
+                name: "print_size",
+                kind: Kind::Bool,
+                help: "Scale the file by its resolution against the image's, so it prints as large as it did \
+                       (before a width or height given), rather than place it pixel for pixel. A file that does \
+                       not say its resolution is placed pixel for pixel either way.",
+                otherwise: Otherwise::Now("the preference (Transform › Place at the file's print size)"),
+            },
             BOX_X,
             BOX_Y,
             BOX_WIDTH,
@@ -1735,7 +1743,9 @@ impl AppState {
                     Err(why) => return now(Err(format!("place: {why}"))),
                 };
                 let name = args.text("name");
-                match self.place_file(&args.path("path"), name) {
+                let print_size =
+                    args.flag("print_size").unwrap_or_else(|| self.prefs.bool("transform.place_print_size"));
+                match self.place_file(&args.path("path"), name, print_size) {
                     Ok(warnings) => {
                         let notes = warnings.into_iter().map(|w| format!("Placed: {w}")).collect();
                         let into = args.flag("into_active") == Some(true);
@@ -3462,6 +3472,70 @@ mod tests {
         let anew = call(&mut st, "paste", json!({}));
         later(&mut st, anew).unwrap();
         assert_eq!(st.active().unwrap().doc().resolution, 300.0, "the copy's resolution was lost");
+    }
+
+    /// A white PNG `w × h` pixels at `ppi` pixels per inch (none recorded if `None`), written
+    /// to a file of the test's own; its path.
+    fn png_at(name: &str, w: u32, h: u32, ppi: Option<f64>) -> std::path::PathBuf {
+        let path = png_file(name, w, h);
+        if let Some(ppi) = ppi {
+            let mut d = opal_core::document::Document::new(w, h);
+            d.resolution = ppi;
+            let mut ids = opal_core::document::IdGen::default();
+            let white = RasterImage::filled(
+                &IRect::from_size(i64::from(w), i64::from(h)),
+                opal_core::tile::pixel_from_f32([1.0; 4]),
+            );
+            let layer = opal_core::document::Layer::new_raster(ids.layer(), ids.object(), "white", white);
+            d.insert(opal_core::document::Position { parent: None, index: 0 }, layer).unwrap();
+            opal_io::image_files::export(
+                &d,
+                &path,
+                &opal_io::image_files::ExportFormat::Png { sixteen_bit: false },
+                None,
+            )
+            .unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn a_file_is_placed_at_its_print_size_unless_asked_otherwise() {
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 400, "height": 300, "resolution": 100 })).unwrap();
+        // 90 pixels at 300 ppi are 0.3 in: 30 pixels at 100 ppi.
+        let logo = png_at("logo.png", 90, 60, Some(300.0)).display().to_string();
+        let width = |v: Value| v["box"]["width"].as_f64().unwrap();
+        assert_eq!(width(now(&mut st, "place", json!({ "path": logo })).unwrap()), 30.0);
+        assert_eq!(width(now(&mut st, "place", json!({ "path": logo, "print_size": false })).unwrap()), 90.0);
+        // So too from the preference.
+        now(&mut st, "set_preference", json!({ "key": "transform.place_print_size", "value": false })).unwrap();
+        assert_eq!(width(now(&mut st, "place", json!({ "path": logo })).unwrap()), 90.0);
+        // A file that does not say its resolution: pixel for pixel either way.
+        let shot = png_at("shot.png", 90, 60, None).display().to_string();
+        assert_eq!(width(now(&mut st, "place", json!({ "path": shot, "print_size": true })).unwrap()), 90.0);
+        // The box switches between the two, about its center, and back.
+        st.place_file(std::path::Path::new(&logo), None, true).unwrap();
+        let d = st.active_mut().unwrap();
+        let center = |d: &crate::doc::DocState| {
+            let s = d.transform.as_ref().unwrap();
+            (s.current.apply(s.frame.center()), s.params().width)
+        };
+        let (c0, w0) = center(d);
+        assert!(d.toggle_print_size());
+        let (c1, w1) = center(d);
+        assert!((w0, w1) == (30.0, 90.0) && (c0[0] - c1[0]).abs() < 1e-9 && (c0[1] - c1[1]).abs() < 1e-9);
+        assert!(d.toggle_print_size());
+        assert_eq!(center(d).1, 30.0);
+        d.cancel_transform();
+        // A file at the image's own resolution has nothing to switch.
+        let same = png_at("same.png", 90, 60, Some(100.0));
+        st.place_file(&same, None, true).unwrap();
+        let d = st.active_mut().unwrap();
+        assert!(!d.toggle_print_size() && d.transform.as_ref().unwrap().params().width == 90.0);
+        d.cancel_transform();
+        std::fs::remove_dir_all(std::path::Path::new(&logo).parent().unwrap()).ok();
     }
 
     #[test]

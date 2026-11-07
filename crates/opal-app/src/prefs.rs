@@ -419,6 +419,18 @@ pub static PREFS: &[Def] = &[
         advanced: false,
     },
     Def {
+        key: "transform.place_print_size",
+        label: "Place at the file's print size",
+        help: "On: a file placed is scaled by its resolution against the image's, so it prints as large as it \
+               did (a 2-inch logo at 300 ppi placed into a 72 ppi image is 144 pixels, still 2 inches), as most \
+               image editors place. Off: pixel for pixel. A file that does not say its resolution is placed \
+               pixel for pixel either way. The button on the box switches it for one placing.",
+        section: "Transform",
+        kind: Kind::Bool,
+        default: Init::Bool(true),
+        advanced: false,
+    },
+    Def {
         key: "transform.reference",
         label: "Reference point",
         help: "Which point of the transform and crop boxes their position fields give, and what a size or \

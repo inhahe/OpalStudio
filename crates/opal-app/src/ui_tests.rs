@@ -144,6 +144,43 @@ fn counting_from_the_layer_being_moved_counts_from_where_it_was() {
 }
 
 #[test]
+fn the_print_size_button_on_a_placed_file_switches_it_and_is_remembered() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    h.state_mut().state_mut().create_image(&crate::state::NewImage {
+        width: 400,
+        height: 300,
+        background: crate::state::Background::White,
+        resolution: 100.0,
+    });
+    // A 90-pixel file at 300 ppi: 30 pixels at its print size here.
+    let path = std::env::temp_dir().join(format!("opal-ui-place-{}.png", std::process::id()));
+    {
+        let mut d = opal_core::document::Document::new(90, 60);
+        d.resolution = 300.0;
+        let mut ids = opal_core::document::IdGen::default();
+        let white = opal_core::raster::RasterImage::filled(
+            &opal_core::geom::IRect::from_size(90, 60),
+            opal_core::tile::pixel_from_f32([1.0; 4]),
+        );
+        let layer = opal_core::document::Layer::new_raster(ids.layer(), ids.object(), "white", white);
+        d.insert(opal_core::document::Position { parent: None, index: 0 }, layer).unwrap();
+        let png = opal_io::image_files::ExportFormat::Png { sixteen_bit: false };
+        opal_io::image_files::export(&d, &path, &png, None).unwrap();
+    }
+    h.state_mut().state_mut().place_file(&path, None, true).unwrap();
+    std::fs::remove_file(&path).ok();
+    h.run();
+    let width =
+        |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().transform.as_ref().unwrap().params().width;
+    assert_eq!(width(&h), 30.0);
+    h.get_by_label(&crate::icons::PRINT_SIZE.to_string()).click();
+    h.run();
+    assert_eq!(width(&h), 90.0, "the button did not switch it to pixel for pixel");
+    assert!(!h.state().state().prefs.bool("transform.place_print_size"), "the choice was not remembered");
+}
+
+#[test]
 fn the_resolution_in_the_status_bar_opens_resize_image() {
     let _gpu = gpu_lock();
     let mut h = harness();

@@ -210,6 +210,7 @@ enum Action {
     Aspect,
     Snap,
     IntoActive,
+    PrintSize,
 }
 
 /// The buttons that go with the box: commit, cancel, fit, fill, the aspect lock, snapping,
@@ -268,6 +269,18 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen
                         action = Some(Action::Snap);
                     }
                     crate::box_fields::toggle(ui, &mut numbers);
+                    if let Some(print) = paste.as_ref().and_then(|p| p.print) {
+                        let tip = if print.on {
+                            "At the file's print size (scaled by its resolution against the image's). Click to \
+                             place it pixel for pixel instead (and so from now on)."
+                        } else {
+                            "Pixel for pixel. Click to place it at the file's print size instead (scaled by \
+                             its resolution against the image's; and so from now on)."
+                        };
+                        if b(ui, icons::PRINT_SIZE, print.on, tip).clicked() {
+                            action = Some(Action::PrintSize);
+                        }
+                    }
                     if let Some(p) = &paste {
                         ui.separator();
                         let r = ui.add_enabled(
@@ -324,6 +337,16 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen
                     }
                 }
                 Action::IntoActive => d.toggle_paste_into_active(),
+                Action::PrintSize => {
+                    let on = d.transform.as_ref().and_then(|s| s.paste.as_ref()).and_then(|p| p.print).map(|p| !p.on);
+                    if d.toggle_print_size()
+                        && let Some(on) = on
+                    {
+                        // As the box's other switches do, it is the default from now on.
+                        st.prefs.set("transform.place_print_size", crate::settings::Value::Bool(on));
+                        st.settings_touched();
+                    }
+                }
                 Action::Aspect | Action::Snap => {}
             }
         }

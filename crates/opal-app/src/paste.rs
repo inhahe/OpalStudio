@@ -4,7 +4,7 @@ use crate::clipboard::{Copied, Pasted, Read, ReadResult};
 use crate::doc::DocId;
 use crate::prefs;
 use crate::state::{AppState, MessageKind, PasteAnswer, Reading};
-use crate::transform::Kind;
+use crate::transform::{Kind, PrintSize};
 use eframe::egui;
 use opal_core::composite::composite_within;
 use opal_core::document::{Document, IdGen, Layer, Position};
@@ -302,11 +302,17 @@ impl AppState {
     /// (`in_place`), or else centered on the part of the canvas in view, at its own size
     /// unless that is larger than the canvas (and the preference fits it).
     pub(crate) fn begin_pasted(&mut self, pasted: &Pasted, in_place: bool, kind: Kind, name: &str) {
+        self.begin_scaled(pasted, in_place, kind, name, 1.0);
+    }
+
+    /// [`begin_pasted`](Self::begin_pasted), its size first scaled by `scale` (a placed
+    /// file at its print size).
+    fn begin_scaled(&mut self, pasted: &Pasted, in_place: bool, kind: Kind, name: &str, scale: f64) {
         let sampling = prefs::sampling(&self.prefs, "transform");
         let fit_large = self.prefs.bool("transform.fit_large");
         let d = self.active_mut().expect("checked above");
         let canvas = d.doc().canvas.rect();
-        let (w, h) = (f64::from(pasted.width), f64::from(pasted.height));
+        let (w, h) = (f64::from(pasted.width) * scale, f64::from(pasted.height) * scale);
         let place = match (in_place, pasted.from) {
             (true, Some(r)) => Affine::translate((canvas.x0 + r.x0) as f64, (canvas.y0 + r.y0) as f64),
             (true, None) => Affine::translate(canvas.x0 as f64, canvas.y0 as f64),
@@ -321,11 +327,12 @@ impl AppState {
                 let [cx, cy] = if seen.is_empty() { canvas.to_f().center() } else { seen.to_f().center() };
                 let (cw, ch) = (canvas.width() as f64, canvas.height() as f64);
                 let s = if fit_large && (w > cw || h > ch) { (cw / w).min(ch / h) } else { 1.0 };
-                if s == 1.0 {
+                let k = scale * s;
+                if k == 1.0 {
                     // Whole pixels, so it stays crisp.
                     Affine::translate((cx - w * 0.5).round(), (cy - h * 0.5).round())
                 } else {
-                    Affine::scale(s, s).then(Affine::translate(cx - w * s * 0.5, cy - h * s * 0.5))
+                    Affine::scale(k, k).then(Affine::translate(cx - w * s * 0.5, cy - h * s * 0.5))
                 }
             }
         };
@@ -341,8 +348,16 @@ impl AppState {
 
     /// Opens the transform box on the active document with the image file at `path` on a
     /// new layer called `name` (or after the file), placed as a paste is: what Place does
-    /// once a file is chosen. What the file's reading said comes back as warnings.
-    pub(crate) fn place_file(&mut self, path: &std::path::Path, name: Option<&str>) -> Result<Vec<String>, String> {
+    /// once a file is chosen. At its print size if `print_size` (scaled by its resolution
+    /// against the image's, which a file that does not say its resolution is not), else pixel
+    /// for pixel; the box's button switches between the two. What the file's reading said
+    /// comes back as warnings.
+    pub(crate) fn place_file(
+        &mut self,
+        path: &std::path::Path,
+        name: Option<&str>,
+        print_size: bool,
+    ) -> Result<Vec<String>, String> {
         let imported = opal_io::image_files::import(path, crate::memory::free()).map_err(|e| e.to_string())?;
         let pasted = Pasted {
             width: imported.width,
@@ -354,7 +369,14 @@ impl AppState {
         };
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned());
         let name = name.map(str::to_owned).or(stem).unwrap_or_else(|| "Placed image".to_owned());
-        self.begin_pasted(&pasted, false, Kind::Place, &name);
+        let ppi = self.active().expect("Place needs an image").doc().resolution;
+        let factor = pasted.resolution.filter(|&r| opal_core::units::valid_ppi(r)).map(|r| ppi / r);
+        let print = factor.filter(|&f| (f - 1.0).abs() > 1e-9).map(|factor| PrintSize { factor, on: print_size });
+        let scale = print.filter(|p| p.on).map_or(1.0, |p| p.factor);
+        self.begin_scaled(&pasted, false, Kind::Place, &name, scale);
+        if let Some(paste) = self.active_mut().and_then(|d| d.transform.as_mut()).and_then(|s| s.paste.as_mut()) {
+            paste.print = print;
+        }
         Ok(pasted.warnings)
     }
 
@@ -367,7 +389,7 @@ impl AppState {
         else {
             return;
         };
-        match self.place_file(&path, None) {
+        match self.place_file(&path, None, self.prefs.bool("transform.place_print_size")) {
             Ok(warnings) => {
                 for w in warnings {
                     self.message(MessageKind::Warning, "Placed", w);
