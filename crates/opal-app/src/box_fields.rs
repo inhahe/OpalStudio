@@ -327,7 +327,7 @@ pub fn transform(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
     }
     let before = d.history.doc();
     let scope = Scope { doc: Some(before), ppi, unit: m.unit, origin: [cx, cy], own: Some(own(&q)) };
-    let rect = Rect { canvas: canvas.to_f(), from: [cx, cy], at, scope };
+    let rect = Rect { canvas: canvas.to_f(), from: [cx, cy], origin, at, scope };
     let mut refused = None;
     if let Some(fit) = fit_into(ui, &mut d.fit_rect, &rect, salt)
         && let Err(why) = crate::api::place_box(d, &fit)
@@ -390,6 +390,8 @@ fn counted_from(origin: Origin, doc: &Document) -> Origin {
 struct Rect<'a> {
     canvas: opal_core::geom::FRect,
     from: [f64; 2],
+    /// What `from` is the point of.
+    origin: Origin,
     at: [f64; 2],
     scope: Scope<'a>,
 }
@@ -455,7 +457,7 @@ fn fit_into(ui: &mut egui::Ui, rect: &mut Option<[f64; 4]>, how: &Rect, salt: &s
     }
     // Stretched, the box is exactly the rectangle typed, so upright; fitted, it keeps its turn.
     let angle = (fit == Some(Fit::Stretch)).then_some(0.0);
-    let from = how.from;
+    let (from, origin) = (how.from, how.origin);
     fit.map(|fit| BoxArgs {
         x: Some(x),
         y: Some(y),
@@ -465,6 +467,7 @@ fn fit_into(ui: &mut egui::Ui, rect: &mut Option<[f64; 4]>, how: &Rect, salt: &s
         fit,
         at,
         from,
+        origin,
         ..BoxArgs::default()
     })
 }

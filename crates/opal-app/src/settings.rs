@@ -289,6 +289,7 @@ fn setting_row(ui: &mut egui::Ui, settings: &mut Settings, def: &'static Def, pa
             let slider = ui.add(
                 egui::Slider::new(f, min..=max)
                     .logarithmic(log)
+                    .fixed_decimals(decimals)
                     .show_value(false)
                     .clamping(egui::SliderClamping::Always),
             );

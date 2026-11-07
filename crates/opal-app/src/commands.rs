@@ -855,11 +855,13 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             if d.transform.is_some() {
                 return Err("Apply or cancel the box first: its numbers re-apply a placement in it.".into());
             }
-            let layer = d.active_layer().and_then(|l| d.doc().layer(l)).ok_or("Select a layer first.")?;
-            if layer.placed.is_none() {
+            let layer = d.active_layer().filter(|&l| d.doc().layer(l).is_some()).ok_or("Select a layer first.")?;
+            if d.doc().layer(layer).is_some_and(|l| l.placed.is_none()) {
                 return Err("The active layer was not placed by expressions naming the canvas or other layers.".into());
             }
-            if let Some(l) = first_locked(layer) {
+            // It moves every layer placed with it.
+            let (_, layers) = crate::transform::placement_group(d.doc(), layer)?;
+            if let Some(l) = layers.iter().filter_map(|&l| d.doc().layer(l)).find_map(first_locked) {
                 return Err(format!("\"{}\" is locked. Unlock it first.", l.name));
             }
             Ok(())

@@ -35,10 +35,7 @@ pub fn length_field<'a>(
     range: RangeInclusive<f64>,
     px_decimals: usize,
 ) -> NumberField<'a> {
-    let unit = scope.unit;
-    let decimals = if unit == Unit::Px { px_decimals } else { unit.decimals(scope.ppi) };
-    NumberField::length(px, scope)
-        .decimals(0, decimals)
+    NumberField::length(px, scope, px_decimals)
         .range(range)
         // Kept as it is if outside the range (a box dragged far), until the user types.
         .clamp_existing(false)

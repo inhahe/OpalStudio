@@ -1090,7 +1090,7 @@ impl Args {
         self.get(name).and_then(Value::as_f64)
     }
 
-    /// A canvas side, in whole pixels, if given (once [`in_pixels`](Self::in_pixels)).
+    /// A canvas side, in whole pixels, if given (once [`worked_out`](Self::worked_out)).
     fn side(&self, name: &str) -> Option<u32> {
         self.opt_number(name).map(crate::lengths::whole_side)
     }
@@ -1242,6 +1242,22 @@ pub struct Typed {
     pub range: (f64, f64),
 }
 
+/// What box number `n` may come to, as the calls that place a box take it: in pixels, or
+/// for the angle, in degrees.
+pub(crate) fn box_range(n: BoxNumber) -> (f64, f64) {
+    let p = match n {
+        BoxNumber::X => BOX_X,
+        BoxNumber::Y => BOX_Y,
+        BoxNumber::Width => BOX_WIDTH,
+        BoxNumber::Height => BOX_HEIGHT,
+        BoxNumber::Angle => BOX_ANGLE,
+    };
+    match p.kind {
+        Kind::Length { min, max } | Kind::Angle { min, max } => (min, max),
+        kind => unreachable!("a box's number is a length or an angle, not {kind:?}"),
+    }
+}
+
 /// The parameters a box's call gives as numbers: worked out once the box is open, if
 /// expressions.
 const BOXED: [&str; 5] = ["x", "y", "width", "height", "angle"];
@@ -1388,10 +1404,12 @@ pub(crate) fn place_box(d: &mut crate::doc::DocState, place: &BoxArgs) -> Result
         return Err(format!("{why}."));
     }
     d.set_box(m, None);
-    // What was given as expressions, for the layers to be placed so again.
+    // What was given as expressions, for the layers to be placed so again: not the sides
+    // and position of a rectangle the box was fitted into, which are not the box's.
     let s = d.transform.as_mut().expect("a box is open");
     let anchor = crate::box_fields::index_of(at);
-    for t in &given.typed {
+    let fitted = place.fit != Fit::Stretch && place.width.is_some() && place.height.is_some();
+    for t in given.typed.iter().filter(|t| !fitted || t.field == BoxNumber::Angle) {
         let side = matches!(t.field, BoxNumber::Width | BoxNumber::Height);
         let keep = side && place.width.is_none() != place.height.is_none();
         s.given.push(crate::transform::Given {
@@ -3943,10 +3961,92 @@ mod tests {
         now(&mut st, "transform", json!({ "layers": [mark.0], "x": "layer(\"Brand mark\").right" })).unwrap();
         now(&mut st, "delete_layer", json!({ "layers": [logo.0] })).unwrap();
         let before = left(&st, mark);
-        let gone = now(&mut st, "reapply_placement", json!({ "layer": mark.0 })).unwrap_err();
+        // (From the ribbon, with another layer selected: the selection is put back.)
+        let sampling = crate::prefs::sampling(&st.prefs, "transform");
+        let d = st.active_mut().unwrap();
+        d.select_only(copy);
+        d.make_active(copy);
+        let gone = d.reapply_placement(mark, sampling).unwrap_err();
         assert!(gone.contains("names a layer that is no longer in the image"), "{gone}");
-        assert!(st.active().unwrap().transform.is_none() && left(&st, mark) == before);
+        let d = st.active().unwrap();
+        assert!(d.transform.is_none() && left(&st, mark) == before);
+        assert!(d.is_selected(copy) && !d.is_selected(mark), "the selection was not put back");
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_placement_keeps_only_what_working_out_again_would_not_move_by_itself() {
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 200, "height": 100, "resolution": 100 })).unwrap();
+        let path = png_file("piece.png", 10, 10).display().to_string();
+        let id = |v: &Value| LayerId(v["layer"].as_u64().unwrap());
+        let logo = id(&now(&mut st, "place", json!({ "path": path, "name": "Logo", "x": 20, "y": 30 })).unwrap());
+        let placed = |st: &AppState, l: LayerId| st.active().unwrap().doc().layer(l).unwrap().placed.clone();
+        // Naming the layer it moves, or counting from it, it would move again each time.
+        now(&mut st, "transform", json!({ "layers": [logo.0], "x": "Logo.left + 10" })).unwrap();
+        assert_eq!(placed(&st, logo), None, "it named the layer it moved");
+        let from_itself = json!({ "layers": [logo.0], "x": "canvas.width - 100", "from_layer": logo.0 });
+        now(&mut st, "transform", from_itself).unwrap();
+        assert_eq!(placed(&st, logo), None, "it counted from the layer it moved");
+        // Fitted inside a rectangle, its sides are the rectangle's, not the box's (though
+        // its height comes out the rectangle's too).
+        let given = json!({ "path": path, "width": "Logo.width * 3", "height": "Logo.height", "fit": "inside" });
+        let fitted = id(&now(&mut st, "place", given).unwrap());
+        assert_eq!(placed(&st, fitted), None, "a rectangle's sides were kept as the box's");
+        // An angle past half a turn is the same angle, and kept.
+        let turned =
+            id(&now(&mut st, "place", json!({ "path": path, "angle": "180 + atan2(Logo.height, Logo.width)" }))
+                .unwrap());
+        let p = placed(&st, turned).expect("the angle was not kept");
+        assert_eq!(p.numbers.iter().map(|n| n.number).collect::<Vec<_>>(), vec![BoxNumber::Angle]);
+        // Only drawn another way where it is, it keeps its placement.
+        let sampling = crate::prefs::sampling(&st.prefs, "transform");
+        let d = st.active_mut().unwrap();
+        d.select_only(turned);
+        d.make_active(turned);
+        assert!(d.begin_transform(sampling));
+        d.set_box_sampling(opal_core::resample::Sampling { method: opal_core::resample::Method::Nearest, ..sampling });
+        d.commit_pending();
+        assert_eq!(placed(&st, turned), Some(p), "drawing it another way lost its placement");
+        // Given what leaves it where it is, the box is kept as given all the same.
+        let mark = id(&now(&mut st, "place", json!({ "path": path, "x": 5 })).unwrap());
+        let left = |st: &AppState, l: LayerId| st.active().unwrap().doc().layer(l).unwrap().bounds().unwrap().x0;
+        let there = format!("Logo.left - {}", left(&st, logo) - left(&st, mark));
+        now(&mut st, "transform", json!({ "layers": [mark.0], "x": there })).unwrap();
+        assert_eq!(left(&st, mark), 5.0);
+        assert!(placed(&st, mark).is_some(), "a placement that moved nothing was dropped");
+        // Placed together, they are re-applied together, or not at all: not one of them
+        // again by itself once the other has been placed otherwise, and none if one is locked.
+        let other = id(&now(&mut st, "place", json!({ "path": path, "x": 100 })).unwrap());
+        now(&mut st, "transform", json!({ "layers": [mark.0, other.0], "x": "Logo.right" })).unwrap();
+        assert_eq!(placed(&st, mark).unwrap().layers.len(), 2);
+        // Open on one of them, the box is not what they were placed as.
+        let sampling = crate::prefs::sampling(&st.prefs, "transform");
+        let d = st.active_mut().unwrap();
+        d.select_only(mark);
+        d.make_active(mark);
+        assert!(d.begin_transform(sampling));
+        assert!(d.box_placement().is_none(), "one of two placed together was offered their placement");
+        d.cancel_transform();
+        now(&mut st, "toggle_lock", json!({ "layers": [other.0], "locked": true })).unwrap();
+        let locked = now(&mut st, "reapply_placement", json!({ "layer": mark.0 })).unwrap_err();
+        assert!(locked.contains("is locked"), "{locked}");
+        now(&mut st, "toggle_lock", json!({ "layers": [other.0], "locked": false })).unwrap();
+        now(&mut st, "transform", json!({ "layers": [other.0], "x": 150 })).unwrap();
+        let apart = now(&mut st, "reapply_placement", json!({ "layer": mark.0 })).unwrap_err();
+        assert!(apart.contains("placed again since"), "{apart}");
+        // A group transformed keeps its placement itself.
+        now(&mut st, "group_layers", json!({ "layers": [mark.0, other.0] })).unwrap();
+        let group = st.active().unwrap().active_layer().unwrap();
+        assert!(st.active().unwrap().doc().layer(group).unwrap().is_group());
+        now(&mut st, "transform", json!({ "layers": [group.0], "x": "Logo.right" })).unwrap();
+        assert!(placed(&st, group).is_some(), "the group has no placement of its own");
+        now(&mut st, "transform", json!({ "layers": [logo.0], "x": 0 })).unwrap();
+        now(&mut st, "reapply_placement", json!({ "layer": group.0 })).unwrap();
+        let b = st.active().unwrap().doc().layer(group).unwrap().bounds().unwrap();
+        assert_eq!(b.x0, 10.0, "the group was not placed so again");
+        std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).ok();
     }
 
     #[test]

@@ -1112,8 +1112,10 @@ numbers (*Paste and transform*): a length such as `8.5in` is the simplest expres
   - In a field or a call, an expression is worked out once against the document as it is
     then (when Enter is pressed, or when the call runs), and the result is a plain number.
   - A field shows what its expression comes to as you type, and an error says where it is,
-    the part at fault marked. Enter on one that cannot be worked out keeps it, to be put
-    right; Esc, or leaving the field, leaves the value as it was.
+    the part at fault marked. What was typed is entered by Enter, Tab, or leaving the field
+    another way; Enter on what cannot be worked out keeps it, to be put right, and Esc
+    leaves the value as it was. Left with nothing typed, the value stays exactly as it is,
+    not as it shows rounded.
   - Each field remembers its recent entries (Up and Down), a box's fields by name, so the
     tool settings' x and the numbers panel's x share theirs.
   - The fields are `number_field::NumberField`, dragged as egui's `DragValue` is (and with
@@ -1130,19 +1132,28 @@ numbers (*Paste and transform*): a length such as `8.5in` is the simplest expres
     fields or given by a script, with how it was measured (`transform::Given`: the unit, the
     box's point, what it counts from, and for a side whether the other kept its
     proportion). When the box is applied, those that name the image (the canvas, a layer)
-    and not the box itself, and still give what the box has then (a drag since has not
-    moved it), are kept with its layers, their layers by id (`Placed`), the last of each
-    number; a number naming the box (`x + 1cm`) is not, as working it out again would move
-    the box again, nor one naming nothing of the image, which would come out the same.
-    Placed by a box again, the layers keep what that box was given, or nothing; moved
-    otherwise (the Move tool), renamed, saved and opened, they keep it; a copy has none.
+    and still give what the box has then (a drag since has not moved it) are kept with the
+    layers it places (`Session::placed`: a paste's new layer, or the layers selected to
+    transform, a group as itself), their layers by id (`Placed`), the last of each number.
+    Not kept, as working it out again would move the box again: a number naming the box
+    (`x + 1cm`), naming a layer that moves with it (one it places, in one, or holding one),
+    or counting from such a layer. Nor one naming nothing of the image, which would come
+    out the same, nor the sides and position of a rectangle the box was fitted into
+    (`fit` inside or cover: they are the rectangle's), nor a number whose kept form would
+    not read back. A box left where it was but given a placement its layers have not is
+    applied all the same. Placed by a box again (moved, or new), the layers keep what that
+    box was given, or nothing; only drawn another way where they are, moved otherwise (the
+    Move tool), renamed, saved and opened, they keep it; a copy has none. A file's
+    placement is refused if it names the box itself, which none ever kept does.
   - *Re-apply Placement* (Home › Transform, and `reapply_placement` for scripts) opens the
-    box on the active layer and those placed with it, gives it the numbers again, each as
-    it was measured and worked out now, and applies it as one history state. A layer it
-    names, or counts from, gone, it says so and changes nothing. With the box open on
-    layers placed together, its numbers list how (*Placed by*, the layers by their names
-    now) with a Re-apply that does the same in the open box. Once constraints exist, *keep
-    linked* turns a placement into a constraint without retyping.
+    box on the layers placed together with the active one (`transform::placement_group`),
+    gives it the numbers again, each as it was measured and worked out now, and applies it
+    as one history state. It is refused, changing nothing and leaving the selection as it
+    was, if one of those layers has gone or been placed again since (the box they made is
+    no more), is locked, or a layer it names or counts from is gone. With the box open on
+    exactly the layers placed together, its numbers list how (*Placed by*, the layers by
+    their names now) with a Re-apply that does the same in the open box. Once constraints
+    exist, *keep linked* turns a placement into a constraint without retyping.
 - **The same from scripts.** Every number and length parameter of the API (Python and MCP)
   also takes an expression as text (*Scripting* has how).
   - The editor works it out when the call runs, with the same parser as the fields, so a

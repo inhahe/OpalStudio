@@ -461,15 +461,16 @@ fn ok_cancel(ui: &mut egui::Ui, ok: &str) -> Option<bool> {
 
 fn resize_image(ctx: &egui::Context, st: &mut AppState) {
     let Some(mut spec) = st.resize_image.clone() else { return };
-    let Some((c, locked, doc)) =
-        st.active().map(|d| (d.doc().canvas, crate::commands::locked_layer(d.doc()), d.doc().clone()))
-    else {
+    // The image, borrowed apart from the preferences the dialog changes.
+    let active = st.active_doc;
+    let Some(doc) = st.docs.iter().find(|d| Some(d.id) == active).map(|d| d.doc()) else {
         st.resize_image = None;
         return;
     };
+    let (c, locked) = (doc.canvas, crate::commands::locked_layer(doc));
     let palette = st.palette;
     let (mut unit, mut per) = (st.unit(), st.resolution_unit());
-    let mut done = None;
+    let (mut done, mut touched) = (None, false);
     egui::Modal::new(egui::Id::unique("resize-image")).show(ctx, |ui| {
         ui.heading("Resize image");
         ui.label("Scales everything in the image to a new size, or gives it a new resolution.");
@@ -477,11 +478,11 @@ fn resize_image(ctx: &egui::Context, st: &mut AppState) {
         egui::Grid::new("resize-image-size").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
             let size = (&mut spec.width, &mut spec.height);
             let original = (c.width, c.height);
-            size_fields(ui, size, &mut spec.keep_aspect, original, &mut unit, spec.resolution, Some(&doc));
+            size_fields(ui, size, &mut spec.keep_aspect, original, &mut unit, spec.resolution, Some(doc));
             ui.label("Resolution");
             ui.horizontal(|ui| {
                 let before = spec.resolution;
-                let scope = lengths::image_scope(Some(&doc), unit, spec.resolution);
+                let scope = lengths::image_scope(Some(doc), unit, spec.resolution);
                 if lengths::resolution(ui, &mut spec.resolution, &mut per, "resize-ppi", scope) && spec.keep_print_size
                 {
                     let id = egui::Id::unique("resize-print");
@@ -505,9 +506,7 @@ fn resize_image(ctx: &egui::Context, st: &mut AppState) {
             ui.label(RichText::new(why).color(ui.visuals().error_fg_color));
         }
         ui.add_space(4.0);
-        if settings::settings_ui(ui, &mut st.prefs, Show::Section("Resize"), &palette, "resize") {
-            st.settings_touched();
-        }
+        touched = settings::settings_ui(ui, &mut st.prefs, Show::Section("Resize"), &palette, "resize");
         let note = if st.prefs.bool("resize.resample") {
             "Pixel layers will be resampled at the new size now: a smaller image takes less memory and a \
              smaller file, and enlarging it again later cannot bring the detail back."
@@ -518,6 +517,9 @@ fn resize_image(ctx: &egui::Context, st: &mut AppState) {
         ui.label(RichText::new(note).small().color(palette.weak_text));
         done = ok_cancel(ui, "Resize");
     });
+    if touched {
+        st.settings_touched();
+    }
     remember_units(st, unit, per);
     match done {
         Some(true) => {
@@ -532,10 +534,11 @@ fn resize_image(ctx: &egui::Context, st: &mut AppState) {
 
 fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
     let Some(mut spec) = st.resize_canvas.clone() else { return };
-    let Some((c, ppi, doc)) = st.active().map(|d| (d.doc().canvas, d.doc().resolution, d.doc().clone())) else {
+    let Some(doc) = st.active().map(|d| d.doc()) else {
         st.resize_canvas = None;
         return;
     };
+    let (c, ppi) = (doc.canvas, doc.resolution);
     let palette = st.palette;
     let mut unit = st.unit();
     let mut done = None;
@@ -555,7 +558,7 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
                 for (name, i) in [("Left", 0), ("Top", 1), ("Right", 2), ("Bottom", 3)] {
                     ui.label(name);
                     let side = i64::from(MAX_SIDE);
-                    lengths::whole(ui, &mut spec.margins[i], lengths::image_scope(Some(&doc), unit, ppi), -side..=side);
+                    lengths::whole(ui, &mut spec.margins[i], lengths::image_scope(Some(doc), unit, ppi), -side..=side);
                     ui.end_row();
                 }
             });
@@ -563,10 +566,10 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
         } else {
             egui::Grid::new("resize-canvas-size").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                 ui.label("Width");
-                lengths::side(ui, &mut spec.width, lengths::image_scope(Some(&doc), unit, ppi));
+                lengths::side(ui, &mut spec.width, lengths::image_scope(Some(doc), unit, ppi));
                 ui.end_row();
                 ui.label("Height");
-                lengths::side(ui, &mut spec.height, lengths::image_scope(Some(&doc), unit, ppi));
+                lengths::side(ui, &mut spec.height, lengths::image_scope(Some(doc), unit, ppi));
                 ui.end_row();
                 ui.label("Anchor").on_hover_text("Where the old canvas sits in the new one.");
                 let mut i = usize::from(spec.anchor[1]) * 3 + usize::from(spec.anchor[0]);
@@ -600,9 +603,9 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
 fn rotate_by(ctx: &egui::Context, st: &mut AppState) {
     let Some(mut spec) = st.rotate_by.clone() else { return };
     let palette = st.palette;
-    let doc = st.active().map(|d| d.doc().clone());
-    let ppi = doc.as_ref().map_or(opal_core::units::DEFAULT_PPI, |d| d.resolution);
-    let scope = lengths::image_scope(doc.as_ref(), st.unit(), ppi);
+    let doc = st.active().map(|d| d.doc());
+    let ppi = doc.map_or(opal_core::units::DEFAULT_PPI, |d| d.resolution);
+    let scope = lengths::image_scope(doc, st.unit(), ppi);
     let mut done = None;
     egui::Modal::new(egui::Id::unique("rotate-by")).show(ctx, |ui| {
         ui.heading("Rotate by angle");

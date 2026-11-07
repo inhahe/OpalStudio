@@ -190,7 +190,10 @@ def _in(unit: str):
         text = _number(value)
         return Expr(f"{text}{unit}", _SIGN if text.startswith("-") else _ATOM)
 
-    length.__doc__ = f"`value` in {unit}."
+    length.__doc__ = (
+        f"`value` in {unit}: a number, or an expression that comes to a plain number "
+        f"(`{unit}(box.width / box.height)`), times one {unit}: of a length, it would be an area."
+    )
     length.__name__ = {"in": "inch"}.get(unit, unit)
     return length
 

@@ -278,7 +278,8 @@ impl BoxNumber {
 
 impl Placement {
     /// Why it cannot be kept, if it cannot: a point out of the nine, a number given twice,
-    /// or an expression that does not read.
+    /// an expression that does not read, or one that names the box itself (worked out
+    /// again, it would move it again: none is ever kept).
     pub fn check(&self) -> Result<(), String> {
         for (i, p) in self.numbers.iter().enumerate() {
             if p.anchor >= 9 || p.from_anchor >= 9 {
@@ -292,7 +293,11 @@ impl Placement {
             if self.numbers[..i].iter().any(|q| q.number == p.number) {
                 return Err(format!("it gives its {} twice", p.number.name()));
             }
-            crate::expr::Expr::parse(&p.expr).map_err(|e| format!("its {} does not read: {e}", p.number.name()))?;
+            let expr =
+                crate::expr::Expr::parse(&p.expr).map_err(|e| format!("its {} does not read: {e}", p.number.name()))?;
+            if expr.names_box() {
+                return Err(format!("its {} names the box itself", p.number.name()));
+            }
         }
         Ok(())
     }
@@ -670,5 +675,6 @@ mod tests {
         let twice = of(vec![placed(BoxNumber::Y, "1", 0), placed(BoxNumber::Y, "2", 0)]);
         assert!(twice.check().unwrap_err().contains("gives its y twice"));
         assert!(of(vec![placed(BoxNumber::Angle, "1 +", 0)]).check().unwrap_err().contains("does not read"));
+        assert!(of(vec![placed(BoxNumber::X, "x + 1", 0)]).check().unwrap_err().contains("names the box itself"));
     }
 }

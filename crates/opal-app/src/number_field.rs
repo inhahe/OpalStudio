@@ -30,6 +30,8 @@ pub struct NumberField<'a> {
 #[derive(Clone, Default)]
 struct Typing {
     text: String,
+    /// The text it began as (the value as shown): left so, nothing was typed.
+    original: String,
     /// The field's value the text was begun at: if it changes, the text is out of date.
     value: f64,
     /// Which remembered entry is shown (0 the latest), and the text typed before Up was.
@@ -55,10 +57,11 @@ impl<'a> NumberField<'a> {
         }
     }
 
-    /// A field for the length `px` pixels, shown in `scope`'s unit with it after.
-    pub fn length(px: &'a mut f64, scope: Scope<'a>) -> NumberField<'a> {
+    /// A field for the length `px` pixels, shown in `scope`'s unit with it after: in pixels
+    /// to `px_decimals` places, in other units to enough for a pixel to show.
+    pub fn length(px: &'a mut f64, scope: Scope<'a>, px_decimals: usize) -> NumberField<'a> {
         let unit = scope.unit;
-        let decimals = if unit == Unit::Px { 0 } else { unit.decimals(scope.ppi) };
+        let decimals = if unit == Unit::Px { px_decimals } else { unit.decimals(scope.ppi) };
         NumberField::new(px, Want::Length, scope).decimals(0, decimals).suffix(format!(" {unit}"))
     }
 
@@ -197,10 +200,14 @@ impl<'a> NumberField<'a> {
         let remembered = self.remember.unwrap_or_else(|| id.with("entries"));
         let mut entered = None;
         let mut response = if editing {
-            let mut typing = ui
-                .data_mut(|d| d.remove_temp::<Typing>(id))
-                .filter(|t| t.value == old)
-                .unwrap_or(Typing { text: text.clone(), value: old, recalled: None, kept: false });
+            let mut typing =
+                ui.data_mut(|d| d.remove_temp::<Typing>(id)).filter(|t| t.value == old).unwrap_or(Typing {
+                    text: text.clone(),
+                    original: text.clone(),
+                    value: old,
+                    recalled: None,
+                    kept: false,
+                });
             let refocused = std::mem::take(&mut typing.kept);
             recall(ui, remembered, &mut typing, id);
             let style = ui.style().drag_value_text_style.clone();
@@ -218,7 +225,9 @@ impl<'a> NumberField<'a> {
             if typing.text.trim().parse::<f64>().is_err() {
                 preview(ui, id, &r, &typing.text, result.as_ref().map(|&v| self.told(self.clamp(v))));
             }
-            if r.lost_focus() && !ui.input(|i| i.key_pressed(Key::Escape)) {
+            // Left with nothing typed, the value stays as it is, not as it is shown rounded.
+            let typed = typing.text.trim() != typing.original.trim();
+            if r.lost_focus() && typed && !ui.input(|i| i.key_pressed(Key::Escape)) {
                 match result {
                     Ok(v) => {
                         value = self.clamp(v);
@@ -248,8 +257,19 @@ impl<'a> NumberField<'a> {
                 .sense(egui::Sense::click_and_drag())
                 .min_size(ui.spacing().interact_size);
             let r = ui.add(button).on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
-            // Not being typed in: what was typed last time is done with.
-            ui.data_mut(|d| d.remove::<Typing>(id));
+            // What was being typed when the focus moved on before the field was drawn (Tab,
+            // or another field clicked) is entered, as leaving it otherwise does; Esc, which
+            // egui also takes the focus away for first, leaves it.
+            if let Some(t) = ui.data_mut(|d| d.remove_temp::<Typing>(id))
+                && t.value == old
+                && t.text.trim() != t.original.trim()
+                && !ui.input(|i| i.key_pressed(Key::Escape))
+                && let Ok(v) = self.work_out(&t.text)
+            {
+                value = self.clamp(v);
+                keep_entry(ui, remembered, &t.text);
+                entered = Some(t.text.trim().to_owned());
+            }
             if ui.input(|i| i.pointer.any_pressed() || i.pointer.any_released()) {
                 ui.data_mut(|d| d.remove::<f64>(id));
             }

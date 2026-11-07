@@ -166,6 +166,9 @@ pub struct Session {
     /// The box's numbers given as expressions (typed into its fields, or by a script), as
     /// they were given: kept with its layers if they still hold when it is applied.
     pub given: Vec<Given>,
+    /// The layers it places, which keep how: a paste's or a placed file's new layer, or
+    /// those selected to transform (a group as itself, not its layers).
+    pub placed: Vec<LayerId>,
 }
 
 /// One of a box's numbers given as an expression, and how it was measured then.
@@ -576,6 +579,7 @@ impl DocState {
             draft: false,
             sampling_changed: false,
             given: Vec::new(),
+            placed: vec![layer_id],
         });
         self.select_only(layer_id);
         self.revision += 1;
@@ -588,10 +592,14 @@ impl DocState {
         self.commit_pending();
         let was_selected = self.selection_with_active_last();
         let mut doc = self.history.doc().clone();
-        let mut found = Vec::new();
+        let (mut found, mut placed) = (Vec::new(), Vec::new());
         for id in self.selection() {
             if let Some(l) = doc.layer_mut(id) {
+                let had = found.len();
                 take_targets(l, sampling, &mut found);
+                if found.len() > had {
+                    placed.push(id);
+                }
             }
         }
         if found.is_empty() {
@@ -630,6 +638,7 @@ impl DocState {
             draft: false,
             sampling_changed: false,
             given: Vec::new(),
+            placed,
         });
         self.revision += 1;
         true
@@ -753,10 +762,9 @@ impl DocState {
     pub fn box_placement(&self) -> Option<&Placement> {
         let s = self.transform.as_ref()?;
         let doc = self.history.doc();
-        let first = doc.layer(s.targets.first()?.layer)?.placed.as_ref()?;
-        let together =
-            placement_layers(s).iter().all(|&l| doc.layer(l).is_some_and(|x| x.placed.as_ref() == Some(first)));
-        together.then_some(first)
+        let (placement, layers) = placement_group(doc, *s.placed.first()?).ok()?;
+        let same = layers.len() == s.placed.len() && layers.iter().all(|l| s.placed.contains(l));
+        same.then_some(placement)
     }
 
     /// Gives the open box the numbers of `placement` again, worked out as things are now,
@@ -764,7 +772,7 @@ impl DocState {
     /// layer that is gone, or counts from one, or comes to what the box cannot take.
     pub fn apply_placement(&mut self, placement: &Placement) -> Result<(), String> {
         use crate::api::{BoxArgs, Typed};
-        use crate::box_fields::{Base, FAR, Origin, point_at};
+        use crate::box_fields::{Base, Origin, point_at};
         let doc = self.history.doc().clone();
         let names = |id: LayerId| doc.layer(id).map(|l| l.name.clone());
         let mut given = Vec::new();
@@ -780,11 +788,7 @@ impl DocState {
             let Some(from) = origin.locate(&doc) else {
                 return Err(format!("Its {} counts from a layer that is gone, or holds nothing now.", p.number.name()));
             };
-            let range = match p.number {
-                BoxNumber::X | BoxNumber::Y => (-FAR, FAR),
-                BoxNumber::Width | BoxNumber::Height => (0.01, 1e6),
-                BoxNumber::Angle => (-360.0, 360.0),
-            };
+            let range = crate::api::box_range(p.number);
             let typed = vec![Typed { field: p.number, expr, text, unit: p.unit, range }];
             given.push((
                 BoxArgs { at: point_at(usize::from(p.anchor)), from, origin, typed, ..BoxArgs::default() },
@@ -812,31 +816,49 @@ impl DocState {
     /// by says, worked out now, as one history state; drawn as `sampling` says, as a
     /// transform is. Why not, if it cannot (nothing changed).
     pub fn reapply_placement(&mut self, layer: LayerId, sampling: Sampling) -> Result<(), String> {
-        let doc = self.doc();
-        let placement = doc.layer(layer).and_then(|l| l.placed.clone()).ok_or("It was not placed by expressions.")?;
-        let with: Vec<LayerId> = placement
-            .layers
-            .iter()
-            .copied()
-            .filter(|&l| l != layer && doc.layer(l).is_some_and(|x| x.placed.as_ref() == Some(&placement)))
-            .collect();
-        self.select_only(layer);
-        for &l in &with {
-            self.toggle_selected(l);
-        }
-        self.make_active(layer);
-        if !self.begin_transform(sampling) {
-            return Err("The layers it placed hold nothing now.".into());
-        }
-        if let Some(p) = self.pending.as_mut() {
-            p.label = "Re-apply Placement".into();
-        }
-        if let Err(why) = self.apply_placement(&placement) {
-            self.cancel_transform();
-            return Err(why);
-        }
         self.commit_pending();
-        Ok(())
+        let (placement, layers) = placement_group(self.history.doc(), layer)?;
+        let placement = placement.clone();
+        let selected = self.selection_with_active_last();
+        self.select_layers(&layers, layer);
+        let done = if self.begin_transform(sampling) {
+            if let Some(p) = self.pending.as_mut() {
+                p.label = "Re-apply Placement".into();
+            }
+            let applied = self.apply_placement(&placement);
+            if applied.is_err() {
+                self.cancel_transform();
+            }
+            applied
+        } else {
+            Err("The layers it placed hold nothing now.".into())
+        };
+        match done {
+            Ok(()) => {
+                self.commit_pending();
+                Ok(())
+            }
+            Err(why) => {
+                self.select_layers(&selected, *selected.last().unwrap_or(&layer));
+                Err(why)
+            }
+        }
+    }
+
+    /// Makes `layers` (those still in the image) the selected ones, `active` the active one.
+    fn select_layers(&mut self, layers: &[LayerId], active: LayerId) {
+        let doc = self.history.doc();
+        let kept: Vec<LayerId> = layers.iter().copied().filter(|&l| doc.layer(l).is_some()).collect();
+        let Some(&first) = kept.first() else { return };
+        self.select_only(first);
+        for &l in &kept {
+            if !self.is_selected(l) {
+                self.toggle_selected(l);
+            }
+        }
+        if self.history.doc().layer(active).is_some() {
+            self.make_active(active);
+        }
     }
 
     /// Ends the session, leaving the document as it was.
@@ -844,16 +866,8 @@ impl DocState {
         let Some(s) = self.transform.take() else { return };
         self.pending = None;
         self.revision += 1;
-        let doc = self.history.doc();
-        let kept: Vec<LayerId> = s.was_selected.into_iter().filter(|&l| doc.layer(l).is_some()).collect();
-        if let Some(&active) = kept.last() {
-            self.select_only(active);
-            for &l in &kept {
-                if !self.is_selected(l) {
-                    self.toggle_selected(l);
-                }
-            }
-            self.make_active(active);
+        if let Some(&active) = s.was_selected.last() {
+            self.select_layers(&s.was_selected, active);
         }
     }
 
@@ -862,13 +876,23 @@ impl DocState {
     /// back as pixels, and a paste into the active layer baked into it. A transform that
     /// changed nothing is dropped instead, leaving no history state.
     pub(crate) fn finish_transform(&mut self) {
-        let unchanged = self
-            .transform
+        let Some(s) = self.transform.as_ref() else { return };
+        let before = self.history.doc();
+        // How its layers were placed, to be placed so again.
+        let placement = placement_made(s, before);
+        let unchanged = s.kind == Kind::Transform && s.current == s.start && !s.sampling_changed;
+        // Left where it was, but given a placement its layers have not: that is kept.
+        let placed_anew = placement
             .as_ref()
-            .is_some_and(|s| s.kind == Kind::Transform && s.current == s.start && !s.sampling_changed);
-        if unchanged {
+            .is_some_and(|p| s.placed.iter().any(|&l| before.layer(l).and_then(|l| l.placed.as_ref()) != Some(p)));
+        if unchanged && !placed_anew {
             return self.cancel_transform();
         }
+        // Placed by the box (moved, or new), its layers keep what it was given, or nothing;
+        // only drawn another way where they are, they keep what they had. A paste drawn
+        // into the active layer has no layer of its own to keep it.
+        let into_active = s.paste.as_ref().is_some_and(|p| p.into_active && p.active.is_some());
+        let replaces = !into_active && (s.current != s.start || s.kind != Kind::Transform || placement.is_some());
         let Some(s) = self.transform.take() else { return };
         let Some(p) = self.pending.as_mut() else { return };
         // Pixel objects ending exactly on the grid are pixels again (see `image_ops::on_grid`):
@@ -897,20 +921,13 @@ impl DocState {
         } else if to.clipped {
             self.notice = Some(crate::layer_ops::CLIPPED.into());
         }
-        // How its layers were placed, to be placed so again (none for a paste drawn into
-        // the active layer: what it placed is that layer's no more). Placed by the box
-        // without expressions, they have no placement any more.
-        let into_active = s.paste.as_ref().is_some_and(|p| p.into_active && p.active.is_some());
-        if !into_active {
-            let placement = placement_made(&s, self.history.doc());
-            let Some(p) = self.pending.as_mut() else { return };
-            for layer in placement_layers(&s) {
+        if replaces {
+            for &layer in &s.placed {
                 if let Some(l) = p.doc.layer_mut(layer) {
                     l.placed = placement.clone();
                 }
             }
         }
-        let Some(p) = self.pending.as_mut() else { return };
         if let Some(paste) = &s.paste
             && paste.into_active
             && let Some(dest) = paste.active
@@ -934,21 +951,41 @@ impl DocState {
     }
 }
 
-/// The layers session `s` places, each once.
-fn placement_layers(s: &Session) -> Vec<LayerId> {
-    let mut out: Vec<LayerId> = Vec::new();
-    for t in &s.targets {
-        if !out.contains(&t.layer) {
-            out.push(t.layer);
-        }
+/// The placement layer `layer` of `doc` was placed by, and the layers placed with it (it
+/// among them); or why it cannot be placed so again: it was not placed by expressions, or
+/// one placed with it has gone or been placed again since (the box they made is no more).
+pub fn placement_group(doc: &Document, layer: LayerId) -> Result<(&Placement, Vec<LayerId>), String> {
+    let placement = doc.layer(layer).and_then(|l| l.placed.as_ref()).ok_or("It was not placed by expressions.")?;
+    let together = placement.layers.iter().all(|&l| doc.layer(l).is_some_and(|x| x.placed.as_ref() == Some(placement)));
+    if !together || !placement.layers.contains(&layer) {
+        return Err("A layer placed with it has gone, or been placed again since: place it with the box again.".into());
     }
-    out
+    Ok((placement, placement.layers.clone()))
+}
+
+/// Whether layer `l` of `doc` moves with a box placing `placed`: it is one of them, in one
+/// (a group's), or holds one.
+fn moves_with(doc: &Document, l: LayerId, placed: &[LayerId]) -> bool {
+    placed.iter().any(|&p| p == l || within(doc, p, l) || within(doc, l, p))
+}
+
+/// Whether layer `inner` of `doc` is in group `outer`, at any depth.
+fn within(doc: &Document, inner: LayerId, outer: LayerId) -> bool {
+    let mut at = doc.position(inner);
+    while let Some(Position { parent: Some(g), .. }) = at {
+        if g == outer {
+            return true;
+        }
+        at = doc.position(g);
+    }
+    false
 }
 
 /// The placement session `s`'s numbers given as expressions make for its layers, in image
 /// `before` (as it was before the box opened, which is what they were worked out in): those
-/// that name the image and not the box itself (worked out again, one naming the box would
-/// move it again), each still what the box has now (a drag since has not moved it), its
+/// that name the image and not the box itself, nor a layer that moves with it, nor count
+/// from one (worked out again, any of them would move it again), each still what the box
+/// has now (a drag since has not moved it), and written in a form that reads back, its
 /// layers named by id; the last given of each number. `None` if there are none.
 fn placement_made(s: &Session, before: &Document) -> Option<Placement> {
     use opal_core::expr::{Scope, Want};
@@ -959,6 +996,13 @@ fn placement_made(s: &Session, before: &Document) -> Option<Placement> {
             continue;
         }
         let (Ok(bound), Some(from)) = (g.expr.bind(before), g.origin.locate(before)) else { continue };
+        let counts_from_box = match g.origin.base {
+            crate::box_fields::Base::Layer(id) => moves_with(before, id, &s.placed),
+            crate::box_fields::Base::Canvas => false,
+        };
+        if counts_from_box || bound.layers().iter().any(|&l| moves_with(before, l, &s.placed)) {
+            continue;
+        }
         let scope = Scope { doc: Some(before), ppi: before.resolution, unit: g.unit, origin: from, own: None };
         let want = if g.number == BoxNumber::Angle { Want::Angle } else { Want::Length };
         let Ok(v) = bound.eval(&scope, want) else { continue };
@@ -970,16 +1014,22 @@ fn placement_made(s: &Session, before: &Document) -> Option<Placement> {
             BoxNumber::Height => p.height,
             BoxNumber::Angle => p.angle,
         };
-        if (v - now).abs() > 1e-6 * v.abs().max(1.0) {
+        // An angle is the same a whole turn on (the box's runs from -180 to 180).
+        let off = if g.number == BoxNumber::Angle { (v - now + 180.0).rem_euclid(360.0) - 180.0 } else { v - now };
+        if off.abs() > 1e-6 * v.abs().max(1.0) {
             continue;
         }
         let from_layer = match g.origin.base {
             crate::box_fields::Base::Layer(id) => Some(id),
             crate::box_fields::Base::Canvas => None,
         };
+        let expr = bound.text(&|_| None);
+        if opal_core::expr::Expr::parse(&expr).is_err() {
+            continue;
+        }
         numbers.push(Placed {
             number: g.number,
-            expr: bound.text(&|_| None),
+            expr,
             unit: g.unit,
             anchor: g.anchor as u8,
             from_layer,
@@ -987,7 +1037,7 @@ fn placement_made(s: &Session, before: &Document) -> Option<Placement> {
             keep: g.keep,
         });
     }
-    (!numbers.is_empty()).then(|| Placement { layers: placement_layers(s), numbers })
+    (!numbers.is_empty()).then(|| Placement { layers: s.placed.clone(), numbers })
 }
 
 /// Draws image object `object` of layer `dest` into the layer's pixels: into its topmost
@@ -1042,6 +1092,7 @@ mod tests {
             draft: false,
             sampling_changed: false,
             given: Vec::new(),
+            placed: Vec::new(),
         }
     }
 

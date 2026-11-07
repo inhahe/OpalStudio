@@ -16,7 +16,6 @@ use crate::document::{Document, Layer, LayerId};
 use crate::units::Unit;
 use std::fmt::Write as _;
 use std::ops::Range;
-use std::sync::Arc;
 
 /// Why an expression could not be read or worked out: what is wrong, and where, as the
 /// byte range of the text at fault.
@@ -608,11 +607,6 @@ impl Expr {
         Ok(Expr { root })
     }
 
-    /// Whether it is no more than a number, with a unit or not.
-    pub fn is_number(&self) -> bool {
-        matches!(self.root.kind, NodeKind::Number { .. })
-    }
-
     /// What it comes to in `scope`, as `want` says: a length in pixels, an angle in
     /// degrees, or a number.
     pub fn eval(&self, scope: &Scope, want: Want) -> Result<f64, Error> {
@@ -710,7 +704,10 @@ impl Expr {
 fn write(n: &Node, name_of: &dyn Fn(LayerId) -> Option<String>, outer: u8, out: &mut String) {
     match &n.kind {
         NodeKind::Number { value, suffix } => {
-            let _ = write!(out, "{value}");
+            // As short as reads back the same: 1e-300 rather than its 301 digits.
+            let plain = format!("{value}");
+            let short = format!("{value:e}");
+            out.push_str(if short.len() < plain.len() { &short } else { &plain });
             match suffix {
                 Some(Suffix::Length(u)) => out.push_str(u.id()),
                 Some(Suffix::Degrees) => out.push_str("deg"),
@@ -785,28 +782,21 @@ fn layer_text(name: &str) -> String {
 }
 
 /// Every layer of `layers` and of the groups in them.
-fn all_layers(layers: &[Arc<Layer>], out: &mut Vec<Arc<Layer>>) {
-    for l in layers {
-        out.push(l.clone());
-        if let Some(c) = l.children() {
-            all_layers(c, out);
-        }
-    }
-}
-
 /// The one layer of `doc` called `name`: exactly so, or else, if just one is, so in
 /// another case.
-fn layer_named(doc: &Document, name: &str, at: &Range<usize>) -> Result<Arc<Layer>, Error> {
-    let mut all = Vec::new();
-    all_layers(&doc.layers, &mut all);
-    let exact: Vec<_> = all.iter().filter(|l| l.name == name).collect();
-    let found: Vec<_> = if exact.is_empty() {
-        all.iter().filter(|l| l.name.to_lowercase() == name.to_lowercase()).collect()
-    } else {
-        exact
-    };
+fn layer_named<'d>(doc: &'d Document, name: &str, at: &Range<usize>) -> Result<&'d Layer, Error> {
+    let lower = name.to_lowercase();
+    let (mut exact, mut other) = (Vec::new(), Vec::new());
+    doc.for_each_layer(&mut |l, _| {
+        if l.name == name {
+            exact.push(l.id);
+        } else if l.name.to_lowercase() == lower {
+            other.push(l.id);
+        }
+    });
+    let found = if exact.is_empty() { other } else { exact };
     match found.as_slice() {
-        [one] => Ok((*one).clone()),
+        [one] => Ok(doc.layer(*one).expect("just found")),
         [] => Err(Error::new(
             at.clone(),
             format!("There is no layer called “{name}”, and “{name}” is not a word the language has"),
@@ -992,7 +982,7 @@ fn eval(n: &Node, scope: &Scope) -> Result<Val, Error> {
             match r {
                 LayerRef::Name(name) => {
                     let layer = layer_named(doc, name, at)?;
-                    layer_bounds(&layer, scope, at)?
+                    layer_bounds(layer, scope, at)?
                 }
                 LayerRef::Id(id) => {
                     let l =
@@ -1065,7 +1055,7 @@ fn word(w: &str, scope: &Scope, at: &Range<usize>) -> Result<Val, Error> {
                 )
             })?;
             let layer = layer_named(doc, name, at)?;
-            layer_bounds(&layer, scope, at)?
+            layer_bounds(layer, scope, at)?
         }
     })
 }
@@ -1128,6 +1118,11 @@ fn arith(op: Op, a: Q, b: Q, scope: &Scope, at: &Range<usize>) -> Result<Q, Erro
         Op::Pow => {
             if (b.len, b.ang) != (0, 0) {
                 return Err(Error::new(at.clone(), format!("A power must be a number, not {}", b.kind())));
+            }
+            // Past 64, any power of a length or an angle is past what powers may be (and
+            // counting it would overflow).
+            if (a.len != 0 || a.ang != 0) && b.v.abs() > 64.0 {
+                return Err(Error::new(at.clone(), "This raises lengths or angles to powers beyond any use"));
             }
             let whole = |d: i32| {
                 let p = f64::from(d) * b.v;
@@ -1245,11 +1240,6 @@ fn function(f: Func, vals: &[Val], spans: &[Range<usize>], scope: &Scope, at: &R
     }
 }
 
-/// What `text` comes to in `scope`, as `want` says (see [`Expr::eval`]).
-pub fn eval_text(text: &str, scope: &Scope, want: Want) -> Result<f64, Error> {
-    Expr::parse(text)?.eval(scope, want)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1271,6 +1261,11 @@ mod tests {
         let logo = ids.layer();
         doc.insert(top(1), Layer::new_raster(logo, ids.object(), "Logo", filled(IRect::new(20, 10, 60, 30)))).unwrap();
         (doc, logo)
+    }
+
+    /// What `text` comes to in `scope`, as `want` says.
+    fn eval_text(text: &str, scope: &Scope, want: Want) -> Result<f64, Error> {
+        Expr::parse(text)?.eval(scope, want)
     }
 
     fn scope(doc: &Document) -> Scope<'_> {
@@ -1417,6 +1412,8 @@ mod tests {
         assert!(Expr::parse(&calls).unwrap_err().message.contains("nests more than"));
         assert!(fails("1px^40 * 1px^40", Want::Length).message.contains("powers beyond"));
         assert!(fails("1px^1e12", Want::Length).message.contains("powers beyond"));
+        assert!(fails("1px^-1e12", Want::Length).message.contains("powers beyond"));
+        assert!(fails("1px^-1e12 * 1px^-1e12", Want::Number).message.contains("powers beyond"));
         assert!(fails("10^400", Want::Number).message.contains("no finite number"));
         // Within them, a long expression is fine.
         let fine = format!("1px{}", " + 1px".repeat(60));
@@ -1446,7 +1443,16 @@ mod tests {
 
     #[test]
     fn its_text_reads_back_as_the_same_expression() {
-        for text in ["-(1 + 2) * 3", "2^3^2", "(2^3)^2", "1 - (2 - 3)", "-2^2", "1in + 2mm * 3", "min(1, 2, 3) / 4"] {
+        for text in [
+            "-(1 + 2) * 3",
+            "2^3^2",
+            "(2^3)^2",
+            "1 - (2 - 3)",
+            "-2^2",
+            "1in + 2mm * 3",
+            "min(1, 2, 3) / 4",
+            "1e-300 + 1e300",
+        ] {
             let e = Expr::parse(text).unwrap();
             let written = e.text(&|_| None);
             let s = Scope::bare(Unit::Px, 72.0);
@@ -1454,9 +1460,9 @@ mod tests {
                 (e.eval(&s, Want::Length).unwrap(), Expr::parse(&written).unwrap().eval(&s, Want::Length).unwrap());
             assert_eq!(a, b, "{text} was written {written}");
         }
+        // Written as short as reads back, so a kept expression stays within what reads.
+        assert_eq!(Expr::parse("1e-300 + 2.5").unwrap().text(&|_| None), "1e-300 + 2.5");
         assert_eq!(Expr::parse("2^3^2").unwrap().eval(&Scope::bare(Unit::Px, 72.0), Want::Number).unwrap(), 512.0);
         assert_eq!(Expr::parse("-2^2").unwrap().eval(&Scope::bare(Unit::Px, 72.0), Want::Number).unwrap(), -4.0);
-        assert!(Expr::parse("2.5cm").unwrap().is_number());
-        assert!(!Expr::parse("2.5cm + 1").unwrap().is_number());
     }
 }

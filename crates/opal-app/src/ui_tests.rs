@@ -235,6 +235,64 @@ fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
 }
 
 #[test]
+fn a_field_left_untouched_changes_nothing_and_tab_enters_what_was_typed() {
+    use egui_kittest::kittest::by;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    let st = h.state_mut().state_mut();
+    st.create_image(&crate::state::NewImage {
+        width: 400,
+        height: 300,
+        background: crate::state::Background::White,
+        resolution: 300.0,
+    });
+    st.set_unit(opal_core::units::Unit::In);
+    st.box_numbers = true;
+    put_on_clipboard(&mut h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
+    h.event(egui::Event::Paste(String::new()));
+    h.run();
+    // At x = 100 px, which shows rounded: 0.333 in.
+    {
+        let d = h.state_mut().state_mut().active_mut().unwrap();
+        let p = d.transform.as_ref().unwrap().params();
+        let m = d.transform.as_ref().unwrap().current.then(opal_core::geom::Affine::translate(100.0 - p.x, 0.0));
+        d.set_box(m, None);
+    }
+    h.run();
+    let x = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
+    let field = |v: f64| {
+        by().predicate(move |n| {
+            n.role() == egui::accesskit::Role::SpinButton
+                && n.numeric_value().is_some_and(|x| (x - v).abs() < 1e-3)
+                && n.bounding_box().is_some_and(|b| b.x0 < 1000.0)
+        })
+    };
+    // Clicked, and left by Tab with nothing typed: still 100 px, not 0.333 in.
+    h.get(field(1.0 / 3.0)).click();
+    h.run();
+    h.key_press(egui::Key::Tab);
+    h.run();
+    assert_eq!(x(&h), 100.0, "leaving the field moved the box to what it showed");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    // So too by Enter.
+    h.get(field(1.0 / 3.0)).click();
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert_eq!(x(&h), 100.0, "Enter on what was not typed moved the box");
+    // Typed, and left by Tab: what was typed is entered.
+    h.get(field(1.0 / 3.0)).click();
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.get(by().predicate(|n| n.is_focused())).type_text("1");
+    h.run();
+    h.key_press(egui::Key::Tab);
+    h.run();
+    assert_eq!(x(&h), 300.0, "Tab threw away what was typed");
+}
+
+#[test]
 fn an_expression_typed_into_the_box_places_the_layer_so_again() {
     use egui_kittest::kittest::by;
     let _gpu = gpu_lock();

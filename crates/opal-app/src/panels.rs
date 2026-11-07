@@ -352,7 +352,8 @@ fn opacity_row(ui: &mut egui::Ui, st: &mut AppState) {
     ui.horizontal(|ui| {
         let label = ui.label("Opacity");
         // Dragged on the slider, or typed (an expression) into the field beside it.
-        let slider = ui.add_enabled(!locked, egui::Slider::new(&mut pct, 0.0..=100.0).show_value(false));
+        let slider =
+            ui.add_enabled(!locked, egui::Slider::new(&mut pct, 0.0..=100.0).fixed_decimals(0).show_value(false));
         let scope = crate::lengths::image_scope(Some(d.doc()), unit, d.doc().resolution);
         let field = crate::number_field::NumberField::number(&mut pct, scope)
             .range(0.0..=100.0)
