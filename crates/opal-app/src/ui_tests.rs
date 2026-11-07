@@ -415,6 +415,120 @@ fn an_expression_typed_into_the_box_places_the_layer_so_again() {
     assert_eq!(x(&h), 440.0, "Re-apply did not work it out again");
 }
 
+/// The README's picture, `docs/screenshot.png`: an image of a few layers, and the box placing
+/// a pasted badge by an expression being typed into its numbers. Made again with
+/// `OPAL_WRITE_SCREENSHOT=1 cargo test -p opal-app --bin opal-studio the_readme_screenshot -- --ignored`.
+#[test]
+#[ignore = "makes the README's screenshot (OPAL_WRITE_SCREENSHOT=1, --ignored)"]
+fn the_readme_screenshot() {
+    use egui_kittest::kittest::by;
+    use opal_core::document::{Document, IdGen, Layer, Position};
+    use opal_core::raster::RasterImage;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    // Colors in 8-bit sRGB, straight alpha.
+    let mix = |a: [f32; 3], b: [f32; 3], t: f32| [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t.clamp(0.0, 1.0));
+    let byte = |c: [f32; 3], a: f32| {
+        let [r, g, b] = c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+        [r, g, b, (a.clamp(0.0, 1.0) * 255.0).round() as u8]
+    };
+    let hex = |v: u32| [(v >> 16) as f32 / 255.0, ((v >> 8) & 255) as f32 / 255.0, (v & 255) as f32 / 255.0];
+    // A sky at dusk, with the sun's glow low on the right.
+    let (w, ht) = (1200u32, 800u32);
+    let stops = [hex(0x10163a), hex(0x2f3a86), hex(0x8a5a9e), hex(0xe2836a), hex(0xf6c98a)];
+    let sky: Vec<[u8; 4]> = (0..w * ht)
+        .map(|i| {
+            let (x, y) = ((i % w) as f32, (i / w) as f32);
+            let t = y / ht as f32 * (stops.len() - 1) as f32;
+            let k = (t.floor() as usize).min(stops.len() - 2);
+            let base = mix(stops[k], stops[k + 1], t - k as f32);
+            let glow = (-((x - 930.0).powi(2) + (y - 640.0).powi(2)) / (2.0 * 170f32.powi(2))).exp();
+            byte(mix(base, hex(0xffe3a3), glow * 0.85), 1.0)
+        })
+        .collect();
+    // An opal: a disc whose color turns with the angle and the distance from its middle,
+    // a light caught at its upper left.
+    let r = 180.0f32;
+    let side = (2.0 * r + 4.0) as u32;
+    let opal: Vec<[u8; 4]> = (0..side * side)
+        .map(|i| {
+            let (dx, dy) = ((i % side) as f32 - side as f32 / 2.0, (i / side) as f32 - side as f32 / 2.0);
+            let d = dx.hypot(dy);
+            let hue = (dy.atan2(dx) / std::f32::consts::TAU + d / r * 0.45).rem_euclid(1.0);
+            let ring = [0.0, 1.0 / 3.0, 2.0 / 3.0].map(|o| 0.5 + 0.5 * ((hue + o) * std::f32::consts::TAU).cos());
+            let pastel = mix(ring, [1.0, 1.0, 1.0], 0.45 - d / r * 0.15);
+            let shine = (-((dx + r * 0.38).powi(2) + (dy + r * 0.38).powi(2)) / (2.0 * (r * 0.28).powi(2))).exp();
+            byte(mix(pastel, [1.0, 1.0, 1.0], shine * 0.7), r + 0.5 - d)
+        })
+        .collect();
+    let mut ids = IdGen::default();
+    let mut doc = Document::new(w, ht);
+    doc.resolution = 300.0;
+    let top = |index| Position { parent: None, index };
+    let sky = Layer::new_raster(ids.layer(), ids.object(), "Sky", RasterImage::from_srgb8(w, ht, &sky));
+    doc.insert(top(0), sky).unwrap();
+    let disc = opal_core::document::PixelObject {
+        image: RasterImage::from_srgb8(side, side, &opal).into(),
+        offset: [250, 210],
+    };
+    let disc = opal_core::document::Object { id: ids.object(), kind: opal_core::document::ObjectKind::Pixels(disc) };
+    doc.insert(top(1), Layer::with_objects(ids.layer(), "Opal", vec![disc])).unwrap();
+    {
+        let st = h.state_mut().state_mut();
+        st.new_untitled(doc, ids, "New image");
+        st.set_unit(opal_core::units::Unit::Mm);
+        st.box_numbers = true;
+    }
+    // A gold badge, pasted.
+    let (bw, bh, round) = (300u32, 120u32, 26.0f32);
+    let badge: Vec<[u8; 4]> = (0..bw * bh)
+        .map(|i| {
+            let (x, y) = ((i % bw) as f32 + 0.5, (i / bw) as f32 + 0.5);
+            let (qx, qy) = (
+                (x - bw as f32 / 2.0).abs() - (bw as f32 / 2.0 - round),
+                (y - bh as f32 / 2.0).abs() - (bh as f32 / 2.0 - round),
+            );
+            let edge = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - round;
+            let gold = mix(hex(0xffe08a), hex(0xd98e2b), y / bh as f32);
+            let rim = mix(gold, hex(0x8a4b12), ((edge + 6.0) / 6.0).clamp(0.0, 1.0) * 0.8);
+            byte(rim, 0.5 - edge)
+        })
+        .collect();
+    let image = RasterImage::from_srgb8(bw, bh, &badge);
+    put_on_clipboard(
+        &mut h,
+        crate::clipboard::Pasted { width: bw, height: bh, image, from: None, resolution: None, warnings: Vec::new() },
+    );
+    h.event(egui::Event::Paste(String::new()));
+    h.run();
+    h.run();
+    // Its x being typed as what names the opal: what it comes to shows below.
+    let at = h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
+    let shown = opal_core::units::Unit::Mm.from_px(at, 300.0);
+    let field = by().predicate(move |n| {
+        n.role() == egui::accesskit::Role::SpinButton
+            && n.numeric_value().is_some_and(|x| (x - shown).abs() < 1e-2)
+            && n.bounding_box().is_some_and(|b| b.x0 < 1000.0)
+    });
+    h.get(field).click();
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.get(by().predicate(|n| n.is_focused())).type_text("Opal.right + 5mm");
+    // The pointer away, so that it hides none of it.
+    h.event(egui::Event::PointerGone);
+    for _ in 0..4 {
+        h.run();
+    }
+    let img = h.render().expect("the app renders");
+    if std::env::var_os("OPAL_WRITE_SCREENSHOT").is_some() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/screenshot.png");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        img.save(&path).unwrap();
+    } else {
+        render(&mut h, "readme");
+    }
+}
+
 #[test]
 fn the_box_s_buttons_stay_in_the_view_however_many_it_has() {
     let _gpu = gpu_lock();

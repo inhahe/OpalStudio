@@ -8,6 +8,8 @@ A 2D graphics editor that aims to be more intuitive than the usual ones: everyth
 editable, every setting that affects a result can be adjusted, and the interface always
 says what a command does and, when it cannot run, why.
 
+![A pasted badge in the transform box, its x being typed as Opal.right + 5mm, with what that comes to shown below the field](docs/screenshot.png)
+
 Milestones 0 (the foundation), 1 (paste and place), S (scripting and MCP) and E
 (expressions) of the roadmap are built. You can open and create images, paste and place
 images, move, scale, rotate, crop and resize, arrange and merge layers, type arithmetic
