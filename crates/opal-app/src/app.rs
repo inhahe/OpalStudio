@@ -82,6 +82,7 @@ impl OpalApp {
             config::load(&mut st);
         }
         st.apply_prefs(&cc.egui_ctx);
+        crate::number_field::load_entries(&cc.egui_ctx, st.field_entries.clone());
         // Before any file is opened, so that its tiles may go to disk.
         st.apply_tile_budget();
         let mut gpu_memory = None;
@@ -820,6 +821,11 @@ impl eframe::App for OpalApp {
             ctx.request_repaint();
         }
         self.field_had_keys = ctx.egui_wants_keyboard_input();
+        // What the fields remembered by name had entered, kept with the settings.
+        if let Some(entries) = crate::number_field::changed_entries(&ctx) {
+            self.st.field_entries = entries;
+            self.st.settings_touched();
+        }
         let st = &mut self.st;
         if let Some(rs) = _frame.wgpu_render_state() {
             st.gpu.textures =

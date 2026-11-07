@@ -18,17 +18,6 @@ use std::ops::RangeInclusive;
 /// A field for a length of `px` pixels, shown in `scope`'s unit at its resolution, worked
 /// out in it when typed, and kept in `range` (in pixels). In pixels it shows `px_decimals`
 /// places; in other units, enough for a pixel to show.
-pub fn length(
-    ui: &mut egui::Ui,
-    px: &mut f64,
-    scope: Scope,
-    range: RangeInclusive<f64>,
-    px_decimals: usize,
-) -> egui::Response {
-    length_field(px, scope, range, px_decimals).show(ui)
-}
-
-/// The field [`length`] shows, to be given more (what it remembers entries under, say).
 pub fn length_field<'a>(
     px: &'a mut f64,
     scope: Scope<'a>,
@@ -55,20 +44,23 @@ pub fn whole_side(px: f64) -> u32 {
     (px.round() as u32).clamp(1, MAX_SIDE)
 }
 
-/// A field for a canvas side of `n` pixels (1 to [`MAX_SIDE`]), in `scope`.
-pub fn side(ui: &mut egui::Ui, n: &mut u32, scope: Scope) -> egui::Response {
+/// A field for a canvas side of `n` pixels (1 to [`MAX_SIDE`]), in `scope`, its entries
+/// remembered as `name`.
+pub fn side(ui: &mut egui::Ui, n: &mut u32, scope: Scope, name: &str) -> egui::Response {
     let mut px = f64::from(*n);
-    let r = length(ui, &mut px, scope, 1.0..=f64::from(MAX_SIDE), 0);
+    let r = length_field(&mut px, scope, 1.0..=f64::from(MAX_SIDE), 0).remember(name).show(ui);
     if r.changed() {
         *n = whole_side(px);
     }
     r
 }
 
-/// A field for a whole number of pixels `n` in `range`, in `scope`.
-pub fn whole(ui: &mut egui::Ui, n: &mut i64, scope: Scope, range: RangeInclusive<i64>) -> egui::Response {
+/// A field for a whole number of pixels `n` in `range`, in `scope`, its entries remembered
+/// as `name`.
+pub fn whole(ui: &mut egui::Ui, n: &mut i64, scope: Scope, range: RangeInclusive<i64>, name: &str) -> egui::Response {
     let mut px = *n as f64;
-    let r = length(ui, &mut px, scope, *range.start() as f64..=*range.end() as f64, 0);
+    let span = *range.start() as f64..=*range.end() as f64;
+    let r = length_field(&mut px, scope, span, 0).remember(name).show(ui);
     if r.changed() {
         *n = (px.round() as i64).clamp(*range.start(), *range.end());
     }
@@ -91,8 +83,9 @@ pub fn unit_menu(ui: &mut egui::Ui, unit: &mut Unit, id: &str) -> bool {
 }
 
 /// A field for a resolution of `ppi` pixels per inch, shown in `in_unit`, with a menu of
-/// the resolution units; what is typed is worked out in `scope`. Returns whether the
-/// resolution changed (not just its unit).
+/// the resolution units (`id` tells the menu apart, and names the field's entries); what is
+/// typed is worked out in `scope`. Returns whether the resolution changed (not just its
+/// unit).
 pub fn resolution(ui: &mut egui::Ui, ppi: &mut f64, in_unit: &mut ResolutionUnit, id: &str, scope: Scope) -> bool {
     let unit = *in_unit;
     let mut shown = unit.from_ppi(*ppi);
@@ -100,7 +93,8 @@ pub fn resolution(ui: &mut egui::Ui, ppi: &mut f64, in_unit: &mut ResolutionUnit
         NumberField::number(&mut shown, scope)
             .range(unit.from_ppi(MIN_PPI)..=unit.from_ppi(MAX_PPI))
             .speed(1.0)
-            .decimals(0, 2),
+            .decimals(0, 2)
+            .remember(id),
     );
     if r.changed() {
         *ppi = unit.to_ppi(shown).clamp(MIN_PPI, MAX_PPI);
@@ -210,7 +204,7 @@ mod tests {
         let mut px = 400_000.0;
         let mut changed = false;
         let mut out = ctx.run_ui(Default::default(), |ui| {
-            changed |= length(ui, &mut px, Scope::bare(Unit::In, 300.0), 1.0..=300_000.0, 0).changed();
+            changed |= length_field(&mut px, Scope::bare(Unit::In, 300.0), 1.0..=300_000.0, 0).show(ui).changed();
         });
         out.textures_delta.clear();
         assert_eq!((px, changed), (400_000.0, false));

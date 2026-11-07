@@ -190,13 +190,13 @@ fn new_image(ctx: &egui::Context, st: &mut AppState) {
         egui::Grid::new("new-image-grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
             ui.label("Width");
             ui.horizontal(|ui| {
-                lengths::side(ui, &mut spec.width, Scope::bare(unit, spec.resolution));
+                lengths::side(ui, &mut spec.width, Scope::bare(unit, spec.resolution), "new.width");
                 lengths::unit_menu(ui, &mut unit, "new-image-unit");
             });
             ui.end_row();
             ui.label("Height");
             ui.horizontal(|ui| {
-                lengths::side(ui, &mut spec.height, Scope::bare(unit, spec.resolution));
+                lengths::side(ui, &mut spec.height, Scope::bare(unit, spec.resolution), "new.height");
                 if ui
                     .small_button(crate::theme::icon(icons::SWAP, 13.0))
                     .on_hover_text("Swap width and height")
@@ -408,15 +408,15 @@ fn size_fields(
     let (w, h) = size;
     let (ow, oh) = (f64::from(original.0), f64::from(original.1));
     let before = (*w, *h);
-    fn percent<'a>(pct: &'a mut f64, scope: Scope<'a>) -> NumberField<'a> {
-        NumberField::number(pct, scope).range(0.01..=10_000.0).suffix("%").decimals(0, 2)
+    fn percent<'a>(pct: &'a mut f64, scope: Scope<'a>, name: &str) -> NumberField<'a> {
+        NumberField::number(pct, scope).range(0.01..=10_000.0).suffix("%").decimals(0, 2).remember(name)
     }
     ui.label("Width");
     ui.horizontal(|ui| {
         let scope = lengths::image_scope(doc, *unit, ppi);
-        lengths::side(ui, w, scope);
+        lengths::side(ui, w, scope, "size.width");
         let mut pct = f64::from(*w) / ow * 100.0;
-        if ui.add(percent(&mut pct, scope)).changed() {
+        if ui.add(percent(&mut pct, scope, "size.width-percent")).changed() {
             *w = lengths::whole_side(ow * pct / 100.0);
         }
         lengths::unit_menu(ui, unit, "size-unit");
@@ -425,9 +425,9 @@ fn size_fields(
     ui.label("Height");
     ui.horizontal(|ui| {
         let scope = lengths::image_scope(doc, *unit, ppi);
-        lengths::side(ui, h, scope);
+        lengths::side(ui, h, scope, "size.height");
         let mut pct = f64::from(*h) / oh * 100.0;
-        if ui.add(percent(&mut pct, scope)).changed() {
+        if ui.add(percent(&mut pct, scope, "size.height-percent")).changed() {
             *h = lengths::whole_side(oh * pct / 100.0);
         }
     });
@@ -558,7 +558,9 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
                 for (name, i) in [("Left", 0), ("Top", 1), ("Right", 2), ("Bottom", 3)] {
                     ui.label(name);
                     let side = i64::from(MAX_SIDE);
-                    lengths::whole(ui, &mut spec.margins[i], lengths::image_scope(Some(doc), unit, ppi), -side..=side);
+                    let scope = lengths::image_scope(Some(doc), unit, ppi);
+                    let field = format!("canvas.{}", name.to_lowercase());
+                    lengths::whole(ui, &mut spec.margins[i], scope, -side..=side, &field);
                     ui.end_row();
                 }
             });
@@ -566,10 +568,10 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
         } else {
             egui::Grid::new("resize-canvas-size").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                 ui.label("Width");
-                lengths::side(ui, &mut spec.width, lengths::image_scope(Some(doc), unit, ppi));
+                lengths::side(ui, &mut spec.width, lengths::image_scope(Some(doc), unit, ppi), "canvas.width");
                 ui.end_row();
                 ui.label("Height");
-                lengths::side(ui, &mut spec.height, lengths::image_scope(Some(doc), unit, ppi));
+                lengths::side(ui, &mut spec.height, lengths::image_scope(Some(doc), unit, ppi), "canvas.height");
                 ui.end_row();
                 ui.label("Anchor").on_hover_text("Where the old canvas sits in the new one.");
                 let mut i = usize::from(spec.anchor[1]) * 3 + usize::from(spec.anchor[0]);
@@ -612,7 +614,9 @@ fn rotate_by(ctx: &egui::Context, st: &mut AppState) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label("Angle");
-            ui.add(NumberField::angle(&mut spec.degrees, scope).range(-360.0..=360.0).speed(0.25));
+            ui.add(
+                NumberField::angle(&mut spec.degrees, scope).range(-360.0..=360.0).speed(0.25).remember("rotate.angle"),
+            );
             ui.label(RichText::new("clockwise").color(palette.weak_text));
         });
         ui.checkbox(&mut spec.grow, "Grow the canvas so nothing is cut off");

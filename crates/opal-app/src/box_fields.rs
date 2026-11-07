@@ -191,7 +191,7 @@ pub fn fields(
         ui.end_row();
         let scope = Scope { doc: Some(doc), ppi, unit: m.unit, origin: counted, own: Some(own(&before)) };
         let mut field = |px: &mut f64, range, number: BoxNumber, ui: &mut egui::Ui| {
-            let f = lengths::length_field(px, scope, range, how.px_decimals).remember(("box", number.name()));
+            let f = lengths::length_field(px, scope, range, how.px_decimals).remember(format!("box.{}", number.name()));
             let (r, text) = f.show_entered(ui);
             entered.extend(text.map(|t| (number, t)));
             r
@@ -224,7 +224,7 @@ pub fn fields(
             ui.label("Scale");
             let mut pct = p.width / own * 100.0;
             let pick = NumberField::number(&mut pct, scope).speed(0.5).range(0.01..=1e6).suffix("%").decimals(0, 2);
-            let r = ui.add(pick.remember(("box", "scale")));
+            let r = ui.add(pick.remember("box.scale"));
             if r.changed() {
                 let k = pct / 100.0 * own / p.width;
                 p.width *= k;
@@ -233,7 +233,7 @@ pub fn fields(
             ui.end_row();
         }
         ui.label("Angle");
-        let angle = NumberField::angle(&mut p.angle, scope).speed(0.5).range(-360.0..=360.0).remember(("box", "angle"));
+        let angle = NumberField::angle(&mut p.angle, scope).speed(0.5).range(-360.0..=360.0).remember("box.angle");
         let (r, text) = angle.show_entered(ui);
         r.on_hover_text(format!("Clockwise, about the box's {point}."));
         entered.extend(text.map(|t| (BoxNumber::Angle, t)));
@@ -405,7 +405,7 @@ fn fit_into(ui: &mut egui::Ui, rect: &mut Option<[f64; 4]>, how: &Rect, salt: &s
     use crate::api::{BoxArgs, Fit};
     let (canvas, at, scope) = ([how.canvas.width(), how.canvas.height()], how.at, how.scope);
     let field = |px: &mut f64, range, name: &str, ui: &mut egui::Ui| {
-        lengths::length_field(px, scope, range, 1).remember(("fit", name)).show(ui).changed()
+        lengths::length_field(px, scope, range, 1).remember(format!("fit.{name}")).show(ui).changed()
     };
     // Kept from the canvas's corner; shown from the point positions count from.
     let shift = [how.canvas.x0 - how.from[0], how.canvas.y0 - how.from[1]];

@@ -29,6 +29,9 @@ struct Saved {
     /// The scripts run lately, the last first.
     #[serde(default)]
     recent_scripts: Vec<PathBuf>,
+    /// What was entered lately in each field remembered by name, the latest first.
+    #[serde(default)]
+    field_entries: BTreeMap<String, Vec<String>>,
 }
 
 /// Notes where this program is, in `program.json` beside the settings, for the `opal`
@@ -131,6 +134,21 @@ fn apply_json(st: &mut AppState, text: &str) -> Result<(), String> {
             st.console.recent.push(path);
         }
     }
+    // So too each field's entries: text that is not blank and could be an expression, each
+    // once, as many as a field remembers.
+    for (name, list) in obj.get("field_entries").and_then(serde_json::Value::as_object).into_iter().flatten() {
+        let mut kept: Vec<String> = Vec::new();
+        for e in list.as_array().into_iter().flatten().filter_map(serde_json::Value::as_str) {
+            let e = e.trim();
+            if !e.is_empty() && e.len() <= opal_core::expr::MAX_LEN && !kept.iter().any(|k| k == e) {
+                kept.push(e.to_owned());
+            }
+        }
+        kept.truncate(crate::number_field::REMEMBERED);
+        if !kept.is_empty() {
+            st.field_entries.insert(name.clone(), kept);
+        }
+    }
     Ok(())
 }
 
@@ -160,6 +178,7 @@ fn saved(st: &AppState) -> Saved {
         last_new_ppi: Some(st.last_new.resolution),
         // Those JSON can hold (a path that is not Unicode would fail the whole file).
         recent_scripts: st.console.recent.iter().filter(|p| p.to_str().is_some()).cloned().collect(),
+        field_entries: st.field_entries.clone(),
     }
 }
 
@@ -190,6 +209,7 @@ mod tests {
             last_new: None,
             last_new_ppi: None,
             recent_scripts: vec![PathBuf::from("C:/scripts/sky.py")],
+            field_entries: BTreeMap::from([("box.x".to_owned(), vec!["Logo.right + 5mm".to_owned(), "10".to_owned()])]),
         };
         let json = serde_json::to_string(&saved).unwrap();
         let back: Saved = serde_json::from_str(&json).unwrap();
@@ -199,6 +219,16 @@ mod tests {
         assert_eq!(back.tools["zoom"].get("zoom.drag"), Some(&Value::Bool(false)));
         apply_json(&mut fresh, &json).unwrap();
         assert_eq!(fresh.console.recent, [PathBuf::from("C:/scripts/sky.py")], "the recent scripts were lost");
+        assert_eq!(fresh.field_entries["box.x"], ["Logo.right + 5mm", "10"], "the fields' entries were lost");
+        // Of entries that cannot be, those that can are kept, each once.
+        let mut entries = AppState::new();
+        let json = r#"{"field_entries": {"box.y": ["1in", 2, "", "1in", " 3mm "], "box.x": "no"}}"#;
+        apply_json(&mut entries, json).unwrap();
+        assert_eq!(
+            entries.field_entries.get("box.y").map(Vec::as_slice),
+            Some(&["1in".to_owned(), "3mm".to_owned()][..])
+        );
+        assert!(!entries.field_entries.contains_key("box.x"));
         // One that cannot be read is skipped, not all; each kept once.
         let mut odd = AppState::new();
         apply_json(&mut odd, r#"{"recent_scripts": ["C:/a.py", null, "C:/b.py", "C:/a.py"]}"#).unwrap();

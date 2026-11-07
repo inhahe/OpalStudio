@@ -1116,8 +1116,12 @@ numbers (*Paste and transform*): a length such as `8.5in` is the simplest expres
     another way; Enter on what cannot be worked out keeps it, to be put right, and Esc
     leaves the value as it was. Left with nothing typed, the value stays exactly as it is,
     not as it shows rounded.
-  - Each field remembers its recent entries (Up and Down), a box's fields by name, so the
-    tool settings' x and the numbers panel's x share theirs.
+  - Each field remembers its last 20 entries (Up and Down). One given a name
+    (`NumberField::remember`: `box.x`, `size.width`, `setting.<key>`) shares them with every
+    field of that name, so the tool settings' x and the numbers panel's x share theirs, and
+    keeps them between sessions, with the settings (`AppState::field_entries`, read in
+    through egui's memory at start and saved when they change); one without keeps them
+    for the session.
   - The fields are `number_field::NumberField`, dragged as egui's `DragValue` is (and with
     its accessibility), on every number the interface takes: lengths (`lengths::length`),
     angles, percentages, resolutions, the zoom and the layer's opacity, and the
@@ -1477,7 +1481,8 @@ a close question on screen to be answered.
 ## Settings storage
 
 Preferences, tool settings and tool presets (and the last New Image's size, background and
-resolution, and the scripts run lately) are kept in `settings.json` in the per-user
+resolution, the scripts run lately, and what was entered lately in each named number
+field) are kept in `settings.json` in the per-user
 configuration folder (`%APPDATA%\Opal Studio\config` on Windows). Only values changed from
 their defaults are written, so a default changed in a later version reaches everyone who
 never changed it. Loading reads entry by entry: an unknown or unreadable entry (one written

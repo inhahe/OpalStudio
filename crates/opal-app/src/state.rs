@@ -169,6 +169,9 @@ pub struct AppState {
     pub raise_window: bool,
     /// Scripts run from the editor, and what they printed.
     pub console: crate::console::Console,
+    /// What was entered lately in each field remembered by name (see
+    /// `NumberField::remember`), the latest first: kept with the settings.
+    pub field_entries: std::collections::BTreeMap<String, Vec<String>>,
     /// The connection file of this editor's server, which scripts it runs connect through;
     /// `None` while it serves none (another editor does).
     pub scripts_file: Option<PathBuf>,
@@ -302,6 +305,7 @@ impl AppState {
             finishing: VecDeque::new(),
             raise_window: false,
             console: crate::console::Console::default(),
+            field_entries: std::collections::BTreeMap::new(),
             scripts_file: None,
             show_console: false,
             scripts_unserved: None,

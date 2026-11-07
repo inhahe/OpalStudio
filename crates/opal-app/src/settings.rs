@@ -299,7 +299,7 @@ fn setting_row(ui: &mut egui::Ui, settings: &mut Settings, def: &'static Def, pa
                 .speed((max - min) / 400.0)
                 .decimals(decimals, decimals)
                 .suffix(suffix)
-                .remember(("setting", def.key));
+                .remember(format!("setting.{}", def.key));
             slider.labelled_by(label_id) | ui.add(field).labelled_by(label_id)
         }
         (Value::Choice(c), Kind::Choice(opts)) => {

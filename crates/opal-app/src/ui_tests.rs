@@ -232,6 +232,43 @@ fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
     assert!(back >= 1, "Up did not bring back the last entry");
     h.key_press(egui::Key::Escape);
     h.run();
+    // What was entered is kept with the settings, for the next session.
+    let kept = h.state().state().field_entries.get("box.x").cloned().unwrap_or_default();
+    assert_eq!(kept.first().map(String::as_str), Some("Background.right - width - 10"), "{kept:?}");
+}
+
+#[test]
+fn a_field_brings_back_what_was_entered_in_an_earlier_session() {
+    use egui_kittest::kittest::by;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    // As loaded from the settings at start.
+    let earlier = std::collections::BTreeMap::from([("box.x".to_owned(), vec!["canvas.width / 3".to_owned()])]);
+    crate::number_field::load_entries(&h.ctx, earlier);
+    h.state_mut().state_mut().create_image(&crate::state::NewImage {
+        width: 400,
+        height: 300,
+        background: crate::state::Background::White,
+        resolution: 100.0,
+    });
+    put_on_clipboard(&mut h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
+    h.event(egui::Event::Paste(String::new()));
+    h.state_mut().state_mut().box_numbers = true;
+    h.run();
+    let at = h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
+    let field = by().predicate(move |n| {
+        n.role() == egui::accesskit::Role::SpinButton
+            && n.numeric_value().is_some_and(|x| (x - at).abs() < 1e-6)
+            && n.bounding_box().is_some_and(|b| b.x0 < 1000.0)
+    });
+    h.get(field).click();
+    h.run();
+    h.key_press(egui::Key::ArrowUp);
+    h.run();
+    let back = h.query_all(by().predicate(|n| n.value().as_deref() == Some("canvas.width / 3"))).count();
+    assert!(back >= 1, "the earlier session's entry did not come back");
+    h.key_press(egui::Key::Escape);
+    h.run();
 }
 
 #[test]

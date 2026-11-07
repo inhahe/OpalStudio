@@ -426,9 +426,9 @@ pub fn sampling_ui(ui: &mut egui::Ui, s: &mut Sampling, salt: &str) -> bool {
                 let scope = Scope::bare(opal_core::units::Unit::Px, opal_core::units::DEFAULT_PPI);
                 let (mut b64, mut c64) = (f64::from(*b), f64::from(*c));
                 let field = |v| NumberField::number(v, scope).speed(0.01).range(0.0..=1.0).decimals(0, 3);
-                ui.add(field(&mut b64).prefix("B ").remember("bicubic-b"))
+                ui.add(field(&mut b64).prefix("B ").remember("bicubic.b"))
                     .on_hover_text("Blur: 0 is sharpest; 1/3 with C = 1/3 is Mitchell's softer choice.");
-                ui.add(field(&mut c64).prefix("C ").remember("bicubic-c"))
+                ui.add(field(&mut c64).prefix("C ").remember("bicubic.c"))
                     .on_hover_text("Sharpening: more sharpens edges, and rings more.");
                 (*b, *c) = (b64 as f32, c64 as f32);
             });

@@ -1,15 +1,82 @@
 //! The field every number and length is typed into: dragged like egui's `DragValue`, and
 //! clicked, it takes an expression (`opal_core::expr`), worked out when entered. While it is
 //! being typed, what it comes to shows below it, or what is wrong with it, and where; Up and
-//! Down bring back what was entered in it before.
+//! Down bring back what was entered in it before: kept between sessions, for a field
+//! remembered by name ([`NumberField::remember`]), with the settings.
 
 use eframe::egui::{self, Key, Modifiers};
 use opal_core::expr::{Expr, Scope, Want};
 use opal_core::units::Unit;
+use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 
 /// How many entries a field remembers.
-const REMEMBERED: usize = 20;
+pub const REMEMBERED: usize = 20;
+
+/// Where a field's entries are remembered: by name, kept between sessions; or by the field
+/// alone, for this session.
+#[derive(Clone)]
+enum Remembered {
+    Named(String),
+    Field(egui::Id),
+}
+
+/// The entries of the fields remembered by name, the latest first: shared through egui's
+/// memory, so that a field reaches them with only its `Ui`, and saved with the settings
+/// (`AppState::field_entries`).
+#[derive(Clone, Default)]
+struct Named {
+    entries: BTreeMap<String, Vec<String>>,
+    changed: bool,
+}
+
+fn named_id() -> egui::Id {
+    egui::Id::unique("number-field-named-entries")
+}
+
+impl Remembered {
+    /// Its entries, the latest first.
+    fn entries(&self, ctx: &egui::Context) -> Vec<String> {
+        match self {
+            Remembered::Named(name) => {
+                ctx.data(|d| d.get_temp::<Named>(named_id())).and_then(|n| n.entries.get(name).cloned())
+            }
+            Remembered::Field(id) => ctx.data(|d| d.get_temp(*id)),
+        }
+        .unwrap_or_default()
+    }
+
+    /// Remembers `text` as entered, the latest first, once.
+    fn keep(&self, ctx: &egui::Context, text: &str) {
+        let text = text.trim().to_owned();
+        let keep = |entries: &mut Vec<String>| {
+            entries.retain(|e| *e != text);
+            entries.insert(0, text.clone());
+            entries.truncate(REMEMBERED);
+        };
+        ctx.data_mut(|d| match self {
+            Remembered::Named(name) => {
+                let n = d.get_temp_mut_or_default::<Named>(named_id());
+                keep(n.entries.entry(name.clone()).or_default());
+                n.changed = true;
+            }
+            Remembered::Field(id) => keep(d.get_temp_mut_or_default(*id)),
+        });
+    }
+}
+
+/// Gives the fields remembered by name the entries `entries` (from an earlier session).
+pub fn load_entries(ctx: &egui::Context, entries: BTreeMap<String, Vec<String>>) {
+    ctx.data_mut(|d| d.insert_temp(named_id(), Named { entries, changed: false }));
+}
+
+/// The entries of the fields remembered by name, if they have changed since this last said.
+pub fn changed_entries(ctx: &egui::Context) -> Option<BTreeMap<String, Vec<String>>> {
+    ctx.data_mut(|d| {
+        let n = d.get_temp_mut_or_default::<Named>(named_id());
+        std::mem::take(&mut n.changed).then(|| n.entries.clone())
+    })
+}
 
 /// A field for a number held in `value`: a length in pixels (shown in its scope's unit), an
 /// angle in degrees, or a plain number; worked out against `scope` when typed.
@@ -23,7 +90,7 @@ pub struct NumberField<'a> {
     decimals: RangeInclusive<usize>,
     prefix: String,
     suffix: String,
-    remember: Option<egui::Id>,
+    remember: Option<String>,
 }
 
 /// What is being typed into a field.
@@ -110,10 +177,10 @@ impl<'a> NumberField<'a> {
         self
     }
 
-    /// Remembers what is entered under `key`, shared by every field given it (else by the
-    /// field alone).
-    pub fn remember(mut self, key: impl std::hash::Hash + std::fmt::Debug) -> Self {
-        self.remember = Some(egui::Id::unique(("number-field-entries", key)));
+    /// Remembers what is entered under the name `name`, shared by every field given it, and
+    /// kept between sessions (else by the field alone, for this session).
+    pub fn remember(mut self, name: impl Into<String>) -> Self {
+        self.remember = Some(name.into());
         self
     }
 
@@ -197,7 +264,7 @@ impl<'a> NumberField<'a> {
             }
         });
         let text = self.text_of(value);
-        let remembered = self.remember.unwrap_or_else(|| id.with("entries"));
+        let remembered = self.remember.clone().map_or_else(|| Remembered::Field(id.with("entries")), Remembered::Named);
         let mut entered = None;
         let mut response = if editing {
             let mut typing =
@@ -209,7 +276,7 @@ impl<'a> NumberField<'a> {
                     kept: false,
                 });
             let refocused = std::mem::take(&mut typing.kept);
-            recall(ui, remembered, &mut typing, id);
+            recall(ui, &remembered, &mut typing, id);
             let style = ui.style().drag_value_text_style.clone();
             let r = ui.add(
                 egui::TextEdit::singleline(&mut typing.text)
@@ -231,7 +298,7 @@ impl<'a> NumberField<'a> {
                 match result {
                     Ok(v) => {
                         value = self.clamp(v);
-                        keep_entry(ui, remembered, &typing.text);
+                        remembered.keep(ui.ctx(), &typing.text);
                         entered = Some(typing.text.trim().to_owned());
                     }
                     // Enter on what cannot be worked out keeps it, to be put right; leaving
@@ -267,7 +334,7 @@ impl<'a> NumberField<'a> {
                 && let Ok(v) = self.work_out(&t.text)
             {
                 value = self.clamp(v);
-                keep_entry(ui, remembered, &t.text);
+                remembered.keep(ui.ctx(), &t.text);
                 entered = Some(t.text.trim().to_owned());
             }
             if ui.input(|i| i.pointer.any_pressed() || i.pointer.any_released()) {
@@ -352,7 +419,7 @@ pub fn show_number(v: f64, places: RangeInclusive<usize>) -> String {
 
 /// Up and Down while typing: what was entered before, the latest first, and back again to
 /// what was being typed.
-fn recall(ui: &mut egui::Ui, remembered: egui::Id, typing: &mut Typing, id: egui::Id) {
+fn recall(ui: &mut egui::Ui, remembered: &Remembered, typing: &mut Typing, id: egui::Id) {
     let (up, down) = ui.input_mut(|i| {
         (
             i.count_and_consume_key(Modifiers::NONE, Key::ArrowUp),
@@ -362,7 +429,7 @@ fn recall(ui: &mut egui::Ui, remembered: egui::Id, typing: &mut Typing, id: egui
     if up == 0 && down == 0 {
         return;
     }
-    let entries: Vec<String> = ui.data(|d| d.get_temp(remembered)).unwrap_or_default();
+    let entries = remembered.entries(ui.ctx());
     if entries.is_empty() {
         return;
     }
@@ -383,17 +450,6 @@ fn recall(ui: &mut egui::Ui, remembered: egui::Id, typing: &mut Typing, id: egui
     let end = egui::text::CCursor::new(typing.text.chars().count());
     state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
     state.store(ui.ctx(), id);
-}
-
-/// Remembers `text` as entered, the latest first, once.
-fn keep_entry(ui: &mut egui::Ui, remembered: egui::Id, text: &str) {
-    let text = text.trim().to_owned();
-    ui.data_mut(|d| {
-        let entries: &mut Vec<String> = d.get_temp_mut_or_default(remembered);
-        entries.retain(|e| *e != text);
-        entries.insert(0, text);
-        entries.truncate(REMEMBERED);
-    });
 }
 
 fn select_all(ui: &egui::Ui, id: egui::Id, text: &str) {
