@@ -16,6 +16,24 @@ name a `script` (the Python package gives the running script's file name): the c
 then a script run, and once it closes, what it changed in each image one change after another
 becomes one history state, `Script: <name>`. Without it, each call is a state of its own.
 
+## Expressions
+
+Every number, length, angle and pixel count a method takes may be an expression instead, as
+text (`"Logo.right + 5mm"`), worked out by the editor when the call runs, against the image as
+it is then: the language its fields take (see `design.md`, *Expressions*). It has numbers in
+any unit, mixed (`2in + 3mm`; a bare number added to a length is in the call's `unit`, one
+multiplying it a plain factor); `+ - * / ^` and parentheses; `min`, `max`, `abs`, `round`,
+`floor`, `ceil` (to whole pixels, or a step: `round(x, 1mm)`), `sqrt`, `sin`, `cos`, `tan`,
+`asin`, `acos`, `atan`, `atan2`, `pi`; the canvas and layers, by name or `layer(id)`, as bounds
+(`left`, `right`, `top`, `bottom`, `width`, `height`, `x`, `y`, and the points `top_left`,
+`top_right`, `bottom_left`, `bottom_right`, `center`, each with `.x` and `.y`), positions from
+what the call counts from (the canvas's top-left corner, unless `from_layer` and `from_anchor`
+say); points (`mid`, `lerp`, `dist`, `point(x, y)`); the image's `ppi`; and for a call that
+places a box, the box as it was (`x`, `y`, `width`, `height`, `angle`): `transform(x="x + 1cm")`
+moves the selected layers 1 cm right. What cannot be worked out is refused, saying where. The
+Python package builds the same text with operators: `opal.layer(logo).right + opal.mm(5)`,
+`opal.box.width / 2`, `opal.fn.mid(a, b)` (`opal.expr`).
+
 ## Commands
 
 ### `new`
@@ -123,7 +141,7 @@ Paste the image on the clipboard, then place and size it.
 | `y` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
 | `width` | length | The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is. |
 | `height` | length | The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is. |
-| `angle` | number | The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is. |
+| `angle` | angle | The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0 degrees. Default: as it is. |
 | `fit` | `stretch`, `inside`, `cover` | With both width and height given: stretch it to them (along its own sides, turned as it is); or keep its proportions and fit it, as it is turned, inside the rectangle they make on the canvas (placed by its anchor point at x and y), or make it cover that rectangle, centered on it. Default: "stretch". |
 | `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left". |
 | `from_layer` | layer | A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas. |
@@ -142,7 +160,7 @@ Paste where the copy came from.
 | `y` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
 | `width` | length | The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is. |
 | `height` | length | The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is. |
-| `angle` | number | The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is. |
+| `angle` | angle | The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0 degrees. Default: as it is. |
 | `fit` | `stretch`, `inside`, `cover` | With both width and height given: stretch it to them (along its own sides, turned as it is); or keep its proportions and fit it, as it is turned, inside the rectangle they make on the canvas (placed by its anchor point at x and y), or make it cover that rectangle, centered on it. Default: "stretch". |
 | `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left". |
 | `from_layer` | layer | A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas. |
@@ -164,7 +182,7 @@ Place an image file into this image, then position and size it.
 | `y` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
 | `width` | length | The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is. |
 | `height` | length | The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is. |
-| `angle` | number | The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is. |
+| `angle` | angle | The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0 degrees. Default: as it is. |
 | `fit` | `stretch`, `inside`, `cover` | With both width and height given: stretch it to them (along its own sides, turned as it is); or keep its proportions and fit it, as it is turned, inside the rectangle they make on the canvas (placed by its anchor point at x and y), or make it cover that rectangle, centered on it. Default: "stretch". |
 | `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left". |
 | `from_layer` | layer | A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas. |
@@ -184,7 +202,7 @@ Move, scale and rotate the selected layers with a box.
 | `y` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
 | `width` | length | The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is. |
 | `height` | length | The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is. |
-| `angle` | number | The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is. |
+| `angle` | angle | The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0 degrees. Default: as it is. |
 | `fit` | `stretch`, `inside`, `cover` | With both width and height given: stretch it to them (along its own sides, turned as it is); or keep its proportions and fit it, as it is turned, inside the rectangle they make on the canvas (placed by its anchor point at x and y), or make it cover that rectangle, centered on it. Default: "stretch". |
 | `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left". |
 | `from_layer` | layer | A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas. |
@@ -382,7 +400,7 @@ Turn the whole image by any angle.
 | Parameter | Kind | |
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
-| `degrees` (required) | number | The angle, clockwise. From -360.0 to 360.0. |
+| `degrees` (required) | angle | The angle, clockwise. From -360.0 to 360.0 degrees. |
 | `grow` | bool | Grow the canvas so that nothing is cut off. Default: true. |
 
 ### `flip_horizontal`
@@ -442,7 +460,7 @@ Crops the image to a rectangle of its canvas, which may be turned: the canvas be
 | `y` | length | Where the rectangle's anchor point is, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where that point of the canvas is. |
 | `width` | length | The rectangle's width. From 1.0 to 300000.0 pixels. Default: the canvas's. |
 | `height` | length | The rectangle's height. From 1.0 to 300000.0 pixels. Default: the canvas's. |
-| `angle` | number | The rectangle's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: 0. |
+| `angle` | angle | The rectangle's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0 degrees. Default: 0. |
 | `delete` | bool | Remove the pixels outside the new canvas, rather than keep them for later. Default: the Crop tool's Delete cropped pixels. |
 | `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the rectangle x and y give, and what the angle turns it about. Default: "top-left". |
 | `from_layer` | layer | A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas. |
@@ -466,10 +484,10 @@ Puts pixels into an image, at a place on its canvas: as a new layer above the ac
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 | `layer` | layer | A pixel layer, by id, whose pixels they replace there. Default: a new layer, above the active one. |
-| `x` | int | Where their left edge goes, in pixels from the canvas's. From -300000 to 600000. Default: 0. |
-| `y` | int | Where their top edge goes, in pixels from the canvas's. From -300000 to 600000. Default: 0. |
-| `width` (required) | int | How many pixels across. From 1 to 300000. |
-| `height` (required) | int | How many pixels down. From 1 to 300000. |
+| `x` | pixels | Where their left edge goes, in pixels from the canvas's. From -300000 to 600000 pixels. Default: 0. |
+| `y` | pixels | Where their top edge goes, in pixels from the canvas's. From -300000 to 600000 pixels. Default: 0. |
+| `width` (required) | pixels | How many pixels across. From 1 to 300000 pixels. |
+| `height` (required) | pixels | How many pixels down. From 1 to 300000 pixels. |
 | `format` | `srgb8`, `srgb16`, `linear` | How each pixel is given, row by row from the top left, red, green, blue and alpha (straight, not premultiplied): srgb8 as bytes in sRGB; srgb16 as 16-bit values in sRGB, little-endian; linear as 32-bit floats in linear light, little-endian. Default: "srgb8". |
 | `shm` | text | The shared memory holding them, by name: made by the caller, with width × height pixels. Default: none: they are in data. |
 | `data` | text | The pixels in base64, if not in shared memory (a request is at most 1 MB). Default: none: they are in shm. |
@@ -497,7 +515,7 @@ What an image shows (or one of its layers alone), as a PNG, scaled down to fit a
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 | `layer` | layer | One layer alone, by id: as if shown, at full opacity. Default: the image as shown, all its visible layers together. |
-| `max_side` | int | The most pixels it may be across or down. From 16 to 8192. Default: 1024. |
+| `max_side` | pixels | The most pixels it may be across or down. From 16 to 8192 pixels. Default: 1024. |
 
 ### `pixels`
 
@@ -507,10 +525,10 @@ The pixels of an image, as shown, or of one layer alone, within a rectangle of t
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 | `layer` | layer | One layer alone, by id: as if shown, at full opacity. Default: the image as shown, all its visible layers together. |
-| `x` | int | The rectangle's left edge, in pixels from the canvas's. From -300000 to 600000. Default: 0. |
-| `y` | int | The rectangle's top edge, in pixels from the canvas's. From -300000 to 600000. Default: 0. |
-| `width` | int | The rectangle's width, in pixels. From 1 to 300000. Default: the canvas's. |
-| `height` | int | The rectangle's height, in pixels. From 1 to 300000. Default: the canvas's. |
+| `x` | pixels | The rectangle's left edge, in pixels from the canvas's. From -300000 to 600000 pixels. Default: 0. |
+| `y` | pixels | The rectangle's top edge, in pixels from the canvas's. From -300000 to 600000 pixels. Default: 0. |
+| `width` | pixels | The rectangle's width, in pixels. From 1 to 300000 pixels. Default: the canvas's. |
+| `height` | pixels | The rectangle's height, in pixels. From 1 to 300000 pixels. Default: the canvas's. |
 | `format` | `srgb8`, `srgb16`, `linear` | How each pixel is given, row by row from the top left, red, green, blue and alpha (straight, not premultiplied): srgb8 as bytes in sRGB; srgb16 as 16-bit values in sRGB, little-endian; linear as 32-bit floats in linear light, little-endian. Default: "srgb8". |
 | `shared` | bool | In shared memory, which the answer names as shm, rather than in the answer (on Windows: elsewhere they always come in the answer). Default: true. |
 

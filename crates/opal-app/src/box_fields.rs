@@ -388,7 +388,17 @@ fn fit_into(ui: &mut egui::Ui, rect: &mut Option<[f64; 4]>, how: &Rect, salt: &s
     // Stretched, the box is exactly the rectangle typed, so upright; fitted, it keeps its turn.
     let angle = (fit == Some(Fit::Stretch)).then_some(0.0);
     let from = how.from;
-    fit.map(|fit| BoxArgs { x: Some(x), y: Some(y), width: Some(w), height: Some(h), angle, fit, at, from })
+    fit.map(|fit| BoxArgs {
+        x: Some(x),
+        y: Some(y),
+        width: Some(w),
+        height: Some(h),
+        angle,
+        fit,
+        at,
+        from,
+        typed: Vec::new(),
+    })
 }
 
 /// The crop box's fields for document `id` (its position, size and angle); what is typed

@@ -35,6 +35,14 @@ What a script changes in an image becomes one history state when it ends (or
 disconnects), so that one undo takes back the whole run; in an interactive session each
 call is a step of its own.
 
+Any number or length a method takes may be an expression, worked out by the editor when
+the call runs: text (``"Logo.right + 5mm"``), or one built with :mod:`opal.expr`'s
+``layer``, ``canvas``, ``box``, ``fn`` and units, which are here too::
+
+    from opal import layer, box, mm
+    editor.transform(x=box.x + mm(5))
+    editor.paste(x=layer("Logo").right + mm(5))
+
 The connection is the editor's local pipe, found with its token in ``api.json`` in the
 user's settings folder; only the user's own programs can read it. With no editor running,
 ``connect`` starts one of its own with no window, which ends with the script: so a script
@@ -53,6 +61,8 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+
+from .expr import Expr, box, canvas, cm, deg, fn, ft, inch, layer, m, mm, pc, pi, ppi, pt, px, rad, yd
 
 __all__ = ["Editor", "OpalError", "connect", "connection_file", "editor_program"]
 
@@ -151,7 +161,10 @@ _DTYPES = {"srgb8": "u1", "srgb16": "<u2", "linear": "<f4"}
 
 def _plain(value: Any) -> Any:
     """What JSON cannot take as it is, as what it stands for: numpy's numbers and arrays (as
-    their values and lists), and anything else that is a whole number or a number."""
+    their values and lists), an expression (as its text), and anything else that is a whole
+    number or a number."""
+    if isinstance(value, Expr):
+        return str(value)
     if hasattr(value, "tolist"):
         return value.tolist()
     try:

@@ -190,9 +190,10 @@ fn made_tools() -> Value {
                 let name = p["name"].as_str().expect("named");
                 let mut schema = match p["kind"].as_str().expect("a kind") {
                     "bool" => json!({ "type": "boolean" }),
-                    "int" => json!({ "type": "integer", "minimum": p["min"], "maximum": p["max"] }),
-                    "number" => json!({ "type": "number", "minimum": p["min"], "maximum": p["max"] }),
-                    // A number in the call's unit, or text with its own: the range is in pixels.
+                    // A number, or an expression as text (whose range is checked once worked out).
+                    "int" | "pixels" => json!({ "type": ["integer", "string"], "minimum": p["min"], "maximum": p["max"] }),
+                    "number" | "angle" => json!({ "type": ["number", "string"], "minimum": p["min"], "maximum": p["max"] }),
+                    // A number in the call's unit, or an expression: the range is in pixels.
                     "length" => json!({ "type": ["number", "string"] }),
                     "any" => json!({}),
                     "text" | "path" => json!({ "type": "string" }),

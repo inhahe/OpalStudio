@@ -15,6 +15,7 @@ use crate::state::{AppState, Background, MessageKind, NewImage};
 use crate::writer::Then;
 use eframe::egui;
 use opal_core::document::{Layer, LayerContent, LayerId, ObjectKind};
+use opal_core::expr::{Expr, Own, Scope, Want};
 use opal_core::geom::IRect;
 use opal_core::raster::RasterImage;
 use opal_core::tile::Pixel;
@@ -29,20 +30,33 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind {
     Bool,
+    /// A whole number, or an expression that comes to one.
     Int {
         min: i64,
         max: i64,
     },
+    /// A number, or an expression that comes to one.
     Number {
         min: f64,
         max: f64,
     },
-    /// A length: a number in the call's `unit` (pixels unless it says), or text with a unit
-    /// of its own ("8.5in"), converted at the image's resolution; in pixels, from `min` to
-    /// `max`.
+    /// A length: a number in the call's `unit` (pixels unless it says), or an expression
+    /// (`opal_core::expr`: "8.5in", "Logo.right + 5mm"), worked out at the image's
+    /// resolution; in pixels, from `min` to `max`.
     Length {
         min: f64,
         max: f64,
+    },
+    /// An angle: a number of degrees, or an expression ("90deg - angle", "1rad").
+    Angle {
+        min: f64,
+        max: f64,
+    },
+    /// A whole number of pixels: a number, or an expression that comes to a number or a
+    /// length (worked out in pixels, and rounded to whole ones).
+    Pixels {
+        min: i64,
+        max: i64,
     },
     Text,
     /// A file's path.
@@ -132,7 +146,7 @@ const OVERWRITE: Param = Param {
 };
 
 const fn side(name: &'static str, help: &'static str, otherwise: Otherwise) -> Param {
-    Param { name, kind: Kind::Int { min: 1, max: SIDE }, help, otherwise }
+    Param { name, kind: Kind::Pixels { min: 1, max: SIDE }, help, otherwise }
 }
 
 /// A canvas side as a length (rounded to whole pixels).
@@ -211,7 +225,7 @@ const BOX_HEIGHT: Param = Param {
 };
 const BOX_ANGLE: Param = Param {
     name: "angle",
-    kind: Kind::Number { min: -360.0, max: 360.0 },
+    kind: Kind::Angle { min: -360.0, max: 360.0 },
     help: "The box's angle, in degrees clockwise, about its anchor point.",
     otherwise: Otherwise::Now("as it is"),
 };
@@ -395,7 +409,7 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             DOCUMENT,
             Param {
                 name: "degrees",
-                kind: Kind::Number { min: -360.0, max: 360.0 },
+                kind: Kind::Angle { min: -360.0, max: 360.0 },
                 help: "The angle, clockwise.",
                 otherwise: Otherwise::Required,
             },
@@ -531,7 +545,7 @@ const QUERIES: &[(&str, &str, &[Param])] = &[
             },
             Param {
                 name: "max_side",
-                kind: Kind::Int { min: 16, max: 8192 },
+                kind: Kind::Pixels { min: 16, max: 8192 },
                 help: "The most pixels it may be across or down.",
                 otherwise: Otherwise::Value("1024"),
             },
@@ -663,7 +677,7 @@ const CHANGES: &[(&str, &str, &[Param])] = &[
             length_side("height", "The rectangle's height.", Otherwise::Now("the canvas's")),
             Param {
                 name: "angle",
-                kind: Kind::Number { min: -360.0, max: 360.0 },
+                kind: Kind::Angle { min: -360.0, max: 360.0 },
                 help: "The rectangle's angle, in degrees clockwise, about its anchor point.",
                 otherwise: Otherwise::Value("0"),
             },
@@ -718,13 +732,13 @@ const CHANGES: &[(&str, &str, &[Param])] = &[
             },
             Param {
                 name: "x",
-                kind: Kind::Int { min: -SIDE, max: 2 * SIDE },
+                kind: Kind::Pixels { min: -SIDE, max: 2 * SIDE },
                 help: "Where their left edge goes, in pixels from the canvas's.",
                 otherwise: Otherwise::Value("0"),
             },
             Param {
                 name: "y",
-                kind: Kind::Int { min: -SIDE, max: 2 * SIDE },
+                kind: Kind::Pixels { min: -SIDE, max: 2 * SIDE },
                 help: "Where their top edge goes, in pixels from the canvas's.",
                 otherwise: Otherwise::Value("0"),
             },
@@ -755,13 +769,13 @@ const CHANGES: &[(&str, &str, &[Param])] = &[
 
 const REGION_X: Param = Param {
     name: "x",
-    kind: Kind::Int { min: -SIDE, max: 2 * SIDE },
+    kind: Kind::Pixels { min: -SIDE, max: 2 * SIDE },
     help: "The rectangle's left edge, in pixels from the canvas's.",
     otherwise: Otherwise::Value("0"),
 };
 const REGION_Y: Param = Param {
     name: "y",
-    kind: Kind::Int { min: -SIDE, max: 2 * SIDE },
+    kind: Kind::Pixels { min: -SIDE, max: 2 * SIDE },
     help: "The rectangle's top edge, in pixels from the canvas's.",
     otherwise: Otherwise::Value("0"),
 };
@@ -1081,28 +1095,83 @@ impl Args {
         self.opt_number(name).map(crate::lengths::whole_side)
     }
 
-    /// These arguments with each length of `params` in pixels: a number in the call's
-    /// `unit`, or text with a unit of its own, converted at `ppi` pixels per inch. Each
-    /// must then be in its parameter's range.
-    fn in_pixels(mut self, params: &[Param], ppi: f64) -> Result<Args, String> {
+    /// These arguments with the numbers of those `params` that `which` takes worked out: a
+    /// length in pixels (a number in the call's `unit`, converted at `scope`'s resolution),
+    /// an angle in degrees, a number; given as an expression, worked out in `scope`. Each
+    /// must then be in its parameter's range. An expression for a parameter named in
+    /// `later` is left as it is: a box's, worked out once the box is open (see [`BoxArgs`]).
+    fn worked_out(
+        mut self,
+        params: &[Param],
+        scope: &Scope,
+        later: &[&str],
+        which: impl Fn(&Param) -> bool,
+    ) -> Result<Args, String> {
         let unit = self.text("unit").and_then(Unit::from_name).unwrap_or(Unit::Px);
-        for p in params {
-            let (Kind::Length { min, max }, Some(v)) = (p.kind, self.0.get_mut(p.name)) else { continue };
-            let (value, typed) = match &*v {
-                Value::String(s) => parse_length(s).expect("checked"),
-                v => (v.as_f64().expect("checked"), None),
-            };
-            let u = typed.unwrap_or(unit);
-            let px = u.to_px(value, ppi);
-            if !(min..=max).contains(&px) {
-                let given = if u == Unit::Px {
-                    format!("{px}")
-                } else {
-                    format!("{value} {u}, which is {px} pixels at {ppi} pixels per inch")
-                };
-                return Err(format!("\"{}\" must lie between {min} and {max} pixels, not {given}", p.name));
+        let ppi = scope.ppi;
+        for p in params.iter().filter(|p| which(p)) {
+            let Some(v) = self.0.get_mut(p.name) else { continue };
+            let text = v.as_str().map(str::to_owned);
+            if text.is_some() && later.contains(&p.name) {
+                continue;
             }
-            *v = json!(px);
+            let work = |want, unit| -> Result<f64, String> {
+                let text = text.as_deref().expect("an expression");
+                let scope = Scope { unit, ..*scope };
+                Expr::parse(text).and_then(|e| e.eval(&scope, want)).map_err(|e| expr_error(p.name, text, &e))
+            };
+            // What a value out of range was given as, said after it.
+            let given = || text.as_ref().map_or(String::new(), |t| format!(", what \"{t}\" comes to"));
+            match p.kind {
+                Kind::Length { min, max } => {
+                    let px = match &text {
+                        Some(_) => work(Want::Length, unit)?,
+                        None => unit.to_px(v.as_f64().expect("checked"), ppi),
+                    };
+                    if !(min..=max).contains(&px) {
+                        // A length typed in a unit is told in it too.
+                        let typed = match text.as_deref() {
+                            Some(t) => parse_length(t),
+                            None => Some((v.as_f64().expect("checked"), None)),
+                        };
+                        let told = match typed {
+                            Some((value, u)) if u.unwrap_or(unit) != Unit::Px => {
+                                let u = u.unwrap_or(unit);
+                                format!("{value} {u}, which is {px} pixels at {ppi} pixels per inch")
+                            }
+                            Some(_) => format!("{px}"),
+                            None => format!("{px}{}", given()),
+                        };
+                        return Err(format!("\"{}\" must lie between {min} and {max} pixels, not {told}", p.name));
+                    }
+                    *v = json!(px);
+                }
+                Kind::Number { min, max } | Kind::Angle { min, max } if text.is_some() => {
+                    let want = if matches!(p.kind, Kind::Angle { .. }) { Want::Angle } else { Want::Number };
+                    let x = work(want, unit)?;
+                    if !(min..=max).contains(&x) {
+                        return Err(format!("\"{}\" must lie between {min} and {max}, not {x}{}", p.name, given()));
+                    }
+                    *v = json!(x);
+                }
+                Kind::Int { min, max } | Kind::Pixels { min, max } if text.is_some() => {
+                    let x = if matches!(p.kind, Kind::Pixels { .. }) {
+                        // In whole pixels, whatever the call's unit: a bare number is pixels.
+                        work(Want::Pixels, Unit::Px)?.round()
+                    } else {
+                        let x = work(Want::Number, unit)?;
+                        if x.fract() != 0.0 {
+                            return Err(format!("\"{}\" must be a whole number, not {x}{}", p.name, given()));
+                        }
+                        x
+                    };
+                    if !(min as f64..=max as f64).contains(&x) {
+                        return Err(format!("\"{}\" must lie between {min} and {max}, not {x}{}", p.name, given()));
+                    }
+                    *v = json!(x as i64);
+                }
+                _ => {}
+            }
         }
         Ok(self)
     }
@@ -1153,6 +1222,46 @@ pub struct BoxArgs {
     /// so a paste whose clipboard is read later, or a box moving the layer counted from,
     /// counts from where it was then.
     pub from: [f64; 2],
+    /// Numbers given as expressions, to be worked out once the box is open (they may name
+    /// it: `x + 1cm`), each in place of its number (see [`worked_out`](Self::worked_out)).
+    pub typed: Vec<Typed>,
+}
+
+/// One of a box's numbers given as an expression.
+#[derive(Clone, Debug)]
+pub struct Typed {
+    pub field: Field,
+    pub expr: Expr,
+    /// As it was given, for what is said about it.
+    pub text: String,
+    /// What a bare number in it is in (the call's `unit`).
+    pub unit: Unit,
+    /// What it may come to: in pixels, or for the angle, in degrees.
+    pub range: (f64, f64),
+}
+
+/// Which of a box's numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    X,
+    Y,
+    Width,
+    Height,
+    Angle,
+}
+
+impl Field {
+    const ALL: [(Field, &'static str); 5] =
+        [(Field::X, "x"), (Field::Y, "y"), (Field::Width, "width"), (Field::Height, "height"), (Field::Angle, "angle")];
+}
+
+/// The parameters a box's call gives as numbers: worked out once the box is open, if
+/// expressions.
+const BOXED: [&str; 5] = ["x", "y", "width", "height", "angle"];
+
+/// Whether `method` puts a box somewhere (its numbers counted from a point it is told).
+fn takes_box(method: &Method) -> bool {
+    method.params.iter().any(|p| p.name == "from_anchor") && method.params.iter().any(|p| p.name == "x")
 }
 
 /// How a box given both a width and a height takes them.
@@ -1168,10 +1277,11 @@ pub enum Fit {
 }
 
 impl BoxArgs {
-    /// The box `args` give (once in pixels), counted from the point their `from_layer` and
-    /// `from_anchor` give in `doc` (as it is when the call is made; a new image's canvas
-    /// corner, with none open), or why there is no such point.
-    fn of(args: &Args, doc: Option<&opal_core::document::Document>) -> Result<BoxArgs, String> {
+    /// The box `args` give to a method of `params` (once worked out: its expressions kept for
+    /// the box), counted from the point their `from_layer` and `from_anchor` give in `doc`
+    /// (as it is when the call is made; a new image's canvas corner, with none open), or why
+    /// there is no such point.
+    fn of(args: &Args, params: &[Param], doc: Option<&opal_core::document::Document>) -> Result<BoxArgs, String> {
         let from = match doc {
             Some(doc) => located(&origin_of(args), doc)?,
             None if args.get("from_layer").is_some() => {
@@ -1179,12 +1289,24 @@ impl BoxArgs {
             }
             None => [0.0, 0.0],
         };
+        let unit = args.text("unit").and_then(Unit::from_name).unwrap_or(Unit::Px);
+        let mut typed = Vec::new();
+        for (field, name) in Field::ALL {
+            let Some(text) = args.text(name) else { continue };
+            let range = match params.iter().find(|p| p.name == name).map(|p| p.kind) {
+                Some(Kind::Length { min, max } | Kind::Angle { min, max }) => (min, max),
+                kind => unreachable!("a box's {name} is a length or an angle, not {kind:?}"),
+            };
+            let expr = Expr::parse(text).expect("checked to read");
+            typed.push(Typed { field, expr, text: text.to_owned(), unit, range });
+        }
         Ok(BoxArgs {
             x: args.opt_number("x"),
             y: args.opt_number("y"),
             width: args.opt_number("width"),
             height: args.opt_number("height"),
             angle: args.opt_number("angle"),
+            typed,
             fit: match args.text("fit") {
                 Some("inside") => Fit::Inside,
                 Some("cover") => Fit::Cover,
@@ -1193,6 +1315,34 @@ impl BoxArgs {
             at: crate::box_fields::point(args.text("anchor").unwrap_or("top-left")),
             from,
         })
+    }
+
+    /// These numbers with the expressions given worked out, in image `doc` (as it was before
+    /// the box opened) at `ppi`, for the box `own` (its numbers as these count them).
+    pub fn worked_out(&self, doc: &opal_core::document::Document, ppi: f64, own: Own) -> Result<BoxArgs, String> {
+        let mut out = BoxArgs { typed: Vec::new(), ..self.clone() };
+        for t in &self.typed {
+            let want = if t.field == Field::Angle { Want::Angle } else { Want::Length };
+            let scope = Scope { doc: Some(doc), ppi, unit: t.unit, origin: self.from, own: Some(own) };
+            let name = Field::ALL.iter().find(|f| f.0 == t.field).expect("every field is named").1;
+            let v = t.expr.eval(&scope, want).map_err(|e| expr_error(name, &t.text, &e))?;
+            let (min, max) = t.range;
+            if !(min..=max).contains(&v) {
+                let unit = if want == Want::Angle { "" } else { " pixels" };
+                return Err(format!(
+                    "\"{name}\" must lie between {min} and {max}{unit}, not {v}, what \"{}\" comes to",
+                    t.text
+                ));
+            }
+            *match t.field {
+                Field::X => &mut out.x,
+                Field::Y => &mut out.y,
+                Field::Width => &mut out.width,
+                Field::Height => &mut out.height,
+                Field::Angle => &mut out.angle,
+            } = Some(v);
+        }
+        Ok(out)
     }
 
     /// The box `p` (as the document has it, its position that of the point [`at`](Self::at))
@@ -1227,6 +1377,11 @@ pub(crate) fn place_box(d: &mut crate::doc::DocState, place: &BoxArgs) -> Result
     let s = d.transform.as_ref().expect("a box is open");
     let at = place.at;
     let p = s.params_at(at);
+    // Expressions given are worked out in the image as it was before the box opened, for
+    // the box as it is.
+    let own = Own { x: p.x - corner[0], y: p.y - corner[1], width: p.width, height: p.height, angle: p.angle };
+    let place = &place.worked_out(d.history.doc(), d.doc().resolution, own)?;
+    let s = d.transform.as_ref().expect("a box is open");
     let m = match (place.fit, place.width, place.height) {
         (Fit::Inside | Fit::Cover, Some(w), Some(h)) => {
             let turned = s.edited(&p, &crate::transform::Params { angle: place.angle.unwrap_or(p.angle), ..p }, at);
@@ -1244,6 +1399,15 @@ pub(crate) fn place_box(d: &mut crate::doc::DocState, place: &BoxArgs) -> Result
     }
     d.set_box(m, None);
     Ok(())
+}
+
+/// What is wrong with expression `text`, given for parameter `name`, and where.
+fn expr_error(name: &str, text: &str, e: &opal_core::expr::Error) -> String {
+    let at = match text.get(e.at.clone()) {
+        Some(part) if !part.is_empty() => format!("at \"{part}\" in \"{text}\""),
+        _ => format!("at the end of \"{text}\""),
+    };
+    format!("\"{name}\": {} ({at})", e.message)
 }
 
 /// What `args` say x and y count from (`from_layer`, `from_anchor`).
@@ -1321,26 +1485,24 @@ fn check_value(p: &Param, value: &Value) -> Result<(), String> {
     let id = |v: &Value| v.as_i64().is_some_and(|i| i >= 0);
     let ok = match p.kind {
         Kind::Bool => value.is_boolean(),
-        Kind::Int { min, max } => match value.as_i64() {
+        // An expression must read; what it comes to is checked once worked out.
+        Kind::Int { .. } | Kind::Pixels { .. } | Kind::Number { .. } | Kind::Angle { .. } | Kind::Length { .. }
+            if value.is_string() =>
+        {
+            let text = value.as_str().expect("checked");
+            return Expr::parse(text).map(|_| ()).map_err(|e| expr_error(name, text, &e));
+        }
+        Kind::Int { min, max } | Kind::Pixels { min, max } => match value.as_i64() {
             Some(i) if (min..=max).contains(&i) => true,
             Some(i) => return Err(format!("\"{name}\" must lie between {min} and {max}, not {i}")),
             None => false,
         },
-        Kind::Number { min, max } => match value.as_f64() {
+        Kind::Number { min, max } | Kind::Angle { min, max } => match value.as_f64() {
             Some(x) if (min..=max).contains(&x) => true,
             Some(x) => return Err(format!("\"{name}\" must lie between {min} and {max}, not {x}")),
             None => false,
         },
-        Kind::Length { .. } => match value {
-            Value::Number(n) => n.as_f64().is_some_and(f64::is_finite),
-            Value::String(s) if parse_length(s).is_some() => true,
-            Value::String(s) => {
-                return Err(format!(
-                    "\"{name}\" must be a number, or a length with its unit (\"8.5in\", \"21 cm\"), not \"{s}\""
-                ));
-            }
-            _ => false,
-        },
+        Kind::Length { .. } => value.as_f64().is_some_and(f64::is_finite),
         Kind::Any => true,
         Kind::Text => value.as_str().is_some_and(|s| !s.trim().is_empty()),
         Kind::Path => match value.as_str() {
@@ -1367,9 +1529,11 @@ fn check_value(p: &Param, value: &Value) -> Result<(), String> {
 pub fn kind_text(kind: Kind) -> &'static str {
     match kind {
         Kind::Bool => "true or false",
-        Kind::Int { .. } => "a whole number",
-        Kind::Number { .. } => "a number",
-        Kind::Length { .. } => "a number, or a length with its unit (\"8.5in\")",
+        Kind::Int { .. } => "a whole number, or an expression",
+        Kind::Number { .. } => "a number, or an expression",
+        Kind::Length { .. } => "a number, or an expression: a length with its unit (\"8.5in\"), or arithmetic",
+        Kind::Angle { .. } => "a number of degrees, or an expression",
+        Kind::Pixels { .. } => "a whole number of pixels, or an expression",
         Kind::Any => "a value",
         Kind::Text => "text that is not blank",
         Kind::Path => "a file's path",
@@ -1411,8 +1575,7 @@ impl AppState {
             Ok(args) => args,
             Err(why) => return Reply::Now(Err(format!("{name}: {why}."))),
         };
-        let ppi = self.resolution_for(method, &args);
-        let args = match args.in_pixels(method.params, ppi) {
+        let args = match self.worked_out_args(method, args) {
             Ok(args) => args,
             Err(why) => return Reply::Now(Err(format!("{name}: {why}."))),
         };
@@ -1721,7 +1884,7 @@ impl AppState {
                     },
                 };
                 let groups = target.and_then(|t| self.doc(t)).map(|d| d.groups.clone()).unwrap_or_default();
-                let place = match BoxArgs::of(args, target.and_then(|t| self.doc(t)).map(|d| d.history.doc())) {
+                let place = match BoxArgs::of(args, params, target.and_then(|t| self.doc(t)).map(|d| d.history.doc())) {
                     Ok(place) => place,
                     Err(why) => return now(Err(format!("{}: {why}", snake(&format!("{cmd:?}"))))),
                 };
@@ -1738,7 +1901,7 @@ impl AppState {
                 Reply::Later(n)
             }
             Cmd::Place => {
-                let place = match BoxArgs::of(args, self.active().map(|d| d.history.doc())) {
+                let place = match BoxArgs::of(args, params, self.active().map(|d| d.history.doc())) {
                     Ok(place) => place,
                     Err(why) => return now(Err(format!("place: {why}"))),
                 };
@@ -1755,7 +1918,7 @@ impl AppState {
                 }
             }
             Cmd::Transform => {
-                let place = match BoxArgs::of(args, self.active().map(|d| d.history.doc())) {
+                let place = match BoxArgs::of(args, params, self.active().map(|d| d.history.doc())) {
                     Ok(place) => place,
                     Err(why) => return now(Err(format!("transform: {why}"))),
                 };
@@ -1841,6 +2004,23 @@ impl AppState {
         doc.map_or(DEFAULT_PPI, |d| d.doc().resolution)
     }
 
+    /// `args` (checked) with their numbers worked out: expressions in the image the method
+    /// acts on (else the active one), positions from its canvas's top-left corner. The
+    /// resolution first, as the lengths are converted at it; a box's numbers given as
+    /// expressions are left for the box (see [`BoxArgs::worked_out`]).
+    fn worked_out_args(&self, method: &Method, args: Args) -> Result<Args, String> {
+        let acts_on_one = method.params.iter().any(|p| p.kind == Kind::Document);
+        let id = if acts_on_one { self.which(&args).ok() } else { self.active_doc };
+        let doc = id.and_then(|id| self.doc(id)).map(|d| d.doc());
+        let origin = doc.map_or([0.0, 0.0], |d| [d.canvas.x as f64, d.canvas.y as f64]);
+        let scope = |ppi| Scope { doc, ppi, unit: Unit::Px, origin, own: None };
+        let ppi = doc.map_or(DEFAULT_PPI, |d| d.resolution);
+        let args = args.worked_out(method.params, &scope(ppi), &[], |p| p.name == "resolution")?;
+        let ppi = self.resolution_for(method, &args);
+        let later: &[&str] = if takes_box(method) { &BOXED } else { &[] };
+        args.worked_out(method.params, &scope(ppi), later, |p| p.name != "resolution")
+    }
+
     /// Puts the transform box open on the active image where `place` says, and applies it
     /// (into the active layer, for a paste, if `into_active`). Answers with the layer it
     /// ends on (or the selected layers, for a transform) and the box: in pixels, its anchor
@@ -1892,18 +2072,29 @@ impl AppState {
         let delete =
             args.flag("delete").unwrap_or_else(|| self.tool_settings(crate::tools::ToolId::Crop).bool("crop.delete"));
         let sampling = crate::prefs::sampling(&self.prefs, "transform");
+        let params = method("crop").expect("crop is a method").params;
         let d = self.doc_mut(id).expect("found");
-        let c = d.doc().canvas;
-        let side = |name: &str, canvas: u32| args.opt_number(name).map_or(f64::from(canvas), f64::round);
-        let at = crate::box_fields::point(args.text("anchor").unwrap_or("top-left"));
-        let from = located(&origin_of(args), d.history.doc()).map_err(|why| format!("crop: {why}"))?;
-        // Left out, x and y are where the anchor's point of the canvas is.
+        let (c, ppi) = (d.doc().canvas, d.doc().resolution);
+        let doc = d.history.doc();
+        let place = BoxArgs::of(args, params, Some(doc)).map_err(|why| format!("crop: {why}"))?;
+        let (at, from) = (place.at, place.from);
+        let (w, h) = (f64::from(c.width), f64::from(c.height));
+        // Left out, the rectangle is the canvas, x and y where the anchor's point of it is;
+        // so too for an expression that names the box.
+        let own = Own {
+            x: c.x as f64 + at[0] * w - from[0],
+            y: c.y as f64 + at[1] * h - from[1],
+            width: w,
+            height: h,
+            angle: 0.0,
+        };
+        let b = place.worked_out(doc, ppi, own).map_err(|why| format!("crop: {why}"))?;
         let p = crate::transform::Params {
-            x: args.opt_number("x").unwrap_or(c.x as f64 + at[0] * f64::from(c.width) - from[0]),
-            y: args.opt_number("y").unwrap_or(c.y as f64 + at[1] * f64::from(c.height) - from[1]),
-            width: side("width", c.width),
-            height: side("height", c.height),
-            angle: args.number("angle"),
+            x: b.x.unwrap_or(own.x),
+            y: b.y.unwrap_or(own.y),
+            width: b.width.map_or(w, f64::round),
+            height: b.height.map_or(h, f64::round),
+            angle: b.angle.unwrap_or(0.0),
             mirrored: false,
         };
         let b = crate::crop::CropBox::from_numbers(&p, from, at);
@@ -2368,8 +2559,10 @@ pub fn describe() -> Value {
                     .map(|p| {
                         let mut v = json!({ "name": p.name, "kind": kind_name(p.kind), "help": p.help });
                         match p.kind {
-                            Kind::Int { min, max } => (v["min"], v["max"]) = (json!(min), json!(max)),
-                            Kind::Number { min, max } | Kind::Length { min, max } => {
+                            Kind::Int { min, max } | Kind::Pixels { min, max } => {
+                                (v["min"], v["max"]) = (json!(min), json!(max))
+                            }
+                            Kind::Number { min, max } | Kind::Length { min, max } | Kind::Angle { min, max } => {
                                 (v["min"], v["max"]) = (json!(min), json!(max))
                             }
                             Kind::Choice(words) => v["choices"] = json!(words),
@@ -2398,6 +2591,8 @@ fn kind_name(kind: Kind) -> &'static str {
         Kind::Int { .. } => "int",
         Kind::Number { .. } => "number",
         Kind::Length { .. } => "length",
+        Kind::Angle { .. } => "angle",
+        Kind::Pixels { .. } => "pixels",
         Kind::Any => "any",
         Kind::Text => "text",
         Kind::Path => "path",
@@ -2420,9 +2615,10 @@ mod tests {
     fn py_type(p: &Value) -> String {
         match p["kind"].as_str().unwrap() {
             "bool" => "bool".into(),
-            "int" | "document" | "layer" => "int".into(),
-            "number" => "float".into(),
-            "length" => "float | str".into(),
+            "document" | "layer" => "int".into(),
+            // An expression is text, or built by the package's own (Expr).
+            "int" | "pixels" => "int | str | Expr".into(),
+            "number" | "length" | "angle" => "float | str | Expr".into(),
             "any" => "Any".into(),
             "text" => "str".into(),
             "path" => "str | os.PathLike[str]".into(),
@@ -2440,7 +2636,11 @@ mod tests {
     fn param_text(p: &Value) -> String {
         let mut text = p["help"].as_str().unwrap().to_owned();
         if let (Some(min), Some(max)) = (p.get("min"), p.get("max")) {
-            let pixels = if p["kind"] == "length" { " pixels" } else { "" };
+            let pixels = match p["kind"].as_str() {
+                Some("length" | "pixels") => " pixels",
+                Some("angle") => " degrees",
+                _ => "",
+            };
             text += &format!(" From {min} to {max}{pixels}.");
         }
         if let Some(d) = p.get("default") {
@@ -2459,6 +2659,9 @@ mod tests {
              # registry by the test `api::tests::the_python_stubs_and_api_page_are_current`: run\n\
              # it with OPAL_WRITE_STUBS=1 to make this again. Do not edit by hand.\n\n\
              import contextlib\nimport os\nfrom pathlib import Path\nfrom typing import Any, Literal\n\n\
+             from opal.expr import Expr as Expr, box as box, canvas as canvas, cm as cm, deg as deg, fn as fn, \
+             ft as ft, inch as inch, layer as layer, m as m, mm as mm, pc as pc, pi as pi, ppi as ppi, pt as pt, \
+             px as px, rad as rad, yd as yd\n\n\
              PROTOCOL: int\n\n\
              class OpalError(Exception):\n    code: int | None\n    def __init__(self, message: str, code: int | None = None) -> None: ...\n\n\
              def connection_file() -> Path: ...\n\
@@ -2536,7 +2739,23 @@ mod tests {
              `hello`, with `token`; anything else is refused and the connection dropped. `hello` may also\n\
              name a `script` (the Python package gives the running script's file name): the connection is\n\
              then a script run, and once it closes, what it changed in each image one change after another\n\
-             becomes one history state, `Script: <name>`. Without it, each call is a state of its own.\n",
+             becomes one history state, `Script: <name>`. Without it, each call is a state of its own.\n\n\
+             ## Expressions\n\n\
+             Every number, length, angle and pixel count a method takes may be an expression instead, as\n\
+             text (`\"Logo.right + 5mm\"`), worked out by the editor when the call runs, against the image as\n\
+             it is then: the language its fields take (see `design.md`, *Expressions*). It has numbers in\n\
+             any unit, mixed (`2in + 3mm`; a bare number added to a length is in the call's `unit`, one\n\
+             multiplying it a plain factor); `+ - * / ^` and parentheses; `min`, `max`, `abs`, `round`,\n\
+             `floor`, `ceil` (to whole pixels, or a step: `round(x, 1mm)`), `sqrt`, `sin`, `cos`, `tan`,\n\
+             `asin`, `acos`, `atan`, `atan2`, `pi`; the canvas and layers, by name or `layer(id)`, as bounds\n\
+             (`left`, `right`, `top`, `bottom`, `width`, `height`, `x`, `y`, and the points `top_left`,\n\
+             `top_right`, `bottom_left`, `bottom_right`, `center`, each with `.x` and `.y`), positions from\n\
+             what the call counts from (the canvas's top-left corner, unless `from_layer` and `from_anchor`\n\
+             say); points (`mid`, `lerp`, `dist`, `point(x, y)`); the image's `ppi`; and for a call that\n\
+             places a box, the box as it was (`x`, `y`, `width`, `height`, `angle`): `transform(x=\"x + 1cm\")`\n\
+             moves the selected layers 1 cm right. What cannot be worked out is refused, saying where. The\n\
+             Python package builds the same text with operators: `opal.layer(logo).right + opal.mm(5)`,\n\
+             `opal.box.width / 2`, `opal.fn.mid(a, b)` (`opal.expr`).\n",
         );
         for (role, heading) in
             [(Role::Command, "Commands"), (Role::Query, "Queries"), (Role::Connection, "The connection")]
@@ -2647,18 +2866,29 @@ mod tests {
         let p = params(Cmd::New).unwrap();
         assert!(Args::check(p, &args(json!({ "width": 10, "height": 20 }))).is_ok());
         // Lengths are checked once in pixels, at the image's resolution.
-        let err = |v| Args::check(p, &args(v)).and_then(|a| a.in_pixels(p, 72.0)).unwrap_err();
+        let worked = |a: Args, ppi| a.worked_out(p, &Scope::bare(Unit::Px, ppi), &[], |_| true);
+        let err = |v| Args::check(p, &args(v)).and_then(|a| worked(a, 72.0)).unwrap_err();
         assert!(err(json!({ "width": 10 })).contains("\"height\" must be given"));
         assert!(err(json!({ "width": 0, "height": 5 })).contains("between 1 and"));
-        assert!(err(json!({ "width": "ten", "height": 5 })).contains("a length with its unit"));
-        assert!(err(json!({ "width": "5 furlongs", "height": 5 })).contains("a length with its unit"));
+        // An expression that names nothing there is, or does not read, is told where.
+        let ten = err(json!({ "width": "ten", "height": 5 }));
+        assert!(ten.contains("\"width\": “ten” is not a word the language has") && ten.contains("at \"ten\""), "{ten}");
+        let furlongs = err(json!({ "width": "5 furlongs", "height": 5 }));
+        assert!(furlongs.contains("An operator") && furlongs.contains("at \"furlongs\""), "{furlongs}");
+        let sum = err(json!({ "width": "2in * 1in", "height": 5 }));
+        assert!(sum.contains("an area, not a length"), "{sum}");
+        let past = err(json!({ "width": "100000in + 1px", "height": 5 }));
+        assert!(past.contains("not 7200001, what \"100000in + 1px\" comes to"), "{past}");
         let far = err(json!({ "width": "400 ft", "height": 5 }));
         assert!(far.contains("400 ft, which is 345600 pixels at 72 pixels per inch"), "{far}");
-        let px = |v| Args::check(p, &args(v)).and_then(|a| a.in_pixels(p, 300.0)).unwrap();
+        let px = |v| Args::check(p, &args(v)).and_then(|a| worked(a, 300.0)).unwrap();
         let sized = px(json!({ "width": "8.5in", "height": 11, "unit": "in" }));
         assert_eq!((sized.side("width"), sized.side("height")), (Some(2550), Some(3300)));
         let mixed = px(json!({ "width": "25.4 mm", "height": "1 pc", "unit": "in" }));
         assert_eq!((mixed.side("width"), mixed.side("height")), (Some(300), Some(50)));
+        // Arithmetic, a bare number in the call's unit.
+        let sum = px(json!({ "width": "1 + 1in / 2", "height": "2cm * 3", "unit": "in" }));
+        assert_eq!((sum.side("width"), sum.side("height")), (Some(450), Some(709)));
         assert!(err(json!({ "width": 1, "height": 5, "colour": 1 })).contains("not a parameter"));
         assert!(err(json!({ "width": 1, "height": 5, "background": "blue" })).contains("one of white, transparent"));
         let fixed = Args::check(p, &args(json!({ "width": 1, "height": 5 }))).unwrap();
@@ -3590,6 +3820,57 @@ mod tests {
         assert!(why.contains("no print size to switch to"), "{why}");
         cancel(&mut st);
         std::fs::remove_dir_all(std::path::Path::new(&half).parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_call_s_numbers_may_be_expressions_naming_the_image_and_the_box() {
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        // At 144 ppi (worked out first: the lengths are converted at it), 2 in by 1 in.
+        now(&mut st, "new", json!({ "width": "2in", "height": "1in", "resolution": "72 * 2" })).unwrap();
+        let c = st.active().unwrap().doc().canvas;
+        assert_eq!((c.width, c.height, st.active().unwrap().doc().resolution), (288, 144, 144.0));
+        let path = png_file("logo.png", 40, 20).display().to_string();
+        let logo = now(&mut st, "place", json!({ "path": path, "name": "Logo", "x": 10, "y": 20 })).unwrap();
+        let logo = logo["layer"].clone();
+        let bounds = |st: &AppState, layer: &Value| {
+            let id = LayerId(layer.as_u64().unwrap());
+            let b = st.active().unwrap().doc().layer(id).unwrap().bounds().unwrap();
+            [b.x0, b.y0, b.x1, b.y1]
+        };
+        // Another layer's edge, a length in a unit, and a bare number in the call's unit.
+        let given =
+            json!({ "path": path, "x": "Logo.right + 0.25in", "y": "layer(\"Logo\").bottom + 1", "unit": "in" });
+        let mark = now(&mut st, "place", given).unwrap()["layer"].clone();
+        assert_eq!(bounds(&st, &mark), [86.0, 184.0, 126.0, 204.0]);
+        // The box's own numbers, as it was: moved 1 in right, then half as wide (its
+        // proportions kept), and turned.
+        now(&mut st, "transform", json!({ "layers": [mark], "x": "x + 1in" })).unwrap();
+        assert_eq!(bounds(&st, &mark), [230.0, 184.0, 270.0, 204.0]);
+        let v = now(&mut st, "transform", json!({ "layers": [mark], "width": "width / 2", "angle": "90deg - 60" }))
+            .unwrap();
+        let (w, angle) = (v["box"]["width"].as_f64().unwrap(), v["box"]["angle"].as_f64().unwrap());
+        assert!((w - 20.0).abs() < 1e-9 && (angle - 30.0).abs() < 1e-9, "{v}");
+        // A crop's rectangle, the canvas less an inch.
+        let c = now(&mut st, "crop", json!({ "width": "canvas.width - 1in", "height": "height" })).unwrap();
+        assert_eq!((c["width"].as_u64(), c["height"].as_u64()), (Some(144), Some(144)), "{c}");
+        // A whole number of pixels may be a length.
+        let image = method("image").unwrap().params;
+        let doc = st.active().unwrap().doc().clone();
+        let scope = Scope { doc: Some(&doc), ppi: 144.0, unit: Unit::Px, origin: [0.0, 0.0], own: None };
+        let a = Args::check(image, &args(json!({ "max_side": "canvas.width / 4 + 0.4" }))).unwrap();
+        assert_eq!(a.worked_out(image, &scope, &[], |_| true).unwrap().int("max_side"), 36);
+        // What cannot be worked out says what, and where; nothing is done.
+        let wrong = now(&mut st, "transform", json!({ "layers": [logo], "x": "Lgo.right" })).unwrap_err();
+        assert!(wrong.contains("\"x\": There is no layer called “Lgo”") && wrong.contains("at \"Lgo\""), "{wrong}");
+        assert!(st.active().unwrap().transform.is_none(), "the box was left open");
+        let turned = now(&mut st, "transform", json!({ "layers": [logo], "angle": "400" })).unwrap_err();
+        assert!(turned.contains("between -360 and 360, not 400, what \"400\" comes to"), "{turned}");
+        let kind = now(&mut st, "transform", json!({ "layers": [logo], "x": "30deg" })).unwrap_err();
+        assert!(kind.contains("an angle, not a length"), "{kind}");
+        let unread = now(&mut st, "transform", json!({ "layers": [logo], "x": "1 +" })).unwrap_err();
+        assert!(unread.contains("Something is missing at the end"), "{unread}");
+        std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).ok();
     }
 
     #[test]

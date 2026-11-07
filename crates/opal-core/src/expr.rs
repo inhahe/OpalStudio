@@ -47,6 +47,9 @@ pub enum Want {
     Angle,
     /// A plain number.
     Number,
+    /// A number of pixels: a plain number, or a length (a bare number is in pixels then,
+    /// whatever the scope's unit).
+    Pixels,
 }
 
 /// The box being placed, as its fields show it: its position that of its reference point,
@@ -941,6 +944,8 @@ fn finish(v: Val, want: Want, scope: &Scope, at: &Range<usize>) -> Result<f64, E
         Want::Length => as_length(q, scope, at),
         Want::Angle => as_angle(q, at),
         Want::Number => as_number(q, at),
+        Want::Pixels if (q.len, q.ang) == (1, 0) => Ok(q.v),
+        Want::Pixels => as_number(q, at).map_err(|e| Error { message: format!("{}, nor a length", e.message), ..e }),
     }
     .map_err(|e| Error { message: format!("{}, so it cannot go here", e.message), ..e })?;
     if out.is_finite() { Ok(out) } else { Err(Error::new(at.clone(), "This comes to no finite number")) }

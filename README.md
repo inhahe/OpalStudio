@@ -112,7 +112,11 @@ cargo test --workspace                     # all tests, interface tests included
   Most commands can be called this way, with their settings as named parameters, as can
   the queries `documents`, `layers` and `image` (what an image looks like, as a PNG);
   `python/API.md` lists them all. Sizes and positions take any unit, at the image's
-  resolution (`editor.new(width="8.5in", height="11in", resolution=300)`); `place`,
+  resolution (`editor.new(width="8.5in", height="11in", resolution=300)`), and every
+  number may be an expression, as in the fields, worked out when the call runs
+  (`editor.transform(x="x + 1cm")`, `editor.place(path=p, x="Logo.right + 5mm")`), or
+  built with the package's own `opal.layer`, `opal.canvas`, `opal.box`, `opal.fn` and
+  units (`x=opal.layer(logo).right + opal.mm(5)`); `place`,
   `paste` and `transform` take the box's exact position and size (fitted inside or
   covering a rectangle, if asked), `crop` a rectangle, and `preferences` and
   `set_preference` read and change the preferences (but for those of scripting). `editor.pixels()` gives an image's pixels, or a layer's,

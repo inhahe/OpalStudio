@@ -158,7 +158,7 @@ impl<'a> NumberField<'a> {
                 if self.scope.unit == Unit::Px { shown } else { format!("{shown} ({} px)", show_number(v, 0..=2)) }
             }
             Want::Angle => format!("{}°", show_number(v, 0..=4)),
-            Want::Number => format!("{}{}", show_number(v, 0..=6), self.suffix),
+            Want::Number | Want::Pixels => format!("{}{}", show_number(v, 0..=6), self.suffix),
         }
     }
 

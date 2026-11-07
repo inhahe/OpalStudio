@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
+from opal.expr import Expr as Expr, box as box, canvas as canvas, cm as cm, deg as deg, fn as fn, ft as ft, inch as inch, layer as layer, m as m, mm as mm, pc as pc, pi as pi, ppi as ppi, pt as pt, px as px, rad as rad, yd as yd
+
 PROTOCOL: int
 
 class OpalError(Exception):
@@ -28,7 +30,7 @@ class Editor:
     def disconnect(self) -> None: ...
     def __enter__(self) -> Editor: ...
     def __exit__(self, *exc: Any) -> None: ...
-    def new(self, *, width: float | str, height: float | str, resolution: float = 72, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px", background: Literal["white", "transparent"] = "white") -> Any:
+    def new(self, *, width: float | str | Expr, height: float | str | Expr, resolution: float | str | Expr = 72, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px", background: Literal["white", "transparent"] = "white") -> Any:
         """Create a new image.
 
         width: Its width. From 1.0 to 300000.0 pixels.
@@ -54,7 +56,7 @@ class Editor:
         path: Where: an Opal Studio file (.opal is added unless it is there), by its absolute path.
         overwrite: Write over a file already there (otherwise that is refused). Default: false.
         """
-    def export(self, *, document: int | None = None, path: str | os.PathLike[str], width: float | str | None = None, height: float | str | None = None, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px", overwrite: bool = False, sixteen_bit: bool | None = None, quality: int | None = None) -> Any:
+    def export(self, *, document: int | None = None, path: str | os.PathLike[str], width: float | str | Expr | None = None, height: float | str | Expr | None = None, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px", overwrite: bool = False, sixteen_bit: bool | None = None, quality: int | str | Expr | None = None) -> Any:
         """Save a flattened copy as PNG or JPEG.
 
         document: The image, by id. Default: the active image.
@@ -92,7 +94,7 @@ class Editor:
 
         document: The image, by id. Default: the active image.
         """
-    def paste(self, *, document: int | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", from_layer: int | None = None, from_anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", into_active: bool = False, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+    def paste(self, *, document: int | None = None, x: float | str | Expr | None = None, y: float | str | Expr | None = None, width: float | str | Expr | None = None, height: float | str | Expr | None = None, angle: float | str | Expr | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", from_layer: int | None = None, from_anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", into_active: bool = False, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
         """Paste the image on the clipboard, then place and size it.
 
         document: The image, by id. Default: the active image; with none open, the paste becomes a new image.
@@ -100,7 +102,7 @@ class Editor:
         y: Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
         width: The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is.
         height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
-        angle: The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is.
+        angle: The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0 degrees. Default: as it is.
         fit: With both width and height given: stretch it to them (along its own sides, turned as it is); or keep its proportions and fit it, as it is turned, inside the rectangle they make on the canvas (placed by its anchor point at x and y), or make it cover that rectangle, centered on it. Default: "stretch".
         anchor: Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left".
         from_layer: A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas.
@@ -108,7 +110,7 @@ class Editor:
         into_active: Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false.
         unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
-    def paste_in_place(self, *, document: int | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", from_layer: int | None = None, from_anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", into_active: bool = False, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+    def paste_in_place(self, *, document: int | None = None, x: float | str | Expr | None = None, y: float | str | Expr | None = None, width: float | str | Expr | None = None, height: float | str | Expr | None = None, angle: float | str | Expr | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", from_layer: int | None = None, from_anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", into_active: bool = False, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
         """Paste where the copy came from.
 
         document: The image, by id. Default: the active image; with none open, the paste becomes a new image.
@@ -116,7 +118,7 @@ class Editor:
         y: Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
         width: The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is.
         height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
-        angle: The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is.
+        angle: The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0 degrees. Default: as it is.
         fit: With both width and height given: stretch it to them (along its own sides, turned as it is); or keep its proportions and fit it, as it is turned, inside the rectangle they make on the canvas (placed by its anchor point at x and y), or make it cover that rectangle, centered on it. Default: "stretch".
         anchor: Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left".
         from_layer: A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas.
@@ -124,7 +126,7 @@ class Editor:
         into_active: Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false.
         unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
-    def place(self, *, document: int | None = None, path: str | os.PathLike[str], name: str | None = None, print_size: bool | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", from_layer: int | None = None, from_anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", into_active: bool = False, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+    def place(self, *, document: int | None = None, path: str | os.PathLike[str], name: str | None = None, print_size: bool | None = None, x: float | str | Expr | None = None, y: float | str | Expr | None = None, width: float | str | Expr | None = None, height: float | str | Expr | None = None, angle: float | str | Expr | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", from_layer: int | None = None, from_anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", into_active: bool = False, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
         """Place an image file into this image, then position and size it.
 
         document: The image, by id. Default: the active image.
@@ -135,7 +137,7 @@ class Editor:
         y: Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
         width: The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is.
         height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
-        angle: The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is.
+        angle: The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0 degrees. Default: as it is.
         fit: With both width and height given: stretch it to them (along its own sides, turned as it is); or keep its proportions and fit it, as it is turned, inside the rectangle they make on the canvas (placed by its anchor point at x and y), or make it cover that rectangle, centered on it. Default: "stretch".
         anchor: Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left".
         from_layer: A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas.
@@ -143,7 +145,7 @@ class Editor:
         into_active: Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false.
         unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
-    def transform(self, *, document: int | None = None, layers: list[int] | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", from_layer: int | None = None, from_anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+    def transform(self, *, document: int | None = None, layers: list[int] | None = None, x: float | str | Expr | None = None, y: float | str | Expr | None = None, width: float | str | Expr | None = None, height: float | str | Expr | None = None, angle: float | str | Expr | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", from_layer: int | None = None, from_anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
         """Move, scale and rotate the selected layers with a box.
 
         document: The image, by id. Default: the active image.
@@ -152,7 +154,7 @@ class Editor:
         y: Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
         width: The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is.
         height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
-        angle: The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is.
+        angle: The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0 degrees. Default: as it is.
         fit: With both width and height given: stretch it to them (along its own sides, turned as it is); or keep its proportions and fit it, as it is turned, inside the rectangle they make on the canvas (placed by its anchor point at x and y), or make it cover that rectangle, centered on it. Default: "stretch".
         anchor: Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left".
         from_layer: A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas.
@@ -245,7 +247,7 @@ class Editor:
 
         document: The image, by id. Default: the active image.
         """
-    def resize_image(self, *, document: int | None = None, width: float | str | None = None, height: float | str | None = None, resolution: float | None = None, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px", resample: bool | None = None) -> Any:
+    def resize_image(self, *, document: int | None = None, width: float | str | Expr | None = None, height: float | str | Expr | None = None, resolution: float | str | Expr | None = None, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px", resample: bool | None = None) -> Any:
         """Change the image's size, scaling everything in it.
 
         document: The image, by id. Default: the active image.
@@ -255,7 +257,7 @@ class Editor:
         unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         resample: Resample the pixel layers now (smaller, but enlarging again later cannot bring their detail back), rather than keep their pixels and draw them at the new size. Default: the preference.
         """
-    def resize_canvas(self, *, document: int | None = None, width: float | str | None = None, height: float | str | None = None, anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] | None = None, left: float | str | None = None, top: float | str | None = None, right: float | str | None = None, bottom: float | str | None = None, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+    def resize_canvas(self, *, document: int | None = None, width: float | str | Expr | None = None, height: float | str | Expr | None = None, anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] | None = None, left: float | str | Expr | None = None, top: float | str | Expr | None = None, right: float | str | Expr | None = None, bottom: float | str | Expr | None = None, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
         """Change the canvas's size without scaling what is on it.
 
         document: The image, by id. Default: the active image.
@@ -283,11 +285,11 @@ class Editor:
 
         document: The image, by id. Default: the active image.
         """
-    def rotate_by(self, *, document: int | None = None, degrees: float, grow: bool = True) -> Any:
+    def rotate_by(self, *, document: int | None = None, degrees: float | str | Expr, grow: bool = True) -> Any:
         """Turn the whole image by any angle.
 
         document: The image, by id. Default: the active image.
-        degrees: The angle, clockwise. From -360.0 to 360.0.
+        degrees: The angle, clockwise. From -360.0 to 360.0 degrees.
         grow: Grow the canvas so that nothing is cut off. Default: true.
         """
     def flip_horizontal(self, *, document: int | None = None) -> Any:
@@ -328,12 +330,12 @@ class Editor:
 
         document: The image, by id. Default: the active image.
         """
-    def image(self, *, document: int | None = None, layer: int | None = None, max_side: int = 1024) -> Any:
+    def image(self, *, document: int | None = None, layer: int | None = None, max_side: int | str | Expr = 1024) -> Any:
         """What an image shows (or one of its layers alone), as a PNG, scaled down to fit a size (never enlarged): its bytes in base64, with its width and height.
 
         document: The image, by id. Default: the active image.
         layer: One layer alone, by id: as if shown, at full opacity. Default: the image as shown, all its visible layers together.
-        max_side: The most pixels it may be across or down. From 16 to 8192. Default: 1024.
+        max_side: The most pixels it may be across or down. From 16 to 8192 pixels. Default: 1024.
         """
     def history(self, *, document: int | None = None) -> Any:
         """An image's history, a tree: each state kept (its id, what made it, when, the state before it and those after, the one redo goes to), the state it is in, the one last saved, and how many states were dropped to keep within the memory the history may use.
@@ -342,7 +344,7 @@ class Editor:
         """
     def preferences(self) -> Any:
         """Every preference: for each, its key, label, section, help, value and default, and what it takes (its range or choices). set_preference changes them."""
-    def crop(self, *, document: int | None = None, x: float | str | None = None, y: float | str | None = None, width: float | str | None = None, height: float | str | None = None, angle: float = 0, delete: bool | None = None, anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", from_layer: int | None = None, from_anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+    def crop(self, *, document: int | None = None, x: float | str | Expr | None = None, y: float | str | Expr | None = None, width: float | str | Expr | None = None, height: float | str | Expr | None = None, angle: float | str | Expr = 0, delete: bool | None = None, anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", from_layer: int | None = None, from_anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
         """Crops the image to a rectangle of its canvas, which may be turned: the canvas becomes the rectangle, and if it was turned, everything turns the other way, so its contents come out upright. Only the canvas moves (enlarging it again brings back what was cropped away), unless delete says.
 
         document: The image, by id. Default: the active image.
@@ -350,7 +352,7 @@ class Editor:
         y: Where the rectangle's anchor point is, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where that point of the canvas is.
         width: The rectangle's width. From 1.0 to 300000.0 pixels. Default: the canvas's.
         height: The rectangle's height. From 1.0 to 300000.0 pixels. Default: the canvas's.
-        angle: The rectangle's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: 0.
+        angle: The rectangle's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0 degrees. Default: 0.
         delete: Remove the pixels outside the new canvas, rather than keep them for later. Default: the Crop tool's Delete cropped pixels.
         anchor: Which point of the rectangle x and y give, and what the angle turns it about. Default: "top-left".
         from_layer: A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas.

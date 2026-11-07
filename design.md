@@ -1129,7 +1129,7 @@ numbers (*Paste and transform*): a length such as `8.5in` is the simplest expres
     and from scripts, works it out again after what it refers to has moved. Once
     constraints exist, *keep linked* turns it into a constraint without retyping.
 - **The same from scripts.** Every number and length parameter of the API (Python and MCP)
-  also takes an expression as text.
+  also takes an expression as text (*Scripting* has how).
   - The editor works it out when the call runs, with the same parser as the fields, so a
     script and the window give the same answer.
   - Because it is worked out inside the call, nothing can move between a query and the
@@ -1187,14 +1187,28 @@ server. Both rest on one language-neutral API.
   connection's first request is `hello` with the token, within 5 seconds; anything else
   first, or the wrong token, is refused and the connection dropped. A command's method is
   its name in the registry in snake case (`save_as`, `merge_down`), its parameters each
-  with a kind (a number in a range, one of some words, text that is not blank, a path, an
-  image's or layers' ids, a length, any value), and either a default or what the editor
-  holds now (`document`: the active image; `layers`: the selected ones); `methods` lists
-  them all, which is what the stubs and tools are made from. A **length** (a size, a
-  position, a margin) is a number in the call's `unit` (pixels by default), or text with a
-  unit of its own (`"8.5in"`), converted once checked, before the call is carried out, at
-  the resolution the call gives (`new`, `resize_image`), else its image's, else 72 ppi;
-  its range is checked in pixels, and a refusal says what the length came to. The
+  with a kind (a whole number, a number, a length, an angle, a whole number of pixels, one
+  of some words, text that is not blank, a path, an image's or layers' ids, any value),
+  and either a default or what the editor holds now (`document`: the active image;
+  `layers`: the selected ones); `methods` lists them all, which is what the stubs and
+  tools are made from. Each of the numeric kinds takes an expression (*Expressions*) as
+  text too; that it reads is checked with the rest, and it is worked out
+  (`Args::worked_out`) before the call is carried out, in the image the call acts on (else
+  the active one), positions from its canvas's corner: the `resolution` first, as lengths
+  are converted at it. A **length** (a size, a position, a margin) is a number in the
+  call's `unit` (pixels by default), or an expression (`"8.5in"` is one), converted at the
+  resolution the call gives (`new`, `resize_image`), else its image's, else 72 ppi; its
+  range is checked in pixels, and a refusal says what the length came to (and what it was
+  given as). An **angle** is in degrees; a whole number of **pixels** (a region's corner, a
+  thumbnail's side) may be given as a length, and is rounded. A call that places a box
+  (`paste`, `place`, `transform`, `crop`: those counting from `from_anchor`) leaves its
+  `x`, `y`, `width`, `height` and `angle` expressions for the box (`api::Typed`): they are
+  worked out once it is open (`BoxArgs::worked_out`), naming the box as it is then
+  (`transform(x="x + 1cm")`), in the image as it was before it opened, from the point the
+  call counts from. The Python package's `opal.expr` builds the same text with operators,
+  parenthesized only where the editor's parser needs it, and sends an `Expr` as its
+  text; the stubs type each numeric parameter as a number, text or an `Expr`, and the MCP
+  tools as a number or a string. The
   commands that open the transform box take where to put it and apply it at once:
   `paste` and `paste_in_place` (answered once the clipboard is read and the paste placed;
   a paste asked for again, or cancelled, before then is told so), `place` (an image file),
