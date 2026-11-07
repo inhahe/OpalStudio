@@ -3,11 +3,12 @@
 What each milestone delivers is specified in `design.md`. Status: milestones 0, 1 and S
 are done; everything after them is planned.
 
-**Order:** 0, 1, S, 2, A, 3, 4, and so on. Photo editing comes first, with vector shapes
+**Order:** 0, 1, S, E, 2, A, 3, 4, and so on. Photo editing comes first, with vector shapes
 taken early (milestone 4), because by then the outline tool has built most of the curve
 editing they need. Scripting (S) comes right after milestone 1 so commands take parameters
-before many more of them are written; AI selection and extraction (A) right after the
-selection core it builds on.
+before many more of them are written. Expressions (E) come before milestone 2, so the
+selection boxes' fields take them from the start. AI selection and extraction (A) comes
+right after the selection core it builds on.
 
 ## 0. Foundation (done)
 - Cargo workspace; window with egui and dockable panels.
@@ -71,6 +72,23 @@ selection core it builds on.
   `python script.py` starts a windowless editor when none runs (`--serve`); the boxes'
   reference point and fitting into a typed rectangle; rulers.
 
+## E. Expressions
+- The expression language (`design.md`, *Expressions*):
+  - numbers in mixed units, with their kinds checked;
+  - arithmetic and functions;
+  - references to the canvas, to any layer's bounds and nine points by name, to the box
+    as it was, and to the resolution;
+  - points as values (`mid`, `lerp`, `dist`);
+  - names resolved to stable ids, and renamed with their objects.
+- Every number and length field takes an expression. It is worked out when entered; what
+  it comes to shows as you type; an error says where it is; recent expressions come back
+  with Up and Down.
+- Every number and length parameter of the API (Python and MCP) takes an expression as
+  text, worked out by the same parser when the call runs. The Python package builds
+  expressions with operators (`opal.layer(logo).right + opal.mm(5)`), naming layers by id.
+- A placement remembers the expression it came from. *Re-apply*, by the box's numbers and
+  from scripts, works it out again after what it refers to has moved.
+
 ## 2. Selection core
 - The mask, and the blend through it that every operation uses.
 - Recipe steps and the selection panel.
@@ -119,7 +137,9 @@ selection core it builds on.
 ## 4. Vector shapes
 - Pen tool reusing the outline tool's curve editing; rectangle, ellipse, polygon, star.
 - Paths' nodes as points the boxes' positions can count from (`box_fields::Base`), beside
-  the canvas and layers, from the fields and from scripts.
+  the canvas and layers, from the fields and from scripts, and that expressions can name
+  (`Outline.node(3).x`). Nodes get names you can see, backed by stable ids, so renaming or
+  deleting another node never redirects an expression.
 - Fill and stroke; editable brush strokes on vector shapes.
 - SVG import and export.
 - Boolean operations on paths.
@@ -161,7 +181,8 @@ selection core it builds on.
 
 ## 7. Text
 - Area text and point text; editable permanently, even inside an existing layer.
-- Text boxes' corners as points the boxes' positions can count from, as paths' nodes.
+- Text boxes' corners as points the boxes' positions can count from and expressions can
+  name, as paths' nodes are.
 - Shaping, bidirectional text, line breaking, font fallback.
 
 ## 8. Edge snapping and color matching
@@ -180,6 +201,10 @@ selection core it builds on.
 
 ## 11. Constraints
 - Units; the geometry solver; degrees-of-freedom display; conflict flags; springs.
+- Kept expressions: *keep linked* by a field, and `linked` in the API, turn an expression
+  into a constraint. It uses the same syntax and parser as milestone E's expressions,
+  which the solver differentiates. A placement's remembered expression can be made one
+  too. Scripts make constraints with the same expressions.
 - Then the layout solver, and nesting units of either kind.
 
 ## Later

@@ -1063,6 +1063,59 @@ channel curve editor and every setting defined in a chosen color model depend on
 palette editor becomes the gradient editor, used by the gradient tool, a gradient-map
 adjustment and indexed-color export.
 
+## Expressions
+
+One small language for every number and length the editor takes, typed into a field or
+given to the API, and later for the constraints between objects (*Constraints*). It
+extends the lengths the API takes now (*Scripting*), and the fields of the boxes'
+numbers (*Paste and transform*): a length such as `8.5in` is the simplest expression.
+
+- **What it has:**
+  - Numbers with units of their own, mixed (`2in + 3mm`). A bare number added to a length
+    is in the field's or the call's unit; one multiplying or dividing it is a plain factor.
+    A length times a length is an error, as is any other mismatch of kinds (length, angle,
+    plain number). Angles are in degrees unless given in `rad`.
+  - Arithmetic (`+ - * /`, powers, parentheses), and functions: `min`, `max`, `abs`,
+    `round`, `floor`, `ceil`, `sqrt`, `sin`, `cos`, `tan`, `atan2`.
+  - References:
+    - the canvas (`canvas.width`, `canvas.right`, and its nine points: `canvas.center.x`);
+    - any layer's bounds and nine points by name (`Logo.right`, `Logo.bottom_left.y`; a
+      name with spaces, or one that clashes with a word of the language, quoted:
+      `layer("Back ground").top`). The points' names are the `anchor` names with `_` for
+      `-`, which here would be a minus;
+    - the box being placed as it was before this change (`x`, `y`, `width`, `height`,
+      `angle`);
+    - the image's resolution (`ppi`);
+    - later, paths' nodes and text boxes' corners (milestones 4 and 7);
+    - points as values, with `mid(A, B)`, `lerp(A, B, t)` and `dist(A, B)`, so "halfway
+      between two nodes" is `mid(A, B).x`.
+- **Its own language, not Python.** The constraint solver must differentiate each
+  expression to solve with it, so expressions are parsed into a tree the editor
+  understands. That also makes them instant, safe, and independent of any Python install.
+- **Names resolve to stable ids.** A reference is resolved to the object's id when the
+  expression is entered, and displayed by its name. Renaming a layer renames it in a
+  remembered expression. A reference to something deleted makes the expression an error
+  that names what is missing; it is never silently redirected to something else.
+- **Worked out once, or kept.**
+  - In a field or a call, an expression is worked out once against the document as it is
+    then (when Enter is pressed, or when the call runs), and the result is a plain number.
+  - A field shows what its expression comes to as you type, and an error says where it is.
+  - Each field remembers its recent expressions (Up and Down).
+  - A placement remembers the expression it came from. *Re-apply*, by the box's numbers
+    and from scripts, works it out again after what it refers to has moved. Once
+    constraints exist, *keep linked* turns it into a constraint without retyping.
+- **The same from scripts.** Every number and length parameter of the API (Python and MCP)
+  also takes an expression as text.
+  - The editor works it out when the call runs, with the same parser as the fields, so a
+    script and the window give the same answer.
+  - Because it is worked out inside the call, nothing can move between a query and the
+    call that uses its answer, and an AI client needs one call rather than a query, its
+    own arithmetic, and a call.
+  - The Python package builds expressions with operators:
+    `opal.layer(logo).right + opal.mm(5)` gives the text of one, naming the layer by its
+    id. The editor's parser checks it; there is no copy of the parser in Python.
+  - Live constraints will be made from scripts with the same expressions.
+
 ## Constraints
 
 For mathematically exact vector design, and later for layouts that adapt to their size.
@@ -1070,15 +1123,21 @@ For mathematically exact vector design, and later for layouts that adapt to thei
 - A **unit** is a group with exactly one solver, decided by the kind of constraints placed in
   it and shown on the unit:
   - **Geometry solver** (nonlinear): coincident, tangent, parallel, perpendicular, symmetric,
-    equal, distances and angles given by expressions such as `width = 2*r + gap`. It shows
-    how many degrees of freedom remain, colors fully constrained geometry, and flags
-    conflicts. Soft "spring" constraints are opt-in, each with an adjustable stiffness, and
-    how far each is stretched is shown. The solver's tolerance is adjustable.
+    equal, distances and angles given by expressions (*Expressions*) such as
+    `width = 2*r + gap`. It shows how many degrees of freedom remain, colors fully
+    constrained geometry, and flags conflicts. Soft "spring" constraints are opt-in, each
+    with an adjustable stiffness, and how far each is stretched is shown. The solver's
+    tolerance is adjustable.
   - **Layout solver** (linear constraints with priorities, Cassowary-style): even spacing,
     grow to fit content, keep proportions, adapt to another aspect ratio.
 - To mix solvers, nest units, to any depth. Between levels, limits go down, sizes come up,
   and the parent places the child.
 - Constraints connect only objects within one unit, or anchor points a child unit exposes.
+- **Kept expressions:** *keep linked*, by a field or as `linked` in a call, makes an
+  expression a constraint that stays true as what it refers to moves. Like every
+  constraint, it relates only objects within one unit. It uses the same
+  syntax and parser as an expression worked out once. A placement's remembered expression
+  can be made one too.
 - The geometry solver comes first.
 
 ## Scripting
