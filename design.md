@@ -1143,7 +1143,8 @@ numbers (*Paste and transform*): a length such as `8.5in` is the simplest expres
 - **Worked out once, or kept.**
   - In a field or a call, an expression is worked out once against the document as it is
     then (when Enter is pressed, or when the call runs), and the result is a plain number.
-  - A field shows what its expression comes to as you type, and an error says where it is,
+  - A field being typed in widens to what is typed, so an expression can be read. It shows
+    what its expression comes to as you type, and an error says where it is,
     the part at fault marked. What was typed is entered by Enter, Tab, or leaving the field
     another way; Enter on what cannot be worked out keeps it, to be put right, and Esc
     leaves the value as it was. Left with nothing typed, the value stays exactly as it is,

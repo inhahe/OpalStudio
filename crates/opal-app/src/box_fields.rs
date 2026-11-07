@@ -174,7 +174,8 @@ pub fn fields(
         ui.label("From").on_hover_text(
             "What the position counts from: a point of the canvas, or of what a layer holds (its bounds).",
         );
-        ui.horizontal(|ui| {
+        // Top-aligned: centered, the taller grid would reach into the row below.
+        ui.horizontal_top(|ui| {
             egui::ComboBox::from_id_salt(("box-from", how.salt))
                 .selected_text(name.as_str())
                 .width(110.0)

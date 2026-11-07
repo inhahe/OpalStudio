@@ -201,8 +201,15 @@ fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
         h.run();
     };
     let at = x(&h);
-    // A layer's edge, the box's own width, and a bare number in the field's unit (pixels).
+    // The grid of points the position counts from ends above the position's row.
+    let from = h.get(by().label("From: Bottom left").predicate(|n| n.bounding_box().is_some_and(|b| b.x0 < 1000.0)));
+    let field = h.get(field_at(at)).rect();
+    assert!(from.rect().bottom() <= field.top(), "the From grid reaches into the row below: {:?} {field:?}", from.rect());
+    // A layer's edge, the box's own width, and a bare number in the field's unit (pixels),
+    // the field as wide as what is typed, to be read.
     typed(&mut h, at, "Background.right - width - 10");
+    let typing = h.get(by().predicate(|n| n.is_focused())).rect();
+    assert!(typing.width() > 150.0, "the field is too narrow to read what is typed: {typing:?}");
     assert_eq!(h.query_all(by().label_contains("= 340 px")).count(), 1, "what it comes to is not shown");
     h.key_press(egui::Key::Enter);
     h.run();

@@ -289,10 +289,14 @@ impl<'a> NumberField<'a> {
             let refocused = std::mem::take(&mut typing.kept);
             recall(ui, &remembered, &mut typing, id);
             let style = ui.style().drag_value_text_style.clone();
+            // As wide as what is typed, so an expression can be read as it is typed.
+            let font = style.resolve(ui.style());
+            let text_width = ui.painter().layout_no_wrap(typing.text.clone(), font, egui::Color32::WHITE).size().x;
+            let width = (text_width + 2.0 * ui.spacing().button_padding.x + 6.0).clamp(0.0, 360.0);
             let r = ui.add(
                 egui::TextEdit::singleline(&mut typing.text)
                     .id(id)
-                    .desired_width(0.0)
+                    .desired_width(width)
                     .min_size(ui.spacing().interact_size)
                     .font(style),
             );
