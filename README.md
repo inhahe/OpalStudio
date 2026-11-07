@@ -1,14 +1,19 @@
 # Opal Studio
 
+> **Pre-alpha.** Opal Studio is in early development: much of what is planned is not built
+> yet, the `.opal` file format and the scripting interface may still change, and it has
+> not been tried widely. Do not trust it with work you cannot afford to lose.
+
 A 2D graphics editor that aims to be more intuitive than the usual ones: everything stays
 editable, every setting that affects a result can be adjusted, and the interface always
 says what a command does and, when it cannot run, why.
 
-Early days: milestones 0 (the foundation), 1 (paste and place) and S (scripting and MCP)
-of the roadmap are built. You can open and create images, paste and place images, move,
-scale, rotate, crop and resize, arrange and merge layers, undo through a branching
-history, save and export, and drive it all from Python scripts or an AI assistant;
-selections and painting come next. See `roadmap.md` for what is planned
+Milestones 0 (the foundation), 1 (paste and place), S (scripting and MCP) and E
+(expressions) of the roadmap are built. You can open and create images, paste and place
+images, move, scale, rotate, crop and resize, arrange and merge layers, type arithmetic
+that names other layers into any number field (`Logo.right + 5mm`) and have a layer
+placed so again once they move, undo through a branching history, save and export, and
+drive it all from Python scripts or an AI assistant; selections and painting come next. See `roadmap.md` for what is planned
 and `design.md` for how it is built. Known problems are listed in `known-issues.md`.
 
 Free software under the GNU General Public License, version 3 or later (`LICENSE`).
