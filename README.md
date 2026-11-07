@@ -39,8 +39,9 @@ cargo test --workspace                     # all tests, interface tests included
 - **Units and resolution.** Sizes and positions can be shown and typed in pixels,
   points, picas, inches, feet, yards, millimeters, centimeters or meters (Preferences ›
   Interface, or the menu beside any size): every image has a resolution (pixels per inch,
-  or per centimeter) that converts them, read from PNG and JPEG files and written back on
-  export. A length typed with a unit after it ("21 cm") is read in that unit whatever the
+  or per centimeter) that converts them, read from PNG and JPEG files (one that does not
+  say gets a preference's, 72 unless changed) and written back on export; the status bar
+  shows it, and clicking it changes it. A length typed with a unit after it ("21 cm") is read in that unit whatever the
   field shows. New Image has paper and photo sizes; Resize Image changes the resolution,
   with or without changing the pixels.
 - **Paste and place.** Ctrl+V pastes an image (from Opal Studio, another program, or an

@@ -119,8 +119,8 @@ Paste the image on the clipboard, then place and size it.
 | Parameter | Kind | |
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image; with none open, the paste becomes a new image. |
-| `x` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's left edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
-| `y` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's top edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
+| `x` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, across from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
+| `y` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
 | `width` | length | The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is. |
 | `height` | length | The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is. |
 | `angle` | number | The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is. |
@@ -138,8 +138,8 @@ Paste where the copy came from.
 | Parameter | Kind | |
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image; with none open, the paste becomes a new image. |
-| `x` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's left edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
-| `y` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's top edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
+| `x` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, across from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
+| `y` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
 | `width` | length | The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is. |
 | `height` | length | The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is. |
 | `angle` | number | The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is. |
@@ -159,8 +159,8 @@ Place an image file into this image, then position and size it.
 | `document` | document | The image, by id. Default: the active image. |
 | `path` (required) | path | The image file, a PNG or a JPEG, by its absolute path. |
 | `name` | text | The new layer's name. Default: the file's name. |
-| `x` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's left edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
-| `y` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's top edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
+| `x` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, across from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
+| `y` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
 | `width` | length | The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is. |
 | `height` | length | The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is. |
 | `angle` | number | The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is. |
@@ -179,8 +179,8 @@ Move, scale and rotate the selected layers with a box.
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 | `layers` | layers | The layers, by id. Default: the selected layers. |
-| `x` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's left edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
-| `y` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's top edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
+| `x` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, across from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
+| `y` | length | Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it. |
 | `width` | length | The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is. |
 | `height` | length | The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is. |
 | `angle` | number | The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is. |
@@ -437,8 +437,8 @@ Crops the image to a rectangle of its canvas, which may be turned: the canvas be
 | Parameter | Kind | |
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
-| `x` | length | Where the rectangle's anchor point is, from the canvas's left edge. From -10000000.0 to 10000000.0 pixels. Default: where that point of the canvas is. |
-| `y` | length | Where the rectangle's anchor point is, from the canvas's top edge. From -10000000.0 to 10000000.0 pixels. Default: where that point of the canvas is. |
+| `x` | length | Where the rectangle's anchor point is, across from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where that point of the canvas is. |
+| `y` | length | Where the rectangle's anchor point is, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where that point of the canvas is. |
 | `width` | length | The rectangle's width. From 1.0 to 300000.0 pixels. Default: the canvas's. |
 | `height` | length | The rectangle's height. From 1.0 to 300000.0 pixels. Default: the canvas's. |
 | `angle` | number | The rectangle's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: 0. |

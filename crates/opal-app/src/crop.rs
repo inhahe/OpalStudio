@@ -68,7 +68,8 @@ impl CropBox {
     }
 
     /// The box as numbers: its point `at` (see [`box_fields::POINTS`]), turned with it, from
-    /// `origin` (the canvas's corner), its size, and its angle in degrees.
+    /// `origin` (the point positions count from, in the document), its size, and its angle
+    /// in degrees.
     ///
     /// [`box_fields::POINTS`]: crate::box_fields::POINTS
     pub fn numbers(&self, origin: [f64; 2], at: [f64; 2]) -> crate::transform::Params {

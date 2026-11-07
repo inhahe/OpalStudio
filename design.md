@@ -639,11 +639,14 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   it, from the canvas's corner; a size typed scales along the box's own sides about that
   point, and an angle turns about it, so the numbers typed stay as typed. **From**: the
   position counts from a point (one of the same nine) of the canvas or of a layer (the
-  bounds of what it holds; not one the box moves, nor a group holding one), kept per
-  image (`box_fields::Origin`); a layer gone or emptied leaves the canvas's corner. Vector
+  bounds of what it holds), kept per image (`box_fields::Origin`), located in the image as
+  it was before the box opened, so a layer the box moves counts from where it was (its
+  numbers then are how far it has moved); a layer gone or emptied shows the canvas's
+  corner, without forgetting the choice. The menu lists the layers only while open. Vector
   paths' nodes, text boxes' corners and guides are to join the layers as things to count
   from (`box_fields::Base`) when they come. Scripts name it as `from_layer` and
-  `from_anchor` (place, paste, transform, crop), held where it is when the call begins.
+  `from_anchor` (place, paste, transform, crop), located when the call is made (a paste
+  read later counts from where the layer was then).
 - **Fit into a rectangle:** the transform box's fields also hold a rectangle, kept per
   image (the canvas, whatever it is then, until one is typed; at the same reference
   point), with *Fit inside* and *Fill*, which keep the box's proportions and its turn and

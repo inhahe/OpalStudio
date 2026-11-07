@@ -96,8 +96,8 @@ class Editor:
         """Paste the image on the clipboard, then place and size it.
 
         document: The image, by id. Default: the active image; with none open, the paste becomes a new image.
-        x: Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's left edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
-        y: Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's top edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        x: Where the box's anchor point (its top-left corner, unless anchor says) goes, across from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        y: Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
         width: The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is.
         height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
         angle: The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is.
@@ -112,8 +112,8 @@ class Editor:
         """Paste where the copy came from.
 
         document: The image, by id. Default: the active image; with none open, the paste becomes a new image.
-        x: Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's left edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
-        y: Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's top edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        x: Where the box's anchor point (its top-left corner, unless anchor says) goes, across from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        y: Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
         width: The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is.
         height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
         angle: The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is.
@@ -130,8 +130,8 @@ class Editor:
         document: The image, by id. Default: the active image.
         path: The image file, a PNG or a JPEG, by its absolute path.
         name: The new layer's name. Default: the file's name.
-        x: Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's left edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
-        y: Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's top edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        x: Where the box's anchor point (its top-left corner, unless anchor says) goes, across from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        y: Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
         width: The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is.
         height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
         angle: The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is.
@@ -147,8 +147,8 @@ class Editor:
 
         document: The image, by id. Default: the active image.
         layers: The layers, by id. Default: the selected layers.
-        x: Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's left edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
-        y: Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's top edge. From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        x: Where the box's anchor point (its top-left corner, unless anchor says) goes, across from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        y: Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
         width: The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is.
         height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
         angle: The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: as it is.
@@ -345,8 +345,8 @@ class Editor:
         """Crops the image to a rectangle of its canvas, which may be turned: the canvas becomes the rectangle, and if it was turned, everything turns the other way, so its contents come out upright. Only the canvas moves (enlarging it again brings back what was cropped away), unless delete says.
 
         document: The image, by id. Default: the active image.
-        x: Where the rectangle's anchor point is, from the canvas's left edge. From -10000000.0 to 10000000.0 pixels. Default: where that point of the canvas is.
-        y: Where the rectangle's anchor point is, from the canvas's top edge. From -10000000.0 to 10000000.0 pixels. Default: where that point of the canvas is.
+        x: Where the rectangle's anchor point is, across from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where that point of the canvas is.
+        y: Where the rectangle's anchor point is, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where that point of the canvas is.
         width: The rectangle's width. From 1.0 to 300000.0 pixels. Default: the canvas's.
         height: The rectangle's height. From 1.0 to 300000.0 pixels. Default: the canvas's.
         angle: The rectangle's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0. Default: 0.

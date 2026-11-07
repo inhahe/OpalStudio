@@ -359,7 +359,7 @@ fn write_system(copy: &Copied) -> Result<Option<u32>, String> {
     #[cfg(windows)]
     {
         use clipboard_win::{formats, raw};
-        let png = image_files::encode_png16(&copy.pixels, w, h);
+        let png = image_files::encode_png16(&copy.pixels, w, h, Some(copy.resolution));
         let dib = dib_v5(&copy.pixels, w, h);
         let opaque = dib_opaque(&copy.pixels, w, h);
         {
@@ -691,7 +691,7 @@ mod system_tests {
         let px = vec![opal_core::tile::pixel_from_f32([0.30001, 0.5, 0.7, 1.0]); 4];
         let mut cb = SystemClipboard::default();
         cb.write_image(
-            Copied { from: IRect::from_size(2, 2), pixels: px.clone(), resolution: 72.0, _hold: None },
+            Copied { from: IRect::from_size(2, 2), pixels: px.clone(), resolution: 300.0, _hold: None },
             &egui::Context::default(),
         );
         // Read at once, while the copy may still be being written: the read waits for it.
@@ -711,13 +711,14 @@ mod system_tests {
         drop(_open);
         let back = image_files::import_bytes(&bytes, std::path::Path::new("clip.png"), None).unwrap();
         assert_eq!(opal_io::pixels::to_srgb16(back.image.pixel(1, 1)), opal_io::pixels::to_srgb16(px[0]));
+        assert_eq!(back.resolution, Some([300.0, 300.0]), "the PNG does not say the resolution");
         // And, once written, Opal Studio reads back its own full-precision copy at once.
         let Read::Ready(own) = cb.read_image() else { panic!("its own copy is read at once") };
         assert_eq!((*own).unwrap().unwrap().from, Some(IRect::from_size(2, 2)));
         // Without its own copy, it reads the 16-bit PNG, as another program's.
         let Read::Later(read) = SystemClipboard::default().read_image() else { panic!("read off the thread") };
         let other = read().unwrap().unwrap();
-        assert_eq!(other.from, None);
+        assert_eq!((other.from, other.resolution), (None, Some(300.0)));
         assert_eq!(opal_io::pixels::to_srgb16(other.image.pixel(1, 1)), opal_io::pixels::to_srgb16(px[0]));
         // A bitmap alone (32-bit, BI_RGB), as most programs copy: its size is checked, then
         // it is read.

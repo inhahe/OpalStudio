@@ -89,6 +89,61 @@ fn the_rulers_take_a_strip_beside_the_view_and_ctrl_r_hides_them() {
 }
 
 #[test]
+fn counting_from_the_layer_being_moved_counts_from_where_it_was() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    h.state_mut().state_mut().create_image(&crate::state::NewImage {
+        width: 1000,
+        height: 300,
+        background: crate::state::Background::White,
+        resolution: 100.0,
+    });
+    // A paste put at a fractional place left of the canvas (x -20.3) and applied: a layer
+    // whose bounds are fractional.
+    put_on_clipboard(&mut h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
+    h.event(egui::Event::Paste(String::new()));
+    h.run();
+    {
+        let d = h.state_mut().state_mut().active_mut().unwrap();
+        let m = d.transform.as_ref().unwrap().current.then(opal_core::geom::Affine::translate(-495.3, 0.0));
+        d.set_box(m, None);
+    }
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let layer = h.state().state().active().unwrap().active_layer().unwrap();
+    // Counting from its own top-left corner, it is transformed with the fields open, its
+    // position given at its center (where shown from a fractional point, a number shown
+    // does not come back the same).
+    {
+        let st = h.state_mut().state_mut();
+        st.set_unit(opal_core::units::Unit::In);
+        st.prefs.set("transform.reference", crate::settings::Value::Choice("center".into()));
+        st.box_numbers = true;
+        st.active_mut().unwrap().origin =
+            crate::box_fields::Origin { base: crate::box_fields::Base::Layer(layer), point: 0 };
+    }
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::T);
+    h.run();
+    for _ in 0..10 {
+        h.key_press(egui::Key::ArrowRight);
+    }
+    h.run();
+    let d = h.state().state().active().unwrap();
+    assert!(d.transform.is_some(), "the box did not open");
+    assert_eq!(d.origin.base, crate::box_fields::Base::Layer(layer), "the choice was dropped while it moved");
+    assert_eq!(d.fit_rect, None, "a rectangle was kept though none was typed");
+    // Its center moved 10 px from where it was: 35 px (0.35 in) right of where its top-left
+    // corner was, which is what the fields count from.
+    let shows = |h: &Harness<'static, OpalApp>, v: f64| {
+        h.query_all(
+            egui_kittest::kittest::by().predicate(move |n| n.numeric_value().is_some_and(|x| (x - v).abs() < 1e-6)),
+        )
+        .count()
+    };
+    assert!(shows(&h, 0.35) >= 1, "not counted from where the layer was");
+}
+
+#[test]
 fn the_resolution_in_the_status_bar_opens_resize_image() {
     let _gpu = gpu_lock();
     let mut h = harness();

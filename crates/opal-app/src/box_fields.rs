@@ -34,11 +34,17 @@ pub const POINTS: [(&str, &str); 9] = [
 /// The point of a box called `id` (one of [`POINTS`]), as fractions of its width and height
 /// from its top-left corner; the corner itself for any other.
 pub fn point(id: &str) -> [f64; 2] {
-    point_at(POINTS.iter().position(|(p, _)| *p == id).unwrap_or(0))
+    point_at(point_index(id))
+}
+
+/// Which of [`POINTS`] is called `id`: its index; the top-left corner's for any other name.
+pub fn point_index(id: &str) -> usize {
+    POINTS.iter().position(|(p, _)| *p == id).unwrap_or(0)
 }
 
 /// The point `POINTS[i]`, as fractions of a box's width and height from its top-left corner.
 pub fn point_at(i: usize) -> [f64; 2] {
+    assert!(i < POINTS.len(), "a box has no point {i}");
     [(i % 3) as f64 * 0.5, (i / 3) as f64 * 0.5]
 }
 
@@ -51,7 +57,8 @@ pub enum Base {
     Layer(LayerId),
 }
 
-/// The point a box's position counts from: point `point` (of [`POINTS`]) of `base`.
+/// The point a box's position counts from: point `point` of `base`, an index into
+/// [`POINTS`] (so less than nine: [`point_at`] asserts it).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Origin {
     pub base: Base,
@@ -71,36 +78,30 @@ impl Origin {
     }
 }
 
-/// The layers of `doc` a position can count from, as the Layers panel lists them (the top
-/// first, those in a group after it, indented): those holding something, but not those in
-/// `except` (the layers a box moves, whose bounds move with it), nor the groups holding them.
-pub fn bases(doc: &Document, except: &[LayerId]) -> Vec<(Base, String)> {
-    let mut moving = std::collections::HashSet::new();
-    for &id in except {
-        let mut at = Some(id);
-        while let Some(l) = at {
-            moving.insert(l);
-            at = doc.position(l).and_then(|p| p.parent);
-        }
-    }
+/// What can be counted from in `doc`, as the Layers panel lists layers (the top first, those
+/// in a group after it, indented): the canvas, and the layers that hold something.
+pub fn bases(doc: &Document) -> Vec<(Base, String)> {
     let mut out = vec![(Base::Canvas, "Canvas".to_owned())];
-    fn walk(
-        layers: &[std::sync::Arc<Layer>],
-        depth: usize,
-        moving: &std::collections::HashSet<LayerId>,
-        out: &mut Vec<(Base, String)>,
-    ) {
+    fn walk(layers: &[std::sync::Arc<Layer>], depth: usize, out: &mut Vec<(Base, String)>) {
         for l in layers.iter().rev() {
-            if !moving.contains(&l.id) && l.bounds().is_some() {
+            if l.bounds().is_some() {
                 out.push((Base::Layer(l.id), format!("{}{}", "   ".repeat(depth), l.name)));
             }
             if let Some(children) = l.children() {
-                walk(children, depth + 1, moving, out);
+                walk(children, depth + 1, out);
             }
         }
     }
-    walk(&doc.layers, 0, &moving, &mut out);
+    walk(&doc.layers, 0, &mut out);
     out
+}
+
+/// What `base` is called in `doc`: "Canvas", or its layer's name.
+fn base_name(doc: &Document, base: Base) -> String {
+    match base {
+        Base::Canvas => "Canvas".to_owned(),
+        Base::Layer(id) => doc.layer(id).map_or_else(|| "Canvas".to_owned(), |l| l.name.clone()),
+    }
 }
 
 /// How a box's numbers are measured, which its fields can change: in what unit, by which of
@@ -127,25 +128,19 @@ pub struct Fields<'a> {
 
 /// Fields for the box `p` (its position that of its point `POINTS[m.reference]`, from
 /// `m.origin`), in `m.unit` at `ppi`, with a menu of the units, a grid of the box's points,
-/// and what the position counts from (one of `bases`, and its point), as a two-column grid.
-/// Returns whether the user changed a number (choosing another point, or another origin,
-/// changes none: the caller shows the box measured so next).
-pub fn fields(
-    ui: &mut egui::Ui,
-    p: &mut Params,
-    m: &mut Measure,
-    bases: &[(Base, String)],
-    ppi: f64,
-    how: &Fields,
-) -> bool {
+/// and what the position counts from (the canvas or a layer of `doc`, the image as it was
+/// before the box opened, and its point), as a two-column grid. Returns whether the user
+/// changed a number (choosing another point, or another origin, changes none: the caller
+/// shows the box measured so next).
+pub fn fields(ui: &mut egui::Ui, p: &mut Params, m: &mut Measure, doc: &Document, ppi: f64, how: &Fields) -> bool {
     let before = *p;
     let point = POINTS[m.reference].1.to_lowercase();
-    let from = bases.iter().find(|(b, _)| *b == m.origin.base).map_or("Canvas", |(_, n)| n.trim());
-    let from = format!(
-        "{} of {}",
-        POINTS[m.origin.point].1.to_lowercase(),
-        if from == "Canvas" { "the canvas".to_owned() } else { format!("“{from}”") }
-    );
+    let name = base_name(doc, m.origin.base);
+    let of = match m.origin.base {
+        Base::Canvas => "the canvas".to_owned(),
+        Base::Layer(_) => format!("“{name}”"),
+    };
+    let from = format!("{} of {of}", POINTS[m.origin.point].1.to_lowercase());
     egui::Grid::new(("box-numbers", how.salt)).num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
         ui.label("Units");
         lengths::unit_menu(ui, &mut m.unit, &format!("{}-unit", how.salt));
@@ -159,13 +154,13 @@ pub fn fields(
             "What the position counts from: a point of the canvas, or of what a layer holds (its bounds).",
         );
         ui.horizontal(|ui| {
-            let shown = bases.iter().find(|(b, _)| *b == m.origin.base).map_or("Canvas", |(_, n)| n.trim());
             egui::ComboBox::from_id_salt(("box-from", how.salt))
-                .selected_text(shown)
+                .selected_text(name.as_str())
                 .width(110.0)
                 .show_ui(ui, |ui| {
-                    for (b, name) in bases {
-                        ui.selectable_value(&mut m.origin.base, *b, name);
+                    // Listed only while the menu is open: a walk of every layer's bounds.
+                    for (b, name) in bases(doc) {
+                        ui.selectable_value(&mut m.origin.base, b, name);
                     }
                 })
                 .response
@@ -243,8 +238,7 @@ pub fn reference_grid(ui: &mut egui::Ui, chosen: &mut usize, what: Option<&str>,
 
 /// The point the preference chooses: its index in [`POINTS`].
 fn reference(st: &AppState) -> usize {
-    let id = st.prefs.choice("transform.reference");
-    POINTS.iter().position(|(p, _)| *p == id).unwrap_or(0)
+    point_index(&st.prefs.choice("transform.reference"))
 }
 
 /// Makes `POINTS[i]` the point the boxes' positions give, if it is another.
@@ -264,10 +258,10 @@ pub fn transform(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
     let Some(d) = st.doc_mut(id) else { return };
     let Some(s) = d.transform.as_ref() else { return };
     let (canvas, ppi) = (d.doc().canvas.rect(), d.doc().resolution);
-    let except: Vec<LayerId> = s.targets.iter().map(|t| t.layer).collect();
-    let bases = bases(d.doc(), &except);
-    let origin = counted_from(d.origin, &bases);
-    let [cx, cy] = origin.locate(d.doc()).unwrap_or([canvas.x0 as f64, canvas.y0 as f64]);
+    // Counted from as it was before the box opened: a layer the box moves, from where it was.
+    let before = d.history.doc();
+    let origin = counted_from(d.origin, before);
+    let [cx, cy] = origin.locate(before).expect("counted_from gives one there");
     let mut m = Measure { unit, reference, origin };
     let p = s.params_at(at);
     let mut q = Params { x: p.x - cx, y: p.y - cy, ..p };
@@ -278,12 +272,16 @@ pub fn transform(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
         sides: 0.01..=1e6,
         salt,
     };
-    if fields(ui, &mut q, &mut m, &bases, ppi, &how) {
+    let typed = fields(ui, &mut q, &mut m, before, ppi, &how);
+    if typed {
         let moved = s.edited(&p, &Params { x: q.x + cx, y: q.y + cy, ..q }, at);
         d.set_box(moved, None);
     }
-    d.origin = m.origin;
-    let rect = Rect { canvas: canvas.to_f(), from: [cx, cy], origin, unit: m.unit, ppi, at };
+    // Kept only when chosen: one shown in its stead (a layer gone) is not the user's choice.
+    if m.origin != origin {
+        d.origin = m.origin;
+    }
+    let rect = Rect { canvas: canvas.to_f(), from: [cx, cy], unit: m.unit, ppi, at };
     if let Some(fit) = fit_into(ui, &mut d.fit_rect, &rect, salt)
         && let Err(why) = crate::api::place_box(d, &fit)
     {
@@ -295,19 +293,18 @@ pub fn transform(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
     }
 }
 
-/// `origin`, if it is still one of `bases` (its layer there, holding something, and not one
-/// the box moves); else the canvas's top-left corner.
-fn counted_from(origin: Origin, bases: &[(Base, String)]) -> Origin {
-    if bases.iter().any(|(b, _)| *b == origin.base) { origin } else { Origin::default() }
+/// `origin`, if it can be counted from in `doc` (its layer there and holding something);
+/// else the canvas's top-left corner.
+fn counted_from(origin: Origin, doc: &Document) -> Origin {
+    if origin.locate(doc).is_some() { origin } else { Origin::default() }
 }
 
 /// What the rectangle to fit a box into is measured in and from: the canvas (its default),
-/// the point positions count from (`from`, in the document; `origin`, as chosen), the unit
-/// and resolution, and the box's point `at` that positions give.
+/// the point positions count from (`from`, in the document), the unit and resolution, and
+/// the box's point `at` that positions give.
 struct Rect {
     canvas: opal_core::geom::FRect,
     from: [f64; 2],
-    origin: Origin,
     unit: Unit,
     ppi: f64,
     at: [f64; 2],
@@ -325,23 +322,23 @@ fn fit_into(ui: &mut egui::Ui, rect: &mut Option<[f64; 4]>, how: &Rect, salt: &s
     let shift = [how.canvas.x0 - how.from[0], how.canvas.y0 - how.from[1]];
     let [x0, y0, w0, h0] = rect.unwrap_or([0.0, 0.0, canvas[0], canvas[1]]);
     let (mut x, mut y, mut w, mut h) = (x0 + at[0] * w0 + shift[0], y0 + at[1] * h0 + shift[1], w0, h0);
-    let (mut fit, mut canvas_again) = (None, false);
+    let (mut fit, mut canvas_again, mut edited) = (None, false, false);
     ui.add_space(4.0);
     egui::CollapsingHeader::new("Fit into a rectangle").id_salt(("fit-into", salt)).default_open(true).show(ui, |ui| {
         egui::Grid::new(("fit-rect", salt)).num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
             ui.label("Position");
             ui.horizontal(|ui| {
                 ui.label("x");
-                lengths::length(ui, &mut x, unit, ppi, -FAR..=FAR, 1);
+                edited |= lengths::length(ui, &mut x, unit, ppi, -FAR..=FAR, 1).changed();
                 ui.label("y");
-                lengths::length(ui, &mut y, unit, ppi, -FAR..=FAR, 1);
+                edited |= lengths::length(ui, &mut y, unit, ppi, -FAR..=FAR, 1).changed();
             });
             ui.end_row();
             ui.label("Size");
             ui.horizontal(|ui| {
-                lengths::length(ui, &mut w, unit, ppi, 0.01..=1e6, 1);
+                edited |= lengths::length(ui, &mut w, unit, ppi, 0.01..=1e6, 1).changed();
                 ui.label("×");
-                lengths::length(ui, &mut h, unit, ppi, 0.01..=1e6, 1);
+                edited |= lengths::length(ui, &mut h, unit, ppi, 0.01..=1e6, 1).changed();
             });
             ui.end_row();
         });
@@ -366,13 +363,13 @@ fn fit_into(ui: &mut egui::Ui, rect: &mut Option<[f64; 4]>, how: &Rect, salt: &s
         // The canvas, whatever it is when the box is fitted to it.
         *rect = None;
         (x, y, w, h) = (at[0] * canvas[0] + shift[0], at[1] * canvas[1] + shift[1], canvas[0], canvas[1]);
-    } else if typed != [x0, y0, w0, h0] {
+    } else if edited {
         *rect = Some(typed);
     }
     // Stretched, the box is exactly the rectangle typed, so upright; fitted, it keeps its turn.
     let angle = (fit == Some(Fit::Stretch)).then_some(0.0);
-    let origin = how.origin;
-    fit.map(|fit| BoxArgs { x: Some(x), y: Some(y), width: Some(w), height: Some(h), angle, fit, at, origin })
+    let from = how.from;
+    fit.map(|fit| BoxArgs { x: Some(x), y: Some(y), width: Some(w), height: Some(h), angle, fit, at, from })
 }
 
 /// The crop box's fields for document `id` (its position, size and angle); what is typed
@@ -384,9 +381,9 @@ pub fn crop(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
     let Some(d) = st.doc_mut(id) else { return };
     let (c, ppi) = (d.doc().canvas, d.doc().resolution);
     let b = *d.crop.get_or_insert_with(|| CropBox::of(&c));
-    let bases = bases(d.doc(), &[]);
-    let origin = counted_from(d.origin, &bases);
-    let from = origin.locate(d.doc()).unwrap_or([c.x as f64, c.y as f64]);
+    let doc = d.history.doc();
+    let origin = counted_from(d.origin, doc);
+    let from = origin.locate(doc).expect("counted_from gives one there");
     let mut m = Measure { unit, reference, origin };
     let mut p = b.numbers(from, at);
     let how = Fields {
@@ -396,11 +393,13 @@ pub fn crop(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
         sides: 1.0..=f64::from(crate::dialogs::MAX_SIDE),
         salt,
     };
-    if fields(ui, &mut p, &mut m, &bases, ppi, &how) {
+    if fields(ui, &mut p, &mut m, doc, ppi, &how) {
         d.crop = Some(CropBox::from_numbers(&p, from, at));
         d.revision += 1;
     }
-    d.origin = m.origin;
+    if m.origin != origin {
+        d.origin = m.origin;
+    }
     set_reference(st, m.reference);
     if m.unit != st.unit() {
         st.set_unit(m.unit);
@@ -473,15 +472,16 @@ mod tests {
         doc.insert(top(2), Layer::new_empty(ids.layer(), "empty")).unwrap();
         // As the Layers panel lists them, the top first; an empty layer is nothing to count from.
         let names = |bases: Vec<(Base, String)>| bases.into_iter().map(|(_, n)| n).collect::<Vec<_>>();
-        assert_eq!(names(bases(&doc, &[])), ["Canvas", "g", "   b", "   a", "x"]);
-        // Not a layer the box moves, nor the group holding it.
-        assert_eq!(names(bases(&doc, &[b])), ["Canvas", "   a", "x"]);
+        assert_eq!(names(bases(&doc)), ["Canvas", "g", "   b", "   a", "x"]);
         // A layer's points are its bounds'.
         let center_of_a = Origin { base: Base::Layer(a), point: 4 };
         assert_eq!(center_of_a.locate(&doc), Some([30.0, 40.0]));
         let canvas_end = Origin { base: Base::Canvas, point: 8 };
         assert_eq!(canvas_end.locate(&doc), Some([100.0, 100.0]));
-        // One not to count from any more is the canvas's corner.
-        assert_eq!(counted_from(Origin { base: Base::Layer(b), point: 2 }, &bases(&doc, &[b])), Origin::default());
+        // One not to count from any more (its layer gone) is the canvas's corner.
+        let gone = Origin { base: Base::Layer(LayerId(999)), point: 2 };
+        assert_eq!(counted_from(gone, &doc), Origin::default());
+        assert_eq!(counted_from(center_of_a, &doc), center_of_a);
+        let _ = b;
     }
 }

@@ -5,7 +5,6 @@ use crate::pixels::{from_srgb8, from_srgb16, pixels_to_rgba8, pixels_to_rgba16};
 use crate::{IoError, Progress, write_atomically};
 use half::f16;
 use image::codecs::jpeg::JpegEncoder;
-use image::codecs::png::PngEncoder;
 use image::{DynamicImage, GenericImageView, ImageDecoder, ImageReader};
 use opal_core::composite::{composite_within_until, flatten};
 use opal_core::document::{Document, Layer};
@@ -212,18 +211,21 @@ pub enum ExportFormat {
     Jpeg { quality: u8, background: [u8; 3] },
 }
 
-/// `w × h` pixels as a 16-bit PNG file's bytes (for the clipboard), compressed quickly.
-pub fn encode_png16(pixels: &[Pixel], w: u32, h: u32) -> Vec<u8> {
-    use image::codecs::png::{CompressionType, FilterType};
+/// `w × h` pixels as a 16-bit PNG file's bytes (for the clipboard), compressed quickly,
+/// recording `ppi` pixels per inch if given.
+pub fn encode_png16(pixels: &[Pixel], w: u32, h: u32, ppi: Option<f64>) -> Vec<u8> {
     let mut out = Vec::new();
-    let encoder = PngEncoder::new_with_quality(&mut out, CompressionType::Fast, FilterType::Adaptive);
-    rgba16(pixels, w, h).write_with_encoder(encoder).expect("encoding into memory cannot fail");
+    let mut encoder = png::Encoder::new(&mut out, w, h);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Sixteen);
+    encoder.set_compression(png::Compression::Fast);
+    encoder.set_filter(png::Filter::Adaptive);
+    encoder.set_pixel_dims(ppi.map(crate::density::png_dims));
+    let bytes: Vec<u8> = pixels_to_rgba16(pixels).iter().flat_map(|v| v.to_be_bytes()).collect();
+    let mut writer = encoder.write_header().expect("encoding into memory cannot fail");
+    writer.write_image_data(&bytes).expect("encoding into memory cannot fail");
+    writer.finish().expect("encoding into memory cannot fail");
     out
-}
-
-/// `w × h` pixels as 16-bit sRGB with straight alpha.
-fn rgba16(pixels: &[Pixel], w: u32, h: u32) -> DynamicImage {
-    DynamicImage::ImageRgba16(image::ImageBuffer::from_raw(w, h, pixels_to_rgba16(pixels)).expect("buffer size"))
 }
 
 /// A size to export at other than the canvas's, and how to resample to it.
@@ -715,6 +717,7 @@ impl<I: Iterator<Item = Vec<Pixel>>> GenericImageView for JpegRows<I> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::codecs::png::PngEncoder;
     use opal_core::document::{IdGen, Layer, Position};
 
     /// The whole exported image at once, with its width and height.
@@ -761,7 +764,7 @@ mod tests {
         let want: Vec<Pixel> = img.pixels().map(|p| from_srgb8(p.0)).collect();
         assert!(eight.image.read_rect(&whole) == want);
         let px = vec![opal_core::tile::pixel_from_f32([0.3, 0.6, 0.9, 1.0]); 300 * 260];
-        let sixteen = import_bytes(&encode_png16(&px, 300, 260), Path::new("16.png"), None).unwrap();
+        let sixteen = import_bytes(&encode_png16(&px, 300, 260, None), Path::new("16.png"), None).unwrap();
         assert!(sixteen.image.tiles().all(|(_, t)| !t.is_srgb8()), "16 bits kept at 8");
     }
 
@@ -770,8 +773,10 @@ mod tests {
         use opal_core::tile::pixel_from_f32;
         // A value between two 8-bit levels survives.
         let px = vec![pixel_from_f32([0.30001, 0.5, 0.7, 1.0]), pixel_from_f32([0.0, 0.0, 0.0, 0.25])];
-        let bytes = encode_png16(&px, 2, 1);
+        let bytes = encode_png16(&px, 2, 1, Some(300.0));
         let back = import_bytes(&bytes, Path::new("clip.png"), None).unwrap();
+        // And the resolution of the image it came from.
+        assert_eq!(back.resolution, Some([300.0, 300.0]));
         let p = back.image.pixel(0, 0);
         let expect = crate::pixels::to_srgb16(px[0]);
         assert_eq!(crate::pixels::to_srgb16(p), expect);

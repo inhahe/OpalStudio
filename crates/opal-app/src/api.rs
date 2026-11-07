@@ -186,15 +186,15 @@ use crate::box_fields::FAR;
 const BOX_X: Param = Param {
     name: "x",
     kind: Kind::Length { min: -FAR, max: FAR },
-    help: "Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's left \
-           edge.",
+    help: "Where the box's anchor point (its top-left corner, unless anchor says) goes, across from the point \
+           from_layer and from_anchor give (the canvas's top-left corner, unless they say).",
     otherwise: Otherwise::Now("where the command puts it"),
 };
 const BOX_Y: Param = Param {
     name: "y",
     kind: Kind::Length { min: -FAR, max: FAR },
-    help: "Where the box's anchor point (its top-left corner, unless anchor says) goes, from the canvas's top \
-           edge.",
+    help: "Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point \
+           from_layer and from_anchor give (the canvas's top-left corner, unless they say).",
     otherwise: Otherwise::Now("where the command puts it"),
 };
 const BOX_WIDTH: Param = Param {
@@ -640,13 +640,15 @@ const CHANGES: &[(&str, &str, &[Param])] = &[
             Param {
                 name: "x",
                 kind: Kind::Length { min: -FAR, max: FAR },
-                help: "Where the rectangle's anchor point is, from the canvas's left edge.",
+                help: "Where the rectangle's anchor point is, across from the point from_layer and from_anchor give \
+                       (the canvas's top-left corner, unless they say).",
                 otherwise: Otherwise::Now("where that point of the canvas is"),
             },
             Param {
                 name: "y",
                 kind: Kind::Length { min: -FAR, max: FAR },
-                help: "Where the rectangle's anchor point is, from the canvas's top edge.",
+                help: "Where the rectangle's anchor point is, down from the point from_layer and from_anchor give \
+                       (the canvas's top-left corner, unless they say).",
                 otherwise: Otherwise::Now("where that point of the canvas is"),
             },
             length_side("width", "The rectangle's width.", Otherwise::Now("the canvas's")),
@@ -1123,9 +1125,9 @@ impl Args {
     }
 }
 
-/// Where an API call puts a box, in pixels, its anchor point (`at`) from the canvas's
-/// corner: each number given replaces the box's own; a side left out keeps the box's
-/// proportions if the other is given; and with both, `fit` says how they are taken.
+/// Where an API call puts a box, in pixels, its anchor point (`at`) from the point `from`:
+/// each number given replaces the box's own; a side left out keeps the box's proportions if
+/// the other is given; and with both, `fit` says how they are taken.
 #[derive(Clone, Debug, Default)]
 pub struct BoxArgs {
     pub x: Option<f64>,
@@ -1139,8 +1141,10 @@ pub struct BoxArgs {
     ///
     /// [`box_fields::POINTS`]: crate::box_fields::POINTS
     pub at: [f64; 2],
-    /// What `x` and `y` count from.
-    pub origin: crate::box_fields::Origin,
+    /// The point `x` and `y` count from, in the document: located when the call is made,
+    /// so a paste whose clipboard is read later, or a box moving the layer counted from,
+    /// counts from where it was then.
+    pub from: [f64; 2],
 }
 
 /// How a box given both a width and a height takes them.
@@ -1156,9 +1160,18 @@ pub enum Fit {
 }
 
 impl BoxArgs {
-    /// The box `args` give (once in pixels).
-    fn of(args: &Args) -> BoxArgs {
-        BoxArgs {
+    /// The box `args` give (once in pixels), counted from the point their `from_layer` and
+    /// `from_anchor` give in `doc` (as it is when the call is made; a new image's canvas
+    /// corner, with none open), or why there is no such point.
+    fn of(args: &Args, doc: Option<&opal_core::document::Document>) -> Result<BoxArgs, String> {
+        let from = match doc {
+            Some(doc) => located(&origin_of(args), doc)?,
+            None if args.get("from_layer").is_some() => {
+                return Err("No image is open, so there is no layer to count from.".to_owned());
+            }
+            None => [0.0, 0.0],
+        };
+        Ok(BoxArgs {
             x: args.opt_number("x"),
             y: args.opt_number("y"),
             width: args.opt_number("width"),
@@ -1170,14 +1183,15 @@ impl BoxArgs {
                 _ => Fit::Stretch,
             },
             at: crate::box_fields::point(args.text("anchor").unwrap_or("top-left")),
-            origin: origin_of(args),
-        }
+            from,
+        })
     }
 
     /// The box `p` (as the document has it, its position that of the point [`at`](Self::at))
-    /// with these numbers put in, its size as given, or kept in proportion; `corner` is the
-    /// canvas's top-left corner. (A fit inside or covering a rectangle is [`place_box`]'s.)
-    pub fn applied(&self, p: &crate::transform::Params, corner: [f64; 2]) -> crate::transform::Params {
+    /// with these numbers put in, counted from [`from`](Self::from); its size as given, or
+    /// kept in proportion. (A fit inside or covering a rectangle is [`place_box`]'s.)
+    pub fn applied(&self, p: &crate::transform::Params) -> crate::transform::Params {
+        let corner = self.from;
         let (w, h) = match (self.width, self.height) {
             (Some(w), Some(h)) => (w, h),
             (Some(w), None) => (w, p.height * w / p.width),
@@ -1201,7 +1215,7 @@ impl BoxArgs {
 /// by its point `at` at `x` and `y`, or at the box's own); otherwise its numbers are put in
 /// (see [`BoxArgs::applied`]).
 pub(crate) fn place_box(d: &mut crate::doc::DocState, place: &BoxArgs) -> Result<(), String> {
-    let corner = located(&place.origin, d.doc())?;
+    let corner = place.from;
     let s = d.transform.as_ref().expect("a box is open");
     let at = place.at;
     let p = s.params_at(at);
@@ -1213,7 +1227,7 @@ pub(crate) fn place_box(d: &mut crate::doc::DocState, place: &BoxArgs) -> Result
             let rect = opal_core::geom::FRect::new(x, y, x + w, y + h);
             crate::transform::fitted(turned, &s.frame, &rect, place.fit == Fit::Cover)
         }
-        _ => s.edited(&p, &place.applied(&p, corner), at),
+        _ => s.edited(&p, &place.applied(&p), at),
     };
     if let Some(why) = d.box_refused(&m) {
         let mut why = why.to_owned();
@@ -1226,11 +1240,10 @@ pub(crate) fn place_box(d: &mut crate::doc::DocState, place: &BoxArgs) -> Result
 
 /// What `args` say x and y count from (`from_layer`, `from_anchor`).
 fn origin_of(args: &Args) -> crate::box_fields::Origin {
-    use crate::box_fields::{Base, Origin, POINTS};
-    let anchor = args.text("from_anchor").unwrap_or("top-left");
+    use crate::box_fields::{Base, Origin, point_index};
     Origin {
         base: args.opt_int("from_layer").map_or(Base::Canvas, |l| Base::Layer(LayerId(l as u64))),
-        point: POINTS.iter().position(|(p, _)| *p == anchor).unwrap_or(0),
+        point: point_index(args.text("from_anchor").unwrap_or("top-left")),
     }
 }
 
@@ -1700,10 +1713,14 @@ impl AppState {
                     },
                 };
                 let groups = target.and_then(|t| self.doc(t)).map(|d| d.groups.clone()).unwrap_or_default();
+                let place = match BoxArgs::of(args, target.and_then(|t| self.doc(t)).map(|d| d.history.doc())) {
+                    Ok(place) => place,
+                    Err(why) => return now(Err(format!("{}: {why}", snake(&format!("{cmd:?}"))))),
+                };
                 self.next_answer += 1;
                 let answer = crate::state::PasteAnswer {
                     n: self.next_answer,
-                    place: BoxArgs::of(args),
+                    place,
                     into_active: args.flag("into_active") == Some(true),
                     groups,
                 };
@@ -1713,23 +1730,31 @@ impl AppState {
                 Reply::Later(n)
             }
             Cmd::Place => {
+                let place = match BoxArgs::of(args, self.active().map(|d| d.history.doc())) {
+                    Ok(place) => place,
+                    Err(why) => return now(Err(format!("place: {why}"))),
+                };
                 let name = args.text("name");
                 match self.place_file(&args.path("path"), name) {
                     Ok(warnings) => {
                         let notes = warnings.into_iter().map(|w| format!("Placed: {w}")).collect();
                         let into = args.flag("into_active") == Some(true);
-                        now(self.apply_box(&BoxArgs::of(args), into).map(|v| with_notes(v, notes)))
+                        now(self.apply_box(&place, into).map(|v| with_notes(v, notes)))
                     }
                     Err(why) => now(Err(format!("place: {why}"))),
                 }
             }
             Cmd::Transform => {
+                let place = match BoxArgs::of(args, self.active().map(|d| d.history.doc())) {
+                    Ok(place) => place,
+                    Err(why) => return now(Err(format!("transform: {why}"))),
+                };
                 self.transform();
                 if self.active().is_some_and(|d| d.transform.is_none()) {
                     // Refused, and said why.
                     return now(Ok(json!({})));
                 }
-                now(self.apply_box(&BoxArgs::of(args), false))
+                now(self.apply_box(&place, false))
             }
             Cmd::Rename => {
                 let id = self.active().and_then(|d| d.active_layer()).expect("available");
@@ -1808,19 +1833,12 @@ impl AppState {
 
     /// Puts the transform box open on the active image where `place` says, and applies it
     /// (into the active layer, for a paste, if `into_active`). Answers with the layer it
-    /// ends on (or the selected layers, for a transform) and the box: in pixels, its corner
-    /// from the canvas's. Refused, the box cancelled, if it would go past what an image file
-    /// can hold, or there is no layer to go into.
+    /// ends on (or the selected layers, for a transform) and the box: in pixels, its anchor
+    /// point from the point `place` counts from. Refused, the box cancelled, if it would go
+    /// past what an image file can hold, or there is no layer to go into.
     pub(crate) fn apply_box(&mut self, place: &BoxArgs, into_active: bool) -> Result<Value, String> {
         let d = self.active_mut().expect("a box is open");
-        // (Where the origin is before the box moves: a layer moved counts from where it was.)
-        let corner = match located(&place.origin, d.doc()) {
-            Ok(corner) => corner,
-            Err(why) => {
-                d.cancel_transform();
-                return Err(why);
-            }
-        };
+        let corner = place.from;
         let paste = d.transform.as_ref().expect("a box is open").paste.clone();
         if let Err(why) = place_box(d, place) {
             d.cancel_transform();
@@ -1868,7 +1886,7 @@ impl AppState {
         let c = d.doc().canvas;
         let side = |name: &str, canvas: u32| args.opt_number(name).map_or(f64::from(canvas), f64::round);
         let at = crate::box_fields::point(args.text("anchor").unwrap_or("top-left"));
-        let from = located(&origin_of(args), d.doc()).map_err(|why| format!("crop: {why}"))?;
+        let from = located(&origin_of(args), d.history.doc()).map_err(|why| format!("crop: {why}"))?;
         // Left out, x and y are where the anchor's point of the canvas is.
         let p = crate::transform::Params {
             x: args.opt_number("x").unwrap_or(c.x as f64 + at[0] * f64::from(c.width) - from[0]),
@@ -3290,7 +3308,7 @@ mod tests {
         let p = crate::transform::Params { x: 10.0, y: 20.0, width: 40.0, height: 20.0, angle: 0.0, mirrored: false };
         let corner = [100.0, 200.0];
         let applied = |b: BoxArgs| {
-            let q = b.applied(&p, corner);
+            let q = BoxArgs { from: corner, ..b }.applied(&p);
             (q.x, q.y, q.width, q.height)
         };
         assert_eq!(applied(BoxArgs::default()), (10.0, 20.0, 40.0, 20.0));
@@ -3474,6 +3492,27 @@ mod tests {
         assert_eq!((c["width"].as_u64(), c["height"].as_u64()), (Some(12), Some(12)));
         let canvas = st.active().unwrap().doc().canvas;
         assert_eq!((canvas.x, canvas.y), (49, 19));
+        // A paste read later counts from where the layer was when it was asked for, though
+        // the layer has moved since.
+        use crate::clipboard::{Pasted, TestClipboard};
+        let px = vec![opal_core::tile::pixel_from_f32([1.0; 4]); 4];
+        let image = Pasted {
+            width: 2,
+            height: 2,
+            image: RasterImage::from_pixels(2, 2, &px),
+            from: None,
+            resolution: None,
+            warnings: Vec::new(),
+        };
+        st.clipboard = Box::new(TestClipboard { image: Some(image), slow: true, ..Default::default() });
+        let ctx = egui::Context::default();
+        let asked = json!({ "from_layer": mark, "x": 0, "y": 0 });
+        let Reply::Later(n) = st.call("paste", &args(asked), &ctx) else { panic!("answered at once") };
+        now(&mut st, "transform", json!({ "layers": [mark], "x": 150 })).unwrap();
+        let pasted = later(&mut st, n).unwrap()["layer"].clone();
+        let (x0, y0, _, _) = bounds(&st, &pasted);
+        let canvas = st.active().unwrap().doc().canvas;
+        assert_eq!((x0 - canvas.x as f64, y0 - canvas.y as f64), (1.0, 1.0), "not from where the mark was");
         // A layer that is not there, or holds nothing, is nothing to count from.
         let none = now(&mut st, "place", json!({ "path": path, "from_layer": 999 })).unwrap_err();
         assert!(none.contains("no layer 999"), "{none}");

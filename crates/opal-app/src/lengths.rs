@@ -138,9 +138,13 @@ pub fn show_size(w: f64, h: f64, unit: Unit, ppi: f64) -> String {
 
 /// `ppi` in `unit`, with the unit's name ("300 pixels/inch").
 pub fn show_resolution(ppi: f64, unit: ResolutionUnit) -> String {
+    format!("{} {}", resolution_number(ppi, unit), unit.name().to_lowercase())
+}
+
+/// `ppi` in `unit`, to two places at most ("300", "118.11").
+fn resolution_number(ppi: f64, unit: ResolutionUnit) -> String {
     let text = format!("{:.2}", unit.from_ppi(ppi));
-    let text = text.trim_end_matches('0').trim_end_matches('.');
-    format!("{text} {}", unit.name().to_lowercase())
+    text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 /// How large a `width × height` image prints at `ppi`, told in `unit` (or, for pixels, in
@@ -152,8 +156,7 @@ pub fn print_note(width: u32, height: u32, ppi: f64, unit: Unit, per: Resolution
 
 /// `ppi` in `unit`, short ("300 ppi"), as the status bar shows it.
 pub fn show_resolution_short(ppi: f64, unit: ResolutionUnit) -> String {
-    let text = format!("{:.2}", unit.from_ppi(ppi));
-    format!("{} {}", text.trim_end_matches('0').trim_end_matches('.'), unit.id())
+    format!("{} {}", resolution_number(ppi, unit), unit.id())
 }
 
 /// The unit a print size is told in: `unit` if it is one, else inches or centimeters as
