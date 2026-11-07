@@ -1,6 +1,6 @@
 # Opal Studio — roadmap
 
-What each milestone delivers is specified in `design.md`. Status: milestones 0, 1 and S
+What each milestone delivers is specified in `design.md`. Status: milestones 0, 1, S and E
 are done; everything after them is planned.
 
 **Order:** 0, 1, S, E, 2, A, 3, 4, and so on. Photo editing comes first, with vector shapes
@@ -72,13 +72,13 @@ right after the selection core it builds on.
   `python script.py` starts a windowless editor when none runs (`--serve`); the boxes'
   reference point and fitting into a typed rectangle; rulers.
 
-## E. Expressions
+## E. Expressions (done)
 - The expression language (`design.md`, *Expressions*):
   - numbers in mixed units, with their kinds checked;
   - arithmetic and functions;
-  - references to the canvas, to any layer's bounds and nine points by name, to the box
-    as it was, and to the resolution;
-  - points as values (`mid`, `lerp`, `dist`);
+  - references to the canvas, to any layer's bounds (edges, corners and center) by name or
+    id, to the box as it was, and to the resolution;
+  - points as values (`mid`, `lerp`, `dist`, `point`);
   - names resolved to stable ids, and renamed with their objects.
 - Every number and length field takes an expression. It is worked out when entered; what
   it comes to shows as you type; an error says where it is; recent expressions come back
