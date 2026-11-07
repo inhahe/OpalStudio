@@ -56,19 +56,29 @@ pub struct PasteInto {
     pub active: Option<LayerId>,
     /// Whether it goes into `active` rather than onto the new layer.
     pub into_active: bool,
-    /// For a file placed whose resolution is not the image's: how its size at that
-    /// resolution and its size in pixels differ, and which it is at.
+    /// For a file placed whose resolution is not the image's: its print size against its
+    /// pixels, and which the box is at.
     pub print: Option<PrintSize>,
 }
 
-/// A placed file's print size against its pixels.
+/// A placed file's print size against its pixels: the scale, across and down, that placing
+/// it at each gives it (its print size: the image's resolution ÷ the file's, each way; then
+/// either fitted to the canvas, if the preference fits large pastes and it is larger), and
+/// which the box is at.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PrintSize {
-    /// The image's resolution ÷ the file's: what its pixels are scaled by to print as large
-    /// as they did.
-    pub factor: f64,
+    pub print: [f64; 2],
+    pub pixels: [f64; 2],
     /// Whether the box is at the print size (else at the file's pixels).
     pub on: bool,
+}
+
+/// How a paste's box begins: as a session of `kind` (a paste, or a file placed) on a layer
+/// called `name`, and for a file placed, its print size against its pixels.
+pub struct PasteAs {
+    pub kind: Kind,
+    pub name: String,
+    pub print: Option<PrintSize>,
 }
 
 /// What a drag on the box does.
@@ -506,10 +516,8 @@ fn take_targets(layer: &mut Layer, sampling: Sampling, out: &mut Vec<(Target, FR
 }
 
 impl DocState {
-    /// Starts placing `pasted` on a new layer called `name` at `position`, carried into the
-    /// document by `place`, as a session of `kind` (a paste, or a placed file). `into` is the
-    /// layer it may go into instead.
-    #[expect(clippy::too_many_arguments, reason = "what a paste is, each its own")]
+    /// Starts placing `pasted` on a new layer at `position`, carried into the document by
+    /// `place`, as `how` says. `into` is the layer it may go into instead.
     pub fn begin_paste(
         &mut self,
         pasted: &Pasted,
@@ -517,16 +525,15 @@ impl DocState {
         sampling: Sampling,
         position: Position,
         into: Option<LayerId>,
-        kind: Kind,
-        name: &str,
+        how: PasteAs,
     ) {
+        let PasteAs { kind, name, print } = how;
         debug_assert!(kind != Kind::Transform, "a paste is placed, not transformed");
         self.commit_pending();
         let was_selected = self.selection_with_active_last();
         let (layer_id, object) = (self.ids.layer(), self.ids.object());
         let frame = IRect::from_size(i64::from(pasted.width), i64::from(pasted.height));
         let image = ImageObject { image: Arc::new(pasted.image.clone()), frame, transform: place, sampling };
-        let name = name.to_owned();
         let layer =
             Layer::with_objects(layer_id, name.clone(), vec![Object { id: object, kind: ObjectKind::Image(image) }]);
         let mut doc = self.history.doc().clone();
@@ -543,7 +550,7 @@ impl DocState {
             start: place,
             current: place,
             sampling,
-            paste: Some(PasteInto { layer: layer_id, position, name, active: into, into_active: false, print: None }),
+            paste: Some(PasteInto { layer: layer_id, position, name, active: into, into_active: false, print }),
             was_selected,
             drag: None,
             guides: Guides::default(),
@@ -693,23 +700,31 @@ impl DocState {
         self.revision += 1;
     }
 
-    /// For a placed file, switches the box between its print size and the file's pixels,
-    /// scaling it about its center (so a size given meanwhile scales with it). Returns
-    /// whether it did (not for a box with nothing to switch, nor one the scaling would put
-    /// past what an image file can hold).
-    pub fn toggle_print_size(&mut self) -> bool {
-        let Some(s) = self.transform.as_ref() else { return false };
-        let Some(print) = s.paste.as_ref().and_then(|p| p.print) else { return false };
-        let k = if print.on { 1.0 / print.factor } else { print.factor };
-        let [cx, cy] = s.current.apply(s.frame.center());
-        let m = s.current.then(Affine::scale(k, k).about(cx, cy));
-        if self.box_refused(&m).is_some() {
-            return false;
+    /// For a placed file, switches the box between its print size and the file's pixels: to
+    /// the size placing it so gives, scaled along its own sides about its center (so a size
+    /// or turn given meanwhile stays, relative to it), on whole pixels where that is the
+    /// file's own size, upright. Why not, if it cannot (a box with nothing to switch, or one
+    /// the scaling would put past what an image file can hold).
+    pub fn toggle_print_size(&mut self) -> Result<(), &'static str> {
+        let Some(s) = self.transform.as_ref() else { return Err("there is no box") };
+        let Some(print) = s.paste.as_ref().and_then(|p| p.print) else {
+            return Err("it has no print size to switch to apart from its pixels");
+        };
+        let (from, to) = if print.on { (print.print, print.pixels) } else { (print.pixels, print.print) };
+        let c = s.frame.center();
+        let mut m = Affine::scale(to[0] / from[0], to[1] / from[1]).about(c[0], c[1]).then(s.current);
+        // At its own pixels, upright: on whole pixels, so it stays crisp.
+        let unit = |v: f64, want: f64| (v - want).abs() < 1e-9;
+        if unit(m.a, 1.0) && unit(m.b, 0.0) && unit(m.c, 0.0) && unit(m.d, 1.0) {
+            m = Affine::translate(m.e.round(), m.f.round());
+        }
+        if let Some(why) = self.box_refused(&m) {
+            return Err(why);
         }
         self.set_box(m, None);
         let p = self.transform.as_mut().and_then(|s| s.paste.as_mut()).expect("checked above");
         p.print = Some(PrintSize { on: !print.on, ..print });
-        true
+        Ok(())
     }
 
     /// Ends the session, leaving the document as it was.

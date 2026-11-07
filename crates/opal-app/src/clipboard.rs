@@ -27,11 +27,18 @@ pub struct Pasted {
     pub image: RasterImage,
     /// For a copy made in Opal Studio: the document pixels it was copied from.
     pub from: Option<IRect>,
-    /// Pixels per inch, if what was copied says (a PNG's resolution, the image a copy made
-    /// here came from), across: a paste that makes a new image gives it this.
-    pub resolution: Option<f64>,
+    /// Pixels per inch across and down, if what was copied says (a PNG's resolution, the
+    /// image a copy made here came from): see [`ppi`](Self::ppi).
+    pub resolution: Option<[f64; 2]>,
     /// Things the user should know about how it was read (an unsupported color profile).
     pub warnings: Vec<String>,
+}
+
+impl Pasted {
+    /// Its resolution across and down, if it says one an image may have.
+    pub fn ppi(&self) -> Option<[f64; 2]> {
+        self.resolution.filter(|r| r.iter().all(|&v| opal_core::units::valid_ppi(v)))
+    }
 }
 
 /// An image to put on the clipboard: `pixels` row by row, copied from `from` in the
@@ -56,7 +63,7 @@ impl Copied {
             height: h,
             image,
             from: Some(self.from),
-            resolution: Some(self.resolution),
+            resolution: Some([self.resolution; 2]),
             warnings: Vec::new(),
         }
     }
@@ -256,7 +263,7 @@ fn from_import(i: image_files::Imported) -> Pasted {
         height: i.height,
         image: i.image,
         from: None,
-        resolution: i.resolution.map(|[across, _]| across),
+        resolution: i.resolution,
         warnings: i.warnings,
     }
 }
@@ -718,7 +725,7 @@ mod system_tests {
         // Without its own copy, it reads the 16-bit PNG, as another program's.
         let Read::Later(read) = SystemClipboard::default().read_image() else { panic!("read off the thread") };
         let other = read().unwrap().unwrap();
-        assert_eq!((other.from, other.resolution), (None, Some(300.0)));
+        assert_eq!((other.from, other.resolution), (None, Some([300.0, 300.0])));
         assert_eq!(opal_io::pixels::to_srgb16(other.image.pixel(1, 1)), opal_io::pixels::to_srgb16(px[0]));
         // A bitmap alone (32-bit, BI_RGB), as most programs copy: its size is checked, then
         // it is read.

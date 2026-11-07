@@ -154,20 +154,8 @@ fn the_print_size_button_on_a_placed_file_switches_it_and_is_remembered() {
         resolution: 100.0,
     });
     // A 90-pixel file at 300 ppi: 30 pixels at its print size here.
-    let path = std::env::temp_dir().join(format!("opal-ui-place-{}.png", std::process::id()));
-    {
-        let mut d = opal_core::document::Document::new(90, 60);
-        d.resolution = 300.0;
-        let mut ids = opal_core::document::IdGen::default();
-        let white = opal_core::raster::RasterImage::filled(
-            &opal_core::geom::IRect::from_size(90, 60),
-            opal_core::tile::pixel_from_f32([1.0; 4]),
-        );
-        let layer = opal_core::document::Layer::new_raster(ids.layer(), ids.object(), "white", white);
-        d.insert(opal_core::document::Position { parent: None, index: 0 }, layer).unwrap();
-        let png = opal_io::image_files::ExportFormat::Png { sixteen_bit: false };
-        opal_io::image_files::export(&d, &path, &png, None).unwrap();
-    }
+    let path = std::env::temp_dir().join(format!("opal-ui-place-{}.jpg", std::process::id()));
+    crate::paste::testing::white_jpeg(&path, 90, 60, Some([300, 300]));
     h.state_mut().state_mut().place_file(&path, None, true).unwrap();
     std::fs::remove_file(&path).ok();
     h.run();
@@ -178,6 +166,70 @@ fn the_print_size_button_on_a_placed_file_switches_it_and_is_remembered() {
     h.run();
     assert_eq!(width(&h), 90.0, "the button did not switch it to pixel for pixel");
     assert!(!h.state().state().prefs.bool("transform.place_print_size"), "the choice was not remembered");
+}
+
+#[test]
+fn the_box_s_buttons_stay_in_the_view_however_many_it_has() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    let st = h.state_mut().state_mut();
+    st.create_image(&crate::state::NewImage {
+        width: 400,
+        height: 300,
+        background: crate::state::Background::White,
+        resolution: 100.0,
+    });
+    // A file placed whose resolution is not the image's has every button there is.
+    let path = std::env::temp_dir().join(format!("opal-ui-place-edge-{}.jpg", std::process::id()));
+    crate::paste::testing::white_jpeg(&path, 90, 60, Some([300, 300]));
+    st.place_file(&path, None, true).unwrap();
+    std::fs::remove_file(&path).ok();
+    h.run();
+    // Moved past the view's right edge: its buttons stop at the edge, all of them inside.
+    let d = h.state_mut().state_mut().active_mut().unwrap();
+    let right = d.view.screen_rect.right();
+    let m = d.transform.as_ref().unwrap().current;
+    d.set_box(m.then(opal_core::geom::Affine::translate(4000.0, 0.0)), None);
+    h.run();
+    h.run();
+    let last = h.get_by_label(&crate::icons::INTO_LAYER.to_string()).rect();
+    let first = h.get_by_label(&crate::icons::CHECK.to_string()).rect();
+    assert!(last.right() <= right, "the last button ends at {} past the view's edge at {right}", last.right());
+    assert!(right - last.right() < 40.0, "the buttons stop short of the edge, at {}", last.right());
+    assert!(first.left() < last.left());
+}
+
+#[test]
+fn the_print_size_button_says_why_it_cannot_switch() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    let st = h.state_mut().state_mut();
+    st.prefs.set("transform.fit_large", crate::settings::Value::Bool(false));
+    st.prefs.set("transform.place_print_size", crate::settings::Value::Bool(false));
+    st.create_image(&crate::state::NewImage {
+        width: 400,
+        height: 300,
+        background: crate::state::Background::White,
+        resolution: opal_core::units::MAX_PPI,
+    });
+    // At 1 ppi, its print size here is a million times its pixels: as far as a box may
+    // scale, so enlarged first, the switch would take it past that.
+    let path = std::env::temp_dir().join(format!("opal-ui-place-far-{}.jpg", std::process::id()));
+    crate::paste::testing::white_jpeg(&path, 2, 2, Some([1, 1]));
+    st.place_file(&path, None, false).unwrap();
+    std::fs::remove_file(&path).ok();
+    let d = st.active_mut().unwrap();
+    let s = d.transform.as_ref().unwrap();
+    let [cx, cy] = s.current.apply(s.frame.center());
+    let twice = s.current.then(opal_core::geom::Affine::scale(2.0, 2.0).about(cx, cy));
+    d.set_box(twice, None);
+    h.run();
+    h.get_by_label(&crate::icons::PRINT_SIZE.to_string()).click();
+    h.run();
+    let st = h.state().state();
+    assert_eq!(st.active().unwrap().transform.as_ref().unwrap().params().width, 4.0, "it switched");
+    assert!(st.notice.as_ref().is_some_and(|n| n.0.contains("cannot be switched")), "{:?}", st.notice);
+    assert!(!st.prefs.bool("transform.place_print_size"), "a switch refused was remembered");
 }
 
 #[test]

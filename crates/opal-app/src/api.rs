@@ -3140,11 +3140,16 @@ mod tests {
         assert!(far.contains("100 yd, which is 360000 pixels at 100 pixels per inch"), "{far}");
     }
 
-    /// A `w × h` PNG of one color, written to a file of its own; its path.
-    fn png_file(name: &str, w: u32, h: u32) -> std::path::PathBuf {
+    /// Where a file called `name` that a test places is written.
+    fn place_path(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("opal-api-place-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
+        dir.join(name)
+    }
+
+    /// A `w × h` PNG of one color, written to a file of its own; its path.
+    fn png_file(name: &str, w: u32, h: u32) -> std::path::PathBuf {
+        let path = place_path(name);
         image::RgbaImage::from_pixel(w, h, image::Rgba([200, 30, 30, 255])).save(&path).unwrap();
         path
     }
@@ -3474,29 +3479,17 @@ mod tests {
         assert_eq!(st.active().unwrap().doc().resolution, 300.0, "the copy's resolution was lost");
     }
 
-    /// A white PNG `w × h` pixels at `ppi` pixels per inch (none recorded if `None`), written
-    /// to a file of the test's own; its path.
-    fn png_at(name: &str, w: u32, h: u32, ppi: Option<f64>) -> std::path::PathBuf {
-        let path = png_file(name, w, h);
-        if let Some(ppi) = ppi {
-            let mut d = opal_core::document::Document::new(w, h);
-            d.resolution = ppi;
-            let mut ids = opal_core::document::IdGen::default();
-            let white = RasterImage::filled(
-                &IRect::from_size(i64::from(w), i64::from(h)),
-                opal_core::tile::pixel_from_f32([1.0; 4]),
-            );
-            let layer = opal_core::document::Layer::new_raster(ids.layer(), ids.object(), "white", white);
-            d.insert(opal_core::document::Position { parent: None, index: 0 }, layer).unwrap();
-            opal_io::image_files::export(
-                &d,
-                &path,
-                &opal_io::image_files::ExportFormat::Png { sixteen_bit: false },
-                None,
-            )
-            .unwrap();
-        }
-        path
+    /// A white JPEG `w × h` pixels at `ppi` pixels per inch across and down (none recorded
+    /// if `None`), written to a file of the test's own; its path.
+    fn jpeg_at(name: &str, w: u32, h: u32, ppi: Option<[u16; 2]>) -> String {
+        let path = place_path(name);
+        crate::paste::testing::white_jpeg(&path, w, h, ppi);
+        path.display().to_string()
+    }
+
+    /// The box of what a call answered: its position, width and height.
+    fn box_of(v: &Value) -> [f64; 4] {
+        ["x", "y", "width", "height"].map(|k| v["box"][k].as_f64().unwrap())
     }
 
     #[test]
@@ -3505,16 +3498,21 @@ mod tests {
         let mut st = AppState::new();
         now(&mut st, "new", json!({ "width": 400, "height": 300, "resolution": 100 })).unwrap();
         // 90 pixels at 300 ppi are 0.3 in: 30 pixels at 100 ppi.
-        let logo = png_at("logo.png", 90, 60, Some(300.0)).display().to_string();
-        let width = |v: Value| v["box"]["width"].as_f64().unwrap();
+        let logo = jpeg_at("logo.jpg", 90, 60, Some([300, 300]));
+        let width = |v: Value| box_of(&v)[2];
         assert_eq!(width(now(&mut st, "place", json!({ "path": logo })).unwrap()), 30.0);
         assert_eq!(width(now(&mut st, "place", json!({ "path": logo, "print_size": false })).unwrap()), 90.0);
         // So too from the preference.
         now(&mut st, "set_preference", json!({ "key": "transform.place_print_size", "value": false })).unwrap();
         assert_eq!(width(now(&mut st, "place", json!({ "path": logo })).unwrap()), 90.0);
         // A file that does not say its resolution: pixel for pixel either way.
-        let shot = png_at("shot.png", 90, 60, None).display().to_string();
+        let shot = jpeg_at("shot.jpg", 90, 60, None);
         assert_eq!(width(now(&mut st, "place", json!({ "path": shot, "print_size": true })).unwrap()), 90.0);
+        // Pixels that are not square: 200 × 100 at 200 ppi across and 100 down is an inch
+        // each way, so 100 pixels each way here.
+        let fax = jpeg_at("fax.jpg", 200, 100, Some([200, 100]));
+        let b = box_of(&now(&mut st, "place", json!({ "path": fax, "print_size": true })).unwrap());
+        assert_eq!(b, [150.0, 100.0, 100.0, 100.0]);
         // The box switches between the two, about its center, and back.
         st.place_file(std::path::Path::new(&logo), None, true).unwrap();
         let d = st.active_mut().unwrap();
@@ -3523,19 +3521,75 @@ mod tests {
             (s.current.apply(s.frame.center()), s.params().width)
         };
         let (c0, w0) = center(d);
-        assert!(d.toggle_print_size());
+        d.toggle_print_size().unwrap();
         let (c1, w1) = center(d);
         assert!((w0, w1) == (30.0, 90.0) && (c0[0] - c1[0]).abs() < 1e-9 && (c0[1] - c1[1]).abs() < 1e-9);
-        assert!(d.toggle_print_size());
+        d.toggle_print_size().unwrap();
         assert_eq!(center(d).1, 30.0);
         d.cancel_transform();
         // A file at the image's own resolution has nothing to switch.
-        let same = png_at("same.png", 90, 60, Some(100.0));
-        st.place_file(&same, None, true).unwrap();
+        let same = jpeg_at("same.jpg", 90, 60, Some([100, 100]));
+        st.place_file(std::path::Path::new(&same), None, true).unwrap();
         let d = st.active_mut().unwrap();
-        assert!(!d.toggle_print_size() && d.transform.as_ref().unwrap().params().width == 90.0);
+        assert!(d.toggle_print_size().is_err() && d.transform.as_ref().unwrap().params().width == 90.0);
         d.cancel_transform();
         std::fs::remove_dir_all(std::path::Path::new(&logo).parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_placed_file_s_switch_gives_what_placing_it_so_gives() {
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 400, "height": 300, "resolution": 200 })).unwrap();
+        let place = |st: &mut AppState, path: &str, on: bool| {
+            box_of(&now(st, "place", json!({ "path": path, "print_size": on })).unwrap())
+        };
+        // The canvas's pixels at half its resolution print twice its size, and are fitted
+        // back to exactly the canvas.
+        let half = jpeg_at("half.jpg", 400, 300, Some([100, 100]));
+        assert_eq!(place(&mut st, &half, true), [0.0, 0.0, 400.0, 300.0]);
+        // Larger than the canvas at its print size only: fitted to it there, its own size
+        // pixel for pixel, and the switch gives each, either way. (The call commits its
+        // box; this leaves it open.)
+        let open = |st: &mut AppState, path: &str, on: bool| {
+            st.place_file(std::path::Path::new(path), None, on).unwrap();
+        };
+        let cancel = |st: &mut AppState| st.active_mut().unwrap().cancel_transform();
+        now(&mut st, "resize_image", json!({ "resolution": 100 })).unwrap();
+        let wide = jpeg_at("wide.jpg", 300, 200, Some([50, 50]));
+        let width = |st: &AppState| st.active().unwrap().transform.as_ref().unwrap().params().width;
+        for on in [true, false] {
+            let [w0, w1] = if on { [400.0, 300.0] } else { [300.0, 400.0] };
+            open(&mut st, &wide, on);
+            assert!((width(&st) - w0).abs() < 1e-9, "placed at {} rather than {w0}", width(&st));
+            st.active_mut().unwrap().toggle_print_size().unwrap();
+            assert!((width(&st) - w1).abs() < 1e-9, "switched to {} rather than {w1}", width(&st));
+            st.active_mut().unwrap().toggle_print_size().unwrap();
+            assert!((width(&st) - w0).abs() < 1e-9, "switched back to {} rather than {w0}", width(&st));
+            cancel(&mut st);
+        }
+        // Switched to its own pixels, upright, it is on whole pixels, as placing it so is:
+        // 91 × 61 pixels at 300 ppi are 30.33 × 20.33 here, centered at (200, 150).
+        let odd = jpeg_at("odd.jpg", 91, 61, Some([300, 300]));
+        open(&mut st, &odd, true);
+        let d = st.active_mut().unwrap();
+        d.toggle_print_size().unwrap();
+        let m = d.transform.as_ref().unwrap().current;
+        assert_eq!([m.a, m.b, m.c, m.d], [1.0, 0.0, 0.0, 1.0]);
+        let whole = |v: f64, near: f64| v.fract() == 0.0 && (v - near).abs() <= 0.5;
+        assert!(whole(m.e, 154.5) && whole(m.f, 119.5), "at ({}, {})", m.e, m.f);
+        cancel(&mut st);
+        // A resolution too far from the image's to scale by: pixel for pixel, and said.
+        now(&mut st, "resize_image", json!({ "resolution": 0.01 })).unwrap();
+        let fine = jpeg_at("fine.jpg", 10, 10, Some([65000, 65000]));
+        let v = now(&mut st, "place", json!({ "path": fine, "print_size": true })).unwrap();
+        assert_eq!(box_of(&v)[2], 10.0);
+        assert!(v["notes"].to_string().contains("too far from the image's"), "{v}");
+        open(&mut st, &fine, true);
+        let why = st.active_mut().unwrap().toggle_print_size().unwrap_err();
+        assert!(why.contains("no print size to switch to"), "{why}");
+        cancel(&mut st);
+        std::fs::remove_dir_all(std::path::Path::new(&half).parent().unwrap()).ok();
     }
 
     #[test]

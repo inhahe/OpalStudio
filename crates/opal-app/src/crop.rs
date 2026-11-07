@@ -466,33 +466,33 @@ pub fn canvas_crop(
     // ---- Buttons ----------------------------------------------------------------------
     let lowest = corners.iter().fold(f32::NEG_INFINITY, |m, p| m.max(p.y));
     let cx = corners.iter().map(|p| p.x).sum::<f32>() / 4.0;
-    let x = (cx - 80.0).clamp(rect.left() + 4.0, (rect.right() - 170.0).max(rect.left() + 4.0));
+    // As wide as it was drawn last (with its numbers button or not).
+    let bar_id = egui::Id::unique(("crop-toolbar", id.0));
+    let width = ctx.memory(|m| m.area_rect(bar_id)).map_or(160.0, |r| r.width());
+    let x = (cx - width * 0.5).clamp(rect.left() + 4.0, (rect.right() - width - 4.0).max(rect.left() + 4.0));
     let y = (lowest + 12.0).clamp(rect.top() + 4.0, rect.bottom() - 40.0);
     let mut choice = None;
-    let bar = egui::Area::new(egui::Id::unique(("crop-toolbar", id.0)))
-        .order(egui::Order::Foreground)
-        .fixed_pos(Pos2::new(x, y))
-        .show(&ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if ui
-                        .button(format!("{}  Crop", icons::CHECK))
-                        .on_hover_text("Crop to the box (Enter, or double-click inside it)")
-                        .clicked()
-                    {
-                        choice = Some(true);
-                    }
-                    if ui
-                        .button(icon(icons::RESET, 15.0))
-                        .on_hover_text("Put the box back around the whole canvas (Esc)")
-                        .clicked()
-                    {
-                        choice = Some(false);
-                    }
-                    crate::box_fields::toggle(ui, &mut numbers);
-                });
+    let bar = egui::Area::new(bar_id).order(egui::Order::Foreground).fixed_pos(Pos2::new(x, y)).show(&ctx, |ui| {
+        egui::Frame::popup(ui.style()).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .button(format!("{}  Crop", icons::CHECK))
+                    .on_hover_text("Crop to the box (Enter, or double-click inside it)")
+                    .clicked()
+                {
+                    choice = Some(true);
+                }
+                if ui
+                    .button(icon(icons::RESET, 15.0))
+                    .on_hover_text("Put the box back around the whole canvas (Esc)")
+                    .clicked()
+                {
+                    choice = Some(false);
+                }
+                crate::box_fields::toggle(ui, &mut numbers);
             });
         });
+    });
     let mut refused = None;
     if apply || choice == Some(true) {
         let delete = settings.bool("crop.delete");

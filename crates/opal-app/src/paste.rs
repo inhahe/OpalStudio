@@ -4,7 +4,7 @@ use crate::clipboard::{Copied, Pasted, Read, ReadResult};
 use crate::doc::DocId;
 use crate::prefs;
 use crate::state::{AppState, MessageKind, PasteAnswer, Reading};
-use crate::transform::{Kind, PrintSize};
+use crate::transform::{Kind, PasteAs, PrintSize};
 use eframe::egui;
 use opal_core::composite::composite_within;
 use opal_core::document::{Document, IdGen, Layer, Position};
@@ -285,7 +285,7 @@ impl AppState {
             return;
         };
         self.show_doc(target);
-        self.begin_pasted(&pasted, in_place, Kind::Paste, "Pasted image");
+        self.begin_pasted(&pasted, in_place, PasteAs { kind: Kind::Paste, name: "Pasted image".into(), print: None });
         if let Some(a) = answer {
             let d = self.doc_mut(target).expect("shown above");
             let before = std::mem::replace(&mut d.groups, a.groups);
@@ -297,42 +297,40 @@ impl AppState {
         }
     }
 
-    /// Opens the transform box on the active document with `pasted` on a new layer called
-    /// `name`, above the active layer, as a session of `kind`: where it was copied from
-    /// (`in_place`), or else centered on the part of the canvas in view, at its own size
-    /// unless that is larger than the canvas (and the preference fits it).
-    pub(crate) fn begin_pasted(&mut self, pasted: &Pasted, in_place: bool, kind: Kind, name: &str) {
-        self.begin_scaled(pasted, in_place, kind, name, 1.0);
-    }
-
-    /// [`begin_pasted`](Self::begin_pasted), its size first scaled by `scale` (a placed
-    /// file at its print size).
-    fn begin_scaled(&mut self, pasted: &Pasted, in_place: bool, kind: Kind, name: &str, scale: f64) {
+    /// Opens the transform box on the active document with `pasted` on a new layer above
+    /// the active layer, as `how` says: where it was copied from (`in_place`, which a file
+    /// placed at a print size cannot be), or else centered on the part of the canvas in
+    /// view, at the size `how.print` says or else its own unless that is larger than the
+    /// canvas (and the preference fits it).
+    pub(crate) fn begin_pasted(&mut self, pasted: &Pasted, in_place: bool, how: PasteAs) {
+        assert!(!in_place || how.print.is_none(), "a paste in place is put where it was, unscaled");
         let sampling = prefs::sampling(&self.prefs, "transform");
         let fit_large = self.prefs.bool("transform.fit_large");
         let d = self.active_mut().expect("checked above");
         let canvas = d.doc().canvas.rect();
-        let (w, h) = (f64::from(pasted.width) * scale, f64::from(pasted.height) * scale);
+        let (w, h) = (f64::from(pasted.width), f64::from(pasted.height));
         let place = match (in_place, pasted.from) {
             (true, Some(r)) => Affine::translate((canvas.x0 + r.x0) as f64, (canvas.y0 + r.y0) as f64),
             (true, None) => Affine::translate(canvas.x0 as f64, canvas.y0 as f64),
             (false, _) => {
-                // Centered on the part of the canvas in view, at its own size unless that is
-                // larger than the canvas.
+                // Centered on the part of the canvas in view.
                 let v = d.view;
                 let a = v.to_canvas(eframe::egui::Vec2::ZERO);
                 let b = v.to_canvas(v.viewport);
                 let seen = opal_core::geom::IRect::new(a.x as i64, a.y as i64, b.x.ceil() as i64, b.y.ceil() as i64);
                 let seen = seen.intersect(&canvas);
                 let [cx, cy] = if seen.is_empty() { canvas.to_f().center() } else { seen.to_f().center() };
-                let (cw, ch) = (canvas.width() as f64, canvas.height() as f64);
-                let s = if fit_large && (w > cw || h > ch) { (cw / w).min(ch / h) } else { 1.0 };
-                let k = scale * s;
-                if k == 1.0 {
+                let [kx, ky] = match how.print {
+                    Some(p) if p.on => p.print,
+                    Some(p) => p.pixels,
+                    None => [fit_scale(w, h, &canvas, fit_large); 2],
+                };
+                let (pw, ph) = (w * kx, h * ky);
+                if [kx, ky] == [1.0, 1.0] {
                     // Whole pixels, so it stays crisp.
-                    Affine::translate((cx - w * 0.5).round(), (cy - h * 0.5).round())
+                    Affine::translate((cx - pw * 0.5).round(), (cy - ph * 0.5).round())
                 } else {
-                    Affine::scale(k, k).then(Affine::translate(cx - w * s * 0.5, cy - h * s * 0.5))
+                    Affine::scale(kx, ky).then(Affine::translate(cx - pw * 0.5, cy - ph * 0.5))
                 }
             }
         };
@@ -343,14 +341,15 @@ impl AppState {
             .and_then(|a| d.doc().position(a))
             .map(|p| Position { parent: p.parent, index: p.index + 1 })
             .unwrap_or(Position { parent: None, index: d.doc().layers.len() });
-        d.begin_paste(pasted, place, sampling, position, into, kind, name);
+        d.begin_paste(pasted, place, sampling, position, into, how);
     }
 
     /// Opens the transform box on the active document with the image file at `path` on a
     /// new layer called `name` (or after the file), placed as a paste is: what Place does
     /// once a file is chosen. At its print size if `print_size` (scaled by its resolution
-    /// against the image's, which a file that does not say its resolution is not), else pixel
-    /// for pixel; the box's button switches between the two. What the file's reading said
+    /// against the image's, each way), else pixel for pixel; the box's button switches
+    /// between the two. A file that does not say its resolution, or says one the image's
+    /// is too far from to scale by, is placed pixel for pixel. What the file's reading said
     /// comes back as warnings.
     pub(crate) fn place_file(
         &mut self,
@@ -364,20 +363,37 @@ impl AppState {
             height: imported.height,
             image: imported.image,
             from: None,
-            resolution: imported.resolution.map(|[across, _]| across),
+            resolution: imported.resolution,
             warnings: imported.warnings,
         };
+        let mut warnings = pasted.warnings.clone();
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned());
         let name = name.map(str::to_owned).or(stem).unwrap_or_else(|| "Placed image".to_owned());
-        let ppi = self.active().expect("Place needs an image").doc().resolution;
-        let factor = pasted.resolution.filter(|&r| opal_core::units::valid_ppi(r)).map(|r| ppi / r);
-        let print = factor.filter(|&f| (f - 1.0).abs() > 1e-9).map(|factor| PrintSize { factor, on: print_size });
-        let scale = print.filter(|p| p.on).map_or(1.0, |p| p.factor);
-        self.begin_scaled(&pasted, false, Kind::Place, &name, scale);
-        if let Some(paste) = self.active_mut().and_then(|d| d.transform.as_mut()).and_then(|s| s.paste.as_mut()) {
-            paste.print = print;
-        }
-        Ok(pasted.warnings)
+        let fit_large = self.prefs.bool("transform.fit_large");
+        let d = self.active().expect("Place needs an image");
+        let (ppi, canvas) = (d.doc().resolution, d.doc().canvas.rect());
+        let (w, h) = (f64::from(pasted.width), f64::from(pasted.height));
+        let factor =
+            pasted.ppi().map(|[x, y]| [ppi / x, ppi / y]).filter(|f| f.iter().any(|&k| (k - 1.0).abs() > 1e-9));
+        let print = factor.and_then(|[fx, fy]| {
+            let s = fit_scale(w * fx, h * fy, &canvas, fit_large);
+            let print = [fx * s, fy * s];
+            let pixels = [fit_scale(w, h, &canvas, fit_large); 2];
+            // Within what an image's placing may stretch or squash it by, both ways.
+            let max = opal_core::document::MAX_SCALE;
+            let usable = |k: [f64; 2]| k.iter().all(|&v| (1.0 / max..=max).contains(&v));
+            if usable(print) && usable(pixels) {
+                Some(PrintSize { print, pixels, on: print_size })
+            } else {
+                warnings.push(
+                    "Its resolution is too far from the image's to scale it by, so it is placed pixel for pixel."
+                        .to_owned(),
+                );
+                None
+            }
+        });
+        self.begin_pasted(&pasted, false, PasteAs { kind: Kind::Place, name, print });
+        Ok(warnings)
     }
 
     /// Asks for an image file and places it (see [`place_file`](Self::place_file)).
@@ -403,8 +419,7 @@ impl AppState {
     fn new_image_from(&mut self, pasted: &Pasted) {
         let mut ids = IdGen::default();
         let mut doc = Document::new(pasted.width, pasted.height);
-        doc.resolution =
-            pasted.resolution.filter(|&r| opal_core::units::valid_ppi(r)).unwrap_or(self.default_resolution());
+        doc.resolution = pasted.ppi().map_or(self.default_resolution(), |[across, _]| across);
         let layer = Layer::new_raster(ids.layer(), ids.object(), "Pasted image", pasted.image.clone());
         doc.insert(Position { parent: None, index: 0 }, layer).expect("an empty document takes a layer");
         self.new_untitled(doc, ids, "Paste");
@@ -417,5 +432,31 @@ impl AppState {
         if !d.begin_transform(sampling) {
             self.message(MessageKind::Info, "Transform", "The selected layers hold nothing to transform.");
         }
+    }
+}
+
+/// How much a paste `w × h` pixels is scaled by to fit `canvas` when it is larger and
+/// `fit_large` says so (else 1): evenly, as large as fits.
+fn fit_scale(w: f64, h: f64, canvas: &opal_core::geom::IRect, fit_large: bool) -> f64 {
+    let (cw, ch) = (canvas.width() as f64, canvas.height() as f64);
+    if fit_large && (w > cw || h > ch) { (cw / w).min(ch / h) } else { 1.0 }
+}
+
+/// Image files for tests.
+#[cfg(test)]
+pub(crate) mod testing {
+    use image::codecs::jpeg::{JpegEncoder, PixelDensity, PixelDensityUnit};
+
+    /// Writes a white JPEG `w × h` pixels to `path`, recording `ppi` pixels per inch across
+    /// and down if given, none if not.
+    pub fn white_jpeg(path: &std::path::Path, w: u32, h: u32, ppi: Option<[u16; 2]>) {
+        let file = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+        let mut jpeg = JpegEncoder::new_with_quality(file, 100);
+        jpeg.set_pixel_density(match ppi {
+            Some([x, y]) => PixelDensity { density: (x, y), unit: PixelDensityUnit::Inches },
+            None => PixelDensity { density: (1, 1), unit: PixelDensityUnit::PixelAspectRatio },
+        });
+        let white = image::RgbImage::from_pixel(w, h, image::Rgb([255; 3]));
+        jpeg.encode_image(&white).unwrap();
     }
 }

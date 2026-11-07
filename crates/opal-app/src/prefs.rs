@@ -423,8 +423,9 @@ pub static PREFS: &[Def] = &[
         label: "Place at the file's print size",
         help: "On: a file placed is scaled by its resolution against the image's, so it prints as large as it \
                did (a 2-inch logo at 300 ppi placed into a 72 ppi image is 144 pixels, still 2 inches), as most \
-               image editors place. Off: pixel for pixel. A file that does not say its resolution is placed \
-               pixel for pixel either way. The button on the box switches it for one placing.",
+               image editors place. Off: pixel for pixel. A file that does not say its resolution, or says \
+               one too far from the image's to scale by, is placed pixel for pixel either way. The button on the \
+               box switches a placed file between the two, and makes the choice the default.",
         section: "Transform",
         kind: Kind::Bool,
         default: Init::Bool(true),

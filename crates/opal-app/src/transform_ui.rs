@@ -214,7 +214,9 @@ enum Action {
 }
 
 /// The buttons that go with the box: commit, cancel, fit, fill, the aspect lock, snapping,
-/// and for a paste, putting it into the active layer.
+/// its numbers, for a file placed whose resolution is not the image's, its print size
+/// against its pixels (which, switched, becomes the preference), and for a paste, putting
+/// it into the active layer.
 fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen: &OnScreen) {
     let Some(d) = st.doc(id) else { return };
     let Some(s) = d.transform.as_ref() else { return };
@@ -223,88 +225,87 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen
     let snapping = st.prefs.bool("transform.snapping");
     let lowest = screen.corners.iter().chain([&screen.rotate]).fold(f32::NEG_INFINITY, |m, p| m.max(p.y));
     let center_x = screen.corners.iter().map(|p| p.x).sum::<f32>() / 4.0;
-    let width = 300.0;
+    // As wide as it was drawn last (its buttons vary).
+    let bar_id = egui::Id::unique(("transform-toolbar", id.0));
+    let width = ctx.memory(|m| m.area_rect(bar_id)).map_or(300.0, |r| r.width());
     let x = (center_x - width * 0.5).clamp(rect.left() + 4.0, (rect.right() - width - 4.0).max(rect.left() + 4.0));
     let y = (lowest + 12.0).clamp(rect.top() + 4.0, rect.bottom() - 40.0);
     let mut action = None;
     let mut numbers = st.box_numbers;
-    let bar = egui::Area::new(egui::Id::unique(("transform-toolbar", id.0)))
-        .order(egui::Order::Foreground)
-        .fixed_pos(Pos2::new(x, y))
-        .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let b = |ui: &mut egui::Ui, glyph: char, on: bool, tip: &str| {
-                        let text = icon(glyph, 16.0);
-                        ui.add(egui::Button::new(text).selected(on)).on_hover_text(tip)
-                    };
-                    if b(ui, icons::CHECK, false, "Apply (Enter)").clicked() {
-                        action = Some(Action::Commit);
-                    }
-                    if b(ui, icons::CLOSE, false, "Cancel (Esc)").clicked() {
-                        action = Some(Action::Cancel);
-                    }
-                    ui.separator();
-                    if b(ui, icons::FIT, false, "Fit inside the canvas").clicked() {
-                        action = Some(Action::Fit(false));
-                    }
-                    if b(ui, icons::FILL, false, "Fill the canvas").clicked() {
-                        action = Some(Action::Fit(true));
-                    }
-                    let lock = if aspect { icons::LINK } else { icons::UNLOCK };
-                    let tip = if aspect {
-                        "The aspect ratio is kept (Shift while dragging frees it). Click to free it."
-                    } else {
-                        "The aspect ratio is free (Shift while dragging keeps it). Click to keep it."
-                    };
-                    if b(ui, lock, aspect, tip).clicked() {
-                        action = Some(Action::Aspect);
-                    }
-                    let tip = if snapping {
-                        "Snapping is on (Alt while dragging turns it off). Click to turn it off."
-                    } else {
-                        "Snapping is off (Alt while dragging turns it on). Click to turn it on."
-                    };
-                    if b(ui, icons::SNAP, snapping, tip).clicked() {
-                        action = Some(Action::Snap);
-                    }
-                    crate::box_fields::toggle(ui, &mut numbers);
-                    if let Some(print) = paste.as_ref().and_then(|p| p.print) {
-                        let tip = if print.on {
-                            "At the file's print size (scaled by its resolution against the image's). Click to \
+    let bar = egui::Area::new(bar_id).order(egui::Order::Foreground).fixed_pos(Pos2::new(x, y)).show(ctx, |ui| {
+        egui::Frame::popup(ui.style()).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let b = |ui: &mut egui::Ui, glyph: char, on: bool, tip: &str| {
+                    let text = icon(glyph, 16.0);
+                    ui.add(egui::Button::new(text).selected(on)).on_hover_text(tip)
+                };
+                if b(ui, icons::CHECK, false, "Apply (Enter)").clicked() {
+                    action = Some(Action::Commit);
+                }
+                if b(ui, icons::CLOSE, false, "Cancel (Esc)").clicked() {
+                    action = Some(Action::Cancel);
+                }
+                ui.separator();
+                if b(ui, icons::FIT, false, "Fit inside the canvas").clicked() {
+                    action = Some(Action::Fit(false));
+                }
+                if b(ui, icons::FILL, false, "Fill the canvas").clicked() {
+                    action = Some(Action::Fit(true));
+                }
+                let lock = if aspect { icons::LINK } else { icons::UNLOCK };
+                let tip = if aspect {
+                    "The aspect ratio is kept (Shift while dragging frees it). Click to free it."
+                } else {
+                    "The aspect ratio is free (Shift while dragging keeps it). Click to keep it."
+                };
+                if b(ui, lock, aspect, tip).clicked() {
+                    action = Some(Action::Aspect);
+                }
+                let tip = if snapping {
+                    "Snapping is on (Alt while dragging turns it off). Click to turn it off."
+                } else {
+                    "Snapping is off (Alt while dragging turns it on). Click to turn it on."
+                };
+                if b(ui, icons::SNAP, snapping, tip).clicked() {
+                    action = Some(Action::Snap);
+                }
+                crate::box_fields::toggle(ui, &mut numbers);
+                if let Some(print) = paste.as_ref().and_then(|p| p.print) {
+                    let tip = if print.on {
+                        "At the file's print size (scaled by its resolution against the image's). Click to \
                              place it pixel for pixel instead (and so from now on)."
-                        } else {
-                            "Pixel for pixel. Click to place it at the file's print size instead (scaled by \
+                    } else {
+                        "Pixel for pixel. Click to place it at the file's print size instead (scaled by \
                              its resolution against the image's; and so from now on)."
-                        };
-                        if b(ui, icons::PRINT_SIZE, print.on, tip).clicked() {
-                            action = Some(Action::PrintSize);
-                        }
+                    };
+                    if b(ui, icons::PRINT_SIZE, print.on, tip).clicked() {
+                        action = Some(Action::PrintSize);
                     }
-                    if let Some(p) = &paste {
-                        ui.separator();
-                        let r = ui.add_enabled(
-                            p.active.is_some(),
-                            egui::Button::new(icon(icons::INTO_LAYER, 16.0)).selected(p.into_active),
-                        );
-                        let r = if p.active.is_some() {
-                            r.on_hover_text(if p.into_active {
-                                "Going into the active layer, drawn into its pixels when applied. Click to put \
+                }
+                if let Some(p) = &paste {
+                    ui.separator();
+                    let r = ui.add_enabled(
+                        p.active.is_some(),
+                        egui::Button::new(icon(icons::INTO_LAYER, 16.0)).selected(p.into_active),
+                    );
+                    let r = if p.active.is_some() {
+                        r.on_hover_text(if p.into_active {
+                            "Going into the active layer, drawn into its pixels when applied. Click to put \
                                  it on a new layer instead."
-                            } else {
-                                "Going onto a new layer. Click to put it into the active layer instead (drawn \
-                                 into its pixels when applied)."
-                            })
                         } else {
-                            r.on_disabled_hover_text("There is no plain, unlocked active layer to put it into.")
-                        };
-                        if r.clicked() {
-                            action = Some(Action::IntoActive);
-                        }
+                            "Going onto a new layer. Click to put it into the active layer instead (drawn \
+                                 into its pixels when applied)."
+                        })
+                    } else {
+                        r.on_disabled_hover_text("There is no plain, unlocked active layer to put it into.")
+                    };
+                    if r.clicked() {
+                        action = Some(Action::IntoActive);
                     }
-                });
+                }
             });
         });
+    });
     st.box_numbers = numbers;
     if numbers {
         let panel = egui::Id::unique(("transform-numbers", id.0));
@@ -339,12 +340,14 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen
                 Action::IntoActive => d.toggle_paste_into_active(),
                 Action::PrintSize => {
                     let on = d.transform.as_ref().and_then(|s| s.paste.as_ref()).and_then(|p| p.print).map(|p| !p.on);
-                    if d.toggle_print_size()
-                        && let Some(on) = on
-                    {
-                        // As the box's other switches do, it is the default from now on.
-                        st.prefs.set("transform.place_print_size", crate::settings::Value::Bool(on));
-                        st.settings_touched();
+                    match (d.toggle_print_size(), on) {
+                        (Ok(()), Some(on)) => {
+                            // As the box's other switches do, it is the default from now on.
+                            st.prefs.set("transform.place_print_size", crate::settings::Value::Bool(on));
+                            st.settings_touched();
+                        }
+                        (Err(why), _) => st.notify(format!("It cannot be switched: {why}.")),
+                        (Ok(()), None) => {}
                     }
                 }
                 Action::Aspect | Action::Snap => {}

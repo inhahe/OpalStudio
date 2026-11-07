@@ -658,14 +658,20 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
 - **Place** (File, Ctrl+Alt+O) opens the transform box on an image file, as a paste of it
   (onto a new layer named after the file; the history state is "Place"), by default at
   the file's **print size**, as most image editors place (scaled by its resolution against
-  the image's: a 2-inch logo at 300 ppi is 144 pixels in a 72 ppi image), before the fit
-  to the canvas a large one gets. A file that does not say its resolution is placed pixel
-  for pixel (taking it for 72 ppi, as some editors do, would make a screenshot tiny in a
-  300 ppi image). A preference (Transform › Place at the file's print size) chooses; a
-  button on the box, shown when the file's resolution is not the image's, switches one
-  placing between the two, scaling the box about its center (so a size given meanwhile
-  scales with it), and becomes the preference, as the box's other switches do. Scripts:
-  `place(print_size=…)`, the preference unless given.
+  the image's, across and down, so a file whose pixels are not square keeps its shape: a
+  2-inch logo at 300 ppi is 144 pixels in a 72 ppi image), before the fit to the canvas a
+  large one gets. A file that does not say its resolution is placed pixel for pixel
+  (taking it for 72 ppi, as some editors do, would make a screenshot tiny in a 300 ppi
+  image), and so, with a warning, is one whose resolution is too far from the image's
+  for its box to stay within what an image's placing may scale by (`MAX_SCALE`). A
+  preference (Transform › Place at the file's print size) chooses; a button on the box,
+  shown when the file's resolution is not the image's, switches one placing between the
+  two and becomes the preference, as the box's other switches do. The session's
+  `PasteInto.print` records the scale each placing gives (fit included), so the switch
+  gives exactly the other one's size, scaled along the box's own sides about its center
+  (a size or turn given meanwhile stays, relative to it), and lands on whole pixels when
+  that is the file's own size, upright. Scripts: `place(print_size=…)`, the preference
+  unless given.
 - **One history state:** the whole session in the box, from paste to commit, is one entry
   ("Paste" or "Transform"). Cancel leaves the document as it was.
 - **The clipboard:** PNG first (keeping 16-bit color and transparency), then the other
