@@ -218,12 +218,15 @@ fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
         (label.center().y - menu.center().y).abs() < 1.0,
         "the From label is not beside its menu: {label:?} {menu:?}"
     );
-    // A layer's edge, the box's own width, and a bare number in the field's unit (pixels),
-    // the field as wide as what is typed, to be read.
+    // A layer's edge, the box's own width, and a bare number in the field's unit (pixels):
+    // shown whole, with what it comes to, below the field (which may be too narrow to show
+    // it), while what is beside the field stays where it was.
+    let y = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().transform.as_ref().unwrap().params().y;
+    let beside = h.get(field_at(y(&h))).rect();
     typed(&mut h, at, "Background.right - width - 10");
-    let typing = h.get(by().predicate(|n| n.is_focused())).rect();
-    assert!(typing.width() > 150.0, "the field is too narrow to read what is typed: {typing:?}");
-    assert_eq!(h.query_all(by().label_contains("= 340 px")).count(), 1, "what it comes to is not shown");
+    let whole = h.query_all(by().label_contains("Background.right - width - 10  = 340 px")).count();
+    assert_eq!(whole, 1, "what is typed, and what it comes to, are not shown whole");
+    assert_eq!(h.get(field_at(y(&h))).rect(), beside, "what is beside the field moved");
     h.key_press(egui::Key::Enter);
     h.run();
     assert_eq!(x(&h), 340.0);

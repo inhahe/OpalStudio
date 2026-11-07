@@ -289,17 +289,13 @@ impl<'a> NumberField<'a> {
             let refocused = std::mem::take(&mut typing.kept);
             recall(ui, &remembered, &mut typing, id);
             let style = ui.style().drag_value_text_style.clone();
-            // As wide as what is typed, so an expression can be read as it is typed.
-            let font = style.resolve(ui.style());
-            let text_width = ui.painter().layout_no_wrap(typing.text.clone(), font, egui::Color32::WHITE).size().x;
-            let width = (text_width + 2.0 * ui.spacing().button_padding.x + 6.0).clamp(0.0, 360.0);
-            let r = ui.add(
-                egui::TextEdit::singleline(&mut typing.text)
-                    .id(id)
-                    .desired_width(width)
-                    .min_size(ui.spacing().interact_size)
-                    .font(style),
-            );
+            // As large as the button that showed the number, so that nothing beside it moves:
+            // a longer expression scrolls in it, and shows whole in the preview below it.
+            let shown = format!("{}{text}{}", self.prefix, self.suffix);
+            let label = ui.painter().layout_no_wrap(shown, style.resolve(ui.style()), egui::Color32::PLACEHOLDER);
+            let size = (label.size() + 2.0 * ui.spacing().button_padding).max(ui.spacing().interact_size);
+            let r = ui
+                .add(egui::TextEdit::singleline(&mut typing.text).id(id).desired_width(0.0).min_size(size).font(style));
             if r.gained_focus() && !refocused {
                 select_all(ui, id, &typing.text);
             }
@@ -483,8 +479,20 @@ fn preview(ui: &egui::Ui, id: egui::Id, r: &egui::Response, text: &str, told: Re
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_max_width(320.0);
                 match told {
+                    // What is typed, whole (the field may be too narrow to show it), and what
+                    // it comes to.
                     Ok(told) => {
-                        ui.label(format!("= {told}"));
+                        let style = ui.style();
+                        let font = egui::TextStyle::Monospace.resolve(style);
+                        let mut job = egui::text::LayoutJob::default();
+                        job.append(text.trim(), 0.0, egui::TextFormat::simple(font, style.visuals.weak_text_color()));
+                        let plain = egui::TextStyle::Body.resolve(style);
+                        job.append(
+                            &format!("  = {told}"),
+                            0.0,
+                            egui::TextFormat::simple(plain, style.visuals.text_color()),
+                        );
+                        ui.label(job);
                     }
                     Err(e) => {
                         let style = ui.style();
