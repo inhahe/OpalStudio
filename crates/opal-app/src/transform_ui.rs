@@ -3,10 +3,12 @@
 
 use crate::doc::DocId;
 use crate::icons;
+use crate::number_field::NumberField;
 use crate::state::AppState;
 use crate::theme::icon;
 use crate::transform::{Drag, DragInput, Handle, snap_targets};
 use eframe::egui::{self, Color32, CursorIcon, Pos2, Rect, Response, RichText, Shape, Stroke, Vec2};
+use opal_core::expr::Scope;
 use opal_core::resample::{Method, Sampling};
 
 /// How far from a handle (points) the pointer still grabs it.
@@ -421,10 +423,14 @@ pub fn sampling_ui(ui: &mut egui::Ui, s: &mut Sampling, salt: &str) -> bool {
     match &mut s.method {
         Method::Bicubic { b, c } => {
             ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(b).speed(0.01).range(0.0..=1.0).prefix("B ").max_decimals(3))
+                let scope = Scope::bare(opal_core::units::Unit::Px, opal_core::units::DEFAULT_PPI);
+                let (mut b64, mut c64) = (f64::from(*b), f64::from(*c));
+                let field = |v| NumberField::number(v, scope).speed(0.01).range(0.0..=1.0).decimals(0, 3);
+                ui.add(field(&mut b64).prefix("B ").remember("bicubic-b"))
                     .on_hover_text("Blur: 0 is sharpest; 1/3 with C = 1/3 is Mitchell's softer choice.");
-                ui.add(egui::DragValue::new(c).speed(0.01).range(0.0..=1.0).prefix("C ").max_decimals(3))
+                ui.add(field(&mut c64).prefix("C ").remember("bicubic-c"))
                     .on_hover_text("Sharpening: more sharpens edges, and rings more.");
+                (*b, *c) = (b64 as f32, c64 as f32);
             });
         }
         Method::Lanczos { lobes } => {

@@ -284,13 +284,23 @@ fn setting_row(ui: &mut egui::Ui, settings: &mut Settings, def: &'static Def, pa
     let mut value = settings.get(def.key);
     let response = match (&mut value, def.kind) {
         (Value::Bool(b), _) => ui.checkbox(b, ""),
-        (Value::Float(f), Kind::Float { min, max, decimals, suffix, log }) => ui.add(
-            egui::Slider::new(f, min..=max)
-                .logarithmic(log)
-                .fixed_decimals(decimals)
+        (Value::Float(f), Kind::Float { min, max, decimals, suffix, log }) => {
+            // Dragged on the slider, or typed (an expression) into the field beside it.
+            let slider = ui.add(
+                egui::Slider::new(f, min..=max)
+                    .logarithmic(log)
+                    .show_value(false)
+                    .clamping(egui::SliderClamping::Always),
+            );
+            let scope = opal_core::expr::Scope::bare(opal_core::units::Unit::Px, opal_core::units::DEFAULT_PPI);
+            let field = crate::number_field::NumberField::number(f, scope)
+                .range(min..=max)
+                .speed((max - min) / 400.0)
+                .decimals(decimals, decimals)
                 .suffix(suffix)
-                .clamping(egui::SliderClamping::Always),
-        ),
+                .remember(("setting", def.key));
+            slider.labelled_by(label_id) | ui.add(field).labelled_by(label_id)
+        }
         (Value::Choice(c), Kind::Choice(opts)) => {
             let current = opts.iter().find(|(id, _)| id == c).map_or("?", |(_, l)| l);
             let mut r = egui::ComboBox::from_id_salt(def.key)

@@ -41,6 +41,9 @@ pub struct OpalApp {
     /// Whether Alt was down last frame, and whether it has been pressed alone (for keytips).
     alt_down: bool,
     alt_alone: bool,
+    /// Whether a field had the keyboard at the end of the last frame: the keys pressed since
+    /// are its, though egui lets go of the focus on Esc before the frame begins.
+    field_had_keys: bool,
     /// Whether settings are saved (not in tests).
     persist: bool,
     /// The API's connection for scripts and assistants (not in tests); `None` if it could
@@ -101,6 +104,7 @@ impl OpalApp {
             gpu_memory,
             last_gpu_poll: None,
             alt_down: false,
+            field_had_keys: false,
             alt_alone: false,
             persist,
             server,
@@ -168,7 +172,8 @@ impl OpalApp {
             self.alt_alone = false;
             return;
         }
-        let typing = ctx.egui_wants_keyboard_input();
+        // Esc typed into a field leaves the field, not the box the field is about.
+        let typing = ctx.egui_wants_keyboard_input() || self.field_had_keys;
         if !typing {
             self.clipboard_events(ctx, paste_presses);
             self.cancel_paste_key(ctx);
@@ -666,17 +671,19 @@ impl OpalApp {
                 let (unit, per) = (self.st.unit(), self.st.resolution_unit());
                 let cursor = self.st.cursor_shown;
                 let Some(d) = self.st.active_mut() else { return };
-                let mut pct = d.view.zoom * 100.0;
+                let mut pct = f64::from(d.view.zoom) * 100.0;
+                let scope = crate::lengths::image_scope(Some(d.doc()), unit, d.doc().resolution);
                 let r = ui.add(
-                    egui::DragValue::new(&mut pct)
-                        .range(crate::doc::MIN_ZOOM * 100.0..=crate::doc::MAX_ZOOM * 100.0)
+                    crate::number_field::NumberField::number(&mut pct, scope)
+                        .range(f64::from(crate::doc::MIN_ZOOM) * 100.0..=f64::from(crate::doc::MAX_ZOOM) * 100.0)
                         .suffix("%")
                         .speed(1.0)
-                        .max_decimals(1),
+                        .decimals(0, 1)
+                        .remember("zoom"),
                 );
                 if r.changed() {
                     let c = d.view.viewport * 0.5;
-                    d.view.zoom_about(pct / 100.0, c);
+                    d.view.zoom_about((pct / 100.0) as f32, c);
                 }
                 r.on_hover_text("Zoom: drag or type a value");
                 ui.separator();
@@ -812,6 +819,7 @@ impl eframe::App for OpalApp {
         if self.signature() != before {
             ctx.request_repaint();
         }
+        self.field_had_keys = ctx.egui_wants_keyboard_input();
         let st = &mut self.st;
         if let Some(rs) = _frame.wgpu_render_state() {
             st.gpu.textures =

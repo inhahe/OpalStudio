@@ -16,6 +16,7 @@
 pub mod composite;
 pub mod curve;
 pub mod document;
+pub mod expr;
 pub mod geom;
 pub mod history;
 pub mod raster;

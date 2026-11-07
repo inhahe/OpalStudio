@@ -6,10 +6,12 @@
 use crate::crop::CropBox;
 use crate::doc::DocId;
 use crate::lengths;
+use crate::number_field::NumberField;
 use crate::state::AppState;
 use crate::transform::Params;
 use eframe::egui;
 use opal_core::document::{Document, Layer, LayerId};
+use opal_core::expr::{Own, Scope};
 use opal_core::units::Unit;
 
 /// The farthest a box's corner may be put from the canvas's, in pixels: typed in its
@@ -134,6 +136,9 @@ pub struct Fields<'a> {
 /// shows the box measured so next).
 pub fn fields(ui: &mut egui::Ui, p: &mut Params, m: &mut Measure, doc: &Document, ppi: f64, how: &Fields) -> bool {
     let before = *p;
+    // What is typed is worked out with positions from where `p`'s are (before another origin
+    // is chosen), and the box as it is.
+    let counted = m.origin.locate(doc).unwrap_or([0.0, 0.0]);
     let point = POINTS[m.reference].1.to_lowercase();
     let name = base_name(doc, m.origin.base);
     let of = match m.origin.base {
@@ -168,22 +173,25 @@ pub fn fields(ui: &mut egui::Ui, p: &mut Params, m: &mut Measure, doc: &Document
             reference_grid(ui, &mut m.origin.point, Some("From"), &format!("{}-from", how.salt));
         });
         ui.end_row();
-        let u = m.unit;
+        let scope = Scope { doc: Some(doc), ppi, unit: m.unit, origin: counted, own: Some(own(&before)) };
+        let field = |px: &mut f64, range, name: &str, ui: &mut egui::Ui| {
+            lengths::length_field(px, scope, range, how.px_decimals).remember(("box", name)).show(ui)
+        };
         ui.label("Position");
         ui.horizontal(|ui| {
             ui.label("x");
-            lengths::length(ui, &mut p.x, u, ppi, -FAR..=FAR, how.px_decimals);
+            field(&mut p.x, -FAR..=FAR, "x", ui);
             ui.label("y");
-            lengths::length(ui, &mut p.y, u, ppi, -FAR..=FAR, how.px_decimals);
+            field(&mut p.y, -FAR..=FAR, "y", ui);
         })
         .response
         .on_hover_text(format!("Where the box's {point} is, from the {from}."));
         ui.end_row();
         ui.label("Size");
         ui.horizontal(|ui| {
-            let w = lengths::length(ui, &mut p.width, u, ppi, how.sides.clone(), how.px_decimals);
+            let w = field(&mut p.width, how.sides.clone(), "width", ui);
             ui.label("×");
-            let h = lengths::length(ui, &mut p.height, u, ppi, how.sides.clone(), how.px_decimals);
+            let h = field(&mut p.height, how.sides.clone(), "height", ui);
             if let Some(r) = how.keep {
                 if w.changed() {
                     p.height = (p.width / r).clamp(*how.sides.start(), *how.sides.end());
@@ -196,7 +204,8 @@ pub fn fields(ui: &mut egui::Ui, p: &mut Params, m: &mut Measure, doc: &Document
         if let Some(own) = how.scale_of {
             ui.label("Scale");
             let mut pct = p.width / own * 100.0;
-            let r = ui.add(egui::DragValue::new(&mut pct).speed(0.5).range(0.01..=1e6).suffix("%").max_decimals(2));
+            let pick = NumberField::number(&mut pct, scope).speed(0.5).range(0.01..=1e6).suffix("%").decimals(0, 2);
+            let r = ui.add(pick.remember(("box", "scale")));
             if r.changed() {
                 let k = pct / 100.0 * own / p.width;
                 p.width *= k;
@@ -205,11 +214,16 @@ pub fn fields(ui: &mut egui::Ui, p: &mut Params, m: &mut Measure, doc: &Document
             ui.end_row();
         }
         ui.label("Angle");
-        ui.add(egui::DragValue::new(&mut p.angle).speed(0.5).range(-360.0..=360.0).suffix("°").max_decimals(2))
+        ui.add(NumberField::angle(&mut p.angle, scope).speed(0.5).range(-360.0..=360.0).remember(("box", "angle")))
             .on_hover_text(format!("Clockwise, about the box's {point}."));
         ui.end_row();
     });
     *p != before
+}
+
+/// The box `p`, as an expression names its numbers.
+fn own(p: &Params) -> Own {
+    Own { x: p.x, y: p.y, width: p.width, height: p.height, angle: p.angle }
 }
 
 /// A 3 × 3 grid of a box's points (see [`POINTS`]), the one at `chosen` marked; clicking
@@ -281,7 +295,9 @@ pub fn transform(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
     if m.origin != origin {
         d.origin = m.origin;
     }
-    let rect = Rect { canvas: canvas.to_f(), from: [cx, cy], unit: m.unit, ppi, at };
+    let before = d.history.doc();
+    let scope = Scope { doc: Some(before), ppi, unit: m.unit, origin: [cx, cy], own: Some(own(&q)) };
+    let rect = Rect { canvas: canvas.to_f(), from: [cx, cy], at, scope };
     if let Some(fit) = fit_into(ui, &mut d.fit_rect, &rect, salt)
         && let Err(why) = crate::api::place_box(d, &fit)
     {
@@ -300,14 +316,14 @@ fn counted_from(origin: Origin, doc: &Document) -> Origin {
 }
 
 /// What the rectangle to fit a box into is measured in and from: the canvas (its default),
-/// the point positions count from (`from`, in the document), the unit and resolution, and
-/// the box's point `at` that positions give.
-struct Rect {
+/// the point positions count from (`from`, in the document), the box's point `at` that
+/// positions give, and what is typed is worked out in (its unit and resolution those the
+/// fields show).
+struct Rect<'a> {
     canvas: opal_core::geom::FRect,
     from: [f64; 2],
-    unit: Unit,
-    ppi: f64,
     at: [f64; 2],
+    scope: Scope<'a>,
 }
 
 /// A rectangle to fit the transform box into (`rect`: its top-left corner from the canvas's,
@@ -317,7 +333,10 @@ struct Rect {
 /// does. What a button asks for, as a script's arguments would.
 fn fit_into(ui: &mut egui::Ui, rect: &mut Option<[f64; 4]>, how: &Rect, salt: &str) -> Option<crate::api::BoxArgs> {
     use crate::api::{BoxArgs, Fit};
-    let (canvas, at, unit, ppi) = ([how.canvas.width(), how.canvas.height()], how.at, how.unit, how.ppi);
+    let (canvas, at, scope) = ([how.canvas.width(), how.canvas.height()], how.at, how.scope);
+    let field = |px: &mut f64, range, name: &str, ui: &mut egui::Ui| {
+        lengths::length_field(px, scope, range, 1).remember(("fit", name)).show(ui).changed()
+    };
     // Kept from the canvas's corner; shown from the point positions count from.
     let shift = [how.canvas.x0 - how.from[0], how.canvas.y0 - how.from[1]];
     let [x0, y0, w0, h0] = rect.unwrap_or([0.0, 0.0, canvas[0], canvas[1]]);
@@ -329,16 +348,16 @@ fn fit_into(ui: &mut egui::Ui, rect: &mut Option<[f64; 4]>, how: &Rect, salt: &s
             ui.label("Position");
             ui.horizontal(|ui| {
                 ui.label("x");
-                edited |= lengths::length(ui, &mut x, unit, ppi, -FAR..=FAR, 1).changed();
+                edited |= field(&mut x, -FAR..=FAR, "x", ui);
                 ui.label("y");
-                edited |= lengths::length(ui, &mut y, unit, ppi, -FAR..=FAR, 1).changed();
+                edited |= field(&mut y, -FAR..=FAR, "y", ui);
             });
             ui.end_row();
             ui.label("Size");
             ui.horizontal(|ui| {
-                edited |= lengths::length(ui, &mut w, unit, ppi, 0.01..=1e6, 1).changed();
+                edited |= field(&mut w, 0.01..=1e6, "width", ui);
                 ui.label("×");
-                edited |= lengths::length(ui, &mut h, unit, ppi, 0.01..=1e6, 1).changed();
+                edited |= field(&mut h, 0.01..=1e6, "height", ui);
             });
             ui.end_row();
         });

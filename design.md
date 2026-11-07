@@ -1075,20 +1075,32 @@ numbers (*Paste and transform*): a length such as `8.5in` is the simplest expres
     is in the field's or the call's unit; one multiplying or dividing it is a plain factor.
     A length times a length is an error, as is any other mismatch of kinds (length, angle,
     plain number). Angles are in degrees unless given in `rad`.
-  - Arithmetic (`+ - * /`, powers, parentheses), and functions: `min`, `max`, `abs`,
-    `round`, `floor`, `ceil`, `sqrt`, `sin`, `cos`, `tan`, `atan2`.
+  - Arithmetic (`+ - * /`, `^` or `**` for powers, parentheses; `×`, `÷` and `−` too), and
+    functions: `min`, `max`, `abs`, `round`, `floor`, `ceil` (to whole pixels or degrees,
+    or to a multiple of a second argument: `round(x, 1mm)`), `sqrt`, `sin`, `cos`, `tan`,
+    `asin`, `acos`, `atan`, `atan2`, and `pi`.
   - References:
-    - the canvas (`canvas.width`, `canvas.right`, and its nine points: `canvas.center.x`);
-    - any layer's bounds and nine points by name (`Logo.right`, `Logo.bottom_left.y`; a
-      name with spaces, or one that clashes with a word of the language, quoted:
-      `layer("Back ground").top`). The points' names are the `anchor` names with `_` for
-      `-`, which here would be a minus;
+    - the canvas, and any layer by name, as bounds: their edges `left`, `right`, `top`,
+      `bottom` (`x` and `y` are the left and top), `width` and `height`, and their points
+      `top_left`, `top_right`, `bottom_left`, `bottom_right` and `center` (`Logo.right`,
+      `canvas.center.x`). An edge's middle is `point(Logo.center.x, Logo.top)`: `top` is the
+      edge's coordinate, as `-` in `bottom-left` would be a minus. A name with spaces, or
+      one that clashes with a word of the language, is quoted, `layer("Back ground").top`,
+      and a layer may be named by its id, `layer(12)`; a name in another case is found if
+      only one layer has it, and two layers of one name are an error, never a guess;
     - the box being placed as it was before this change (`x`, `y`, `width`, `height`,
       `angle`);
     - the image's resolution (`ppi`);
     - later, paths' nodes and text boxes' corners (milestones 4 and 7);
-    - points as values, with `mid(A, B)`, `lerp(A, B, t)` and `dist(A, B)`, so "halfway
-      between two nodes" is `mid(A, B).x`.
+    - points as values, with `mid(A, B)`, `lerp(A, B, t)` (of lengths too), `dist(A, B)`
+      and `point(x, y)`, so "halfway between two nodes" is `mid(A, B).x`.
+  - Positions are measured as the field's are: from the point its box counts from (the
+    canvas's top-left corner unless *From* says), so `Logo.right + 5mm` in the x field puts
+    the box 5 mm right of the logo however it is counted. Lengths (`Logo.width`) are the
+    same from anywhere.
+  - Limits, for text from scripts and files: at most 4096 bytes, nesting 64 deep, and
+    lengths and angles to powers of at most 64; anything past them is refused, never taken
+    down the stack.
 - **Its own language, not Python.** The constraint solver must differentiate each
   expression to solve with it, so expressions are parsed into a tree the editor
   understands. That also makes them instant, safe, and independent of any Python install.
@@ -1099,8 +1111,20 @@ numbers (*Paste and transform*): a length such as `8.5in` is the simplest expres
 - **Worked out once, or kept.**
   - In a field or a call, an expression is worked out once against the document as it is
     then (when Enter is pressed, or when the call runs), and the result is a plain number.
-  - A field shows what its expression comes to as you type, and an error says where it is.
-  - Each field remembers its recent expressions (Up and Down).
+  - A field shows what its expression comes to as you type, and an error says where it is,
+    the part at fault marked. Enter on one that cannot be worked out keeps it, to be put
+    right; Esc, or leaving the field, leaves the value as it was.
+  - Each field remembers its recent entries (Up and Down), a box's fields by name, so the
+    tool settings' x and the numbers panel's x share theirs.
+  - The fields are `number_field::NumberField`, dragged as egui's `DragValue` is (and with
+    its accessibility), on every number the interface takes: lengths (`lengths::length`),
+    angles, percentages, resolutions, the zoom and the layer's opacity, and the
+    preferences' numbers beside their sliders. Each is given an `expr::Scope`: a box's
+    fields the image as it was before the box opened, positions from what it counts from,
+    and the box; a dialog's the image it is about; one with no image, units alone.
+  - Keys pressed while a field has the keyboard are the field's: Esc there leaves the
+    field, not the box the field is about (egui lets go of the focus on Esc before the
+    frame's keys are read, so the app remembers who had them last frame).
   - A placement remembers the expression it came from. *Re-apply*, by the box's numbers
     and from scripts, works it out again after what it refers to has moved. Once
     constraints exist, *keep linked* turns it into a constraint without retyping.

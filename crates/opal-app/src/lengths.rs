@@ -2,49 +2,55 @@
 //!
 //! A length is always held in pixels; a field shows it in a unit, converted at the image's
 //! resolution, and writes back only what the user changes, so showing a length never
-//! moves it. A length typed with a unit after it ("2 cm") is read in that unit, whatever
-//! the field shows.
+//! moves it. What is typed is an expression (`opal_core::expr`): a number in the field's
+//! unit, one with a unit of its own ("2 cm"), or arithmetic on lengths and what the
+//! field's scope lets it name.
 
 use crate::dialogs::MAX_SIDE;
+use crate::number_field::NumberField;
 use crate::settings::Value;
 use crate::state::AppState;
 use eframe::egui;
-use opal_core::units::{MAX_PPI, MIN_PPI, ResolutionUnit, Unit, parse_length};
+use opal_core::expr::Scope;
+use opal_core::units::{MAX_PPI, MIN_PPI, ResolutionUnit, Unit};
 use std::ops::RangeInclusive;
 
-/// A field for a length of `px` pixels, shown in `unit` at `ppi` pixels per inch and kept
-/// in `range` (in pixels). In pixels it shows `px_decimals` places; in other units, enough
-/// for a pixel to show.
+/// A field for a length of `px` pixels, shown in `scope`'s unit at its resolution, worked
+/// out in it when typed, and kept in `range` (in pixels). In pixels it shows `px_decimals`
+/// places; in other units, enough for a pixel to show.
 pub fn length(
     ui: &mut egui::Ui,
     px: &mut f64,
-    unit: Unit,
-    ppi: f64,
+    scope: Scope,
     range: RangeInclusive<f64>,
     px_decimals: usize,
 ) -> egui::Response {
-    let decimals = if unit == Unit::Px { px_decimals } else { unit.decimals(ppi) };
-    let shown = unit.from_px(*range.start(), ppi)..=unit.from_px(*range.end(), ppi);
-    ui.add(
-        egui::DragValue::from_get_set(|set| {
-            if let Some(v) = set {
-                *px = unit.to_px(v, ppi).clamp(*range.start(), *range.end());
-            }
-            unit.from_px(*px, ppi)
-        })
-        .range(shown)
+    length_field(px, scope, range, px_decimals).show(ui)
+}
+
+/// The field [`length`] shows, to be given more (what it remembers entries under, say).
+pub fn length_field<'a>(
+    px: &'a mut f64,
+    scope: Scope<'a>,
+    range: RangeInclusive<f64>,
+    px_decimals: usize,
+) -> NumberField<'a> {
+    let unit = scope.unit;
+    let decimals = if unit == Unit::Px { px_decimals } else { unit.decimals(scope.ppi) };
+    NumberField::length(px, scope)
+        .decimals(0, decimals)
+        .range(range)
         // Kept as it is if outside the range (a box dragged far), until the user types.
-        .clamp_existing_to_range(false)
+        .clamp_existing(false)
         // A pixel for each point dragged.
-        .speed(unit.from_px(1.0, ppi))
-        .min_decimals(0)
-        .max_decimals(decimals)
-        .suffix(format!(" {unit}"))
-        .custom_parser(move |text| {
-            let (v, typed) = parse_length(text)?;
-            Some(typed.map_or(v, |t| unit.from_px(t.to_px(v, ppi), ppi)))
-        }),
-    )
+        .speed(1.0)
+}
+
+/// What a field about image `doc` (if one) works out what is typed in: lengths in `unit` at
+/// `ppi`, positions from its canvas's top-left corner, and no box.
+pub fn image_scope(doc: Option<&opal_core::document::Document>, unit: Unit, ppi: f64) -> Scope<'_> {
+    let origin = doc.map_or([0.0, 0.0], |d| [d.canvas.x as f64, d.canvas.y as f64]);
+    Scope { doc, ppi, unit, origin, own: None }
 }
 
 /// A canvas side of `px` pixels, in whole pixels from 1 to [`MAX_SIDE`].
@@ -52,20 +58,20 @@ pub fn whole_side(px: f64) -> u32 {
     (px.round() as u32).clamp(1, MAX_SIDE)
 }
 
-/// A field for a canvas side of `n` pixels (1 to [`MAX_SIDE`]), shown in `unit` at `ppi`.
-pub fn side(ui: &mut egui::Ui, n: &mut u32, unit: Unit, ppi: f64) -> egui::Response {
+/// A field for a canvas side of `n` pixels (1 to [`MAX_SIDE`]), in `scope`.
+pub fn side(ui: &mut egui::Ui, n: &mut u32, scope: Scope) -> egui::Response {
     let mut px = f64::from(*n);
-    let r = length(ui, &mut px, unit, ppi, 1.0..=f64::from(MAX_SIDE), 0);
+    let r = length(ui, &mut px, scope, 1.0..=f64::from(MAX_SIDE), 0);
     if r.changed() {
         *n = whole_side(px);
     }
     r
 }
 
-/// A field for a whole number of pixels `n` in `range`, shown in `unit` at `ppi`.
-pub fn whole(ui: &mut egui::Ui, n: &mut i64, unit: Unit, ppi: f64, range: RangeInclusive<i64>) -> egui::Response {
+/// A field for a whole number of pixels `n` in `range`, in `scope`.
+pub fn whole(ui: &mut egui::Ui, n: &mut i64, scope: Scope, range: RangeInclusive<i64>) -> egui::Response {
     let mut px = *n as f64;
-    let r = length(ui, &mut px, unit, ppi, *range.start() as f64..=*range.end() as f64, 0);
+    let r = length(ui, &mut px, scope, *range.start() as f64..=*range.end() as f64, 0);
     if r.changed() {
         *n = (px.round() as i64).clamp(*range.start(), *range.end());
     }
@@ -88,22 +94,20 @@ pub fn unit_menu(ui: &mut egui::Ui, unit: &mut Unit, id: &str) -> bool {
 }
 
 /// A field for a resolution of `ppi` pixels per inch, shown in `in_unit`, with a menu of
-/// the resolution units. Returns whether the resolution changed (not just its unit).
-pub fn resolution(ui: &mut egui::Ui, ppi: &mut f64, in_unit: &mut ResolutionUnit, id: &str) -> bool {
+/// the resolution units; what is typed is worked out in `scope`. Returns whether the
+/// resolution changed (not just its unit).
+pub fn resolution(ui: &mut egui::Ui, ppi: &mut f64, in_unit: &mut ResolutionUnit, id: &str, scope: Scope) -> bool {
     let unit = *in_unit;
+    let mut shown = unit.from_ppi(*ppi);
     let r = ui.add(
-        egui::DragValue::from_get_set(|set| {
-            if let Some(v) = set {
-                *ppi = unit.to_ppi(v).clamp(MIN_PPI, MAX_PPI);
-            }
-            unit.from_ppi(*ppi)
-        })
-        .range(unit.from_ppi(MIN_PPI)..=unit.from_ppi(MAX_PPI))
-        .speed(1.0)
-        .min_decimals(0)
-        .max_decimals(2),
+        NumberField::number(&mut shown, scope)
+            .range(unit.from_ppi(MIN_PPI)..=unit.from_ppi(MAX_PPI))
+            .speed(1.0)
+            .decimals(0, 2),
     );
-    let shown = unit.from_ppi(*ppi);
+    if r.changed() {
+        *ppi = unit.to_ppi(shown).clamp(MIN_PPI, MAX_PPI);
+    }
     r.widget_info(|| egui::WidgetInfo {
         label: Some("Resolution".into()),
         ..egui::WidgetInfo::drag_value(true, shown)
@@ -209,7 +213,7 @@ mod tests {
         let mut px = 400_000.0;
         let mut changed = false;
         let mut out = ctx.run_ui(Default::default(), |ui| {
-            changed |= length(ui, &mut px, Unit::In, 300.0, 1.0..=300_000.0, 0).changed();
+            changed |= length(ui, &mut px, Scope::bare(Unit::In, 300.0), 1.0..=300_000.0, 0).changed();
         });
         out.textures_delta.clear();
         assert_eq!((px, changed), (400_000.0, false));

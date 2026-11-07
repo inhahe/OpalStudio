@@ -169,6 +169,72 @@ fn the_print_size_button_on_a_placed_file_switches_it_and_is_remembered() {
 }
 
 #[test]
+fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
+    use egui_kittest::kittest::by;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    h.state_mut().state_mut().create_image(&crate::state::NewImage {
+        width: 400,
+        height: 300,
+        background: crate::state::Background::White,
+        resolution: 100.0,
+    });
+    put_on_clipboard(&mut h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
+    h.event(egui::Event::Paste(String::new()));
+    // Typed into the numbers by the box (the tool settings show the same, past the bottom of
+    // their panel at this window's height).
+    h.state_mut().state_mut().box_numbers = true;
+    h.run();
+    let x = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
+    let field_at = |v: f64| {
+        by().predicate(move |n| {
+            n.role() == egui::accesskit::Role::SpinButton
+                && n.numeric_value().is_some_and(|x| (x - v).abs() < 1e-6)
+                && n.bounding_box().is_some_and(|b| b.x0 < 1000.0)
+        })
+    };
+    let typed = |h: &mut Harness<'static, OpalApp>, at: f64, text: &str| {
+        h.get(field_at(at)).click();
+        h.run();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.get(by().predicate(|n| n.is_focused())).type_text(text);
+        h.run();
+    };
+    let at = x(&h);
+    // A layer's edge, the box's own width, and a bare number in the field's unit (pixels).
+    typed(&mut h, at, "Background.right - width - 10");
+    assert_eq!(h.query_all(by().label_contains("= 340 px")).count(), 1, "what it comes to is not shown");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert_eq!(x(&h), 340.0);
+    // What cannot be worked out says why, and where; Enter keeps it, to be put right.
+    typed(&mut h, 340.0, "Bakground.right");
+    assert!(h.query_all(by().label_contains("no layer called “Bakground”")).count() >= 1, "the error is not shown");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    assert_eq!(x(&h), 340.0, "what could not be worked out moved the box");
+    let kept = h.query_all(by().predicate(|n| n.value().as_deref() == Some("Bakground.right"))).count();
+    assert!(kept >= 1, "the text was not kept to be put right");
+    // Escape leaves the field as it was, and the box open (egui lets go of a field's focus
+    // on Esc before the frame's keys are seen).
+    h.key_press(egui::Key::Escape);
+    h.run();
+    let open = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().transform.is_some();
+    assert!(open(&h), "Esc in a field cancelled the box");
+    assert_eq!(x(&h), 340.0);
+    // Up brings back what was entered.
+    h.get(field_at(340.0)).click();
+    h.run();
+    h.key_press(egui::Key::ArrowUp);
+    h.run();
+    let back = h.query_all(by().predicate(|n| n.value().as_deref() == Some("Background.right - width - 10"))).count();
+    assert!(back >= 1, "Up did not bring back the last entry");
+    h.key_press(egui::Key::Escape);
+    h.run();
+}
+
+#[test]
 fn the_box_s_buttons_stay_in_the_view_however_many_it_has() {
     let _gpu = gpu_lock();
     let mut h = harness();

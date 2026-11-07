@@ -3,10 +3,12 @@
 
 use crate::icons;
 use crate::lengths;
+use crate::number_field::NumberField;
 use crate::prefs::SECTIONS;
 use crate::settings::{self, Show};
 use crate::state::{AppState, Background, Confirm, ExportKind, MessageKind, NewImage};
 use eframe::egui::{self, RichText, ViewportCommand};
+use opal_core::expr::Scope;
 use opal_core::units::{ResolutionUnit, Unit};
 use opal_io::bytes;
 
@@ -188,13 +190,13 @@ fn new_image(ctx: &egui::Context, st: &mut AppState) {
         egui::Grid::new("new-image-grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
             ui.label("Width");
             ui.horizontal(|ui| {
-                lengths::side(ui, &mut spec.width, unit, spec.resolution);
+                lengths::side(ui, &mut spec.width, Scope::bare(unit, spec.resolution));
                 lengths::unit_menu(ui, &mut unit, "new-image-unit");
             });
             ui.end_row();
             ui.label("Height");
             ui.horizontal(|ui| {
-                lengths::side(ui, &mut spec.height, unit, spec.resolution);
+                lengths::side(ui, &mut spec.height, Scope::bare(unit, spec.resolution));
                 if ui
                     .small_button(crate::theme::icon(icons::SWAP, 13.0))
                     .on_hover_text("Swap width and height")
@@ -208,7 +210,8 @@ fn new_image(ctx: &egui::Context, st: &mut AppState) {
             ui.horizontal(|ui| {
                 let before = spec.resolution;
                 // A size shown in a unit of length stays that size; one in pixels, those pixels.
-                if lengths::resolution(ui, &mut spec.resolution, &mut per, "new-image-ppi") && unit != Unit::Px {
+                let scope = Scope::bare(unit, spec.resolution);
+                if lengths::resolution(ui, &mut spec.resolution, &mut per, "new-image-ppi", scope) && unit != Unit::Px {
                     let id = egui::Id::unique("new-image-print");
                     hold_print_size(ui, id, (&mut spec.width, &mut spec.height), before, spec.resolution);
                 }
@@ -332,10 +335,11 @@ fn export(ctx: &egui::Context, st: &mut AppState) {
             ui.radio_value(&mut spec.kind, ExportKind::Jpeg, "JPEG");
         });
         ui.add_space(4.0);
-        if let Some((c, ppi)) = st.doc(spec.doc).map(|d| (d.doc().canvas, d.doc().resolution)) {
+        if let Some(d) = st.doc(spec.doc) {
+            let (doc, c, ppi) = (d.doc(), d.doc().canvas, d.doc().resolution);
             egui::Grid::new("export-size").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                 let size = (&mut spec.width, &mut spec.height);
-                size_fields(ui, size, &mut spec.keep_aspect, (c.width, c.height), &mut unit, ppi);
+                size_fields(ui, size, &mut spec.keep_aspect, (c.width, c.height), &mut unit, ppi, Some(doc));
             });
             if (spec.width, spec.height) != (c.width, c.height) {
                 ui.label(
@@ -399,15 +403,20 @@ fn size_fields(
     original: (u32, u32),
     unit: &mut Unit,
     ppi: f64,
+    doc: Option<&opal_core::document::Document>,
 ) {
     let (w, h) = size;
     let (ow, oh) = (f64::from(original.0), f64::from(original.1));
     let before = (*w, *h);
+    fn percent<'a>(pct: &'a mut f64, scope: Scope<'a>) -> NumberField<'a> {
+        NumberField::number(pct, scope).range(0.01..=10_000.0).suffix("%").decimals(0, 2)
+    }
     ui.label("Width");
     ui.horizontal(|ui| {
-        lengths::side(ui, w, *unit, ppi);
+        let scope = lengths::image_scope(doc, *unit, ppi);
+        lengths::side(ui, w, scope);
         let mut pct = f64::from(*w) / ow * 100.0;
-        if ui.add(egui::DragValue::new(&mut pct).range(0.01..=10_000.0).suffix("%").max_decimals(2)).changed() {
+        if ui.add(percent(&mut pct, scope)).changed() {
             *w = lengths::whole_side(ow * pct / 100.0);
         }
         lengths::unit_menu(ui, unit, "size-unit");
@@ -415,9 +424,10 @@ fn size_fields(
     ui.end_row();
     ui.label("Height");
     ui.horizontal(|ui| {
-        lengths::side(ui, h, *unit, ppi);
+        let scope = lengths::image_scope(doc, *unit, ppi);
+        lengths::side(ui, h, scope);
         let mut pct = f64::from(*h) / oh * 100.0;
-        if ui.add(egui::DragValue::new(&mut pct).range(0.01..=10_000.0).suffix("%").max_decimals(2)).changed() {
+        if ui.add(percent(&mut pct, scope)).changed() {
             *h = lengths::whole_side(oh * pct / 100.0);
         }
     });
@@ -451,7 +461,9 @@ fn ok_cancel(ui: &mut egui::Ui, ok: &str) -> Option<bool> {
 
 fn resize_image(ctx: &egui::Context, st: &mut AppState) {
     let Some(mut spec) = st.resize_image.clone() else { return };
-    let Some((c, locked)) = st.active().map(|d| (d.doc().canvas, crate::commands::locked_layer(d.doc()))) else {
+    let Some((c, locked, doc)) =
+        st.active().map(|d| (d.doc().canvas, crate::commands::locked_layer(d.doc()), d.doc().clone()))
+    else {
         st.resize_image = None;
         return;
     };
@@ -464,11 +476,14 @@ fn resize_image(ctx: &egui::Context, st: &mut AppState) {
         ui.add_space(4.0);
         egui::Grid::new("resize-image-size").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
             let size = (&mut spec.width, &mut spec.height);
-            size_fields(ui, size, &mut spec.keep_aspect, (c.width, c.height), &mut unit, spec.resolution);
+            let original = (c.width, c.height);
+            size_fields(ui, size, &mut spec.keep_aspect, original, &mut unit, spec.resolution, Some(&doc));
             ui.label("Resolution");
             ui.horizontal(|ui| {
                 let before = spec.resolution;
-                if lengths::resolution(ui, &mut spec.resolution, &mut per, "resize-ppi") && spec.keep_print_size {
+                let scope = lengths::image_scope(Some(&doc), unit, spec.resolution);
+                if lengths::resolution(ui, &mut spec.resolution, &mut per, "resize-ppi", scope) && spec.keep_print_size
+                {
                     let id = egui::Id::unique("resize-print");
                     hold_print_size(ui, id, (&mut spec.width, &mut spec.height), before, spec.resolution);
                 }
@@ -517,7 +532,7 @@ fn resize_image(ctx: &egui::Context, st: &mut AppState) {
 
 fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
     let Some(mut spec) = st.resize_canvas.clone() else { return };
-    let Some((c, ppi)) = st.active().map(|d| (d.doc().canvas, d.doc().resolution)) else {
+    let Some((c, ppi, doc)) = st.active().map(|d| (d.doc().canvas, d.doc().resolution, d.doc().clone())) else {
         st.resize_canvas = None;
         return;
     };
@@ -540,7 +555,7 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
                 for (name, i) in [("Left", 0), ("Top", 1), ("Right", 2), ("Bottom", 3)] {
                     ui.label(name);
                     let side = i64::from(MAX_SIDE);
-                    lengths::whole(ui, &mut spec.margins[i], unit, ppi, -side..=side);
+                    lengths::whole(ui, &mut spec.margins[i], lengths::image_scope(Some(&doc), unit, ppi), -side..=side);
                     ui.end_row();
                 }
             });
@@ -548,10 +563,10 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
         } else {
             egui::Grid::new("resize-canvas-size").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                 ui.label("Width");
-                lengths::side(ui, &mut spec.width, unit, ppi);
+                lengths::side(ui, &mut spec.width, lengths::image_scope(Some(&doc), unit, ppi));
                 ui.end_row();
                 ui.label("Height");
-                lengths::side(ui, &mut spec.height, unit, ppi);
+                lengths::side(ui, &mut spec.height, lengths::image_scope(Some(&doc), unit, ppi));
                 ui.end_row();
                 ui.label("Anchor").on_hover_text("Where the old canvas sits in the new one.");
                 let mut i = usize::from(spec.anchor[1]) * 3 + usize::from(spec.anchor[0]);
@@ -585,15 +600,16 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
 fn rotate_by(ctx: &egui::Context, st: &mut AppState) {
     let Some(mut spec) = st.rotate_by.clone() else { return };
     let palette = st.palette;
+    let doc = st.active().map(|d| d.doc().clone());
+    let ppi = doc.as_ref().map_or(opal_core::units::DEFAULT_PPI, |d| d.resolution);
+    let scope = lengths::image_scope(doc.as_ref(), st.unit(), ppi);
     let mut done = None;
     egui::Modal::new(egui::Id::unique("rotate-by")).show(ctx, |ui| {
         ui.heading("Rotate by angle");
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label("Angle");
-            ui.add(
-                egui::DragValue::new(&mut spec.degrees).range(-360.0..=360.0).speed(0.25).suffix("°").max_decimals(2),
-            );
+            ui.add(NumberField::angle(&mut spec.degrees, scope).range(-360.0..=360.0).speed(0.25));
             ui.label(RichText::new("clockwise").color(palette.weak_text));
         });
         ui.checkbox(&mut spec.grow, "Grow the canvas so nothing is cut off");

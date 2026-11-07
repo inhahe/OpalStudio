@@ -29,6 +29,7 @@ mod mcp;
 mod mcp_http;
 mod memory;
 mod move_tool;
+mod number_field;
 mod panels;
 mod paste;
 mod paste_keys;
