@@ -541,6 +541,14 @@ impl AppState {
             Cmd::PasteInPlace => self.paste(true, ctx),
             Cmd::Place => self.place_dialog(),
             Cmd::Transform => self.transform(),
+            Cmd::ReapplyPlacement => {
+                let sampling = crate::prefs::sampling(&self.prefs, "transform");
+                let d = self.active_mut().expect("available");
+                let layer = d.active_layer().expect("available");
+                if let Err(why) = d.reapply_placement(layer, sampling) {
+                    self.message(MessageKind::Info, "Re-apply Placement", why);
+                }
+            }
             Cmd::CropToContent => self.crop_to_content(),
             Cmd::ResizeImage => {
                 let doc = self.active().expect("available").doc();

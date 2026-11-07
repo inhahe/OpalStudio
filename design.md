@@ -1125,9 +1125,24 @@ numbers (*Paste and transform*): a length such as `8.5in` is the simplest expres
   - Keys pressed while a field has the keyboard are the field's: Esc there leaves the
     field, not the box the field is about (egui lets go of the focus on Esc before the
     frame's keys are read, so the app remembers who had them last frame).
-  - A placement remembers the expression it came from. *Re-apply*, by the box's numbers
-    and from scripts, works it out again after what it refers to has moved. Once
-    constraints exist, *keep linked* turns it into a constraint without retyping.
+  - A placement remembers the expressions it came from (`Layer::placed`, a `Placement`).
+    The box's session keeps each of its numbers given as an expression, typed into its
+    fields or given by a script, with how it was measured (`transform::Given`: the unit, the
+    box's point, what it counts from, and for a side whether the other kept its
+    proportion). When the box is applied, those that name the image (the canvas, a layer)
+    and not the box itself, and still give what the box has then (a drag since has not
+    moved it), are kept with its layers, their layers by id (`Placed`), the last of each
+    number; a number naming the box (`x + 1cm`) is not, as working it out again would move
+    the box again, nor one naming nothing of the image, which would come out the same.
+    Placed by a box again, the layers keep what that box was given, or nothing; moved
+    otherwise (the Move tool), renamed, saved and opened, they keep it; a copy has none.
+  - *Re-apply Placement* (Home › Transform, and `reapply_placement` for scripts) opens the
+    box on the active layer and those placed with it, gives it the numbers again, each as
+    it was measured and worked out now, and applies it as one history state. A layer it
+    names, or counts from, gone, it says so and changes nothing. With the box open on
+    layers placed together, its numbers list how (*Placed by*, the layers by their names
+    now) with a Re-apply that does the same in the open box. Once constraints exist, *keep
+    linked* turns a placement into a constraint without retyping.
 - **The same from scripts.** Every number and length parameter of the API (Python and MCP)
   also takes an expression as text (*Scripting* has how).
   - The editor works it out when the call runs, with the same parser as the fields, so a
@@ -1408,7 +1423,9 @@ server. Both rest on one language-neutral API.
 `.opal`, version 2: a zip archive holding `mimetype` (stored first, uncompressed:
 `application/x-opal-studio`), `document.json` (the canvas rectangle, the resolution, the
 layer tree and the next free identifier; a file without a resolution, as files before it
-are, has 72 ppi, and versions before it ignore it, so it needed no new version) and `tiles/<n>.bin` or `tiles/<n>.srgb8`, one tile each. Objects are
+are, has 72 ppi, and versions before it ignore it, so it needed no new version; a layer's
+`placed`, its placement, is read the same way, and refused if it could not have been made:
+a point past the nine, a number given twice, or an expression that does not read) and `tiles/<n>.bin` or `tiles/<n>.srgb8`, one tile each. Objects are
 pixel objects (their tiles and whole-pixel offset) or image objects (their tiles, frame,
 transform and sampling). A tile shared by several layers is stored once. A `.bin` tile is
 the tile's half floats byte-shuffled (all low bytes, then all high bytes), which lets

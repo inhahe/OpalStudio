@@ -217,6 +217,85 @@ pub struct Layer {
     /// 0–1.
     pub opacity: f32,
     pub content: LayerContent,
+    /// How it was last placed by expressions, to be placed so again (see [`Placement`]).
+    pub placed: Option<Placement>,
+}
+
+/// How a layer was last placed by a box whose numbers were given as expressions naming the
+/// image (its canvas, its layers; see [`crate::expr`]): those numbers, to be worked out
+/// again (Re-apply) once what they name has moved. Kept until a box places the layer again.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Placement {
+    /// The layers the box placed together (this one among them).
+    pub layers: Vec<LayerId>,
+    /// What it was given, each number once, in the order given.
+    pub numbers: Vec<Placed>,
+}
+
+/// One of a box's numbers, as it was given.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Placed {
+    pub number: BoxNumber,
+    /// The expression, its layers named by id ([`crate::expr::Expr::text`]).
+    pub expr: String,
+    /// The unit a bare number in it is in.
+    pub unit: crate::units::Unit,
+    /// The box's point its position gives, and the point that counts from, of the canvas
+    /// or of layer `from_layer`: each one of the nine points, by its index row by row from
+    /// the top-left (so less than 9).
+    pub anchor: u8,
+    pub from_layer: Option<LayerId>,
+    pub from_anchor: u8,
+    /// For a side: whether the other one was kept in proportion with it.
+    pub keep: bool,
+}
+
+/// One of a box's numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BoxNumber {
+    X,
+    Y,
+    Width,
+    Height,
+    Angle,
+}
+
+impl BoxNumber {
+    /// Each, with its name (as scripts' parameters and the language have it).
+    pub const ALL: [(BoxNumber, &'static str); 5] = [
+        (BoxNumber::X, "x"),
+        (BoxNumber::Y, "y"),
+        (BoxNumber::Width, "width"),
+        (BoxNumber::Height, "height"),
+        (BoxNumber::Angle, "angle"),
+    ];
+
+    pub fn name(self) -> &'static str {
+        BoxNumber::ALL.iter().find(|n| n.0 == self).expect("each is listed").1
+    }
+}
+
+impl Placement {
+    /// Why it cannot be kept, if it cannot: a point out of the nine, a number given twice,
+    /// or an expression that does not read.
+    pub fn check(&self) -> Result<(), String> {
+        for (i, p) in self.numbers.iter().enumerate() {
+            if p.anchor >= 9 || p.from_anchor >= 9 {
+                return Err(format!(
+                    "its {} counts by point {} from point {}, of nine",
+                    p.number.name(),
+                    p.anchor,
+                    p.from_anchor
+                ));
+            }
+            if self.numbers[..i].iter().any(|q| q.number == p.number) {
+                return Err(format!("it gives its {} twice", p.number.name()));
+            }
+            crate::expr::Expr::parse(&p.expr).map_err(|e| format!("its {} does not read: {e}", p.number.name()))?;
+        }
+        Ok(())
+    }
 }
 
 impl Layer {
@@ -229,6 +308,7 @@ impl Layer {
             locked: false,
             opacity: 1.0,
             content: LayerContent::Objects(Vec::new()),
+            placed: None,
         }
     }
 
@@ -571,5 +651,24 @@ mod tests {
         let mut fresh = IdGen::default();
         fresh.reserve_above(&d);
         assert!(fresh.layer().0 > d.layer_ids().iter().map(|l| l.0).max().unwrap());
+    }
+
+    #[test]
+    fn a_placement_read_from_a_file_must_be_one_that_could_be_made() {
+        let placed = |number, expr: &str, anchor| Placed {
+            number,
+            expr: expr.to_owned(),
+            unit: crate::units::Unit::Px,
+            anchor,
+            from_layer: None,
+            from_anchor: 0,
+            keep: false,
+        };
+        let of = |numbers| Placement { layers: vec![LayerId(1)], numbers };
+        assert_eq!(of(vec![placed(BoxNumber::X, "layer(3).right + 5", 4)]).check(), Ok(()));
+        assert!(of(vec![placed(BoxNumber::X, "1", 9)]).check().unwrap_err().contains("of nine"));
+        let twice = of(vec![placed(BoxNumber::Y, "1", 0), placed(BoxNumber::Y, "2", 0)]);
+        assert!(twice.check().unwrap_err().contains("gives its y twice"));
+        assert!(of(vec![placed(BoxNumber::Angle, "1 +", 0)]).check().unwrap_err().contains("does not read"));
     }
 }

@@ -164,6 +164,12 @@ impl<'a> NumberField<'a> {
 
     /// Shows the field; its response is changed if its value is.
     pub fn show(self, ui: &mut egui::Ui) -> egui::Response {
+        self.show_entered(ui).0
+    }
+
+    /// [`show`](Self::show), and what was entered in it this frame (its text, as typed), if
+    /// something was.
+    pub fn show_entered(self, ui: &mut egui::Ui) -> (egui::Response, Option<String>) {
         // One id whether it is a button or a text edit, as egui's DragValue keeps.
         let id = ui.next_auto_id();
         let editing = ui.is_enabled()
@@ -189,6 +195,7 @@ impl<'a> NumberField<'a> {
         });
         let text = self.text_of(value);
         let remembered = self.remember.unwrap_or_else(|| id.with("entries"));
+        let mut entered = None;
         let mut response = if editing {
             let mut typing = ui
                 .data_mut(|d| d.remove_temp::<Typing>(id))
@@ -216,6 +223,7 @@ impl<'a> NumberField<'a> {
                     Ok(v) => {
                         value = self.clamp(v);
                         keep_entry(ui, remembered, &typing.text);
+                        entered = Some(typing.text.trim().to_owned());
                     }
                     // Enter on what cannot be worked out keeps it, to be put right; leaving
                     // the field another way leaves the value as it was.
@@ -296,7 +304,7 @@ impl<'a> NumberField<'a> {
                 b.set_value(format!("{}{}{}", self.prefix, self.text_of(*self.value), self.suffix));
             }
         });
-        response
+        (response, entered)
     }
 }
 

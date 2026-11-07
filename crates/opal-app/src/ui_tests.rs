@@ -235,6 +235,81 @@ fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
 }
 
 #[test]
+fn an_expression_typed_into_the_box_places_the_layer_so_again() {
+    use egui_kittest::kittest::by;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    h.state_mut().state_mut().create_image(&crate::state::NewImage {
+        width: 400,
+        height: 300,
+        background: crate::state::Background::White,
+        resolution: 100.0,
+    });
+    h.state_mut().state_mut().box_numbers = true;
+    let field_at = |v: f64| {
+        by().predicate(move |n| {
+            n.role() == egui::accesskit::Role::SpinButton
+                && n.numeric_value().is_some_and(|x| (x - v).abs() < 1e-6)
+                && n.bounding_box().is_some_and(|b| b.x0 < 1000.0)
+        })
+    };
+    let x = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
+    // Pasted, its x typed as what names the canvas, entered, and the box applied.
+    let paste = |h: &mut Harness<'static, OpalApp>, drag: bool| {
+        put_on_clipboard(h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
+        h.event(egui::Event::Paste(String::new()));
+        h.run();
+        let at = x(h);
+        h.get(field_at(at)).click();
+        h.run();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.get(by().predicate(|n| n.is_focused())).type_text("canvas.width - 60");
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(x(h), 340.0);
+        if drag {
+            let d = h.state_mut().state_mut().active_mut().unwrap();
+            let m = d.transform.as_ref().unwrap().current.then(opal_core::geom::Affine::translate(-5.0, 0.0));
+            d.set_box(m, None);
+        }
+        h.key_press(egui::Key::Enter);
+        h.run();
+        let d = h.state().state().active().unwrap();
+        d.active_layer().unwrap()
+    };
+    let placed =
+        |h: &Harness<'static, OpalApp>, l| h.state().state().active().unwrap().doc().layer(l).unwrap().placed.clone();
+    let kept = paste(&mut h, false);
+    let p = placed(&h, kept).expect("what was typed was not kept");
+    assert_eq!((p.numbers.len(), p.numbers[0].expr.as_str()), (1, "canvas.width - 60"));
+    // Dragged after it was typed, it no longer says where the box is: not kept.
+    let dragged = paste(&mut h, true);
+    assert_eq!(placed(&h, dragged), None, "what a drag undid was kept");
+    // The canvas wider, the box opened on the first layer says how it was placed, and its
+    // Re-apply puts it where that says now.
+    {
+        let st = h.state_mut().state_mut();
+        let resized = st.call(
+            "resize_canvas",
+            &serde_json::json!({ "width": 500, "anchor": "top-left" }).as_object().unwrap().clone(),
+            &egui::Context::default(),
+        );
+        assert!(matches!(resized, crate::api::Reply::Now(Ok(_))), "{resized:?}");
+        let d = st.active_mut().unwrap();
+        d.select_only(kept);
+        d.make_active(kept);
+    }
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::T);
+    h.run();
+    assert!(h.query_all(by().label("x = canvas.width - 60")).count() >= 1, "the box does not say how it was placed");
+    let again = format!("{}  Re-apply", crate::icons::REAPPLY);
+    h.get(by().label(&again).predicate(|n| n.bounding_box().is_some_and(|b| b.x0 < 1000.0))).click();
+    h.run();
+    assert_eq!(x(&h), 440.0, "Re-apply did not work it out again");
+}
+
+#[test]
 fn the_box_s_buttons_stay_in_the_view_however_many_it_has() {
     let _gpu = gpu_lock();
     let mut h = harness();

@@ -651,6 +651,31 @@ impl Expr {
         Ok(Expr { root: walk(&self.root, doc)? })
     }
 
+    /// Whether it names the box being placed (`x`, `width` and the rest).
+    pub fn names_box(&self) -> bool {
+        self.names(&|w| ["x", "y", "width", "height", "angle"].contains(&w), false)
+    }
+
+    /// Whether it names something of the image: its canvas, or a layer.
+    pub fn names_image(&self) -> bool {
+        self.names(&|w| w == "canvas" || !WORDS.contains(&w), true)
+    }
+
+    /// Whether it has a word `word` takes, or (if `layers`) names a layer by `layer( )`.
+    fn names(&self, word: &dyn Fn(&str) -> bool, layers: bool) -> bool {
+        fn walk(n: &Node, word: &dyn Fn(&str) -> bool, layers: bool) -> bool {
+            match &n.kind {
+                NodeKind::Word(w) => word(w),
+                NodeKind::Layer(_) => layers,
+                NodeKind::Member(a, _) | NodeKind::Neg(a) => walk(a, word, layers),
+                NodeKind::Call(_, args) => args.iter().any(|a| walk(a, word, layers)),
+                NodeKind::Bin(_, a, b) => walk(a, word, layers) || walk(b, word, layers),
+                NodeKind::Number { .. } => false,
+            }
+        }
+        walk(&self.root, word, layers)
+    }
+
     /// The layers it names by id.
     pub fn layers(&self) -> Vec<LayerId> {
         fn walk(n: &Node, out: &mut Vec<LayerId>) {
@@ -1273,6 +1298,7 @@ mod tests {
         assert_eq!(length("2 inches"), 200.0);
         // A bare number added to a length is in the field's unit; multiplying, a factor.
         assert_eq!(length("50px + 1"), 150.0);
+        assert_eq!(length("1 - 50px"), 50.0, "a bare number first takes the kind of what follows");
         assert_eq!(length("50px * 2"), 100.0);
         assert_eq!(length("(1 + 1) * 50px"), 100.0);
         assert_eq!(length("100px / 4"), 25.0);

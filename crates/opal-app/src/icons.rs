@@ -78,6 +78,7 @@ pub const RULER: char = '\u{f67c}';
 pub const NUMBERS: char = '\u{e748}';
 pub const PRINT_SIZE: char = '\u{f62a}';
 pub const PLACE: char = '\u{e97d}';
+pub const REAPPLY: char = '\u{f171}';
 pub const INTO_LAYER: char = '\u{e0dc}';
 pub const SCRIPT: char = '\u{f2ef}';
 pub const CONSOLE: char = '\u{ee6f}';

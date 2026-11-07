@@ -536,10 +536,11 @@ pub(crate) fn count_layers(doc: &Document) -> usize {
 }
 
 /// A copy of `layer` (and, for a group, everything in it) with fresh identifiers. Pixels are
-/// shared until changed.
+/// shared until changed. A copy has not been placed: it has no placement to re-apply.
 pub(crate) fn copy_with_new_ids(layer: &Layer, ids: &mut IdGen) -> Layer {
     let mut c = layer.clone();
     c.id = ids.layer();
+    c.placed = None;
     match &mut c.content {
         LayerContent::Objects(objects) => {
             for o in objects {

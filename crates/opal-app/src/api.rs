@@ -14,7 +14,7 @@ use crate::image_ops::{ResizeCanvas, ResizeImage, RotateBy, Turn};
 use crate::state::{AppState, Background, MessageKind, NewImage};
 use crate::writer::Then;
 use eframe::egui;
-use opal_core::document::{Layer, LayerContent, LayerId, ObjectKind};
+use opal_core::document::{BoxNumber, Layer, LayerContent, LayerId, ObjectKind};
 use opal_core::expr::{Expr, Own, Scope, Want};
 use opal_core::geom::IRect;
 use opal_core::raster::RasterImage;
@@ -368,7 +368,7 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             Param { name: "name", kind: Kind::Text, help: "Its name.", otherwise: Otherwise::Now("a numbered one") },
         ],
         Duplicate | GroupLayers | DeleteLayer | MergeSelected | Rasterize => &[DOCUMENT, LAYERS],
-        MoveUp | MoveDown | MergeDown | MergeGroup => &[DOCUMENT, LAYER],
+        MoveUp | MoveDown | MergeDown | MergeGroup | ReapplyPlacement => &[DOCUMENT, LAYER],
         ResizeImage => &[
             DOCUMENT,
             RESIZED_WIDTH,
@@ -1222,6 +1222,8 @@ pub struct BoxArgs {
     /// so a paste whose clipboard is read later, or a box moving the layer counted from,
     /// counts from where it was then.
     pub from: [f64; 2],
+    /// What `from` is the point of: kept with a placement, to be counted from again.
+    pub origin: crate::box_fields::Origin,
     /// Numbers given as expressions, to be worked out once the box is open (they may name
     /// it: `x + 1cm`), each in place of its number (see [`worked_out`](Self::worked_out)).
     pub typed: Vec<Typed>,
@@ -1230,7 +1232,7 @@ pub struct BoxArgs {
 /// One of a box's numbers given as an expression.
 #[derive(Clone, Debug)]
 pub struct Typed {
-    pub field: Field,
+    pub field: BoxNumber,
     pub expr: Expr,
     /// As it was given, for what is said about it.
     pub text: String,
@@ -1238,21 +1240,6 @@ pub struct Typed {
     pub unit: Unit,
     /// What it may come to: in pixels, or for the angle, in degrees.
     pub range: (f64, f64),
-}
-
-/// Which of a box's numbers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Field {
-    X,
-    Y,
-    Width,
-    Height,
-    Angle,
-}
-
-impl Field {
-    const ALL: [(Field, &'static str); 5] =
-        [(Field::X, "x"), (Field::Y, "y"), (Field::Width, "width"), (Field::Height, "height"), (Field::Angle, "angle")];
 }
 
 /// The parameters a box's call gives as numbers: worked out once the box is open, if
@@ -1282,8 +1269,9 @@ impl BoxArgs {
     /// (as it is when the call is made; a new image's canvas corner, with none open), or why
     /// there is no such point.
     fn of(args: &Args, params: &[Param], doc: Option<&opal_core::document::Document>) -> Result<BoxArgs, String> {
+        let origin = origin_of(args);
         let from = match doc {
-            Some(doc) => located(&origin_of(args), doc)?,
+            Some(doc) => located(&origin, doc)?,
             None if args.get("from_layer").is_some() => {
                 return Err("No image is open, so there is no layer to count from.".to_owned());
             }
@@ -1291,7 +1279,7 @@ impl BoxArgs {
         };
         let unit = args.text("unit").and_then(Unit::from_name).unwrap_or(Unit::Px);
         let mut typed = Vec::new();
-        for (field, name) in Field::ALL {
+        for (field, name) in BoxNumber::ALL {
             let Some(text) = args.text(name) else { continue };
             let range = match params.iter().find(|p| p.name == name).map(|p| p.kind) {
                 Some(Kind::Length { min, max } | Kind::Angle { min, max }) => (min, max),
@@ -1314,6 +1302,7 @@ impl BoxArgs {
             },
             at: crate::box_fields::point(args.text("anchor").unwrap_or("top-left")),
             from,
+            origin,
         })
     }
 
@@ -1322,9 +1311,9 @@ impl BoxArgs {
     pub fn worked_out(&self, doc: &opal_core::document::Document, ppi: f64, own: Own) -> Result<BoxArgs, String> {
         let mut out = BoxArgs { typed: Vec::new(), ..self.clone() };
         for t in &self.typed {
-            let want = if t.field == Field::Angle { Want::Angle } else { Want::Length };
+            let want = if t.field == BoxNumber::Angle { Want::Angle } else { Want::Length };
             let scope = Scope { doc: Some(doc), ppi, unit: t.unit, origin: self.from, own: Some(own) };
-            let name = Field::ALL.iter().find(|f| f.0 == t.field).expect("every field is named").1;
+            let name = t.field.name();
             let v = t.expr.eval(&scope, want).map_err(|e| expr_error(name, &t.text, &e))?;
             let (min, max) = t.range;
             if !(min..=max).contains(&v) {
@@ -1335,11 +1324,11 @@ impl BoxArgs {
                 ));
             }
             *match t.field {
-                Field::X => &mut out.x,
-                Field::Y => &mut out.y,
-                Field::Width => &mut out.width,
-                Field::Height => &mut out.height,
-                Field::Angle => &mut out.angle,
+                BoxNumber::X => &mut out.x,
+                BoxNumber::Y => &mut out.y,
+                BoxNumber::Width => &mut out.width,
+                BoxNumber::Height => &mut out.height,
+                BoxNumber::Angle => &mut out.angle,
             } = Some(v);
         }
         Ok(out)
@@ -1380,6 +1369,7 @@ pub(crate) fn place_box(d: &mut crate::doc::DocState, place: &BoxArgs) -> Result
     // Expressions given are worked out in the image as it was before the box opened, for
     // the box as it is.
     let own = Own { x: p.x - corner[0], y: p.y - corner[1], width: p.width, height: p.height, angle: p.angle };
+    let given = place;
     let place = &place.worked_out(d.history.doc(), d.doc().resolution, own)?;
     let s = d.transform.as_ref().expect("a box is open");
     let m = match (place.fit, place.width, place.height) {
@@ -1398,6 +1388,21 @@ pub(crate) fn place_box(d: &mut crate::doc::DocState, place: &BoxArgs) -> Result
         return Err(format!("{why}."));
     }
     d.set_box(m, None);
+    // What was given as expressions, for the layers to be placed so again.
+    let s = d.transform.as_mut().expect("a box is open");
+    let anchor = crate::box_fields::index_of(at);
+    for t in &given.typed {
+        let side = matches!(t.field, BoxNumber::Width | BoxNumber::Height);
+        let keep = side && place.width.is_none() != place.height.is_none();
+        s.given.push(crate::transform::Given {
+            number: t.field,
+            expr: t.expr.clone(),
+            unit: t.unit,
+            anchor,
+            origin: given.origin,
+            keep,
+        });
+    }
     Ok(())
 }
 
@@ -3858,8 +3863,9 @@ mod tests {
         let image = method("image").unwrap().params;
         let doc = st.active().unwrap().doc().clone();
         let scope = Scope { doc: Some(&doc), ppi: 144.0, unit: Unit::Px, origin: [0.0, 0.0], own: None };
-        let a = Args::check(image, &args(json!({ "max_side": "canvas.width / 4 + 0.4" }))).unwrap();
-        assert_eq!(a.worked_out(image, &scope, &[], |_| true).unwrap().int("max_side"), 36);
+        // (Rounded, not cut short.)
+        let a = Args::check(image, &args(json!({ "max_side": "canvas.width / 4 + 0.6" }))).unwrap();
+        assert_eq!(a.worked_out(image, &scope, &[], |_| true).unwrap().int("max_side"), 37);
         // What cannot be worked out says what, and where; nothing is done.
         let wrong = now(&mut st, "transform", json!({ "layers": [logo], "x": "Lgo.right" })).unwrap_err();
         assert!(wrong.contains("\"x\": There is no layer called “Lgo”") && wrong.contains("at \"Lgo\""), "{wrong}");
@@ -3871,6 +3877,76 @@ mod tests {
         let unread = now(&mut st, "transform", json!({ "layers": [logo], "x": "1 +" })).unwrap_err();
         assert!(unread.contains("Something is missing at the end"), "{unread}");
         std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_layer_placed_by_expressions_naming_the_image_is_placed_so_again() {
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 200, "height": 100, "resolution": 100 })).unwrap();
+        let path = png_file("piece.png", 10, 10).display().to_string();
+        let id = |v: &Value| LayerId(v["layer"].as_u64().unwrap());
+        let logo = id(&now(&mut st, "place", json!({ "path": path, "name": "Logo", "x": 20, "y": 30 })).unwrap());
+        let placed = |st: &AppState, l: LayerId| st.active().unwrap().doc().layer(l).unwrap().placed.clone();
+        let left = |st: &AppState, l: LayerId| st.active().unwrap().doc().layer(l).unwrap().bounds().unwrap().x0;
+        // x names another layer, so it is kept, the layer by id; y is a length alone, which
+        // working out again would not change.
+        let mark = id(&now(&mut st, "place", json!({ "path": path, "x": "Logo.right + 5", "y": "0.1in" })).unwrap());
+        let p = placed(&st, mark).expect("its placement was not kept");
+        assert_eq!((p.layers.clone(), p.numbers.len()), (vec![mark], 1));
+        assert_eq!(
+            (p.numbers[0].number, p.numbers[0].expr.clone()),
+            (BoxNumber::X, format!("layer({}).right + 5", logo.0))
+        );
+        // The logo moved, Re-apply follows it, as one history state.
+        now(&mut st, "transform", json!({ "layers": [logo.0], "x": 50 })).unwrap();
+        let states = st.active().unwrap().history.nodes().count();
+        now(&mut st, "reapply_placement", json!({ "layer": mark.0 })).unwrap();
+        assert_eq!(left(&st, mark), 65.0);
+        assert_eq!(st.active().unwrap().history.nodes().count(), states + 1);
+        assert_eq!(placed(&st, mark), Some(p.clone()), "re-applied, it is kept as it was");
+        // A side given with the other, not in proportion with it: re-applied, the other
+        // stays as it is.
+        let wide = id(&now(&mut st, "place", json!({ "path": path, "width": "Logo.width * 2", "height": 7 })).unwrap());
+        now(&mut st, "transform", json!({ "layers": [logo.0], "width": 20 })).unwrap();
+        now(&mut st, "reapply_placement", json!({ "layer": wide.0 })).unwrap();
+        let b = st.active().unwrap().doc().layer(wide).unwrap().bounds().unwrap();
+        assert_eq!((b.width(), b.height()), (40.0, 7.0));
+        now(&mut st, "transform", json!({ "layers": [logo.0], "width": 10 })).unwrap();
+        // Renamed, the logo is still the layer it names, shown by its new name.
+        now(&mut st, "rename", json!({ "layer": logo.0, "name": "Brand mark" })).unwrap();
+        now(&mut st, "transform", json!({ "layers": [logo.0], "x": 0 })).unwrap();
+        now(&mut st, "reapply_placement", json!({ "layer": mark.0 })).unwrap();
+        assert_eq!(left(&st, mark), 15.0);
+        let doc = st.active().unwrap().doc().clone();
+        let shown = Expr::parse(&p.numbers[0].expr).unwrap().text(&|l| doc.layer(l).map(|l| l.name.clone()));
+        assert_eq!(shown, "layer(\"Brand mark\").right + 5");
+        // Saved and opened again, it is kept.
+        let file = place_path("placed.opal");
+        call(&mut st, "save_as", json!({ "path": file.display().to_string() })).unwrap();
+        call(&mut st, "close", json!({})).unwrap();
+        call(&mut st, "open", json!({ "path": file.display().to_string() })).unwrap();
+        assert_eq!(placed(&st, mark), Some(p.clone()), "the placement was not saved");
+        // A copy has not been placed.
+        now(&mut st, "duplicate", json!({ "layers": [mark.0] })).unwrap();
+        let copy = st.active().unwrap().active_layer().unwrap();
+        assert_ne!(copy, mark);
+        assert_eq!(placed(&st, copy), None, "a copy kept a placement");
+        // Placed by the box again, by numbers that name the box itself or nothing of the
+        // image, it has no placement to re-apply.
+        now(&mut st, "transform", json!({ "layers": [mark.0], "x": "x + 1" })).unwrap();
+        assert_eq!(placed(&st, mark), None, "the box named itself, so working it out again would move it again");
+        let refused = now(&mut st, "reapply_placement", json!({ "layer": mark.0 })).unwrap_err();
+        assert!(refused.contains("not placed by expressions"), "{refused}");
+        // The layer it names gone, Re-apply says so, and leaves it as it was.
+        now(&mut st, "transform", json!({ "layers": [mark.0], "x": "Brand mark.right" })).unwrap_err();
+        now(&mut st, "transform", json!({ "layers": [mark.0], "x": "layer(\"Brand mark\").right" })).unwrap();
+        now(&mut st, "delete_layer", json!({ "layers": [logo.0] })).unwrap();
+        let before = left(&st, mark);
+        let gone = now(&mut st, "reapply_placement", json!({ "layer": mark.0 })).unwrap_err();
+        assert!(gone.contains("names a layer that is no longer in the image"), "{gone}");
+        assert!(st.active().unwrap().transform.is_none() && left(&st, mark) == before);
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 
     #[test]

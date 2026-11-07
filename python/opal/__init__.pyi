@@ -161,6 +161,12 @@ class Editor:
         from_anchor: Which point of the canvas (or of from_layer) x and y count from. Default: "top-left".
         unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
+    def reapply_placement(self, *, document: int | None = None, layer: int | None = None) -> Any:
+        """Place the active layer again as the expressions it was placed by say, now.
+
+        document: The image, by id. Default: the active image.
+        layer: The layer, by id. Default: the active layer.
+        """
     def new_layer(self, *, document: int | None = None, name: str | None = None) -> Any:
         """Add an empty layer above the active one.
 

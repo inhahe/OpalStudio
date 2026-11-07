@@ -10,7 +10,7 @@ use crate::number_field::NumberField;
 use crate::state::AppState;
 use crate::transform::Params;
 use eframe::egui;
-use opal_core::document::{Document, Layer, LayerId};
+use opal_core::document::{BoxNumber, Document, Layer, LayerId};
 use opal_core::expr::{Own, Scope};
 use opal_core::units::Unit;
 
@@ -42,6 +42,13 @@ pub fn point(id: &str) -> [f64; 2] {
 /// Which of [`POINTS`] is called `id`: its index; the top-left corner's for any other name.
 pub fn point_index(id: &str) -> usize {
     POINTS.iter().position(|(p, _)| *p == id).unwrap_or(0)
+}
+
+/// Which of [`POINTS`] lies `at` (fractions of a box's width and height from its top-left
+/// corner, as [`point_at`] gives them): its index.
+pub fn index_of(at: [f64; 2]) -> usize {
+    let half = |v: f64| ((v * 2.0).round() as usize).min(2);
+    half(at[1]) * 3 + half(at[0])
 }
 
 /// The point `POINTS[i]`, as fractions of a box's width and height from its top-left corner.
@@ -133,8 +140,17 @@ pub struct Fields<'a> {
 /// and what the position counts from (the canvas or a layer of `doc`, the image as it was
 /// before the box opened, and its point), as a two-column grid. Returns whether the user
 /// changed a number (choosing another point, or another origin, changes none: the caller
-/// shows the box measured so next).
-pub fn fields(ui: &mut egui::Ui, p: &mut Params, m: &mut Measure, doc: &Document, ppi: f64, how: &Fields) -> bool {
+/// shows the box measured so next); what was entered in the fields for the position, size
+/// and angle goes into `entered`.
+pub fn fields(
+    ui: &mut egui::Ui,
+    p: &mut Params,
+    m: &mut Measure,
+    doc: &Document,
+    ppi: f64,
+    how: &Fields,
+    entered: &mut Vec<(BoxNumber, String)>,
+) -> bool {
     let before = *p;
     // What is typed is worked out with positions from where `p`'s are (before another origin
     // is chosen), and the box as it is.
@@ -174,24 +190,27 @@ pub fn fields(ui: &mut egui::Ui, p: &mut Params, m: &mut Measure, doc: &Document
         });
         ui.end_row();
         let scope = Scope { doc: Some(doc), ppi, unit: m.unit, origin: counted, own: Some(own(&before)) };
-        let field = |px: &mut f64, range, name: &str, ui: &mut egui::Ui| {
-            lengths::length_field(px, scope, range, how.px_decimals).remember(("box", name)).show(ui)
+        let mut field = |px: &mut f64, range, number: BoxNumber, ui: &mut egui::Ui| {
+            let f = lengths::length_field(px, scope, range, how.px_decimals).remember(("box", number.name()));
+            let (r, text) = f.show_entered(ui);
+            entered.extend(text.map(|t| (number, t)));
+            r
         };
         ui.label("Position");
         ui.horizontal(|ui| {
             ui.label("x");
-            field(&mut p.x, -FAR..=FAR, "x", ui);
+            field(&mut p.x, -FAR..=FAR, BoxNumber::X, ui);
             ui.label("y");
-            field(&mut p.y, -FAR..=FAR, "y", ui);
+            field(&mut p.y, -FAR..=FAR, BoxNumber::Y, ui);
         })
         .response
         .on_hover_text(format!("Where the box's {point} is, from the {from}."));
         ui.end_row();
         ui.label("Size");
         ui.horizontal(|ui| {
-            let w = field(&mut p.width, how.sides.clone(), "width", ui);
+            let w = field(&mut p.width, how.sides.clone(), BoxNumber::Width, ui);
             ui.label("×");
-            let h = field(&mut p.height, how.sides.clone(), "height", ui);
+            let h = field(&mut p.height, how.sides.clone(), BoxNumber::Height, ui);
             if let Some(r) = how.keep {
                 if w.changed() {
                     p.height = (p.width / r).clamp(*how.sides.start(), *how.sides.end());
@@ -214,8 +233,10 @@ pub fn fields(ui: &mut egui::Ui, p: &mut Params, m: &mut Measure, doc: &Document
             ui.end_row();
         }
         ui.label("Angle");
-        ui.add(NumberField::angle(&mut p.angle, scope).speed(0.5).range(-360.0..=360.0).remember(("box", "angle")))
-            .on_hover_text(format!("Clockwise, about the box's {point}."));
+        let angle = NumberField::angle(&mut p.angle, scope).speed(0.5).range(-360.0..=360.0).remember(("box", "angle"));
+        let (r, text) = angle.show_entered(ui);
+        r.on_hover_text(format!("Clockwise, about the box's {point}."));
+        entered.extend(text.map(|t| (BoxNumber::Angle, t)));
         ui.end_row();
     });
     *p != before
@@ -286,10 +307,19 @@ pub fn transform(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
         sides: 0.01..=1e6,
         salt,
     };
-    let typed = fields(ui, &mut q, &mut m, before, ppi, &how);
+    let mut entered = Vec::new();
+    let typed = fields(ui, &mut q, &mut m, before, ppi, &how, &mut entered);
     if typed {
         let moved = s.edited(&p, &Params { x: q.x + cx, y: q.y + cy, ..q }, at);
         d.set_box(moved, None);
+    }
+    // What was typed, as it was measured, for the layers to be placed so again.
+    if let Some(s) = d.transform.as_mut() {
+        for (number, text) in entered {
+            let Ok(expr) = opal_core::expr::Expr::parse(&text) else { continue };
+            let keep = aspect && matches!(number, BoxNumber::Width | BoxNumber::Height);
+            s.given.push(crate::transform::Given { number, expr, unit: m.unit, anchor: reference, origin, keep });
+        }
     }
     // Kept only when chosen: one shown in its stead (a layer gone) is not the user's choice.
     if m.origin != origin {
@@ -298,15 +328,53 @@ pub fn transform(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
     let before = d.history.doc();
     let scope = Scope { doc: Some(before), ppi, unit: m.unit, origin: [cx, cy], own: Some(own(&q)) };
     let rect = Rect { canvas: canvas.to_f(), from: [cx, cy], at, scope };
+    let mut refused = None;
     if let Some(fit) = fit_into(ui, &mut d.fit_rect, &rect, salt)
         && let Err(why) = crate::api::place_box(d, &fit)
     {
+        refused = Some(why);
+    }
+    // How the layers were placed, to place them so again.
+    if let Some(placement) = d.box_placement().cloned()
+        && placed_by(ui, &placement, d.history.doc(), salt)
+        && let Err(why) = d.apply_placement(&placement)
+    {
+        refused = Some(why);
+    }
+    if let Some(why) = refused {
         st.notify(why);
     }
     set_reference(st, m.reference);
     if m.unit != st.unit() {
         st.set_unit(m.unit);
     }
+}
+
+/// The expressions `placement` gives, as `doc` names the layers in them, and a button to
+/// work them out again. Returns whether it was pressed.
+fn placed_by(ui: &mut egui::Ui, placement: &opal_core::document::Placement, doc: &Document, salt: &str) -> bool {
+    let names = |id: LayerId| doc.layer(id).map(|l| l.name.clone());
+    let mut again = false;
+    ui.add_space(4.0);
+    egui::CollapsingHeader::new("Placed by").id_salt(("placed-by", salt)).default_open(true).show(ui, |ui| {
+        for p in &placement.numbers {
+            let text = opal_core::expr::Expr::parse(&p.expr).map_or_else(|_| p.expr.clone(), |e| e.text(&names));
+            let from = match p.from_layer {
+                Some(id) => format!("“{}”", names(id).unwrap_or_else(|| format!("layer {}", id.0))),
+                None => "the canvas".to_owned(),
+            };
+            let how = format!(
+                "The box's {} from the {} of {from}; a bare number in {}.",
+                POINTS[usize::from(p.anchor).min(8)].1.to_lowercase(),
+                POINTS[usize::from(p.from_anchor).min(8)].1.to_lowercase(),
+                p.unit
+            );
+            ui.label(format!("{} = {text}", p.number.name())).on_hover_text(how);
+        }
+        let tip = "Work these out again, as things are now, and put the box where they say.";
+        again = ui.button(format!("{}  Re-apply", crate::icons::REAPPLY)).on_hover_text(tip).clicked();
+    });
+    again
 }
 
 /// `origin`, if it can be counted from in `doc` (its layer there and holding something);
@@ -397,7 +465,7 @@ fn fit_into(ui: &mut egui::Ui, rect: &mut Option<[f64; 4]>, how: &Rect, salt: &s
         fit,
         at,
         from,
-        typed: Vec::new(),
+        ..BoxArgs::default()
     })
 }
 
@@ -422,7 +490,7 @@ pub fn crop(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
         sides: 1.0..=f64::from(crate::dialogs::MAX_SIDE),
         salt,
     };
-    if fields(ui, &mut p, &mut m, doc, ppi, &how) {
+    if fields(ui, &mut p, &mut m, doc, ppi, &how, &mut Vec::new()) {
         d.crop = Some(CropBox::from_numbers(&p, from, at));
         d.revision += 1;
     }

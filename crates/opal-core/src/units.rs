@@ -17,8 +17,9 @@ pub fn valid_ppi(ppi: f64) -> bool {
     (MIN_PPI..=MAX_PPI).contains(&ppi)
 }
 
-/// A unit of length.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// A unit of length (written in files by its [`id`](Unit::id)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Unit {
     Px,
     In,

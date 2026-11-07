@@ -28,6 +28,7 @@ pub enum Cmd {
     PasteInPlace,
     Place,
     Transform,
+    ReapplyPlacement,
     NewLayer,
     NewGroup,
     Duplicate,
@@ -104,7 +105,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 59] = [
+    pub const ALL: [Cmd; 60] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -123,6 +124,7 @@ impl Cmd {
         Cmd::PasteInPlace,
         Cmd::Place,
         Cmd::Transform,
+        Cmd::ReapplyPlacement,
         Cmd::NewLayer,
         Cmd::NewGroup,
         Cmd::Duplicate,
@@ -316,6 +318,17 @@ impl Cmd {
                  transformed this way keep their pixels, so they can be transformed again without \
                  losing quality.",
                 const { &[ctrl(Key::T)] },
+            ),
+            Cmd::ReapplyPlacement => i(
+                "Re-apply Placement",
+                icons::REAPPLY,
+                "Place the active layer again as the expressions it was placed by say, now.",
+                "A layer placed with numbers that name the canvas or other layers (Logo.right + \
+                 5mm, typed into the box's numbers or given by a script) remembers them. Once what \
+                 they name has moved, this works them out again and puts the layer (and those \
+                 placed with it) where they say now, as one step of history. The box's numbers \
+                 list them, under Placed by. Placing the layer with the box again replaces them.",
+                &[],
             ),
             Cmd::NewLayer => i(
                 "New Layer",
@@ -694,7 +707,7 @@ pub static RIBBON: &[Tab] = &[
                 name: "Transform",
                 description: "Moving, scaling and rotating layers. The Move tool (V) moves them too.",
                 large: 1,
-                cmds: &[Cmd::Transform],
+                cmds: &[Cmd::Transform, Cmd::ReapplyPlacement],
             },
             Group {
                 name: "Layers",
@@ -837,6 +850,20 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             _ => Ok(()),
         },
         Copy | GroupLayers => selection(st).map(|_| ()),
+        ReapplyPlacement => {
+            let d = st.active().ok_or("Open or create an image first.")?;
+            if d.transform.is_some() {
+                return Err("Apply or cancel the box first: its numbers re-apply a placement in it.".into());
+            }
+            let layer = d.active_layer().and_then(|l| d.doc().layer(l)).ok_or("Select a layer first.")?;
+            if layer.placed.is_none() {
+                return Err("The active layer was not placed by expressions naming the canvas or other layers.".into());
+            }
+            if let Some(l) = first_locked(layer) {
+                return Err(format!("\"{}\" is locked. Unlock it first.", l.name));
+            }
+            Ok(())
+        }
         Transform | Rasterize => {
             let (d, sel) = selection(st)?;
             let layers: Vec<&opal_core::document::Layer> = sel.iter().filter_map(|&l| d.doc().layer(l)).collect();

@@ -15,7 +15,8 @@ use crate::doc::{DocState, Pending};
 use crate::image_ops::Drawing;
 use crate::memory::Allowance;
 use opal_core::document::{
-    Document, ImageObject, Layer, LayerContent, LayerId, Object, ObjectId, ObjectKind, PixelObject, Position,
+    BoxNumber, Document, ImageObject, Layer, LayerContent, LayerId, Object, ObjectId, ObjectKind, PixelObject, Placed,
+    Placement, Position,
 };
 use opal_core::geom::{Affine, FRect, IRect};
 use opal_core::resample::{self, Sampling};
@@ -162,6 +163,24 @@ pub struct Session {
     /// Whether the box's drawing method was changed (so the session changed something even
     /// if the box never moved).
     pub sampling_changed: bool,
+    /// The box's numbers given as expressions (typed into its fields, or by a script), as
+    /// they were given: kept with its layers if they still hold when it is applied.
+    pub given: Vec<Given>,
+}
+
+/// One of a box's numbers given as an expression, and how it was measured then.
+#[derive(Clone, Debug)]
+pub struct Given {
+    pub number: BoxNumber,
+    pub expr: opal_core::expr::Expr,
+    /// What a bare number in it is in.
+    pub unit: opal_core::units::Unit,
+    /// The box's point the position gives (an index into
+    /// [`box_fields::POINTS`](crate::box_fields::POINTS)), and what it counts from.
+    pub anchor: usize,
+    pub origin: crate::box_fields::Origin,
+    /// For a side: whether the other one was kept in proportion with it.
+    pub keep: bool,
 }
 
 /// The smallest scale a drag may leave along an axis, so the box never collapses.
@@ -556,6 +575,7 @@ impl DocState {
             guides: Guides::default(),
             draft: false,
             sampling_changed: false,
+            given: Vec::new(),
         });
         self.select_only(layer_id);
         self.revision += 1;
@@ -609,6 +629,7 @@ impl DocState {
             guides: Guides::default(),
             draft: false,
             sampling_changed: false,
+            given: Vec::new(),
         });
         self.revision += 1;
         true
@@ -727,6 +748,97 @@ impl DocState {
         Ok(())
     }
 
+    /// The placement the layers the box is open on were placed by, if they were placed
+    /// together by one (see [`Placement`]).
+    pub fn box_placement(&self) -> Option<&Placement> {
+        let s = self.transform.as_ref()?;
+        let doc = self.history.doc();
+        let first = doc.layer(s.targets.first()?.layer)?.placed.as_ref()?;
+        let together =
+            placement_layers(s).iter().all(|&l| doc.layer(l).is_some_and(|x| x.placed.as_ref() == Some(first)));
+        together.then_some(first)
+    }
+
+    /// Gives the open box the numbers of `placement` again, worked out as things are now,
+    /// each as it was measured. Why not, if it cannot (the box left as it was): one names a
+    /// layer that is gone, or counts from one, or comes to what the box cannot take.
+    pub fn apply_placement(&mut self, placement: &Placement) -> Result<(), String> {
+        use crate::api::{BoxArgs, Typed};
+        use crate::box_fields::{Base, FAR, Origin, point_at};
+        let doc = self.history.doc().clone();
+        let names = |id: LayerId| doc.layer(id).map(|l| l.name.clone());
+        let mut given = Vec::new();
+        for p in &placement.numbers {
+            let expr = opal_core::expr::Expr::parse(&p.expr)
+                .map_err(|e| format!("Its {} does not read: {e}", p.number.name()))?;
+            let text = expr.text(&names);
+            if expr.layers().iter().any(|&l| doc.layer(l).is_none()) {
+                return Err(format!("Its {} names a layer that is no longer in the image: {text}.", p.number.name()));
+            }
+            let origin =
+                Origin { base: p.from_layer.map_or(Base::Canvas, Base::Layer), point: usize::from(p.from_anchor) };
+            let Some(from) = origin.locate(&doc) else {
+                return Err(format!("Its {} counts from a layer that is gone, or holds nothing now.", p.number.name()));
+            };
+            let range = match p.number {
+                BoxNumber::X | BoxNumber::Y => (-FAR, FAR),
+                BoxNumber::Width | BoxNumber::Height => (0.01, 1e6),
+                BoxNumber::Angle => (-360.0, 360.0),
+            };
+            let typed = vec![Typed { field: p.number, expr, text, unit: p.unit, range }];
+            given.push((
+                BoxArgs { at: point_at(usize::from(p.anchor)), from, origin, typed, ..BoxArgs::default() },
+                p.keep,
+            ));
+        }
+        let start = self.transform.as_ref().expect("a box is open").current;
+        for (mut args, keep) in given {
+            // A side given alone, the other not kept in proportion: the other as it is.
+            let side = self.transform.as_ref().expect("a box is open").params_at(args.at);
+            match args.typed[0].field {
+                BoxNumber::Width if !keep => args.height = Some(side.height),
+                BoxNumber::Height if !keep => args.width = Some(side.width),
+                _ => {}
+            }
+            if let Err(why) = crate::api::place_box(self, &args) {
+                self.set_box(start, None);
+                return Err(why);
+            }
+        }
+        Ok(())
+    }
+
+    /// Places `layer` (and the layers placed with it) again as the placement it was placed
+    /// by says, worked out now, as one history state; drawn as `sampling` says, as a
+    /// transform is. Why not, if it cannot (nothing changed).
+    pub fn reapply_placement(&mut self, layer: LayerId, sampling: Sampling) -> Result<(), String> {
+        let doc = self.doc();
+        let placement = doc.layer(layer).and_then(|l| l.placed.clone()).ok_or("It was not placed by expressions.")?;
+        let with: Vec<LayerId> = placement
+            .layers
+            .iter()
+            .copied()
+            .filter(|&l| l != layer && doc.layer(l).is_some_and(|x| x.placed.as_ref() == Some(&placement)))
+            .collect();
+        self.select_only(layer);
+        for &l in &with {
+            self.toggle_selected(l);
+        }
+        self.make_active(layer);
+        if !self.begin_transform(sampling) {
+            return Err("The layers it placed hold nothing now.".into());
+        }
+        if let Some(p) = self.pending.as_mut() {
+            p.label = "Re-apply Placement".into();
+        }
+        if let Err(why) = self.apply_placement(&placement) {
+            self.cancel_transform();
+            return Err(why);
+        }
+        self.commit_pending();
+        Ok(())
+    }
+
     /// Ends the session, leaving the document as it was.
     pub fn cancel_transform(&mut self) {
         let Some(s) = self.transform.take() else { return };
@@ -785,6 +897,20 @@ impl DocState {
         } else if to.clipped {
             self.notice = Some(crate::layer_ops::CLIPPED.into());
         }
+        // How its layers were placed, to be placed so again (none for a paste drawn into
+        // the active layer: what it placed is that layer's no more). Placed by the box
+        // without expressions, they have no placement any more.
+        let into_active = s.paste.as_ref().is_some_and(|p| p.into_active && p.active.is_some());
+        if !into_active {
+            let placement = placement_made(&s, self.history.doc());
+            let Some(p) = self.pending.as_mut() else { return };
+            for layer in placement_layers(&s) {
+                if let Some(l) = p.doc.layer_mut(layer) {
+                    l.placed = placement.clone();
+                }
+            }
+        }
+        let Some(p) = self.pending.as_mut() else { return };
         if let Some(paste) = &s.paste
             && paste.into_active
             && let Some(dest) = paste.active
@@ -806,6 +932,62 @@ impl DocState {
         v.extend(self.active_layer());
         v
     }
+}
+
+/// The layers session `s` places, each once.
+fn placement_layers(s: &Session) -> Vec<LayerId> {
+    let mut out: Vec<LayerId> = Vec::new();
+    for t in &s.targets {
+        if !out.contains(&t.layer) {
+            out.push(t.layer);
+        }
+    }
+    out
+}
+
+/// The placement session `s`'s numbers given as expressions make for its layers, in image
+/// `before` (as it was before the box opened, which is what they were worked out in): those
+/// that name the image and not the box itself (worked out again, one naming the box would
+/// move it again), each still what the box has now (a drag since has not moved it), its
+/// layers named by id; the last given of each number. `None` if there are none.
+fn placement_made(s: &Session, before: &Document) -> Option<Placement> {
+    use opal_core::expr::{Scope, Want};
+    let mut numbers: Vec<Placed> = Vec::new();
+    for g in &s.given {
+        numbers.retain(|q| q.number != g.number);
+        if g.expr.names_box() || !g.expr.names_image() {
+            continue;
+        }
+        let (Ok(bound), Some(from)) = (g.expr.bind(before), g.origin.locate(before)) else { continue };
+        let scope = Scope { doc: Some(before), ppi: before.resolution, unit: g.unit, origin: from, own: None };
+        let want = if g.number == BoxNumber::Angle { Want::Angle } else { Want::Length };
+        let Ok(v) = bound.eval(&scope, want) else { continue };
+        let p = s.params_at(crate::box_fields::point_at(g.anchor));
+        let now = match g.number {
+            BoxNumber::X => p.x - from[0],
+            BoxNumber::Y => p.y - from[1],
+            BoxNumber::Width => p.width,
+            BoxNumber::Height => p.height,
+            BoxNumber::Angle => p.angle,
+        };
+        if (v - now).abs() > 1e-6 * v.abs().max(1.0) {
+            continue;
+        }
+        let from_layer = match g.origin.base {
+            crate::box_fields::Base::Layer(id) => Some(id),
+            crate::box_fields::Base::Canvas => None,
+        };
+        numbers.push(Placed {
+            number: g.number,
+            expr: bound.text(&|_| None),
+            unit: g.unit,
+            anchor: g.anchor as u8,
+            from_layer,
+            from_anchor: g.origin.point as u8,
+            keep: g.keep,
+        });
+    }
+    (!numbers.is_empty()).then(|| Placement { layers: placement_layers(s), numbers })
 }
 
 /// Draws image object `object` of layer `dest` into the layer's pixels: into its topmost
@@ -859,6 +1041,7 @@ mod tests {
             guides: Guides::default(),
             draft: false,
             sampling_changed: false,
+            given: Vec::new(),
         }
     }
 

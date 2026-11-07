@@ -49,7 +49,10 @@ cargo test --workspace                     # all tests, interface tests included
   (`Logo.right + 5mm`, `canvas.center.x`, `layer("Back ground").height`) and the box's own
   numbers (`x + 1cm`). What it comes to shows as you type, or what is wrong and where;
   Up and Down bring back what was entered before. `min`, `max`, `round` (`round(x, 1mm)`),
-  `sqrt`, the trigonometric functions, `mid`, `lerp` and `dist` are there too.
+  `sqrt`, the trigonometric functions, `mid`, `lerp` and `dist` are there too. A layer
+  placed by a box given expressions that name the canvas or other layers remembers them:
+  once those have moved, Re-apply Placement (Home › Transform, or the box's numbers, under
+  Placed by) puts it where they say now.
 - **Paste and place.** Ctrl+V pastes an image (from Opal Studio, another program, or an
   image file copied in Explorer) into a box that moves, scales and rotates it, snapping to
   the canvas and other layers; Enter places it. A pasted image keeps its own pixels, so it

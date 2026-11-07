@@ -21,6 +21,7 @@ use crate::memory::{Free, Need};
 use crate::{IoError, Progress, write_all, write_atomically};
 use opal_core::document::{
     Canvas, Document, IdGen, ImageObject, Layer, LayerContent, LayerId, Object, ObjectId, ObjectKind, PixelObject,
+    Placement,
 };
 use opal_core::geom::{Affine, IRect};
 use opal_core::raster::RasterImage;
@@ -87,6 +88,9 @@ struct FileLayer {
     visible: bool,
     locked: bool,
     opacity: f32,
+    /// Older files have none, and older versions ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    placed: Option<Placement>,
     #[serde(flatten)]
     content: FileContent,
 }
@@ -120,6 +124,8 @@ struct LayerRead {
     visible: bool,
     locked: bool,
     opacity: f32,
+    #[serde(default)]
+    placed: Option<Placement>,
     kind: String,
     objects: Option<Vec<FileObject>>,
     children: Option<Vec<FileLayer>>,
@@ -134,7 +140,8 @@ impl TryFrom<LayerRead> for FileLayer {
             ("group", _, Some(children)) => FileContent::Group { children },
             (kind, ..) => return Err(format!("a layer of kind {kind:?} is unknown, or lacks what it holds")),
         };
-        Ok(FileLayer { id: l.id, name: l.name, visible: l.visible, locked: l.locked, opacity: l.opacity, content })
+        let (id, name, visible, locked, opacity, placed) = (l.id, l.name, l.visible, l.locked, l.opacity, l.placed);
+        Ok(FileLayer { id, name, visible, locked, opacity, placed, content })
     }
 }
 
@@ -316,6 +323,7 @@ fn file_layer(layer: &Layer, numbers: &mut HashMap<*const Tile, usize>, tiles: &
         visible: layer.visible,
         locked: layer.locked,
         opacity: layer.opacity,
+        placed: layer.placed.clone(),
         content,
     }
 }
@@ -532,7 +540,11 @@ fn build_layer(l: FileLayer, tiles: &HashMap<usize, Arc<Tile>>, path: &Path) -> 
     if !(0.0..=1.0).contains(&l.opacity) {
         return Err(bad(format!("layer {:?} has opacity {}", l.name, l.opacity)));
     }
-    Ok(Layer { id: l.id, name: l.name, visible: l.visible, locked: l.locked, opacity: l.opacity, content })
+    if let Some(p) = &l.placed {
+        p.check().map_err(|m| bad(format!("layer {:?}'s placement is not usable: {m}", l.name)))?;
+    }
+    let (id, name, visible, locked, opacity, placed) = (l.id, l.name, l.visible, l.locked, l.opacity, l.placed);
+    Ok(Layer { id, name, visible, locked, opacity, content, placed })
 }
 
 /// Why an image object's placement is unusable, if it is.
