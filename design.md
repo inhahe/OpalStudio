@@ -1063,6 +1063,38 @@ channel curve editor and every setting defined in a chosen color model depend on
 palette editor becomes the gradient editor, used by the gradient tool, a gradient-map
 adjustment and indexed-color export.
 
+## Symmetry
+
+One setting, shared by vector shapes, the brushes and the outline tool: symmetry of
+**order n** (n copies around a center; 1 for none), with or without a **mirror**, about a
+**center** and an **axis angle**. Order 1 with a mirror is one mirror axis; order 2 with a
+mirror, both axes; order n alone, rotational symmetry of order n; order n with a mirror, a
+kaleidoscope of 2n parts.
+
+- **Vector shapes (milestone 4).** A shape given symmetry is edited as one slice (1/n of it,
+  or 1/2n with a mirror); the rest is made from it and joined into one closed path, so it
+  stays exactly symmetric without a solver (as Inkscape's mirror and rotate-copies path
+  effects keep theirs).
+  - The center is a point kept with the shape, where its middle was when symmetry was
+    turned on, not its bounding box's middle, which moves as it is edited and would make it
+    drift. The center and the axis are moved by handles on the canvas.
+  - A node on a seam (an axis) stays on it, its handles mirrored so that the joined curve
+    is smooth there, unless it is made a corner.
+  - The slice is clipped to its part, so that the copies do not overlap; an option lets it
+    cross, the fill rule deciding what the overlap fills.
+  - *Expand symmetry* makes it an ordinary path: how symmetry is broken, and what is
+    exported to SVG, which has no such thing.
+  - A calligraphic stroke reflected has its nib's angle reflected; an option keeps the
+    angle as drawn.
+  - Symmetry between separate objects is the constraint solver's (*Constraints*:
+    symmetric).
+  - Expressions can name the center (`Badge.symmetry.center`).
+- **Painting (milestone 3).** A stroke is repeated as the symmetry says while it is
+  painted, about a center and an axis shown on the canvas and moved by dragging them. Every
+  tool built on the brush engine takes it, the retouching tools too.
+- **The outline tool (milestone 2).** An outline drawn with symmetry is made and closed as
+  a shape's is: symmetric selections.
+
 ## Expressions
 
 One small language for every number and length the editor takes, typed into a field or

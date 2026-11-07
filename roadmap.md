@@ -95,6 +95,8 @@ right after the selection core it builds on.
 - Rectangle and ellipse; add, subtract, intersect, replace. Their boxes take exact numbers
   in any unit, by the box, as the transform and crop boxes do (`box_fields`).
 - The outline tool: freehand, anchors, curves.
+- Symmetric outlines: drawn as one slice, mirrored, turned or both (`design.md`,
+  *Symmetry*).
 - Reshape: right-drag, red preview, Tab flips the side, R + left-drag.
 - Feather (inward, outward, centered; falloff curve), grow/shrink (round, square, diamond),
   invert.
@@ -130,6 +132,8 @@ right after the selection core it builds on.
 - Eraser (Brush variant), erasing to transparency or into the layer's mask.
 - Fill, gradient, eyedropper.
 - Painting on masks.
+- Symmetric painting: each stroke repeated in mirror, in rotation of a chosen order, or
+  both, about a center and axis on the canvas (*Symmetry*).
 - Color picker, version 1: the 2D picker and sliders.
 - Compositing caches for each group and for everything below the active layer, so painting
   recombines only what is above it.
@@ -143,6 +147,9 @@ right after the selection core it builds on.
 - Fill and stroke; editable brush strokes on vector shapes.
 - SVG import and export.
 - Boolean operations on paths.
+- Symmetric shapes: order n, with or without a mirror, about a movable center and axis;
+  edited as one slice, the seams kept smooth; Expand symmetry; the center named in
+  expressions (*Symmetry*).
 - The Calligraphy tool: broad-edge, pointed and brush variants; strokes as editable vector
   objects (centerline plus nib); pressure, tilt and rotation; the guide sheet, with the
   Chinese practice grids.
