@@ -16,7 +16,12 @@ fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn harness() -> Harness<'static, OpalApp> {
-    Harness::builder().with_size([1400.0, 860.0]).with_max_steps(12).wgpu().build_eframe(|cc| OpalApp::for_tests(cc))
+    harness_of([1400.0, 860.0])
+}
+
+/// A harness whose window is `size` points.
+fn harness_of(size: [f32; 2]) -> Harness<'static, OpalApp> {
+    Harness::builder().with_size(size).with_max_steps(12).wgpu().build_eframe(|cc| OpalApp::for_tests(cc))
 }
 
 /// Saves the harness's current rendering as `<name>.png` in the temporary folder (for
@@ -185,25 +190,13 @@ fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
     // their panel at this window's height).
     h.state_mut().state_mut().box_numbers = true;
     h.run();
-    let x = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
-    let field_at = |v: f64| {
-        by().predicate(move |n| {
-            n.role() == egui::accesskit::Role::SpinButton
-                && n.numeric_value().is_some_and(|x| (x - v).abs() < 1e-6)
-                && n.bounding_box().is_some_and(|b| b.x0 < 1000.0)
-        })
-    };
-    let typed = |h: &mut Harness<'static, OpalApp>, at: f64, text: &str| {
-        h.get(field_at(at)).click();
-        h.run();
-        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
-        h.get(by().predicate(|n| n.is_focused())).type_text(text);
-        h.run();
-    };
+    let params =
+        |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().transform.as_ref().unwrap().params();
+    let x = |h: &Harness<'static, OpalApp>| params(h).x;
     let at = x(&h);
     // The grid of points the position counts from ends above the position's row.
     let from = h.get(by().label("From: Bottom left").predicate(|n| n.bounding_box().is_some_and(|b| b.x0 < 1000.0)));
-    let field = h.get(field_at(at)).rect();
+    let field = h.get(box_field(at, 1e-6)).rect();
     assert!(
         from.rect().bottom() <= field.top(),
         "the From grid reaches into the row below: {:?} {field:?}",
@@ -221,17 +214,16 @@ fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
     // A layer's edge, the box's own width, and a bare number in the field's unit (pixels):
     // shown whole, with what it comes to, below the field (which may be too narrow to show
     // it), while what is beside the field stays where it was.
-    let y = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().transform.as_ref().unwrap().params().y;
-    let beside = h.get(field_at(y(&h))).rect();
-    typed(&mut h, at, "Background.right - width - 10");
+    let beside = h.get(box_field(params(&h).y, 1e-6)).rect();
+    type_into(&mut h, box_field(at, 1e-6), "Background.right - width - 10");
     let whole = h.query_all(by().label_contains("Background.right - width - 10  = 340 px")).count();
     assert_eq!(whole, 1, "what is typed, and what it comes to, are not shown whole");
-    assert_eq!(h.get(field_at(y(&h))).rect(), beside, "what is beside the field moved");
+    assert_eq!(h.get(box_field(params(&h).y, 1e-6)).rect(), beside, "what is beside the field moved");
     h.key_press(egui::Key::Enter);
     h.run();
     assert_eq!(x(&h), 340.0);
     // What cannot be worked out says why, and where; Enter keeps it, to be put right.
-    typed(&mut h, 340.0, "Bakground.right");
+    type_into(&mut h, box_field(340.0, 1e-6), "Bakground.right");
     assert!(h.query_all(by().label_contains("no layer called “Bakground”")).count() >= 1, "the error is not shown");
     h.key_press(egui::Key::Enter);
     h.run();
@@ -247,7 +239,7 @@ fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
     assert!(open(&h), "Esc in a field cancelled the box");
     assert_eq!(x(&h), 340.0);
     // Up brings back what was entered.
-    h.get(field_at(340.0)).click();
+    h.get(box_field(340.0, 1e-6)).click();
     h.run();
     h.key_press(egui::Key::ArrowUp);
     h.run();
@@ -283,12 +275,7 @@ fn a_field_brings_back_what_was_entered_in_an_earlier_session() {
     h.state_mut().state_mut().box_numbers = true;
     h.run();
     let at = h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
-    let field = by().predicate(move |n| {
-        n.role() == egui::accesskit::Role::SpinButton
-            && n.numeric_value().is_some_and(|x| (x - at).abs() < 1e-6)
-            && n.bounding_box().is_some_and(|b| b.x0 < 1000.0)
-    });
-    h.get(field).click();
+    h.get(box_field(at, 1e-6)).click();
     h.run();
     h.key_press(egui::Key::ArrowUp);
     h.run();
@@ -300,7 +287,6 @@ fn a_field_brings_back_what_was_entered_in_an_earlier_session() {
 
 #[test]
 fn a_field_left_untouched_changes_nothing_and_tab_enters_what_was_typed() {
-    use egui_kittest::kittest::by;
     let _gpu = gpu_lock();
     let mut h = harness();
     let st = h.state_mut().state_mut();
@@ -324,13 +310,7 @@ fn a_field_left_untouched_changes_nothing_and_tab_enters_what_was_typed() {
     }
     h.run();
     let x = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
-    let field = |v: f64| {
-        by().predicate(move |n| {
-            n.role() == egui::accesskit::Role::SpinButton
-                && n.numeric_value().is_some_and(|x| (x - v).abs() < 1e-3)
-                && n.bounding_box().is_some_and(|b| b.x0 < 1000.0)
-        })
-    };
+    let field = |v: f64| box_field(v, 1e-3);
     // Clicked, and left by Tab with nothing typed: still 100 px, not 0.333 in.
     h.get(field(1.0 / 3.0)).click();
     h.run();
@@ -346,11 +326,7 @@ fn a_field_left_untouched_changes_nothing_and_tab_enters_what_was_typed() {
     h.run();
     assert_eq!(x(&h), 100.0, "Enter on what was not typed moved the box");
     // Typed, and left by Tab: what was typed is entered.
-    h.get(field(1.0 / 3.0)).click();
-    h.run();
-    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
-    h.get(by().predicate(|n| n.is_focused())).type_text("1");
-    h.run();
+    type_into(&mut h, field(1.0 / 3.0), "1");
     h.key_press(egui::Key::Tab);
     h.run();
     assert_eq!(x(&h), 300.0, "Tab threw away what was typed");
@@ -368,13 +344,6 @@ fn an_expression_typed_into_the_box_places_the_layer_so_again() {
         resolution: 100.0,
     });
     h.state_mut().state_mut().box_numbers = true;
-    let field_at = |v: f64| {
-        by().predicate(move |n| {
-            n.role() == egui::accesskit::Role::SpinButton
-                && n.numeric_value().is_some_and(|x| (x - v).abs() < 1e-6)
-                && n.bounding_box().is_some_and(|b| b.x0 < 1000.0)
-        })
-    };
     let x = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
     // Pasted, its x typed as what names the canvas, entered, and the box applied.
     let paste = |h: &mut Harness<'static, OpalApp>, drag: bool| {
@@ -382,11 +351,7 @@ fn an_expression_typed_into_the_box_places_the_layer_so_again() {
         h.event(egui::Event::Paste(String::new()));
         h.run();
         let at = x(h);
-        h.get(field_at(at)).click();
-        h.run();
-        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
-        h.get(by().predicate(|n| n.is_focused())).type_text("canvas.width - 60");
-        h.run();
+        type_into(h, box_field(at, 1e-6), "canvas.width - 60");
         h.key_press(egui::Key::Enter);
         h.run();
         assert_eq!(x(h), 340.0);
@@ -432,7 +397,7 @@ fn an_expression_typed_into_the_box_places_the_layer_so_again() {
 }
 
 /// The README's picture, `docs/screenshot.png`: an image of a few layers, and the box placing
-/// a pasted badge by an expression being typed into its numbers. Made again with
+/// a pasted badge by an expression being typed into the tool settings. Made again with
 /// `OPAL_WRITE_SCREENSHOT=1 cargo test -p opal-app --bin opal-studio the_readme_screenshot -- --ignored`.
 #[test]
 #[ignore = "makes the README's screenshot (OPAL_WRITE_SCREENSHOT=1, --ignored)"]
@@ -441,7 +406,8 @@ fn the_readme_screenshot() {
     use opal_core::document::{Document, IdGen, Layer, Position};
     use opal_core::raster::RasterImage;
     let _gpu = gpu_lock();
-    let mut h = harness();
+    // Tall enough for the whole of the tool settings.
+    let mut h = harness_of([1400.0, 1100.0]);
     // Colors in 8-bit sRGB, straight alpha.
     let mix = |a: [f32; 3], b: [f32; 3], t: f32| [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t.clamp(0.0, 1.0));
     let byte = |c: [f32; 3], a: f32| {
@@ -493,8 +459,10 @@ fn the_readme_screenshot() {
         let st = h.state_mut().state_mut();
         st.new_untitled(doc, ids, "New image");
         st.set_unit(opal_core::units::Unit::Mm);
-        st.box_numbers = true;
     }
+    // The tool settings given room for all of them, and the layers what they need.
+    h.state_mut().set_pane_share(crate::app::Pane::ToolSettings, 0.72);
+    h.state_mut().set_pane_share(crate::app::Pane::Layers, 0.28);
     // A gold badge, pasted.
     let (bw, bh, round) = (300u32, 120u32, 26.0f32);
     let badge: Vec<[u8; 4]> = (0..bw * bh)
@@ -521,28 +489,21 @@ fn the_readme_screenshot() {
     // Its x being typed as what names the opal: what it comes to shows below.
     let at = h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
     let shown = opal_core::units::Unit::Mm.from_px(at, 300.0);
-    let field = by().predicate(move |n| {
-        n.role() == egui::accesskit::Role::SpinButton
-            && n.numeric_value().is_some_and(|x| (x - shown).abs() < 1e-2)
-            && n.bounding_box().is_some_and(|b| b.x0 < 1000.0)
-    });
-    h.get(field).click();
-    h.run();
-    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
-    h.get(by().predicate(|n| n.is_focused())).type_text("Opal.right + 5mm");
+    type_into(&mut h, field_showing(shown, 1e-2, false), "Opal.right + 5mm");
     // The pointer away, so that it hides none of it.
     h.event(egui::Event::PointerGone);
     for _ in 0..4 {
         h.run();
     }
+    // It shows what the expression comes to, not an error.
+    assert!(h.query_all(by().label_contains("= 56.9 mm")).count() >= 1, "the preview does not show the value");
     let img = h.render().expect("the app renders");
-    if std::env::var_os("OPAL_WRITE_SCREENSHOT").is_some() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/screenshot.png");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        img.save(&path).unwrap();
-    } else {
-        render(&mut h, "readme");
-    }
+    let path = match std::env::var_os("OPAL_WRITE_SCREENSHOT") {
+        Some(_) => std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/screenshot.png"),
+        None => std::env::temp_dir().join("opal-ui-readme.png"),
+    };
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    img.save(&path).unwrap();
 }
 
 #[test]
@@ -994,6 +955,30 @@ fn pasted(w: u32, h: u32, rgba: [f32; 4]) -> crate::clipboard::Pasted {
         resolution: None,
         warnings: Vec::new(),
     }
+}
+
+/// The field that shows `v`, to within `within`: of the numbers by the box (left of the side
+/// panels), or of the tool settings (which show the same), as `by_the_box` says.
+fn field_showing(v: f64, within: f64, by_the_box: bool) -> egui_kittest::kittest::By<'static> {
+    egui_kittest::kittest::by().predicate(move |n| {
+        n.role() == egui::accesskit::Role::SpinButton
+            && n.numeric_value().is_some_and(|x| (x - v).abs() < within)
+            && n.bounding_box().is_some_and(|b| (b.x0 < 1000.0) == by_the_box)
+    })
+}
+
+/// The field of the numbers by the box that shows `v`, to within `within`.
+fn box_field(v: f64, within: f64) -> egui_kittest::kittest::By<'static> {
+    field_showing(v, within, true)
+}
+
+/// Types `text` into `field`, in place of what it shows.
+fn type_into(h: &mut Harness<'static, OpalApp>, field: egui_kittest::kittest::By<'static>, text: &str) {
+    h.get(field).click();
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.get(egui_kittest::kittest::by().predicate(|n| n.is_focused())).type_text(text);
+    h.run();
 }
 
 fn put_on_clipboard(h: &mut Harness<'static, OpalApp>, p: crate::clipboard::Pasted) {

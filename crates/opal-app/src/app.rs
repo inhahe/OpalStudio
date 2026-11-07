@@ -156,6 +156,20 @@ impl OpalApp {
         l.shares[l.children[0]]
     }
 
+    /// Gives the tabs holding `pane` the share `share` of the column or row they are in, for
+    /// tests.
+    #[cfg(test)]
+    pub fn set_pane_share(&mut self, pane: Pane, share: f32) {
+        let tiles = &mut self.tree.tiles;
+        let tabs = tiles.find_pane(&pane).and_then(|p| tiles.parent_of(p)).expect("the pane is in tabs");
+        let Some(egui_tiles::Tile::Container(egui_tiles::Container::Linear(l))) =
+            tiles.parent_of(tabs).and_then(|c| tiles.get_mut(c))
+        else {
+            panic!("its tabs are in a column or row")
+        };
+        l.shares.set_share(tabs, share);
+    }
+
     /// Whether the start page is in the panel tree, for tests.
     #[cfg(test)]
     pub fn shows_welcome(&self) -> bool {
