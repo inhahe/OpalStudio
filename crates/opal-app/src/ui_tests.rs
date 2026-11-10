@@ -173,6 +173,28 @@ fn the_print_size_button_on_a_placed_file_switches_it_and_is_remembered() {
     assert!(!h.state().state().prefs.bool("transform.place_print_size"), "the choice was not remembered");
 }
 
+/// In the starting layout, the tool settings (cut short above the layers) show that there is
+/// more of them: their scroll bar shows without the pointer on it.
+#[test]
+fn a_panel_cut_short_shows_its_scroll_bar() {
+    use egui_kittest::kittest::by;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    pasting(&mut h);
+    h.run();
+    // Light marks right of what the pane holds, beside the first rows (where the handle is,
+    // nothing scrolled yet).
+    let words = h.get(on_side(by().label_contains("Drag the box to move"), false)).rect();
+    let img = render(&mut h, "scroll-bar");
+    let ppp = img.width() as f32 / 1400.0;
+    let px = |v: f32| (v * ppp) as u32;
+    let bar = (px(words.right() + 1.0)..img.width())
+        .flat_map(|x| (px(words.top())..px(words.bottom())).map(move |y| (x, y)))
+        .filter(|&(x, y)| img.get_pixel(x, y)[0] > 70)
+        .count();
+    assert!(bar > 0, "no scroll bar shows right of the tool settings");
+}
+
 #[test]
 fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
     use egui_kittest::kittest::by;

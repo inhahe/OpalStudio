@@ -461,6 +461,9 @@ curve editors.
   **Light**, and **Follow the system** (switches along with the operating system's light
   or dark mode).
 - One accent color, slightly rounded corners, subtle hover and press animations.
+- Scroll bars are always shown, thin until the pointer is on them, with room kept for
+  them beside what scrolls, so that a panel cut short shows there is more of it (egui's
+  own appear only under the pointer).
 - Fluent UI System Icons (Microsoft's, MIT), rendered sharp at any display scaling.
 - The system font: Segoe UI on Windows; a bundled open font elsewhere.
 - **Rulers** (`rulers.rs`) along the top and left of each image's view, outside it, which

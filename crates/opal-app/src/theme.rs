@@ -84,6 +84,18 @@ pub fn apply(ctx: &egui::Context, choice: egui::ThemePreference) {
         style.spacing.item_spacing = egui::vec2(6.0, 5.0);
         style.spacing.button_padding = egui::vec2(7.0, 3.0);
         style.spacing.interact_size.y = 22.0;
+        // Scroll bars always shown, thin until the pointer is on them, so that a panel cut
+        // short shows there is more of it (egui's own appear only under the pointer). Room
+        // is kept for them beside what scrolls, which they would otherwise cover.
+        style.spacing.scroll = egui::style::ScrollStyle {
+            floating_width: 4.0,
+            floating_allocated_width: 8.0,
+            foreground_color: true,
+            dormant_handle_opacity: 0.4,
+            active_handle_opacity: 0.55,
+            interact_handle_opacity: 0.8,
+            ..egui::style::ScrollStyle::thin()
+        };
         // Text is for reading here, not for selecting: a selectable label inside a clickable
         // row (a layer's name) would take the row's clicks and drags.
         style.interaction.selectable_labels = false;
