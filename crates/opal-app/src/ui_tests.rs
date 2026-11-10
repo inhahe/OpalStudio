@@ -161,20 +161,19 @@ fn the_print_size_button_on_a_placed_file_switches_it_and_is_remembered() {
 /// more of them: their scroll bar shows without the pointer on it.
 #[test]
 fn a_panel_cut_short_shows_its_scroll_bar() {
-    use egui_kittest::kittest::by;
     let _gpu = gpu_lock();
     let mut h = harness();
     pasting(&mut h);
     h.run();
-    // Marks unlike the panel between what the pane holds and its right edge, beside the first
-    // rows (where the handle is, nothing scrolled yet).
-    let words = h.get(on_side(by().label_contains("Drag the box to move"), false)).rect();
+    // Marks unlike the panel in the strip kept for the bar at the pane's right edge, beside
+    // its first rows (where the handle is, nothing scrolled yet).
     let pane = h.state().pane_rect(crate::app::Pane::ToolSettings);
+    let strip = h.ctx.global_style().spacing.scroll.allocated_width();
     let panel = h.ctx.global_style().visuals.panel_fill;
     let img = render(&mut h, "scroll-bar");
     let px = |v: f32| (v * h.ctx.pixels_per_point()) as u32;
-    let bar = (px(words.right() + 1.0)..px(pane.right()))
-        .flat_map(|x| (px(words.top())..px(words.bottom())).map(move |y| (x, y)))
+    let bar = (px(pane.right() - strip)..px(pane.right()))
+        .flat_map(|x| (px(pane.top())..px(pane.top() + 40.0)).map(move |y| (x, y)))
         .filter(|&(x, y)| img.get_pixel(x, y)[0].abs_diff(panel.r()) > 30)
         .count();
     assert!(bar > 0, "no scroll bar shows right of the tool settings");

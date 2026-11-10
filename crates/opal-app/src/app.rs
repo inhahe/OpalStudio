@@ -980,7 +980,9 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
             Pane::Layers => inset(ui, &mut |ui| panels::layers_panel(ui, self.st)),
             Pane::History => inset(ui, &mut |ui| panels::history_panel(ui, self.st)),
             Pane::ToolSettings => inset(ui, &mut |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| panels::tool_settings_panel(ui, self.st));
+                // As wide as the pane, whatever it holds, so that its scroll bar is at its edge.
+                let area = egui::ScrollArea::vertical().auto_shrink([false, true]);
+                area.show(ui, |ui| panels::tool_settings_panel(ui, self.st));
             }),
             Pane::Console => inset(ui, &mut |ui| crate::console::console_panel(ui, self.st)),
         }

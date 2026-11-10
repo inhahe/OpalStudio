@@ -454,6 +454,9 @@ A docked panel: the active tool's variant picker at the top, then its basic sett
 its Advanced section. It is a panel rather than a bar because the Advanced settings include
 curve editors.
 
+- It scrolls, its scroll area as wide as the pane whatever it holds, so that the scroll bar
+  is at the pane's edge.
+
 ### Look
 
 - egui restyled. Three choices of color scheme: **Dark** (the default: neutral gray, so the
