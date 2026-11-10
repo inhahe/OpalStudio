@@ -486,8 +486,10 @@ curve editors.
   save or export under way, tiles on disk, GPU memory, and the active image's zoom, size,
   resolution and the pointer's place.
 - The text is laid out first, so that it is read out first, in the room the parts took
-  when last shown (another pass at once where they changed width), and cut short, whole
-  on hover, where it does not fit. Where the parts would leave it less than 160 points,
+  when last shown (another pass at once where they grew), and cut short, whole on hover,
+  where it does not fit. What other threads change (scripts connected, tiles on disk) is
+  read once a frame, the parts chosen and drawn by it. Where the parts would leave it less
+  than 160 points,
   the least needed are left out (tiles on disk, GPU memory, the pointer's place, and so
   on, a save under way last); the scripts' open steps and the file's name are cut short
   past 260 points (`app::StatusPart`).

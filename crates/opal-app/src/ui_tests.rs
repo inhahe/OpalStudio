@@ -344,7 +344,7 @@ fn the_status_bar_cuts_short_what_does_not_fit() {
     let start = &crate::transform_ui::HINT[..20];
     let (first, hint) = parts.first().cloned().expect("the status bar shows something");
     assert!(first.contains(start), "what is read first is not what the canvas does: {parts:?}");
-    assert!(hint.width() >= 150.0, "the parts leave it too little room: {hint:?}");
+    assert!(hint.width() >= 155.0, "the parts leave it too little room: {hint:?}");
     for (label, r) in &parts[1..] {
         assert!(r.left() >= hint.right(), "{label:?} runs over what the canvas does: {r:?} {hint:?}");
     }

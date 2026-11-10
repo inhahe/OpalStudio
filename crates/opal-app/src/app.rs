@@ -615,61 +615,66 @@ impl OpalApp {
             }
             _ => RichText::new(format!("{glyph}  {does}")).color(weak),
         };
+        // What other threads change, read once, so that the parts are chosen and drawn by it.
+        let seen = self.status_seen();
         // The parts at the bar's right, as wide as they were when last shown: the least needed
         // left out until the rest leave the text room enough.
         let widths_id = egui::Id::unique("status-bar-widths");
-        let mut widths: std::collections::HashMap<StatusPart, f32> =
-            ui.data(|d| d.get_temp(widths_id)).unwrap_or_default();
-        let wide = |widths: &std::collections::HashMap<StatusPart, f32>, parts: &[StatusPart]| {
-            parts.iter().map(|p| widths.get(p).copied().unwrap_or(0.0)).sum::<f32>()
-        };
-        let room = ui.available_width() - STATUS_TEXT_ROOM;
-        let mut shown = self.status_parts();
+        let mut widths: StatusWidths = ui.data(|d| d.get_temp(widths_id)).unwrap_or_default();
+        let room = ui.available_width() - ui.spacing().item_spacing.x - STATUS_TEXT_ROOM;
+        let mut shown = self.status_parts(&seen);
         for least in StatusPart::LEAST_NEEDED_FIRST {
-            if wide(&widths, &shown) <= room {
+            if widths.of(&shown) <= room {
                 break;
             }
             shown.retain(|p| *p != least);
         }
-        let parts_wide = wide(&widths, &shown);
+        let parts_wide = widths.of(&shown);
         ui.horizontal(|ui| {
             // The text first, so that it is read out first, in the room the parts leave: cut
             // short where it does not fit (whole on hover), rather than run under them.
             let gap = ui.spacing().item_spacing.x;
-            let room = egui::vec2((ui.available_width() - parts_wide - gap).max(0.0), ui.available_height());
+            let room = egui::vec2((ui.available_width() - gap - parts_wide).max(0.0), ui.available_height());
             ui.allocate_ui_with_layout(room, egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add(egui::Label::new(said).truncate());
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 for (i, &part) in shown.iter().enumerate() {
-                    let r = ui.scope(|ui| {
-                        if i > 0 {
-                            ui.separator();
-                        }
-                        self.status_part(ui, part);
-                    });
-                    widths.insert(part, r.response.rect.width() + gap);
+                    if i > 0 {
+                        widths.between = ui.separator().rect.width() + 2.0 * gap;
+                    }
+                    let r = ui.scope(|ui| self.status_part(ui, part, &seen));
+                    widths.parts.insert(part, r.response.rect.width());
                 }
             });
         });
-        // Laid out by widths that have changed (a part shown the first time, or grown): again,
-        // at once, by these.
-        if (wide(&widths, &shown) - parts_wide).abs() > 0.5 {
-            ui.ctx().request_discard("the status bar's parts changed width");
+        // Grown past the room they were given (a part shown the first time, or longer): laid
+        // out again at once, so as not to run over the text. Narrower, the next frame will do.
+        if widths.of(&shown) > parts_wide + 0.5 {
+            ui.ctx().request_discard("the status bar's parts grew");
         }
         ui.data_mut(|d| d.insert_temp(widths_id, widths));
     }
 
-    /// The parts of the status bar there is something for, from its right end.
-    fn status_parts(&self) -> Vec<StatusPart> {
+    /// What the status bar shows of what other threads change.
+    fn status_seen(&self) -> StatusSeen {
+        let (clients, steps, shut_out) = match &self.server {
+            Some(s) => (s.clients(), s.open_steps(), s.shut_out()),
+            None => (0, Vec::new(), false),
+        };
+        StatusSeen { clients, steps, shut_out, tiles: opal_core::store::status() }
+    }
+
+    /// The parts of the status bar there is something for, from its right end, by `seen`.
+    fn status_parts(&self, seen: &StatusSeen) -> Vec<StatusPart> {
         let mut parts = Vec::new();
-        if self.server.as_ref().is_some_and(|s| s.clients() > 0 || s.shut_out()) {
+        if self.server.is_some() && (seen.clients > 0 || seen.shut_out) {
             parts.push(StatusPart::Scripts);
         }
         if self.st.writer.pending().next().is_some() {
             parts.push(StatusPart::Write);
         }
-        if opal_core::store::status().on_disk > 0 {
+        if seen.tiles.on_disk > 0 {
             parts.push(StatusPart::Disk);
         }
         if self.st.gpu.memory.is_some() {
@@ -684,8 +689,8 @@ impl OpalApp {
         parts
     }
 
-    /// The part `part` of the status bar (one [`OpalApp::status_parts`] gives).
-    fn status_part(&mut self, ui: &mut egui::Ui, part: StatusPart) {
+    /// The part `part` of the status bar (one [`OpalApp::status_parts`] gives for `seen`).
+    fn status_part(&mut self, ui: &mut egui::Ui, part: StatusPart, seen: &StatusSeen) {
         let weak = self.st.palette.weak_text;
         // A text that could be long, cut short (whole on hover).
         let capped = |ui: &mut egui::Ui, text: RichText| {
@@ -699,7 +704,7 @@ impl OpalApp {
             // way to let them in again.
             StatusPart::Scripts => {
                 let Some(server) = &self.server else { return };
-                let n = server.clients();
+                let n = seen.clients;
                 if n > 0 {
                     if ui
                         .small_button("Disconnect")
@@ -714,9 +719,8 @@ impl OpalApp {
                     let mut who =
                         if n == 1 { "A script is connected".to_owned() } else { format!("{n} scripts are connected") };
                     // A step open is told, so that one a script or assistant forgot is seen.
-                    let steps = server.open_steps();
-                    if !steps.is_empty() {
-                        let names: Vec<String> = steps.iter().map(|s| format!("\u{201c}{s}\u{201d}")).collect();
+                    if !seen.steps.is_empty() {
+                        let names: Vec<String> = seen.steps.iter().map(|s| format!("\u{201c}{s}\u{201d}")).collect();
                         who += &format!(", in step {}", names.join(", "));
                     }
                     let strong = self.st.palette.strong_text;
@@ -754,7 +758,7 @@ impl OpalApp {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
             }
             StatusPart::Disk => {
-                let tiles = opal_core::store::status();
+                let tiles = &seen.tiles;
                 ui.label(RichText::new(format!("{} on disk", bytes(tiles.on_disk))).color(weak)).on_hover_text(
                     format!(
                         "Parts of the open images not looked at lately, kept in a scratch file until they are \
@@ -864,6 +868,31 @@ impl StatusPart {
         StatusPart::Scripts,
         StatusPart::Write,
     ];
+}
+
+/// What the status bar shows of what other threads change (the server's, the tile store's),
+/// read once a frame, so that its parts are chosen and drawn by the same.
+struct StatusSeen {
+    clients: usize,
+    steps: Vec<String>,
+    shut_out: bool,
+    tiles: opal_core::store::Status,
+}
+
+/// How wide the status bar's parts were when last shown, in points, and what stands between
+/// two (a separator, and the spacing either side of it).
+#[derive(Clone, Default)]
+struct StatusWidths {
+    parts: std::collections::HashMap<StatusPart, f32>,
+    between: f32,
+}
+
+impl StatusWidths {
+    /// How wide `parts` are, shown side by side.
+    fn of(&self, parts: &[StatusPart]) -> f32 {
+        let each: f32 = parts.iter().map(|p| self.parts.get(p).copied().unwrap_or(0.0)).sum();
+        each + parts.len().saturating_sub(1) as f32 * self.between
+    }
 }
 
 /// The room the status bar keeps for what the canvas does, before its parts, in points.
