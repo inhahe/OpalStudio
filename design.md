@@ -641,7 +641,9 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   (the unit, the reference point, and what the position counts from), so that the tool
   settings, short in the starting layout, show the numbers without scrolling; another
   unit, point or origin chosen shows them measured so in the same frame (egui is asked
-  for another pass). The position is that of the box's **reference point** (a 3 × 3 grid in
+  for another pass). Each grid of points is one stop for Tab, the point chosen, and the
+  arrow keys move the choice, as in a group of radio buttons. The position is that of the
+  box's **reference point** (a 3 × 3 grid in
   the fields, a preference: its top-left corner unless another is chosen), turned with
   it, from the canvas's corner; a size typed scales along the box's own sides about that
   point, and an angle turns about it, so the numbers typed stay as typed. **From**: the

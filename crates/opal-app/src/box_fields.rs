@@ -272,18 +272,25 @@ fn own(p: &Params) -> Own {
 /// A 3 × 3 grid of a box's points (see [`POINTS`]), the one at `chosen` marked; clicking
 /// another chooses it. Each is read out by its name, after `what` the grid chooses if it
 /// says ("From: Center"). (Resize Canvas's anchor is chosen with it too.)
+///
+/// Like a group of radio buttons, it is one stop for Tab, the point chosen; the arrow keys
+/// move the choice, and the focus with it, to the next point that way.
 pub fn reference_grid(ui: &mut egui::Ui, chosen: &mut usize, what: Option<&str>, salt: &str) {
+    let mut ids = [egui::Id::NULL; 9];
+    let mut focused = false;
     egui::Grid::new(("box-reference", salt)).spacing([1.0, 1.0]).show(ui, |ui| {
         for row in 0..3 {
             for col in 0..3 {
                 let i = row * 3 + col;
                 let on = *chosen == i;
                 let glyph = if on { "●" } else { "○" };
-                let r = ui
-                    .add(egui::Button::new(glyph).small().selected(on).min_size(egui::vec2(16.0, 16.0)))
-                    .on_hover_text(POINTS[i].1);
+                let sense = if on { egui::Sense::click() } else { egui::Sense::CLICK };
+                let b = egui::Button::new(glyph).small().selected(on).min_size(egui::vec2(16.0, 16.0)).sense(sense);
+                let r = ui.add(b).on_hover_text(POINTS[i].1);
                 let name = what.map_or_else(|| POINTS[i].1.to_owned(), |w| format!("{w}: {}", POINTS[i].1));
                 r.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, on, &name));
+                ids[i] = r.id;
+                focused |= on && r.has_focus();
                 if r.clicked() {
                     *chosen = i;
                 }
@@ -291,6 +298,34 @@ pub fn reference_grid(ui: &mut egui::Ui, chosen: &mut usize, what: Option<&str>,
             ui.end_row();
         }
     });
+    if !focused {
+        return;
+    }
+    // The arrows are the grid's while it has the focus: at its edges, where they move nothing,
+    // egui would move the focus out of it by them.
+    let arrows = egui::EventFilter { horizontal_arrows: true, vertical_arrows: true, ..Default::default() };
+    ui.memory_mut(|m| m.set_focus_lock_filter(ids[*chosen], arrows));
+    let (row, col) = (*chosen / 3, *chosen % 3);
+    let next = ui.input_mut(|input| {
+        let mut pressed = |key| input.consume_key(egui::Modifiers::NONE, key);
+        if pressed(egui::Key::ArrowLeft) {
+            (col > 0).then(|| *chosen - 1)
+        } else if pressed(egui::Key::ArrowRight) {
+            (col < 2).then(|| *chosen + 1)
+        } else if pressed(egui::Key::ArrowUp) {
+            (row > 0).then(|| *chosen - 3)
+        } else if pressed(egui::Key::ArrowDown) {
+            (row < 2).then(|| *chosen + 3)
+        } else {
+            None
+        }
+    });
+    if let Some(next) = next {
+        *chosen = next;
+        ui.memory_mut(|m| m.request_focus(ids[next]));
+        // At once, so that the next point locks the arrows before the next is pressed.
+        ui.ctx().request_repaint();
+    }
 }
 
 /// The point the preference chooses: its index in [`POINTS`].

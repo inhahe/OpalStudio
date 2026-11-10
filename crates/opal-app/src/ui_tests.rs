@@ -202,6 +202,45 @@ fn the_tool_settings_show_a_paste_s_numbers_without_scrolling() {
     in_the_tool_settings(&h, &[("x", p.x), ("y", p.y), ("width", p.width), ("height", p.height)]);
 }
 
+/// A grid of a box's points is one stop for Tab, the point chosen, and the arrow keys move the
+/// choice within it.
+#[test]
+fn a_grid_of_points_is_one_tab_stop_and_the_arrows_move_in_it() {
+    use egui_kittest::kittest::by;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    pasting(&mut h);
+    h.state_mut().state_mut().box_numbers = true;
+    h.run();
+    let focused = |h: &Harness<'static, OpalApp>| {
+        use egui_kittest::kittest::NodeT;
+        h.get(by().predicate(|n| n.is_focused())).accesskit_node().label().unwrap_or_default()
+    };
+    // From the units, Tab reaches the point chosen, then the next menu.
+    h.get(on_side(by().label("Units").role(egui::accesskit::Role::ComboBox), true)).focus();
+    h.run();
+    h.key_press(egui::Key::Tab);
+    h.run();
+    assert_eq!(focused(&h), "Top left");
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    h.key_press(egui::Key::ArrowDown);
+    h.run();
+    assert_eq!(h.state().state().prefs.choice("transform.reference"), "center", "the arrows did not move the choice");
+    assert_eq!(focused(&h), "Center", "the focus did not move with the choice");
+    // At the grid's edge an arrow moves nothing, and the focus stays (egui, given the arrow,
+    // would move it on to what lies that way: the units).
+    h.key_press(egui::Key::ArrowUp);
+    h.run();
+    h.key_press(egui::Key::ArrowUp);
+    h.run();
+    assert_eq!(h.state().state().prefs.choice("transform.reference"), "top");
+    assert_eq!(focused(&h), "Top", "the focus left the grid at its edge");
+    h.key_press(egui::Key::Tab);
+    h.run();
+    assert_eq!(focused(&h), "From", "Tab went through the other points");
+}
+
 /// A unit chosen in the menu below a box's numbers shows them in it in the same frame.
 #[test]
 fn a_unit_chosen_below_a_box_s_numbers_shows_them_in_it_at_once() {
