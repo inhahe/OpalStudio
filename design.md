@@ -461,7 +461,8 @@ curve editors.
   saved one; delete one, from a submenu of its own so that a slip applies rather than
   deletes). What the tool does is said by the status bar too, which, while a transform box
   is open, says instead how the box is used (`transform_ui::HINT`), the canvas being the
-  box's then.
+  box's then; it is cut short, whole on hover, where the items at the bar's right leave it
+  too little room.
 - It scrolls, its scroll area as wide as the pane whatever it holds, so that the scroll bar
   is at the pane's edge.
 

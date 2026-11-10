@@ -587,171 +587,163 @@ impl OpalApp {
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let weak = self.st.palette.weak_text;
-        ui.horizontal(|ui| {
-            // What the canvas does: the transform box's, while one is open, takes its drags.
-            let tool = self.st.tool.info();
-            let (glyph, does) = match self.st.active().and_then(|d| d.transform.as_ref()) {
-                Some(_) => (crate::icons::TRANSFORM, crate::transform_ui::HINT),
-                None => (tool.icon, tool.description),
-            };
-            // A recent notice, for a few seconds, instead of what the canvas does.
-            const SHOWN: std::time::Duration = crate::state::NOTICE_SHOWN;
-            match &self.st.notice {
-                Some((text, at)) if at.elapsed() < SHOWN => {
-                    ui.label(
-                        RichText::new(format!("{}  {text}", crate::icons::INFO)).color(self.st.palette.strong_text),
-                    );
-                    ui.ctx().request_repaint_after(SHOWN.saturating_sub(at.elapsed()));
-                }
-                _ => {
-                    ui.label(RichText::new(format!("{glyph}  {does}")).color(weak));
-                }
+        // What the canvas does: the transform box's, while one is open, takes its drags.
+        let tool = self.st.tool.info();
+        let (glyph, does) = match self.st.active().and_then(|d| d.transform.as_ref()) {
+            Some(_) => (crate::icons::TRANSFORM, crate::transform_ui::HINT),
+            None => (tool.icon, tool.description),
+        };
+        // A recent notice, for a few seconds, instead of what the canvas does.
+        const SHOWN: std::time::Duration = crate::state::NOTICE_SHOWN;
+        let said = match &self.st.notice {
+            Some((text, at)) if at.elapsed() < SHOWN => {
+                ui.ctx().request_repaint_after(SHOWN.saturating_sub(at.elapsed()));
+                RichText::new(format!("{}  {text}", crate::icons::INFO)).color(self.st.palette.strong_text)
             }
+            _ => RichText::new(format!("{glyph}  {does}")).color(weak),
+        };
+        ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Scripts and assistants connected, and a way to send them off; once sent off,
-                // a way to let them in again.
-                if let Some(server) = &self.server {
-                    let n = server.clients();
-                    if n > 0 {
-                        if ui
-                            .small_button("Disconnect")
-                            .on_hover_text(
-                                "Drop every connected script and assistant (each is cut off at its next \
-                                 request), and keep them out until you let them in again.",
-                            )
-                            .clicked()
-                        {
-                            server.disconnect_all();
-                        }
-                        let mut who = if n == 1 {
-                            "A script is connected".to_owned()
-                        } else {
-                            format!("{n} scripts are connected")
-                        };
-                        // A step open is told, so that one a script or assistant forgot is seen.
-                        let steps = server.open_steps();
-                        if !steps.is_empty() {
-                            let names: Vec<String> = steps.iter().map(|s| format!("\u{201c}{s}\u{201d}")).collect();
-                            who += &format!(", in step {}", names.join(", "));
-                        }
-                        ui.label(
-                            RichText::new(format!("{}  {who}", crate::icons::INFO)).color(self.st.palette.strong_text),
-                        );
-                        ui.separator();
-                    } else if server.shut_out() {
-                        if ui
-                            .small_button("Let in")
-                            .on_hover_text("Let scripts and assistants connect again.")
-                            .clicked()
-                        {
-                            server.let_in();
-                        }
-                        ui.label(
-                            RichText::new(format!("{}  Scripts are disconnected", crate::icons::INFO)).color(weak),
-                        );
-                        ui.separator();
-                    }
-                }
-                // The write under way: how far it has got, and a way to stop it.
-                if let Some((w, progress)) = self.st.writer.pending().next() {
-                    let (doing, path) = match w {
-                        crate::writer::Written::Save { path, .. } => ("Saving", path),
-                        crate::writer::Written::Export { path } => ("Exporting", path),
-                    };
-                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    if progress.is_cancelled() {
-                        ui.label(RichText::new("Cancelling…").color(weak));
-                    } else if ui
-                        .small_button("Cancel")
-                        .on_hover_text(format!("Stop {} {name}; the file is left as it was.", doing.to_lowercase()))
-                        .clicked()
-                    {
-                        progress.cancel();
-                    }
-                    if let Some(f) = progress.fraction() {
-                        // As text of its own, so that it is read out too.
-                        let pct = format!("{}%", (f * 100.0).floor());
-                        ui.add(egui::ProgressBar::new(f).desired_width(90.0).desired_height(14.0).text(pct));
-                    }
-                    ui.label(RichText::new(format!("{}  {doing} {name}…", crate::icons::SAVE)).color(weak));
-                    ui.separator();
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-                }
-                let tiles = opal_core::store::status();
-                if tiles.on_disk > 0 {
-                    ui.label(RichText::new(format!("{} on disk", bytes(tiles.on_disk))).color(weak)).on_hover_text(
-                        format!(
-                            "Parts of the open images not looked at lately, kept in a scratch file until they are \
-                             needed again (Preferences › Memory); {} of them are in memory.",
-                            bytes(tiles.resident)
-                        ),
-                    );
-                    ui.separator();
-                }
-                if let Some((used, budget)) = self.st.gpu.memory {
-                    ui.label(RichText::new(format!("GPU {} / {}", bytes(used), bytes(budget))).color(weak))
-                        .on_hover_text(format!(
-                            "{} ({})\nGPU memory this process uses, and the budget the system gives it.",
-                            self.st.gpu.adapter, self.st.gpu.backend
-                        ));
-                    ui.separator();
-                }
-                let (unit, per) = (self.st.unit(), self.st.resolution_unit());
-                let cursor = self.st.cursor_shown;
-                let Some(d) = self.st.active_mut() else { return };
-                let mut pct = f64::from(d.view.zoom) * 100.0;
-                let scope = crate::lengths::image_scope(Some(d.doc()), unit, d.doc().resolution);
-                let r = ui.add(
-                    crate::number_field::NumberField::number(&mut pct, scope)
-                        .range(f64::from(crate::doc::MIN_ZOOM) * 100.0..=f64::from(crate::doc::MAX_ZOOM) * 100.0)
-                        .suffix("%")
-                        .speed(1.0)
-                        .decimals(0, 1)
-                        .remember("zoom"),
-                );
-                if r.changed() {
-                    let c = d.view.viewport * 0.5;
-                    d.view.zoom_about((pct / 100.0) as f32, c);
-                }
-                r.on_hover_text("Zoom: drag or type a value");
-                ui.separator();
-                let (c, ppi) = (d.doc().canvas, d.doc().resolution);
-                let (w, h) = (f64::from(c.width), f64::from(c.height));
-                let mut size = format!("{} × {} px", c.width, c.height);
-                if unit != opal_core::units::Unit::Px {
-                    size = format!("{} ({size})", crate::lengths::show_size(w, h, unit, ppi));
-                }
-                let print = crate::lengths::print_note(c.width, c.height, ppi, unit, per);
-                ui.label(RichText::new(size).color(weak)).on_hover_text(format!(
-                    "The canvas's size. {print} (Preferences › Interface: the unit sizes are shown in.)"
-                ));
-                ui.separator();
-                let shown = crate::lengths::show_resolution_short(ppi, per);
-                let r = ui.add(egui::Button::new(RichText::new(shown).color(weak)).frame(false)).on_hover_text(
-                    "The image's resolution: how large its pixels print, which sizes in units other than pixels \
-                     are counted at. Click to change it (Image › Resize Image), with or without its pixels.",
-                );
-                if r.clicked() {
-                    self.st.queue.push(Cmd::ResizeImage);
-                }
-                ui.separator();
-                // Positions count from the canvas's corner, wherever cropping has put it.
-                if let Some((x, y)) = cursor {
-                    let (x, y) = ((x - c.x) as f64, (y - c.y) as f64);
-                    let at = if unit == opal_core::units::Unit::Px {
-                        format!("{x}, {y}")
-                    } else {
-                        let x = crate::lengths::show(x, unit, ppi);
-                        format!(
-                            "{}, {}",
-                            x.rsplit_once(' ').map_or(x.as_str(), |(n, _)| n),
-                            crate::lengths::show(y, unit, ppi)
-                        )
-                    };
-                    ui.label(RichText::new(at).color(weak));
-                }
+                self.status_items(ui);
+                // In the room the items leave: cut short where it does not fit (whole on
+                // hover), rather than run under them.
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(said).truncate());
+                });
             });
         });
+    }
+
+    /// The status bar's items from its right end: who is connected, the write under way,
+    /// memory, and the active image's zoom, size, resolution and the pointer's place.
+    fn status_items(&mut self, ui: &mut egui::Ui) {
+        let weak = self.st.palette.weak_text;
+        // Scripts and assistants connected, and a way to send them off; once sent off,
+        // a way to let them in again.
+        if let Some(server) = &self.server {
+            let n = server.clients();
+            if n > 0 {
+                if ui
+                    .small_button("Disconnect")
+                    .on_hover_text(
+                        "Drop every connected script and assistant (each is cut off at its next \
+                             request), and keep them out until you let them in again.",
+                    )
+                    .clicked()
+                {
+                    server.disconnect_all();
+                }
+                let mut who =
+                    if n == 1 { "A script is connected".to_owned() } else { format!("{n} scripts are connected") };
+                // A step open is told, so that one a script or assistant forgot is seen.
+                let steps = server.open_steps();
+                if !steps.is_empty() {
+                    let names: Vec<String> = steps.iter().map(|s| format!("\u{201c}{s}\u{201d}")).collect();
+                    who += &format!(", in step {}", names.join(", "));
+                }
+                ui.label(RichText::new(format!("{}  {who}", crate::icons::INFO)).color(self.st.palette.strong_text));
+                ui.separator();
+            } else if server.shut_out() {
+                if ui.small_button("Let in").on_hover_text("Let scripts and assistants connect again.").clicked() {
+                    server.let_in();
+                }
+                ui.label(RichText::new(format!("{}  Scripts are disconnected", crate::icons::INFO)).color(weak));
+                ui.separator();
+            }
+        }
+        // The write under way: how far it has got, and a way to stop it.
+        if let Some((w, progress)) = self.st.writer.pending().next() {
+            let (doing, path) = match w {
+                crate::writer::Written::Save { path, .. } => ("Saving", path),
+                crate::writer::Written::Export { path } => ("Exporting", path),
+            };
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if progress.is_cancelled() {
+                ui.label(RichText::new("Cancelling…").color(weak));
+            } else if ui
+                .small_button("Cancel")
+                .on_hover_text(format!("Stop {} {name}; the file is left as it was.", doing.to_lowercase()))
+                .clicked()
+            {
+                progress.cancel();
+            }
+            if let Some(f) = progress.fraction() {
+                // As text of its own, so that it is read out too.
+                let pct = format!("{}%", (f * 100.0).floor());
+                ui.add(egui::ProgressBar::new(f).desired_width(90.0).desired_height(14.0).text(pct));
+            }
+            ui.label(RichText::new(format!("{}  {doing} {name}…", crate::icons::SAVE)).color(weak));
+            ui.separator();
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        let tiles = opal_core::store::status();
+        if tiles.on_disk > 0 {
+            ui.label(RichText::new(format!("{} on disk", bytes(tiles.on_disk))).color(weak)).on_hover_text(format!(
+                "Parts of the open images not looked at lately, kept in a scratch file until they are \
+                         needed again (Preferences › Memory); {} of them are in memory.",
+                bytes(tiles.resident)
+            ));
+            ui.separator();
+        }
+        if let Some((used, budget)) = self.st.gpu.memory {
+            ui.label(RichText::new(format!("GPU {} / {}", bytes(used), bytes(budget))).color(weak)).on_hover_text(
+                format!(
+                    "{} ({})\nGPU memory this process uses, and the budget the system gives it.",
+                    self.st.gpu.adapter, self.st.gpu.backend
+                ),
+            );
+            ui.separator();
+        }
+        let (unit, per) = (self.st.unit(), self.st.resolution_unit());
+        let cursor = self.st.cursor_shown;
+        let Some(d) = self.st.active_mut() else { return };
+        let mut pct = f64::from(d.view.zoom) * 100.0;
+        let scope = crate::lengths::image_scope(Some(d.doc()), unit, d.doc().resolution);
+        let r = ui.add(
+            crate::number_field::NumberField::number(&mut pct, scope)
+                .range(f64::from(crate::doc::MIN_ZOOM) * 100.0..=f64::from(crate::doc::MAX_ZOOM) * 100.0)
+                .suffix("%")
+                .speed(1.0)
+                .decimals(0, 1)
+                .remember("zoom"),
+        );
+        if r.changed() {
+            let c = d.view.viewport * 0.5;
+            d.view.zoom_about((pct / 100.0) as f32, c);
+        }
+        r.on_hover_text("Zoom: drag or type a value");
+        ui.separator();
+        let (c, ppi) = (d.doc().canvas, d.doc().resolution);
+        let (w, h) = (f64::from(c.width), f64::from(c.height));
+        let mut size = format!("{} × {} px", c.width, c.height);
+        if unit != opal_core::units::Unit::Px {
+            size = format!("{} ({size})", crate::lengths::show_size(w, h, unit, ppi));
+        }
+        let print = crate::lengths::print_note(c.width, c.height, ppi, unit, per);
+        ui.label(RichText::new(size).color(weak)).on_hover_text(format!(
+            "The canvas's size. {print} (Preferences › Interface: the unit sizes are shown in.)"
+        ));
+        ui.separator();
+        let shown = crate::lengths::show_resolution_short(ppi, per);
+        let r = ui.add(egui::Button::new(RichText::new(shown).color(weak)).frame(false)).on_hover_text(
+            "The image's resolution: how large its pixels print, which sizes in units other than pixels \
+                 are counted at. Click to change it (Image › Resize Image), with or without its pixels.",
+        );
+        if r.clicked() {
+            self.st.queue.push(Cmd::ResizeImage);
+        }
+        ui.separator();
+        // Positions count from the canvas's corner, wherever cropping has put it.
+        if let Some((x, y)) = cursor {
+            let (x, y) = ((x - c.x) as f64, (y - c.y) as f64);
+            let at = if unit == opal_core::units::Unit::Px {
+                format!("{x}, {y}")
+            } else {
+                let x = crate::lengths::show(x, unit, ppi);
+                format!("{}, {}", x.rsplit_once(' ').map_or(x.as_str(), |(n, _)| n), crate::lengths::show(y, unit, ppi))
+            };
+            ui.label(RichText::new(at).color(weak));
+        }
     }
 }
 

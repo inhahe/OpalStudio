@@ -247,6 +247,28 @@ fn the_status_bar_and_the_heading_say_what_the_canvas_does() {
     h.run();
     let shown = said(&h, crate::transform_ui::HINT);
     assert!(shown.len() == 1 && in_status_bar(&shown[0]), "the box's hint: {shown:?}");
+    // And the box's heading says it on hover.
+    h.get(on_side(by().label("Paste").role(egui::accesskit::Role::Label), false)).hover();
+    for _ in 0..8 {
+        h.step();
+    }
+    assert_eq!(said(&h, crate::transform_ui::HINT).len(), 2, "the box's heading does not say on hover how it is used");
+}
+
+/// In a window as narrow as one can be, what the canvas does is cut short in the status bar
+/// rather than run under the items at its right.
+#[test]
+fn the_status_bar_cuts_short_what_does_not_fit() {
+    use egui_kittest::kittest::by;
+    let _gpu = gpu_lock();
+    let mut h = harness_of([720.0, 600.0]);
+    pasting(&mut h);
+    h.run();
+    let start = &crate::transform_ui::HINT[..20];
+    let hint = h.get(by().label_contains(start).predicate(|n| n.bounding_box().is_some())).rect();
+    // The leftmost of the items: the image's resolution.
+    let resolution = h.get(by().label("100 ppi")).rect();
+    assert!(hint.right() <= resolution.left(), "the hint runs under the items: {hint:?} {resolution:?}");
 }
 
 /// The Presets menu beside a tool's name saves its settings under a name, applies them, and
