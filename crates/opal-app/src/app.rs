@@ -44,6 +44,9 @@ pub struct OpalApp {
     /// Whether a field had the keyboard at the end of the last frame: the keys pressed since
     /// are its, though egui lets go of the focus on Esc before the frame begins.
     field_had_keys: bool,
+    /// Whether the window has been fitted to its monitor ([`fit_to_monitor`]): once, at the
+    /// start, as soon as the monitor's size is known.
+    fitted_to_monitor: bool,
     /// Whether settings are saved (not in tests).
     persist: bool,
     /// The API's connection for scripts and assistants (not in tests); `None` if it could
@@ -106,6 +109,7 @@ impl OpalApp {
             last_gpu_poll: None,
             alt_down: false,
             field_had_keys: false,
+            fitted_to_monitor: false,
             alt_alone: false,
             persist,
             server,
@@ -750,6 +754,9 @@ impl OpalApp {
 impl eframe::App for OpalApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if !self.fitted_to_monitor {
+            self.fitted_to_monitor = fit_to_monitor(&ctx);
+        }
         let before = self.signature();
         // The scheme can change under us when following the system's.
         self.st.palette = theme::palette(self.st.scheme(&ctx));
@@ -907,6 +914,21 @@ fn find_docs_container(tiles: &Tiles<Pane>) -> Option<TileId> {
     tiles.parent_of(pane)
 }
 
+/// Room a monitor keeps for its taskbar, in points (Windows 11's is 48).
+const TASKBAR: f32 = 48.0;
+
+/// Maximizes the window if it does not fit its monitor with room for a taskbar, as the
+/// starting size (`main.rs`) does not on a small screen, or a full-HD one at 125%. Returns
+/// whether it could tell (the window's and the monitor's sizes known).
+fn fit_to_monitor(ctx: &egui::Context) -> bool {
+    let (outer, monitor) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().monitor_size));
+    let (Some(outer), Some(monitor)) = (outer, monitor) else { return false };
+    if outer.width() > monitor.x || outer.height() + TASKBAR > monitor.y {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+    }
+    true
+}
+
 /// The margin between the side panels' edges and what they show, in points.
 const PANE_INSET: i8 = 8;
 
@@ -931,7 +953,7 @@ fn default_tree(st: &AppState) -> egui_tiles::Tree<Pane> {
     let history = tiles.insert_pane(Pane::History);
     let console = tiles.insert_pane(Pane::Console);
     let lh = tiles.insert_tab_tile(vec![layers, history, console]);
-    // Halves: in a window of a full-HD screen at 125%, so the tool settings show a box's
+    // Halves: in a window maximized on a full-HD screen at 125%, so the tool settings show a box's
     // position and size without scrolling (the crop box's after the crop tool's own settings).
     let mut right = egui_tiles::Linear::new(egui_tiles::LinearDir::Vertical, vec![tool_tabs, lh]);
     right.shares.set_share(tool_tabs, 0.5);

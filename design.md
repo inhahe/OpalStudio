@@ -465,6 +465,10 @@ curve editors.
   too little room.
 - It scrolls, its scroll area as wide as the pane whatever it holds, so that the scroll bar
   is at the pane's edge.
+- **The window** starts 1440 × 900 points, maximized instead where that does not fit the
+  monitor with room for a taskbar (a full-HD screen at 125% is 864 points tall). The
+  starting layout's split gives the tool settings half the right column, which shows the
+  crop box's numbers in such a window, maximized.
 
 ### Look
 
@@ -653,7 +657,7 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   (the unit, the reference point, and what the position counts from), so that the tool
   settings, which have half the right column in the starting layout, show a paste's
   numbers without scrolling (the crop box's come after the crop tool's own settings, and
-  show so in a window of a full-HD screen at 125%); another unit, point or origin chosen shows
+  show so in a window maximized on a full-HD screen at 125%); another unit, point or origin chosen shows
   them measured so in the same frame (egui is asked for another pass). Each grid of
   points is one stop for Tab, the point chosen, and the arrow keys move the choice, as in
   a group of radio buttons. The position is that of the box's **reference point** (a 3 × 3 grid in

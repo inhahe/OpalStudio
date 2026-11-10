@@ -201,13 +201,13 @@ fn the_tool_settings_show_a_paste_s_numbers_without_scrolling() {
     in_the_tool_settings(&h, &[("x", p.x), ("y", p.y), ("width", p.width), ("height", p.height)]);
 }
 
-/// In the starting layout, in a window of a full-HD screen at 125% (860 points tall, as the
-/// harness's), the tool settings show the crop box's size without scrolling, after the crop
-/// tool's own settings.
+/// In the starting layout, in a window maximized on a full-HD screen at 125% (864 points tall,
+/// less the taskbar's 48 and the title bar's 31 or so), the tool settings show the crop box's
+/// size without scrolling, after the crop tool's own settings.
 #[test]
 fn the_tool_settings_show_the_crop_box_s_numbers_without_scrolling() {
     let _gpu = gpu_lock();
-    let mut h = harness();
+    let mut h = harness_of([1400.0, 780.0]);
     h.state_mut().state_mut().tool = crate::tools::ToolId::Crop;
     image_of(&mut h, 400, 300);
     h.run();
@@ -253,6 +253,32 @@ fn the_status_bar_and_the_heading_say_what_the_canvas_does() {
         h.step();
     }
     assert_eq!(said(&h, crate::transform_ui::HINT).len(), 2, "the box's heading does not say on hover how it is used");
+}
+
+/// The window is maximized at the start where its starting size does not fit the monitor
+/// (a full-HD screen at 125%), and left as it is where it does (at 100%), once.
+#[test]
+fn the_window_is_maximized_where_it_does_not_fit_the_monitor() {
+    let _gpu = gpu_lock();
+    let maximizes = |monitor: [f32; 2]| {
+        let mut h = harness();
+        let root = h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default();
+        root.monitor_size = Some(monitor.into());
+        root.outer_rect = Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1456.0, 940.0)));
+        let asked = |h: &Harness<'static, OpalApp>| {
+            h.output()
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .is_some_and(|v| v.commands.iter().any(|c| matches!(c, egui::ViewportCommand::Maximized(true))))
+        };
+        h.step();
+        let first = asked(&h);
+        h.step();
+        assert!(!asked(&h), "it asked again");
+        first
+    };
+    assert!(maximizes([1536.0, 864.0]), "a window taller than the screen was left so");
+    assert!(!maximizes([1920.0, 1080.0]), "a window that fits was maximized");
 }
 
 /// In a window as narrow as one can be, what the canvas does is cut short in the status bar
