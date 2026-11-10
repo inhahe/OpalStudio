@@ -73,12 +73,7 @@ fn a_paper_size_makes_an_image_of_its_size_at_its_resolution() {
 fn the_rulers_take_a_strip_beside_the_view_and_ctrl_r_hides_them() {
     let _gpu = gpu_lock();
     let mut h = harness();
-    h.state_mut().state_mut().create_image(&crate::state::NewImage {
-        width: 400,
-        height: 300,
-        background: crate::state::Background::White,
-        resolution: 100.0,
-    });
+    new_image(&mut h, 400, 300, 100.0);
     h.state_mut().state_mut().set_unit(opal_core::units::Unit::In);
     h.run();
     let view = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().view.screen_rect;
@@ -97,12 +92,7 @@ fn the_rulers_take_a_strip_beside_the_view_and_ctrl_r_hides_them() {
 fn counting_from_the_layer_being_moved_counts_from_where_it_was() {
     let _gpu = gpu_lock();
     let mut h = harness();
-    h.state_mut().state_mut().create_image(&crate::state::NewImage {
-        width: 1000,
-        height: 300,
-        background: crate::state::Background::White,
-        resolution: 100.0,
-    });
+    new_image(&mut h, 1000, 300, 100.0);
     // A paste put at a fractional place left of the canvas (x -20.3) and applied: a layer
     // whose bounds are fractional.
     put_on_clipboard(&mut h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
@@ -152,20 +142,14 @@ fn counting_from_the_layer_being_moved_counts_from_where_it_was() {
 fn the_print_size_button_on_a_placed_file_switches_it_and_is_remembered() {
     let _gpu = gpu_lock();
     let mut h = harness();
-    h.state_mut().state_mut().create_image(&crate::state::NewImage {
-        width: 400,
-        height: 300,
-        background: crate::state::Background::White,
-        resolution: 100.0,
-    });
+    new_image(&mut h, 400, 300, 100.0);
     // A 90-pixel file at 300 ppi: 30 pixels at its print size here.
     let path = std::env::temp_dir().join(format!("opal-ui-place-{}.jpg", std::process::id()));
     crate::paste::testing::white_jpeg(&path, 90, 60, Some([300, 300]));
     h.state_mut().state_mut().place_file(&path, None, true).unwrap();
     std::fs::remove_file(&path).ok();
     h.run();
-    let width =
-        |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().transform.as_ref().unwrap().params().width;
+    let width = |h: &Harness<'static, OpalApp>| box_params(h).width;
     assert_eq!(width(&h), 30.0);
     h.get_by_label(&crate::icons::PRINT_SIZE.to_string()).click();
     h.run();
@@ -182,37 +166,40 @@ fn a_panel_cut_short_shows_its_scroll_bar() {
     let mut h = harness();
     pasting(&mut h);
     h.run();
-    // Light marks right of what the pane holds, beside the first rows (where the handle is,
-    // nothing scrolled yet).
+    // Marks unlike the panel between what the pane holds and its right edge, beside the first
+    // rows (where the handle is, nothing scrolled yet).
     let words = h.get(on_side(by().label_contains("Drag the box to move"), false)).rect();
+    let pane = h.state().pane_rect(crate::app::Pane::ToolSettings);
+    let panel = h.ctx.global_style().visuals.panel_fill;
     let img = render(&mut h, "scroll-bar");
-    let ppp = img.width() as f32 / 1400.0;
-    let px = |v: f32| (v * ppp) as u32;
-    let bar = (px(words.right() + 1.0)..img.width())
+    let px = |v: f32| (v * h.ctx.pixels_per_point()) as u32;
+    let bar = (px(words.right() + 1.0)..px(pane.right()))
         .flat_map(|x| (px(words.top())..px(words.bottom())).map(move |y| (x, y)))
-        .filter(|&(x, y)| img.get_pixel(x, y)[0] > 70)
+        .filter(|&(x, y)| img.get_pixel(x, y)[0].abs_diff(panel.r()) > 30)
         .count();
     assert!(bar > 0, "no scroll bar shows right of the tool settings");
 }
 
-/// In the starting layout, the tool settings show a box's position and size without scrolling
-/// (they are short there, above the layers).
+/// Asserts that the tool settings show each of `fields` (a name, and the value its field
+/// shows) whole, without scrolling.
+fn in_the_tool_settings(h: &Harness<'static, OpalApp>, fields: &[(&str, f64)]) {
+    let pane = h.state().pane_rect(crate::app::Pane::ToolSettings);
+    for &(what, v) in fields {
+        let field = h.get(field_showing(v, 1e-6, false)).rect();
+        assert!(pane.contains_rect(field), "the {what} field is out of sight: {field:?}, the pane {pane:?}");
+    }
+}
+
+/// In the starting layout, the tool settings (short there, above the layers) show a paste's
+/// position and size without scrolling.
 #[test]
-fn the_tool_settings_show_a_box_s_numbers_first() {
-    use egui_kittest::kittest::by;
+fn the_tool_settings_show_a_paste_s_numbers_without_scrolling() {
     let _gpu = gpu_lock();
     let mut h = harness();
     pasting(&mut h);
     h.run();
-    let p = h.state().state().active().unwrap().transform.as_ref().unwrap().params();
-    let layers = h.get(on_side(by().label("Opacity").role(egui::accesskit::Role::Label), false)).rect();
-    for (what, v) in [("x", p.x), ("y", p.y), ("width", p.width), ("height", p.height)] {
-        let field = h.get(field_showing(v, 1e-6, false)).rect();
-        assert!(
-            field.bottom() < layers.top(),
-            "the {what} field is out of sight, below the layers: {field:?} {layers:?}"
-        );
-    }
+    let p = box_params(&h);
+    in_the_tool_settings(&h, &[("x", p.x), ("y", p.y), ("width", p.width), ("height", p.height)]);
 }
 
 /// A unit chosen in the menu below a box's numbers shows them in it in the same frame.
@@ -225,7 +212,7 @@ fn a_unit_chosen_below_a_box_s_numbers_shows_them_in_it_at_once() {
     pasting(&mut h);
     h.state_mut().state_mut().box_numbers = true;
     h.run();
-    let x = h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
+    let x = box_params(&h).x;
     h.get(on_side(by().label("Units").role(egui::accesskit::Role::ComboBox), true)).click();
     h.run();
     h.get_by_label(Unit::In.name()).click();
@@ -246,8 +233,7 @@ fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
     // Typed into the numbers by the box (the tool settings show the same).
     h.state_mut().state_mut().box_numbers = true;
     h.run();
-    let params =
-        |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().transform.as_ref().unwrap().params();
+    let params = |h: &Harness<'static, OpalApp>| box_params(h);
     let x = |h: &Harness<'static, OpalApp>| params(h).x;
     let at = x(&h);
     // The From label is level with the menu it names, and the grid of points the position
@@ -256,7 +242,7 @@ fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
     let label = by_the_box(by().label("From").role(egui::accesskit::Role::Label));
     let menu = by_the_box(by().label("From").role(egui::accesskit::Role::ComboBox));
     assert!(
-        (label.center().y - menu.center().y).abs() < 3.0,
+        (label.center().y - menu.center().y).abs() < 1.0,
         "the From label is not beside its menu: {label:?} {menu:?}"
     );
     let (first, last) = (by_the_box(by().label("From: Top left")), by_the_box(by().label("From: Bottom left")));
@@ -321,7 +307,7 @@ fn a_field_brings_back_what_was_entered_in_an_earlier_session() {
     pasting(&mut h);
     h.state_mut().state_mut().box_numbers = true;
     h.run();
-    let at = h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
+    let at = box_params(&h).x;
     h.get(box_field(at, 1e-6)).click();
     h.run();
     h.key_press(egui::Key::ArrowUp);
@@ -356,7 +342,7 @@ fn a_field_left_untouched_changes_nothing_and_tab_enters_what_was_typed() {
         d.set_box(m, None);
     }
     h.run();
-    let x = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
+    let x = |h: &Harness<'static, OpalApp>| box_params(h).x;
     let field = |v: f64| box_field(v, 1e-3);
     // Clicked, and left by Tab with nothing typed: still 100 px, not 0.333 in.
     h.get(field(1.0 / 3.0)).click();
@@ -384,14 +370,9 @@ fn an_expression_typed_into_the_box_places_the_layer_so_again() {
     use egui_kittest::kittest::by;
     let _gpu = gpu_lock();
     let mut h = harness();
-    h.state_mut().state_mut().create_image(&crate::state::NewImage {
-        width: 400,
-        height: 300,
-        background: crate::state::Background::White,
-        resolution: 100.0,
-    });
+    new_image(&mut h, 400, 300, 100.0);
     h.state_mut().state_mut().box_numbers = true;
-    let x = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
+    let x = |h: &Harness<'static, OpalApp>| box_params(h).x;
     // Pasted, its x typed as what names the canvas, entered, and the box applied.
     let paste = |h: &mut Harness<'static, OpalApp>, drag: bool| {
         put_on_clipboard(h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
@@ -534,7 +515,7 @@ fn the_readme_screenshot() {
     h.run();
     h.run();
     // Its x being typed as what names the opal: what it comes to shows below.
-    let at = h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
+    let at = box_params(&h).x;
     let shown = opal_core::units::Unit::Mm.from_px(at, 300.0);
     type_into(&mut h, field_showing(shown, 1e-2, false), "Opal.right + 5mm");
     // The pointer away, so that it hides none of it.
@@ -621,12 +602,7 @@ fn the_print_size_button_says_why_it_cannot_switch() {
 fn the_resolution_in_the_status_bar_opens_resize_image() {
     let _gpu = gpu_lock();
     let mut h = harness();
-    h.state_mut().state_mut().create_image(&crate::state::NewImage {
-        width: 40,
-        height: 30,
-        background: crate::state::Background::White,
-        resolution: 150.0,
-    });
+    new_image(&mut h, 40, 30, 150.0);
     h.run();
     h.get_by_label("150 ppi").click();
     h.run();
@@ -676,12 +652,7 @@ fn command_search_finds_and_runs_a_command() {
 fn a_white_image_draws_white_on_the_backdrop() {
     let _gpu = gpu_lock();
     let mut h = harness();
-    h.state_mut().state_mut().create_image(&crate::state::NewImage {
-        width: 400,
-        height: 300,
-        background: crate::state::Background::White,
-        resolution: opal_core::units::DEFAULT_PPI,
-    });
+    new_image(&mut h, 400, 300, opal_core::units::DEFAULT_PPI);
     h.run();
     let img = render(&mut h, "white-canvas");
     // The middle of the canvas is the white image; just outside it is the backdrop.
@@ -807,12 +778,7 @@ fn render_the_main_states() {
 fn keytips_open_a_tab_and_run_a_command() {
     let _gpu = gpu_lock();
     let mut h = harness();
-    h.state_mut().state_mut().create_image(&crate::state::NewImage {
-        width: 32,
-        height: 32,
-        background: crate::state::Background::White,
-        resolution: opal_core::units::DEFAULT_PPI,
-    });
+    new_image(&mut h, 32, 32, opal_core::units::DEFAULT_PPI);
     h.run();
     // With the keytips shown, H picks the Home tab, and N runs its New Layer.
     h.state_mut().state_mut().ribbon.keytips = crate::state::Keytips::Tabs;
@@ -1007,20 +973,25 @@ fn pasted(w: u32, h: u32, rgba: [f32; 4]) -> crate::clipboard::Pasted {
 /// Opens the box on a 50 × 40 red paste in a new white image, 400 × 300 at 100 ppi (for the
 /// next run).
 fn pasting(h: &mut Harness<'static, OpalApp>) {
-    h.state_mut().state_mut().create_image(&crate::state::NewImage {
-        width: 400,
-        height: 300,
-        background: crate::state::Background::White,
-        resolution: 100.0,
-    });
+    new_image(h, 400, 300, 100.0);
     put_on_clipboard(h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
     h.event(egui::Event::Paste(String::new()));
 }
 
+/// The transform box's numbers (in pixels, of its top-left corner from the canvas's).
+fn box_params(h: &Harness<'static, OpalApp>) -> crate::transform::Params {
+    h.state().state().active().expect("an image is open").transform.as_ref().expect("the box is open").params()
+}
+
+/// Where, across the window, the numbers by the box end and the side panels begin (which
+/// take the right 22% of the window: from 1092 in the harnesses, all 1400 points wide).
+const PANELS_LEFT: f64 = 1000.0;
+
 /// What `b` finds among the numbers by the box (left of the side panels) if `by_the_box`,
-/// else in the side panels (where the tool settings show the same).
+/// else in the side panels (where the tool settings show the same). `b` is not to have a
+/// predicate of its own: this one takes its place.
 fn on_side(b: egui_kittest::kittest::By<'_>, by_the_box: bool) -> egui_kittest::kittest::By<'_> {
-    b.predicate(move |n| n.bounding_box().is_some_and(|r| (r.x0 < 1000.0) == by_the_box))
+    b.predicate(move |n| n.bounding_box().is_some_and(|r| (r.x0 < PANELS_LEFT) == by_the_box))
 }
 
 /// The field that shows `v`, to within `within`: of the numbers by the box (left of the side
@@ -1029,7 +1000,7 @@ fn field_showing(v: f64, within: f64, by_the_box: bool) -> egui_kittest::kittest
     egui_kittest::kittest::by().predicate(move |n| {
         n.role() == egui::accesskit::Role::SpinButton
             && n.numeric_value().is_some_and(|x| (x - v).abs() < within)
-            && n.bounding_box().is_some_and(|b| (b.x0 < 1000.0) == by_the_box)
+            && n.bounding_box().is_some_and(|b| (b.x0 < PANELS_LEFT) == by_the_box)
     })
 }
 
@@ -1053,13 +1024,18 @@ fn put_on_clipboard(h: &mut Harness<'static, OpalApp>, p: crate::clipboard::Past
 }
 
 fn image_of(h: &mut Harness<'static, OpalApp>, w: u32, ht: u32) {
+    new_image(h, w, ht, opal_core::units::DEFAULT_PPI);
+    h.run();
+}
+
+/// A new white image `w` × `ht` pixels at `ppi` (for the next run).
+fn new_image(h: &mut Harness<'static, OpalApp>, w: u32, ht: u32, ppi: f64) {
     h.state_mut().state_mut().create_image(&crate::state::NewImage {
         width: w,
         height: ht,
         background: crate::state::Background::White,
-        resolution: opal_core::units::DEFAULT_PPI,
+        resolution: ppi,
     });
-    h.run();
 }
 
 #[test]
@@ -1118,11 +1094,11 @@ fn the_numbers_button_by_the_box_opens_its_fields_in_the_unit_chosen() {
     // (By the box, which is the last: the tool settings show the same fields.)
     h.query_all_by_label("Fit inside").last().unwrap().click();
     h.run();
-    let p = h.state().state().active().unwrap().transform.as_ref().unwrap().params();
+    let p = box_params(&h);
     assert_eq!((p.x, p.y, p.width, p.height), (0.0, 10.0, 100.0, 80.0));
     h.query_all_by_label("Fill").last().unwrap().click();
     h.run();
-    let p = h.state().state().active().unwrap().transform.as_ref().unwrap().params();
+    let p = box_params(&h);
     assert_eq!((p.x, p.y, p.width, p.height), (-12.5, 0.0, 125.0, 100.0));
     // Its position given at its center: filling 100 × 100 from the canvas's corner, the
     // 125 × 100 box's top-left corner is 0.125 in left of it, and its center 0.5 in in.

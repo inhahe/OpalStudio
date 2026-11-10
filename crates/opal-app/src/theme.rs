@@ -89,6 +89,7 @@ pub fn apply(ctx: &egui::Context, choice: egui::ThemePreference) {
         // is kept for them beside what scrolls, which they would otherwise cover.
         style.spacing.scroll = egui::style::ScrollStyle {
             floating_width: 4.0,
+            bar_width: 8.0,
             floating_allocated_width: 8.0,
             foreground_color: true,
             dormant_handle_opacity: 0.4,

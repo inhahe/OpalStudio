@@ -115,6 +115,7 @@ fn base_name(doc: &Document, base: Base) -> String {
 
 /// How a box's numbers are measured, which its fields can change: in what unit, by which of
 /// the box's points (an index into [`POINTS`]), and from what.
+#[derive(Clone, Copy, PartialEq)]
 pub struct Measure {
     pub unit: Unit,
     pub reference: usize,
@@ -162,7 +163,7 @@ pub fn fields(
         Base::Layer(_) => format!("“{name}”"),
     };
     let from = format!("{} of {of}", POINTS[m.origin.point].1.to_lowercase());
-    let measured = (m.unit, m.reference, m.origin);
+    let measured = *m;
     egui::Grid::new(("box-numbers", how.salt)).num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
         // The numbers first, how they are measured after them: in a short panel, what shows
         // without scrolling is what is typed in most.
@@ -246,7 +247,7 @@ pub fn fields(
     });
     // The numbers above were shown measured as before: shown again at once, measured so now
     // (by the caller, which measures them).
-    if (m.unit, m.reference, m.origin) != measured {
+    if *m != measured {
         ui.ctx().request_discard("a box's numbers are measured otherwise");
     }
     *p != before
@@ -334,12 +335,13 @@ pub fn transform(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
         let moved = s.edited(&p, &Params { x: q.x + cx, y: q.y + cy, ..q }, at);
         d.set_box(moved, None);
     }
-    // What was typed, as it was measured, for the layers to be placed so again.
+    // What was typed, as it was measured (as the fields showed it: a unit, point or origin
+    // chosen below them counts from the next frame), for the layers to be placed so again.
     if let Some(s) = d.transform.as_mut() {
         for (number, text) in entered {
             let Ok(expr) = opal_core::expr::Expr::parse(&text) else { continue };
             let keep = aspect && matches!(number, BoxNumber::Width | BoxNumber::Height);
-            s.given.push(crate::transform::Given { number, expr, unit: m.unit, anchor: reference, origin, keep });
+            s.given.push(crate::transform::Given { number, expr, unit, anchor: reference, origin, keep });
         }
     }
     // Kept only when chosen: one shown in its stead (a layer gone) is not the user's choice.

@@ -170,6 +170,13 @@ impl OpalApp {
         l.shares.set_share(tabs, share);
     }
 
+    /// Where `pane` was shown in the last frame (below its tab), for tests.
+    #[cfg(test)]
+    pub fn pane_rect(&self, pane: Pane) -> egui::Rect {
+        let tile = self.tree.tiles.find_pane(&pane).expect("the pane is in the tree");
+        self.tree.tiles.rect(tile).expect("the pane was shown")
+    }
+
     /// Whether the start page is in the panel tree, for tests.
     #[cfg(test)]
     pub fn shows_welcome(&self) -> bool {
