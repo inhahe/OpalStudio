@@ -242,7 +242,7 @@ impl OpalApp {
         }
         for t in ToolId::ALL {
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, t.info().key)) {
-                self.st.tool = t;
+                self.st.set_tool(t);
             }
         }
     }
@@ -297,7 +297,7 @@ impl OpalApp {
     /// it or the selected layers by a pixel (or, with Shift, by the nudge distance).
     fn editing_keys(&mut self, ctx: &egui::Context) {
         let far = self.st.prefs.f64("nav.nudge").round() as i64;
-        let crop_tool = self.st.tool == ToolId::Crop;
+        let crop_tool = self.st.tool() == ToolId::Crop;
         let crop_delete = self.st.tool_settings(ToolId::Crop).bool("crop.delete");
         let sampling = crate::prefs::sampling(&self.st.prefs, "transform");
         let Some(d) = self.st.active_mut() else { return };
@@ -576,7 +576,7 @@ impl OpalApp {
         for t in ToolId::ALL {
             st.tool_settings(t).revision().hash(&mut h);
         }
-        st.tool.hash(&mut h);
+        st.tool().hash(&mut h);
         (st.ribbon.tab, &st.ribbon.keytips, st.renaming.is_some(), st.messages.len(), st.confirm.is_some())
             .hash(&mut h);
         (st.new_image.is_some(), st.export.is_some(), st.prefs_open, st.about_open, st.gallery_open, &st.help)
@@ -592,7 +592,7 @@ impl OpalApp {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let weak = self.st.palette.weak_text;
         // What the canvas does: the transform box's, while one is open, takes its drags.
-        let tool = self.st.tool.info();
+        let tool = self.st.tool().info();
         let (glyph, does) = match self.st.active().and_then(|d| d.transform.as_ref()) {
             Some(_) => (crate::icons::TRANSFORM, crate::transform_ui::HINT),
             None => (tool.icon, tool.description),

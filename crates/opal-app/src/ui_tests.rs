@@ -208,7 +208,7 @@ fn the_tool_settings_show_a_paste_s_numbers_without_scrolling() {
 fn the_tool_settings_show_the_crop_box_s_numbers_without_scrolling() {
     let _gpu = gpu_lock();
     let mut h = harness_of([1400.0, 780.0]);
-    h.state_mut().state_mut().tool = crate::tools::ToolId::Crop;
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Crop);
     image_of(&mut h, 400, 300);
     h.run();
     in_the_tool_settings(&h, &[("width", 400.0), ("height", 300.0)]);
@@ -221,7 +221,7 @@ fn the_status_bar_and_the_heading_say_what_the_canvas_does() {
     use egui_kittest::kittest::by;
     let _gpu = gpu_lock();
     let mut h = harness();
-    h.state_mut().state_mut().tool = crate::tools::ToolId::Crop;
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Crop);
     image_of(&mut h, 400, 300);
     h.run();
     // Where it shows (egui also gives each hover text to screen readers, in a node not drawn).
@@ -299,7 +299,7 @@ fn the_presets_menu_saves_applies_and_deletes_a_tool_s_settings() {
     use egui_kittest::kittest::by;
     let _gpu = gpu_lock();
     let mut h = harness();
-    h.state_mut().state_mut().tool = ToolId::Crop;
+    h.state_mut().state_mut().set_tool(ToolId::Crop);
     image_of(&mut h, 400, 300);
     let guides = |h: &Harness<'static, OpalApp>| h.state().state().tool_settings[&ToolId::Crop].get("crop.guides");
     let set_guides = |h: &mut Harness<'static, OpalApp>, v: &str| {
@@ -313,7 +313,7 @@ fn the_presets_menu_saves_applies_and_deletes_a_tool_s_settings() {
         h.get(on_side(by().label("Presets").role(egui::accesskit::Role::Button), false)).click();
         h.run();
     };
-    let naming = |h: &Harness<'static, OpalApp>| h.state().state().preset_name.clone().map(|(_, n)| n);
+    let naming = |h: &Harness<'static, OpalApp>| h.state().state().preset_name.clone();
     let save_as = |h: &mut Harness<'static, OpalApp>| {
         menu(h);
         h.get_by_label("Save as preset…").click();
@@ -372,9 +372,9 @@ fn the_presets_menu_saves_applies_and_deletes_a_tool_s_settings() {
     assert_eq!(naming(&h).as_deref(), Some(""), "the name was not shown again");
     assert!(h.query(focused()).is_none(), "the name took the keyboard long after it was asked to");
     // A name typed for one tool is let go when another is chosen.
-    h.state_mut().state_mut().tool = ToolId::Move;
+    h.state_mut().state_mut().set_tool(ToolId::Move);
     h.run();
-    h.state_mut().state_mut().tool = ToolId::Crop;
+    h.state_mut().state_mut().set_tool(ToolId::Crop);
     h.run();
     assert!(naming(&h).is_none(), "a name typed for the crop tool was kept for another");
     // Applied from the menu.
@@ -1378,7 +1378,7 @@ fn the_numbers_button_by_the_box_opens_its_fields_in_the_unit_chosen() {
     assert!(shows(&h, -3.5) >= 1 && shows(&h, -2.5) >= 1, "not counted from the canvas's bottom-right corner");
     // The crop box has them too.
     h.key_press(egui::Key::Enter);
-    h.state_mut().state_mut().tool = crate::tools::ToolId::Crop;
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Crop);
     h.run();
     assert!(shows(&h, 4.0) >= 1, "the crop box's width is not shown");
     render(&mut h, "crop-numbers");
@@ -2453,7 +2453,7 @@ fn a_view_taking_a_while_says_so() {
     assert!(h.query_by_label("Drawing…").is_some(), "the view taking a while did not say so");
     render(&mut h, "drawing");
     // The sign takes no presses: a drag begun on it pans the canvas.
-    h.state_mut().state_mut().tool = crate::tools::ToolId::Hand;
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Hand);
     let before = h.state().state().active().unwrap().view.offset;
     let on_sign = h.get_by_label("Drawing…").rect().center();
     let to = on_sign + egui::vec2(-60.0, 40.0);

@@ -108,7 +108,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let palette = st.palette;
     let unit = st.unit();
     let space = ctx.input(|i| i.key_down(Key::Space)) && !ctx.egui_wants_keyboard_input();
-    let chosen = st.tool;
+    let chosen = st.tool();
     let tool = if space { ToolId::Hand } else { chosen };
     let mut notice = None;
     let Some(d) = st.doc_mut(id) else { return };

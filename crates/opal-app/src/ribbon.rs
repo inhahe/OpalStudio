@@ -528,7 +528,7 @@ fn tools_group(ui: &mut egui::Ui, st: &mut AppState, area: Rect, single: bool) -
 pub fn tool_button(ui: &mut egui::Ui, st: &mut AppState, t: ToolId, rect: Rect) {
     let info = t.info();
     let r = ui.interact(rect, ui.scope_id().with(("tool", info.id)), Sense::click());
-    let on = st.tool == t;
+    let on = st.tool() == t;
     r.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, on, format!("{} tool", info.name)));
     paint_button_bg(ui, st, &r, rect, on, true);
     ui.painter().text(
@@ -550,7 +550,7 @@ pub fn tool_button(ui: &mut egui::Ui, st: &mut AppState, t: ToolId, rect: Rect) 
         st.ribbon.hovered_tool = Some(t);
     }
     if r.clicked() {
-        st.tool = t;
+        st.set_tool(t);
     }
 }
 

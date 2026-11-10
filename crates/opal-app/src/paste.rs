@@ -201,7 +201,7 @@ impl AppState {
     /// Whether Esc goes to a box on the image shown (a transform box, or the crop box while
     /// cropping) rather than to a paste.
     pub(crate) fn box_takes_escape(&self) -> bool {
-        let crop_tool = self.tool == crate::tools::ToolId::Crop;
+        let crop_tool = self.tool() == crate::tools::ToolId::Crop;
         self.active().is_some_and(|d| d.transform.is_some() || (crop_tool && d.crop.is_some()))
     }
 

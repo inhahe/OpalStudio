@@ -566,16 +566,12 @@ pub fn history_panel(ui: &mut egui::Ui, st: &mut AppState) {
 // ---- Tool settings --------------------------------------------------------------------
 
 pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
-    // A preset's name typed for one tool is let go when another is chosen.
-    if st.preset_name.as_ref().is_some_and(|(named, _)| *named != st.tool) {
-        st.preset_name = None;
-    }
     // While the transform box is open, its settings come first.
     if st.active().is_some_and(|d| d.transform.is_some()) {
         crate::transform_ui::settings(ui, st);
         return;
     }
-    let tool = st.tool;
+    let tool = st.tool();
     let info = tool.info();
     let has_settings = !info.settings.is_empty();
     ui.horizontal(|ui| {
@@ -619,7 +615,7 @@ pub fn heading(ui: &mut egui::Ui, glyph: char, name: &str, does: &str) {
 /// A menu of the current tool's presets: saving its settings under a name (typed below the
 /// heading, [`preset_naming`]), applying saved ones, and deleting them.
 fn presets_menu(ui: &mut egui::Ui, st: &mut AppState) {
-    let tool = st.tool;
+    let tool = st.tool();
     let names: Vec<String> = st.presets.get(&tool).map(|p| p.keys().cloned().collect()).unwrap_or_default();
     let weak = st.palette.weak_text;
     let (mut apply, mut delete, mut save) = (None, None, false);
@@ -650,10 +646,8 @@ fn presets_menu(ui: &mut egui::Ui, st: &mut AppState) {
     .response
     .on_hover_text("Save these settings under a name, or apply or delete saved ones");
     if save {
-        // A name being typed for this tool already is kept, to be finished.
-        if !st.preset_name.as_ref().is_some_and(|(t, _)| *t == tool) {
-            st.preset_name = Some((tool, String::new()));
-        }
+        // A name being typed already (for this tool) is kept, to be finished.
+        st.preset_name.get_or_insert_with(String::new);
         // The field takes the keyboard in the next pass: in this one, the click on the menu is
         // a click elsewhere, which would take it away again.
         let pass = ui.ctx().cumulative_pass_nr();
@@ -684,7 +678,7 @@ fn preset_name_id() -> egui::Id {
 /// settings under it or not. Enter in the field saves, Esc in it does not; a name typed for
 /// a tool is let go when another is chosen.
 fn preset_naming(ui: &mut egui::Ui, st: &mut AppState) {
-    let tool = st.tool;
+    let tool = st.tool();
     // The keyboard, given once, as Save as preset… asked in the pass before, so that the field
     // is drawn with it; not taken back from another field the user goes to meanwhile, nor
     // given later if the row was not drawn then.
@@ -699,8 +693,7 @@ fn preset_naming(ui: &mut egui::Ui, st: &mut AppState) {
         }
         None => {}
     }
-    // For this tool: one typed for another was let go when it was chosen.
-    let Some((_, mut name)) = st.preset_name.take() else { return };
+    let Some(mut name) = st.preset_name.take() else { return };
     // Kept being typed, unless saved or let go.
     let mut kept = true;
     ui.horizontal(|ui| {
@@ -723,6 +716,6 @@ fn preset_naming(ui: &mut egui::Ui, st: &mut AppState) {
         }
     });
     if kept {
-        st.preset_name = Some((tool, name));
+        st.preset_name = Some(name);
     }
 }

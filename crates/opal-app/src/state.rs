@@ -129,12 +129,14 @@ pub struct AppState {
     pub active_doc: Option<DocId>,
     next_doc: u64,
     untitled: u32,
-    pub tool: ToolId,
+    /// The tool chosen: changed by [`AppState::set_tool`].
+    tool: ToolId,
     pub tool_settings: HashMap<ToolId, Settings>,
     /// Named sets of tool settings, per tool.
     pub presets: HashMap<ToolId, BTreeMap<String, BTreeMap<String, Value>>>,
-    /// The name being typed for a new preset, and the tool whose settings it is to save.
-    pub preset_name: Option<(ToolId, String)>,
+    /// The name being typed for a new preset of the chosen tool's settings (let go when
+    /// another is chosen).
+    pub preset_name: Option<String>,
     pub prefs: Settings,
     pub palette: Palette,
     pub ribbon: RibbonState,
@@ -277,6 +279,19 @@ pub struct PasteAnswer {
 }
 
 impl AppState {
+    /// The tool chosen.
+    pub fn tool(&self) -> ToolId {
+        self.tool
+    }
+
+    /// Chooses `tool`; a preset's name being typed for another is let go.
+    pub fn set_tool(&mut self, tool: ToolId) {
+        if tool != self.tool {
+            self.preset_name = None;
+        }
+        self.tool = tool;
+    }
+
     pub fn new() -> AppState {
         let mut tool_settings = HashMap::new();
         for t in ToolId::ALL {
