@@ -1437,4 +1437,44 @@ mod tests {
         let room = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1536.0, 825.6));
         assert_eq!(fitting(starting([40.0, 0.0]), room), Some(egui::ViewportCommand::Maximized(true)));
     }
+    /// The interface zoomed (as its size preference does before the first frame), the first
+    /// frame's sizes measured as if it were not (as egui-winit measures them then): nothing is
+    /// decided by them. In the next frame's, in the zoom's units, a window that fits is left.
+    #[test]
+    fn the_window_s_fit_waits_for_the_interface_s_zoom() {
+        use egui::{Rect, ViewportCommand, ViewportId, pos2, vec2};
+        fn full_hd(_: egui::Pos2) -> Option<Rect> {
+            Some(Rect::from_min_max(pos2(0.0, 0.0), pos2(1920.0, 1032.0)))
+        }
+        let ctx = egui::Context::default();
+        ctx.set_zoom_factor(1.25);
+        // In the middle of a full-HD screen at 100%, in physical pixels: it fits.
+        let [w, h] = START_SIZE;
+        let inner = Rect::from_min_size(pos2(240.0, 97.0), vec2(w, h));
+        let outer = Rect::from_min_max(pos2(232.0, 66.0), inner.max + vec2(8.0, 8.0));
+        // A frame whose sizes are in points of `scale` physical pixels: whether the fit was
+        // decided in it, and the commands it asked for.
+        let frame = |scale: f32| {
+            let mut input = egui::RawInput::default();
+            let v = input.viewports.entry(ViewportId::ROOT).or_default();
+            v.native_pixels_per_point = Some(1.0);
+            v.outer_rect = Some(Rect::from_min_max(outer.min / scale, outer.max / scale));
+            v.inner_rect = Some(Rect::from_min_max(inner.min / scale, inner.max / scale));
+            v.monitor_size = Some(vec2(1920.0, 1080.0) / scale);
+            let mut decided = false;
+            let mut out = ctx.run_ui(input, |ui| decided = fit_to_monitor(ui.ctx(), full_hd));
+            // The fonts' textures, which nothing here draws with.
+            out.textures_delta.clear();
+            let asked: Vec<ViewportCommand> = out.viewport_output.get(&ViewportId::ROOT).map_or_else(Vec::new, |v| {
+                v.commands
+                    .iter()
+                    .filter(|c| matches!(c, ViewportCommand::Maximized(_) | ViewportCommand::OuterPosition(_)))
+                    .cloned()
+                    .collect()
+            });
+            (decided, asked)
+        };
+        assert_eq!(frame(1.0), (false, vec![]), "decided by the first frame's sizes");
+        assert_eq!(frame(1.25), (true, vec![]), "a window that fits was not left");
+    }
 }
