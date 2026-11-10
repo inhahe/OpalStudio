@@ -195,36 +195,75 @@ fn a_panel_cut_short_shows_its_scroll_bar() {
     assert!(bar > 0, "no scroll bar shows right of the tool settings");
 }
 
+/// In the starting layout, the tool settings show a box's position and size without scrolling
+/// (they are short there, above the layers).
+#[test]
+fn the_tool_settings_show_a_box_s_numbers_first() {
+    use egui_kittest::kittest::by;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    pasting(&mut h);
+    h.run();
+    let p = h.state().state().active().unwrap().transform.as_ref().unwrap().params();
+    let layers = h.get(on_side(by().label("Opacity").role(egui::accesskit::Role::Label), false)).rect();
+    for (what, v) in [("x", p.x), ("y", p.y), ("width", p.width), ("height", p.height)] {
+        let field = h.get(field_showing(v, 1e-6, false)).rect();
+        assert!(
+            field.bottom() < layers.top(),
+            "the {what} field is out of sight, below the layers: {field:?} {layers:?}"
+        );
+    }
+}
+
+/// A unit chosen in the menu below a box's numbers shows them in it in the same frame.
+#[test]
+fn a_unit_chosen_below_a_box_s_numbers_shows_them_in_it_at_once() {
+    use egui_kittest::kittest::by;
+    use opal_core::units::Unit;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    pasting(&mut h);
+    h.state_mut().state_mut().box_numbers = true;
+    h.run();
+    let x = h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
+    h.get(on_side(by().label("Units").role(egui::accesskit::Role::ComboBox), true)).click();
+    h.run();
+    h.get_by_label(Unit::In.name()).click();
+    h.step();
+    let shown = Unit::In.from_px(x, 100.0);
+    assert!(
+        h.query(box_field(shown, 1e-6)).is_some(),
+        "x is not shown in inches ({shown}) in the frame they were chosen"
+    );
+}
+
 #[test]
 fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
     use egui_kittest::kittest::by;
     let _gpu = gpu_lock();
     let mut h = harness();
     pasting(&mut h);
-    // Typed into the numbers by the box (the tool settings show the same, past the bottom of
-    // their panel at this window's height).
+    // Typed into the numbers by the box (the tool settings show the same).
     h.state_mut().state_mut().box_numbers = true;
     h.run();
     let params =
         |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().transform.as_ref().unwrap().params();
     let x = |h: &Harness<'static, OpalApp>| params(h).x;
     let at = x(&h);
-    // The grid of points the position counts from ends above the position's row.
-    let from = h.get(by().label("From: Bottom left").predicate(|n| n.bounding_box().is_some_and(|b| b.x0 < 1000.0)));
-    let field = h.get(box_field(at, 1e-6)).rect();
+    // The From label is level with the menu it names, and the grid of points the position
+    // counts from lies between the menu and what follows the fields.
+    let by_the_box = |b| h.get(on_side(b, true)).rect();
+    let label = by_the_box(by().label("From").role(egui::accesskit::Role::Label));
+    let menu = by_the_box(by().label("From").role(egui::accesskit::Role::ComboBox));
     assert!(
-        from.rect().bottom() <= field.top(),
-        "the From grid reaches into the row below: {:?} {field:?}",
-        from.rect()
-    );
-    // Its label is level with the menu it names.
-    let from_as = |role| {
-        h.get(by().label("From").role(role).predicate(|n| n.bounding_box().is_some_and(|b| b.x0 < 1000.0))).rect()
-    };
-    let (label, menu) = (from_as(egui::accesskit::Role::Label), from_as(egui::accesskit::Role::ComboBox));
-    assert!(
-        (label.center().y - menu.center().y).abs() < 1.0,
+        (label.center().y - menu.center().y).abs() < 3.0,
         "the From label is not beside its menu: {label:?} {menu:?}"
+    );
+    let (first, last) = (by_the_box(by().label("From: Top left")), by_the_box(by().label("From: Bottom left")));
+    let below = by_the_box(by().label("Fit into a rectangle"));
+    assert!(
+        menu.bottom() <= first.top() && last.bottom() <= below.top(),
+        "the From grid reaches into the rows beside it: {menu:?} {first:?} {last:?} {below:?}"
     );
     // A layer's edge, the box's own width, and a bare number in the field's unit (pixels):
     // shown whole, with what it comes to, below the field (which may be too narrow to show

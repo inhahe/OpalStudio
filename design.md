@@ -637,7 +637,11 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   (`box_fields`), beside the box and its toolbar (to the right, else the left, else the
   view's corner), so a paste can be put in a rectangle typed in any unit without leaving
   the canvas. The crop box has the same fields and button; the selection tools' boxes will
-  take them too. The position is that of the box's **reference point** (a 3 × 3 grid in
+  take them too. The fields give the numbers first and how they are measured after them
+  (the unit, the reference point, and what the position counts from), so that the tool
+  settings, short in the starting layout, show the numbers without scrolling; another
+  unit, point or origin chosen shows them measured so in the same frame (egui is asked
+  for another pass). The position is that of the box's **reference point** (a 3 × 3 grid in
   the fields, a preference: its top-left corner unless another is chosen), turned with
   it, from the canvas's corner; a size typed scales along the box's own sides about that
   point, and an angle turns about it, so the numbers typed stay as typed. **From**: the

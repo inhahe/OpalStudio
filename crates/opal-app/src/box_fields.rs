@@ -136,12 +136,12 @@ pub struct Fields<'a> {
 }
 
 /// Fields for the box `p` (its position that of its point `POINTS[m.reference]`, from
-/// `m.origin`), in `m.unit` at `ppi`, with a menu of the units, a grid of the box's points,
-/// and what the position counts from (the canvas or a layer of `doc`, the image as it was
-/// before the box opened, and its point), as a two-column grid. Returns whether the user
-/// changed a number (choosing another point, or another origin, changes none: the caller
-/// shows the box measured so next); what was entered in the fields for the position, size
-/// and angle goes into `entered`.
+/// `m.origin`), in `m.unit` at `ppi`, and after them a menu of the units, a grid of the
+/// box's points, and what the position counts from (the canvas or a layer of `doc`, the
+/// image as it was before the box opened, and its point), as a two-column grid. Returns
+/// whether the user changed a number (choosing another unit, point or origin changes none:
+/// the caller shows the box measured so, in the pass this asks egui for at once); what was
+/// entered in the fields for the position, size and angle goes into `entered`.
 pub fn fields(
     ui: &mut egui::Ui,
     p: &mut Params,
@@ -162,35 +162,10 @@ pub fn fields(
         Base::Layer(_) => format!("“{name}”"),
     };
     let from = format!("{} of {of}", POINTS[m.origin.point].1.to_lowercase());
+    let measured = (m.unit, m.reference, m.origin);
     egui::Grid::new(("box-numbers", how.salt)).num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-        ui.label("Units");
-        lengths::unit_menu(ui, &mut m.unit, &format!("{}-unit", how.salt));
-        ui.end_row();
-        ui.label("Reference").on_hover_text(
-            "Which point of the box the position gives, and what a size or angle typed scales and turns it about.",
-        );
-        reference_grid(ui, &mut m.reference, None, how.salt);
-        ui.end_row();
-        ui.label("From").on_hover_text(
-            "What the position counts from: a point of the canvas, or of what a layer holds (its bounds).",
-        );
-        // The menu beside its label, the grid of its points in a row of its own below (in
-        // one row, the grid would stand taller than the label's row).
-        egui::ComboBox::from_id_salt(("box-from", how.salt))
-            .selected_text(name.as_str())
-            .width(110.0)
-            .show_ui(ui, |ui| {
-                // Listed only while the menu is open: a walk of every layer's bounds.
-                for (b, name) in bases(doc) {
-                    ui.selectable_value(&mut m.origin.base, b, name);
-                }
-            })
-            .response
-            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "From"));
-        ui.end_row();
-        ui.label("");
-        reference_grid(ui, &mut m.origin.point, Some("From"), &format!("{}-from", how.salt));
-        ui.end_row();
+        // The numbers first, how they are measured after them: in a short panel, what shows
+        // without scrolling is what is typed in most.
         let scope = Scope { doc: Some(doc), ppi, unit: m.unit, origin: counted, own: Some(own(&before)) };
         let mut field = |px: &mut f64, range, number: BoxNumber, ui: &mut egui::Ui| {
             let f = lengths::length_field(px, scope, range, how.px_decimals).remember(box_entries(number));
@@ -240,7 +215,40 @@ pub fn fields(
         r.on_hover_text(format!("Clockwise, about the box's {point}."));
         entered.extend(text.map(|t| (BoxNumber::Angle, t)));
         ui.end_row();
+        ui.label("Units");
+        lengths::unit_menu(ui, &mut m.unit, &format!("{}-unit", how.salt));
+        ui.end_row();
+        ui.label("Reference").on_hover_text(
+            "Which point of the box the position gives, and what a size or angle typed scales and turns it about.",
+        );
+        reference_grid(ui, &mut m.reference, None, how.salt);
+        ui.end_row();
+        ui.label("From").on_hover_text(
+            "What the position counts from: a point of the canvas, or of what a layer holds (its bounds).",
+        );
+        // The menu beside its label, the grid of its points in a row of its own below (in
+        // one row, the grid would stand taller than the label's row).
+        egui::ComboBox::from_id_salt(("box-from", how.salt))
+            .selected_text(name.as_str())
+            .width(110.0)
+            .show_ui(ui, |ui| {
+                // Listed only while the menu is open: a walk of every layer's bounds.
+                for (b, name) in bases(doc) {
+                    ui.selectable_value(&mut m.origin.base, b, name);
+                }
+            })
+            .response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "From"));
+        ui.end_row();
+        ui.label("");
+        reference_grid(ui, &mut m.origin.point, Some("From"), &format!("{}-from", how.salt));
+        ui.end_row();
     });
+    // The numbers above were shown measured as before: shown again at once, measured so now
+    // (by the caller, which measures them).
+    if (m.unit, m.reference, m.origin) != measured {
+        ui.ctx().request_discard("a box's numbers are measured otherwise");
+    }
     *p != before
 }
 
