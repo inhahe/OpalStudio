@@ -272,17 +272,38 @@ fn the_presets_menu_saves_applies_and_deletes_a_tool_s_settings() {
         h.get(on_side(by().label("Presets").role(egui::accesskit::Role::Button), false)).click();
         h.run();
     };
+    let naming = |h: &Harness<'static, OpalApp>| h.state().state().preset_name.clone();
+    let save_as = |h: &mut Harness<'static, OpalApp>| {
+        menu(h);
+        h.get_by_label("Save as preset…").click();
+        h.run();
+    };
     set_guides(&mut h, "grid");
     h.run();
-    // Saved under a name typed below the heading.
-    menu(&mut h);
-    h.get_by_label("Save as preset…").click();
+    // Saved under a name typed below the heading, which has the keyboard.
+    save_as(&mut h);
+    h.get(focused()).type_text("Gri");
     h.run();
-    h.get(focused()).type_text("Grid");
+    // Meanwhile another field takes the keyboard, and keeps it, and Esc in it leaves the name.
+    h.get(field_showing(400.0, 1e-6, false)).click();
+    h.run();
+    h.get(focused()).type_text("5");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(naming(&h).as_deref(), Some("Gri"), "the name took the keyboard, or Esc elsewhere dropped it");
+    // Save as… again gives the name back the keyboard, as it was typed.
+    save_as(&mut h);
+    assert_eq!(naming(&h).as_deref(), Some("Gri"), "Save as… again forgot the name being typed");
+    h.get(focused()).type_text("d");
     h.key_press(egui::Key::Enter);
     h.run();
     assert_eq!(saved(&h), ["Grid"]);
-    assert!(h.state().state().preset_name.is_none(), "the name is still being asked for");
+    assert!(naming(&h).is_none(), "the name is still being asked for");
+    // Esc in the name lets it go.
+    save_as(&mut h);
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(naming(&h).is_none(), "Esc did not let the name go");
     // Applied from the menu.
     set_guides(&mut h, "none");
     h.run();
@@ -292,7 +313,7 @@ fn the_presets_menu_saves_applies_and_deletes_a_tool_s_settings() {
     assert_eq!(guides(&h), Value::Choice("grid".to_owned()), "the preset was not applied");
     // Deleted from its submenu.
     menu(&mut h);
-    h.get_by_label("Delete").hover();
+    h.get_by_label("Delete a preset").hover();
     h.run();
     h.get_by_label("Delete Grid").click();
     h.run();

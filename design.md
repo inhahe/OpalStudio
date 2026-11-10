@@ -456,8 +456,9 @@ curve editors.
 
 - **The heading is one row**, so that in a short panel the settings start high: the tool's
   name, which says what the tool does on hover, and a **Presets** menu beside it (save the
-  settings under a name, typed in a row that shows below the heading only meanwhile; apply
-  a saved one; delete one, from a submenu of its own so that a slip applies rather than
+  settings under a name, typed in a row that shows below the heading only meanwhile, which
+  takes the keyboard once, when asked, and not back from a field the user goes to; apply a
+  saved one; delete one, from a submenu of its own so that a slip applies rather than
   deletes). What the tool does is said by the status bar too, which, while a transform box
   is open, says instead how the box is used (`transform_ui::HINT`), the canvas being the
   box's then.

@@ -624,16 +624,15 @@ fn presets_menu(ui: &mut egui::Ui, st: &mut AppState) {
         ui.separator();
         if names.is_empty() {
             ui.label(RichText::new("No presets saved yet.").color(weak));
-        }
-        for n in &names {
-            if ui.button(n).on_hover_text("Apply these settings").clicked() {
-                apply = Some(n.clone());
+        } else {
+            for n in &names {
+                if ui.button(n).on_hover_text("Apply these settings").clicked() {
+                    apply = Some(n.clone());
+                }
             }
-        }
-        if !names.is_empty() {
             ui.separator();
             // Apart from the presets applied, so that a slip of the pointer deletes none.
-            ui.menu_button("Delete", |ui| {
+            ui.menu_button("Delete a preset", |ui| {
                 for n in &names {
                     let r = ui.button(n).on_hover_text("Delete this preset");
                     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Delete {n}")));
@@ -647,7 +646,12 @@ fn presets_menu(ui: &mut egui::Ui, st: &mut AppState) {
     .response
     .on_hover_text("Save these settings under a name, or apply or delete saved ones");
     if save {
-        st.preset_name = Some(String::new());
+        // A name being typed already is kept, to be finished.
+        st.preset_name.get_or_insert_with(String::new);
+        // The field takes the keyboard from the next pass: in this one, the click on the menu
+        // is a click elsewhere, which would take it away again.
+        let pass = ui.ctx().cumulative_pass_nr();
+        ui.data_mut(|d| d.insert_temp(preset_name_id(), pass));
     }
     if let Some(n) = apply {
         let map = st.presets[&tool][&n].clone();
@@ -664,26 +668,40 @@ fn presets_menu(ui: &mut egui::Ui, st: &mut AppState) {
     }
 }
 
-/// While a preset's name is being typed (after the menu's Save as preset…): the name, and
-/// buttons to save the current tool's settings under it or not.
+/// The field a preset's name is typed in.
+fn preset_name_id() -> egui::Id {
+    egui::Id::unique("preset-name")
+}
+
+/// While a preset's name is being typed (after the menu's Save as preset…, which gives the
+/// field the keyboard): the name, and buttons to save the current tool's settings under it
+/// or not. Enter in the field saves, Esc in it does not.
 fn preset_naming(ui: &mut egui::Ui, st: &mut AppState) {
     let tool = st.tool;
     let Some(mut name) = st.preset_name.take() else { return };
     // Kept being typed, unless saved or let go.
     let mut kept = true;
     ui.horizontal(|ui| {
-        let r = ui.add(egui::TextEdit::singleline(&mut name).hint_text("Preset name").desired_width(110.0));
-        if !r.has_focus() && !r.lost_focus() {
+        let field = egui::TextEdit::singleline(&mut name).id(preset_name_id()).hint_text("Preset name");
+        let r = ui.add(field.desired_width(110.0));
+        // Given the keyboard once, when Save as preset… asks (in an earlier pass); not taken
+        // back from another field the user goes to meanwhile.
+        let asked = ui.data(|d| d.get_temp::<u64>(preset_name_id()));
+        if asked.is_some_and(|pass| pass < ui.ctx().cumulative_pass_nr()) {
+            ui.data_mut(|d| d.remove::<u64>(preset_name_id()));
             r.request_focus();
+        } else if asked.is_some() {
+            ui.ctx().request_repaint();
         }
-        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let left_by = |key| r.lost_focus() && ui.input(|i| i.key_pressed(key));
+        let (enter, escape) = (left_by(egui::Key::Enter), left_by(egui::Key::Escape));
         let trimmed = name.trim().to_owned();
         if (enter || ui.button("Save").clicked()) && !trimmed.is_empty() {
             let map = st.tool_settings[&tool].to_map();
             st.presets.entry(tool).or_default().insert(trimmed, map);
             st.settings_touched();
             kept = false;
-        } else if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        } else if ui.button("Cancel").clicked() || escape {
             kept = false;
         }
     });
