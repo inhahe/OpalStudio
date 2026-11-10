@@ -133,8 +133,8 @@ pub struct AppState {
     pub tool_settings: HashMap<ToolId, Settings>,
     /// Named sets of tool settings, per tool.
     pub presets: HashMap<ToolId, BTreeMap<String, BTreeMap<String, Value>>>,
-    /// The name being typed for a new preset.
-    pub preset_name: Option<String>,
+    /// The name being typed for a new preset, and the tool whose settings it is to save.
+    pub preset_name: Option<(ToolId, String)>,
     pub prefs: Settings,
     pub palette: Palette,
     pub ribbon: RibbonState,

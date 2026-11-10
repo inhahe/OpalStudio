@@ -320,7 +320,7 @@ fn the_presets_menu_saves_applies_and_deletes_a_tool_s_settings() {
         h.get(on_side(by().label("Presets").role(egui::accesskit::Role::Button), false)).click();
         h.run();
     };
-    let naming = |h: &Harness<'static, OpalApp>| h.state().state().preset_name.clone();
+    let naming = |h: &Harness<'static, OpalApp>| h.state().state().preset_name.clone().map(|(_, n)| n);
     let save_as = |h: &mut Harness<'static, OpalApp>| {
         menu(h);
         h.get_by_label("Save as preset…").click();
@@ -330,6 +330,10 @@ fn the_presets_menu_saves_applies_and_deletes_a_tool_s_settings() {
     h.run();
     // Saved under a name typed below the heading, which has the keyboard.
     save_as(&mut h);
+    // Enter with no name keeps the keyboard there, for one to be typed.
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert!(h.query(focused()).is_some(), "Enter with no name let go of the keyboard");
     h.get(focused()).type_text("Gri");
     h.run();
     // Meanwhile another field takes the keyboard, and keeps it, and Esc in it leaves the name.
@@ -352,6 +356,34 @@ fn the_presets_menu_saves_applies_and_deletes_a_tool_s_settings() {
     h.key_press(egui::Key::Escape);
     h.run();
     assert!(naming(&h).is_none(), "Esc did not let the name go");
+    // Asked for while something else takes the panel from the next frame on (a paste, its box
+    // opened at the end of the frame of the click), the name does not take the keyboard when
+    // it shows again later. (The click and the paste in one frame: kittest gives each event
+    // queued a frame of its own.)
+    menu(&mut h);
+    put_on_clipboard(&mut h, pasted(20, 20, [1.0, 0.0, 0.0, 1.0]));
+    let at = h.get_by_label("Save as preset…").rect().center();
+    let button = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let events = [egui::Event::PointerMoved(at), button(true), button(false), egui::Event::Paste(String::new())];
+    h.input_mut().events.extend(events);
+    h.step();
+    h.run();
+    assert!(h.state().state().active().unwrap().transform.is_some(), "the paste did not open its box");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(naming(&h).as_deref(), Some(""), "the name was not shown again");
+    assert!(h.query(focused()).is_none(), "the name took the keyboard long after it was asked to");
+    // A name typed for one tool is let go when another is chosen.
+    h.state_mut().state_mut().tool = ToolId::Move;
+    h.run();
+    h.state_mut().state_mut().tool = ToolId::Crop;
+    h.run();
+    assert!(naming(&h).is_none(), "a name typed for the crop tool was kept for another");
     // Applied from the menu.
     set_guides(&mut h, "none");
     h.run();
