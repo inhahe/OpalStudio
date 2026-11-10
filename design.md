@@ -454,10 +454,13 @@ A docked panel: the active tool's variant picker at the top, then its basic sett
 its Advanced section. It is a panel rather than a bar because the Advanced settings include
 curve editors.
 
-- **The heading is the tool's name**, which says what the tool does on hover, so that in a
-  short panel the settings start high. What the tool does is said by the status bar too,
-  which, while a transform box is open, says instead how the box is used
-  (`transform_ui::HINT`), the canvas being the box's then.
+- **The heading is one row**, so that in a short panel the settings start high: the tool's
+  name, which says what the tool does on hover, and a **Presets** menu beside it (save the
+  settings under a name, typed in a row that shows below the heading only meanwhile; apply
+  a saved one; delete one, from a submenu of its own so that a slip applies rather than
+  deletes). What the tool does is said by the status bar too, which, while a transform box
+  is open, says instead how the box is used (`transform_ui::HINT`), the canvas being the
+  box's then.
 - It scrolls, its scroll area as wide as the pane whatever it holds, so that the scroll bar
   is at the pane's edge.
 
@@ -648,7 +651,7 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   (the unit, the reference point, and what the position counts from), so that the tool
   settings, which have half the right column in the starting layout, show a paste's
   numbers without scrolling (the crop box's come after the crop tool's own settings, and
-  show so in a window of a full-HD screen); another unit, point or origin chosen shows
+  show so in a window of a full-HD screen at 125%); another unit, point or origin chosen shows
   them measured so in the same frame (egui is asked for another pass). Each grid of
   points is one stop for Tab, the point chosen, and the arrow keys move the choice, as in
   a group of radio buttons. The position is that of the box's **reference point** (a 3 × 3 grid in

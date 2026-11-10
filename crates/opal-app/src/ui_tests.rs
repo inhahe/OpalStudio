@@ -201,12 +201,13 @@ fn the_tool_settings_show_a_paste_s_numbers_without_scrolling() {
     in_the_tool_settings(&h, &[("x", p.x), ("y", p.y), ("width", p.width), ("height", p.height)]);
 }
 
-/// In the starting layout, in a window of a full-HD screen, the tool settings show the crop
-/// box's size without scrolling, after the crop tool's own settings.
+/// In the starting layout, in a window of a full-HD screen at 125% (860 points tall, as the
+/// harness's), the tool settings show the crop box's size without scrolling, after the crop
+/// tool's own settings.
 #[test]
 fn the_tool_settings_show_the_crop_box_s_numbers_without_scrolling() {
     let _gpu = gpu_lock();
-    let mut h = harness_of([1400.0, 1000.0]);
+    let mut h = harness();
     h.state_mut().state_mut().tool = crate::tools::ToolId::Crop;
     image_of(&mut h, 400, 300);
     h.run();
@@ -246,6 +247,56 @@ fn the_status_bar_and_the_heading_say_what_the_canvas_does() {
     h.run();
     let shown = said(&h, crate::transform_ui::HINT);
     assert!(shown.len() == 1 && in_status_bar(&shown[0]), "the box's hint: {shown:?}");
+}
+
+/// The Presets menu beside a tool's name saves its settings under a name, applies them, and
+/// deletes them.
+#[test]
+fn the_presets_menu_saves_applies_and_deletes_a_tool_s_settings() {
+    use crate::settings::Value;
+    use crate::tools::ToolId;
+    use egui_kittest::kittest::by;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    h.state_mut().state_mut().tool = ToolId::Crop;
+    image_of(&mut h, 400, 300);
+    let guides = |h: &Harness<'static, OpalApp>| h.state().state().tool_settings[&ToolId::Crop].get("crop.guides");
+    let set_guides = |h: &mut Harness<'static, OpalApp>, v: &str| {
+        let s = h.state_mut().state_mut().tool_settings.get_mut(&ToolId::Crop).unwrap();
+        s.set("crop.guides", Value::Choice(v.to_owned()));
+    };
+    let saved = |h: &Harness<'static, OpalApp>| {
+        h.state().state().presets.get(&ToolId::Crop).map(|p| p.keys().cloned().collect::<Vec<_>>()).unwrap_or_default()
+    };
+    let menu = |h: &mut Harness<'static, OpalApp>| {
+        h.get(on_side(by().label("Presets").role(egui::accesskit::Role::Button), false)).click();
+        h.run();
+    };
+    set_guides(&mut h, "grid");
+    h.run();
+    // Saved under a name typed below the heading.
+    menu(&mut h);
+    h.get_by_label("Save as preset…").click();
+    h.run();
+    h.get(focused()).type_text("Grid");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert_eq!(saved(&h), ["Grid"]);
+    assert!(h.state().state().preset_name.is_none(), "the name is still being asked for");
+    // Applied from the menu.
+    set_guides(&mut h, "none");
+    h.run();
+    menu(&mut h);
+    h.get(by().label("Grid").role(egui::accesskit::Role::Button)).click();
+    h.run();
+    assert_eq!(guides(&h), Value::Choice("grid".to_owned()), "the preset was not applied");
+    // Deleted from its submenu.
+    menu(&mut h);
+    h.get_by_label("Delete").hover();
+    h.run();
+    h.get_by_label("Delete Grid").click();
+    h.run();
+    assert!(saved(&h).is_empty(), "the preset was not deleted");
 }
 
 /// A grid of a box's points is one stop for Tab, the point chosen, and the arrow keys move the

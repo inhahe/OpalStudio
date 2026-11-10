@@ -573,12 +573,18 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
     }
     let tool = st.tool;
     let info = tool.info();
-    heading(ui, info.icon, info.name, info.description);
-    if info.settings.is_empty() {
+    let has_settings = !info.settings.is_empty();
+    ui.horizontal(|ui| {
+        heading(ui, info.icon, info.name, info.description);
+        if has_settings {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| presets_menu(ui, st));
+        }
+    });
+    if !has_settings {
         ui.label(RichText::new("This tool has no settings.").color(st.palette.weak_text));
         return;
     }
-    presets_row(ui, st);
+    preset_naming(ui, st);
     ui.separator();
     let palette = st.palette;
     let settings = st.tool_settings.get_mut(&tool).expect("every tool has settings");
@@ -606,70 +612,82 @@ pub fn heading(ui: &mut egui::Ui, glyph: char, name: &str, does: &str) {
     .on_hover_text(does);
 }
 
-/// Saving the current tool's settings under a name, and applying saved ones.
-fn presets_row(ui: &mut egui::Ui, st: &mut AppState) {
+/// A menu of the current tool's presets: saving its settings under a name (typed below the
+/// heading, [`preset_naming`]), applying saved ones, and deleting them.
+fn presets_menu(ui: &mut egui::Ui, st: &mut AppState) {
     let tool = st.tool;
     let names: Vec<String> = st.presets.get(&tool).map(|p| p.keys().cloned().collect()).unwrap_or_default();
     let weak = st.palette.weak_text;
-    ui.horizontal(|ui| {
-        let mut apply: Option<String> = None;
-        let label = ui.label("Presets").id;
-        egui::ComboBox::from_id_salt("tool-preset")
-            .selected_text("Apply…")
-            .show_ui(ui, |ui| {
-                if names.is_empty() {
-                    ui.label(RichText::new("No presets saved yet.").color(weak));
-                }
+    let (mut apply, mut delete, mut save) = (None, None, false);
+    ui.menu_button("Presets", |ui| {
+        save = ui.button("Save as preset…").on_hover_text("Save these settings under a name").clicked();
+        ui.separator();
+        if names.is_empty() {
+            ui.label(RichText::new("No presets saved yet.").color(weak));
+        }
+        for n in &names {
+            if ui.button(n).on_hover_text("Apply these settings").clicked() {
+                apply = Some(n.clone());
+            }
+        }
+        if !names.is_empty() {
+            ui.separator();
+            // Apart from the presets applied, so that a slip of the pointer deletes none.
+            ui.menu_button("Delete", |ui| {
                 for n in &names {
-                    if ui.button(n).on_hover_text("Apply these settings").clicked() {
-                        apply = Some(n.clone());
+                    let r = ui.button(n).on_hover_text("Delete this preset");
+                    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Delete {n}")));
+                    if r.clicked() {
+                        delete = Some(n.clone());
                     }
                 }
-            })
-            .response
-            .labelled_by(label);
-        if let Some(n) = apply {
-            let map = st.presets[&tool][&n].clone();
-            let s = st.tool_settings.get_mut(&tool).expect("every tool has settings");
-            s.reset_all();
-            s.load_map(&map);
-            st.settings_touched();
+            });
         }
-        match st.preset_name.as_mut() {
-            None => {
-                if ui.button("Save as preset…").clicked() {
-                    st.preset_name = Some(String::new());
-                }
-            }
-            Some(name) => {
-                let r = ui.add(egui::TextEdit::singleline(name).hint_text("Preset name").desired_width(110.0));
-                if !r.has_focus() && !r.lost_focus() {
-                    r.request_focus();
-                }
-                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let trimmed = name.trim().to_owned();
-                if (enter || ui.button("Save").clicked()) && !trimmed.is_empty() {
-                    let map = st.tool_settings[&tool].to_map();
-                    st.presets.entry(tool).or_default().insert(trimmed, map);
-                    st.preset_name = None;
-                    st.settings_touched();
-                } else if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    st.preset_name = None;
-                }
-            }
+    })
+    .response
+    .on_hover_text("Save these settings under a name, or apply or delete saved ones");
+    if save {
+        st.preset_name = Some(String::new());
+    }
+    if let Some(n) = apply {
+        let map = st.presets[&tool][&n].clone();
+        let s = st.tool_settings.get_mut(&tool).expect("every tool has settings");
+        s.reset_all();
+        s.load_map(&map);
+        st.settings_touched();
+    }
+    if let Some(n) = delete {
+        if let Some(p) = st.presets.get_mut(&tool) {
+            p.remove(&n);
+        }
+        st.settings_touched();
+    }
+}
+
+/// While a preset's name is being typed (after the menu's Save as preset…): the name, and
+/// buttons to save the current tool's settings under it or not.
+fn preset_naming(ui: &mut egui::Ui, st: &mut AppState) {
+    let tool = st.tool;
+    let Some(mut name) = st.preset_name.take() else { return };
+    // Kept being typed, unless saved or let go.
+    let mut kept = true;
+    ui.horizontal(|ui| {
+        let r = ui.add(egui::TextEdit::singleline(&mut name).hint_text("Preset name").desired_width(110.0));
+        if !r.has_focus() && !r.lost_focus() {
+            r.request_focus();
+        }
+        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let trimmed = name.trim().to_owned();
+        if (enter || ui.button("Save").clicked()) && !trimmed.is_empty() {
+            let map = st.tool_settings[&tool].to_map();
+            st.presets.entry(tool).or_default().insert(trimmed, map);
+            st.settings_touched();
+            kept = false;
+        } else if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            kept = false;
         }
     });
-    if !names.is_empty() {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Delete:").small().color(weak));
-            for n in &names {
-                if ui.small_button(format!("{n} ×")).on_hover_text("Delete this preset").clicked() {
-                    if let Some(p) = st.presets.get_mut(&tool) {
-                        p.remove(n);
-                    }
-                    st.settings_touched();
-                }
-            }
-        });
+    if kept {
+        st.preset_name = Some(name);
     }
 }
