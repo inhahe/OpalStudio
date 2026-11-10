@@ -930,9 +930,11 @@ fn default_tree(st: &AppState) -> egui_tiles::Tree<Pane> {
     let history = tiles.insert_pane(Pane::History);
     let console = tiles.insert_pane(Pane::Console);
     let lh = tiles.insert_tab_tile(vec![layers, history, console]);
+    // Halves: in a window of a full-HD screen, so the tool settings show a box's position
+    // and size without scrolling (the crop box's after the crop tool's own settings).
     let mut right = egui_tiles::Linear::new(egui_tiles::LinearDir::Vertical, vec![tool_tabs, lh]);
-    right.shares.set_share(tool_tabs, 0.35);
-    right.shares.set_share(lh, 0.65);
+    right.shares.set_share(tool_tabs, 0.5);
+    right.shares.set_share(lh, 0.5);
     let right = tiles.insert_container(right);
     let mut root = egui_tiles::Linear::new(egui_tiles::LinearDir::Horizontal, vec![doc_tabs, right]);
     root.shares.set_share(doc_tabs, 0.78);

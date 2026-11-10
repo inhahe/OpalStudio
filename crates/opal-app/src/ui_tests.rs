@@ -202,6 +202,18 @@ fn the_tool_settings_show_a_paste_s_numbers_without_scrolling() {
     in_the_tool_settings(&h, &[("x", p.x), ("y", p.y), ("width", p.width), ("height", p.height)]);
 }
 
+/// In the starting layout, in a window of a full-HD screen, the tool settings show the crop
+/// box's size without scrolling, after the crop tool's own settings.
+#[test]
+fn the_tool_settings_show_the_crop_box_s_numbers_without_scrolling() {
+    let _gpu = gpu_lock();
+    let mut h = harness_of([1400.0, 1000.0]);
+    h.state_mut().state_mut().tool = crate::tools::ToolId::Crop;
+    image_of(&mut h, 400, 300);
+    h.run();
+    in_the_tool_settings(&h, &[("width", 400.0), ("height", 300.0)]);
+}
+
 /// A grid of a box's points is one stop for Tab, the point chosen, and the arrow keys move the
 /// choice within it.
 #[test]

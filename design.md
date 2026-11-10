@@ -639,11 +639,12 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
   the canvas. The crop box has the same fields and button; the selection tools' boxes will
   take them too. The fields give the numbers first and how they are measured after them
   (the unit, the reference point, and what the position counts from), so that the tool
-  settings, short in the starting layout, show the numbers without scrolling; another
-  unit, point or origin chosen shows them measured so in the same frame (egui is asked
-  for another pass). Each grid of points is one stop for Tab, the point chosen, and the
-  arrow keys move the choice, as in a group of radio buttons. The position is that of the
-  box's **reference point** (a 3 × 3 grid in
+  settings, which have half the right column in the starting layout, show a paste's
+  numbers without scrolling (the crop box's come after the crop tool's own settings, and
+  show so in a window of a full-HD screen); another unit, point or origin chosen shows
+  them measured so in the same frame (egui is asked for another pass). Each grid of
+  points is one stop for Tab, the point chosen, and the arrow keys move the choice, as in
+  a group of radio buttons. The position is that of the box's **reference point** (a 3 × 3 grid in
   the fields, a preference: its top-left corner unless another is chosen), turned with
   it, from the canvas's corner; a size typed scales along the box's own sides about that
   point, and an angle turns about it, so the numbers typed stay as typed. **From**: the
