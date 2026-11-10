@@ -263,9 +263,7 @@ fn the_window_is_put_where_windows_go_on_its_monitor() {
     use egui::{Rect, ViewportCommand, pos2, vec2};
     let _gpu = gpu_lock();
     // A full-HD screen's room for windows, and a 1440p one's, in physical pixels.
-    fn full_hd(_: egui::Pos2) -> Option<Rect> {
-        Some(Rect::from_min_max(pos2(0.0, 0.0), pos2(1920.0, 1032.0)))
-    }
+    let full_hd = crate::app::full_hd_work_area;
     fn qhd(_: egui::Pos2) -> Option<Rect> {
         Some(Rect::from_min_max(pos2(0.0, 0.0), pos2(2560.0, 1400.0)))
     }
@@ -317,12 +315,37 @@ fn the_window_is_put_where_windows_go_on_its_monitor() {
     assert_eq!(asked(start, [560.0, 200.0], qhd, 1.25, false), [], "the zoom made it not fit");
 }
 
+/// What the status bar's row shows in a window `height` points tall, in the order it is read
+/// out: the first (its text, which `says` begins, as the test asserts), and the parts after it;
+/// each as what it says and where.
+fn status_bar(h: &Harness<'static, OpalApp>, height: f32, says: &str) -> (egui::Rect, Vec<(String, egui::Rect)>) {
+    use egui_kittest::kittest::{NodeT, by};
+    let in_bar = by().predicate(move |n| {
+        n.bounding_box().is_some_and(|b| b.y0 > f64::from(height) - 30.0 && b.y1 <= f64::from(height))
+    });
+    // A label's text is its value.
+    let text = |n: &egui_kittest::Node| {
+        let a = n.accesskit_node();
+        a.label().or(a.value()).unwrap_or_default()
+    };
+    let mut shown: Vec<(String, egui::Rect)> =
+        h.query_all(in_bar).map(|n| (text(&n), n.rect())).filter(|(t, _)| !t.is_empty()).collect();
+    assert!(!shown.is_empty(), "the status bar shows nothing");
+    let (first, said) = shown.remove(0);
+    assert!(first.contains(says), "what is read first is not the text: {first:?}, then {shown:?}");
+    (said, shown)
+}
+
+/// The text of the status bar while a paste's box is open (its start).
+fn box_hint() -> &'static str {
+    &crate::transform_ui::HINT[..20]
+}
+
 /// In a window as narrow as one can be, what the canvas does is read out first in the status
 /// bar, and shows, cut short, left of its parts, which leave it room by leaving out the least
 /// needed of them.
 #[test]
 fn the_status_bar_cuts_short_what_does_not_fit() {
-    use egui_kittest::kittest::{NodeT, by};
     let _gpu = gpu_lock();
     let mut h = harness_of([720.0, 600.0]);
     pasting(&mut h);
@@ -333,63 +356,38 @@ fn the_status_bar_cuts_short_what_does_not_fit() {
     h.run();
     assert!(h.state().state().gpu.memory.is_some(), "no GPU memory to leave out");
     assert!(h.state().state().cursor_shown.is_some(), "the pointer is not over the canvas");
-    // What the bar's row shows, in the order it is read out (a label's text is its value).
-    let in_bar = by().predicate(|n| n.bounding_box().is_some_and(|b| b.y0 > 570.0 && b.y1 <= 600.0));
-    let text = |n: &egui_kittest::Node| {
-        let a = n.accesskit_node();
-        a.label().or(a.value()).unwrap_or_default()
-    };
-    let parts: Vec<(String, egui::Rect)> =
-        h.query_all(in_bar).map(|n| (text(&n), n.rect())).filter(|(t, _)| !t.is_empty()).collect();
-    let start = &crate::transform_ui::HINT[..20];
-    let (first, hint) = parts.first().cloned().expect("the status bar shows something");
-    assert!(first.contains(start), "what is read first is not what the canvas does: {parts:?}");
+    let (hint, parts) = status_bar(&h, 600.0, box_hint());
     assert!(hint.width() >= 155.0, "the parts leave it too little room: {hint:?}");
-    for (label, r) in &parts[1..] {
+    for (label, r) in &parts {
         assert!(r.left() >= hint.right(), "{label:?} runs over what the canvas does: {r:?} {hint:?}");
     }
     assert!(!parts.iter().any(|(l, _)| l.starts_with("GPU")), "the least needed part was kept: {parts:?}");
     assert!(parts.iter().any(|(l, _)| l.ends_with("ppi")), "a part more needed was left out: {parts:?}");
 }
 
-/// The status bar's text, and its parts (what each says, and where), in a window `height`
-/// points tall: what its row shows, in the order it is read out.
-fn status_bar(h: &Harness<'static, OpalApp>, height: f32) -> (egui::Rect, Vec<(String, egui::Rect)>) {
-    use egui_kittest::kittest::{NodeT, by};
-    let in_bar = by().predicate(move |n| {
-        n.bounding_box().is_some_and(|b| b.y0 > f64::from(height) - 30.0 && b.y1 <= f64::from(height))
-    });
-    let text = |n: &egui_kittest::Node| {
-        let a = n.accesskit_node();
-        a.label().or(a.value()).unwrap_or_default()
-    };
-    let mut shown: Vec<(String, egui::Rect)> =
-        h.query_all(in_bar).map(|n| (text(&n), n.rect())).filter(|(t, _)| !t.is_empty()).collect();
-    let (_, said) = shown.remove(0);
-    (said, shown)
-}
-
-/// About the width where the status bar's parts no longer all fit, the text keeps its 160
-/// points, no part runs over it, and which parts show holds from frame to frame: a part is as
-/// wide wherever it stands (first, or after a separator).
+/// About the width where the status bar's parts no longer all fit, the text keeps its room, no
+/// part runs over it, and which parts show holds from frame to frame: a part is as wide
+/// wherever it stands (first, or after a separator).
 #[test]
 fn the_status_bar_holds_about_where_a_part_is_left_out() {
     let _gpu = gpu_lock();
     let mut h = harness();
     pasting(&mut h);
-    // Long parts, of a width that holds: the size in millimetres, the GPU's memory fixed.
+    // Parts of widths that hold: the size in millimetres, the GPU's memory fixed, no scripts and
+    // no tiles on disk (whatever other tests do with the tile store).
     h.state_mut().state_mut().set_unit(opal_core::units::Unit::Mm);
     h.state_mut().pin_gpu_memory((212 << 20, 48 << 30));
+    h.state_mut().pretend_status(0, 0);
     h.run();
     let gap = h.ctx.global_style().spacing.item_spacing.x;
-    let height = 860.0;
-    // Where they would just fit: the text's start, its 160 points and the gap after them, the
-    // parts, and what is right of them.
-    let (said, parts) = status_bar(&h, height);
+    let [width, height] = [h.ctx.content_rect().width(), h.ctx.content_rect().height()];
+    let room = crate::app::STATUS_TEXT_ROOM;
+    // Where they would just fit: the text's start, its room and the gap after it, and the parts
+    // from where they begin to the window's edge.
+    let (said, parts) = status_bar(&h, height, box_hint());
     assert!(parts.iter().any(|(t, _)| t.starts_with("GPU")), "no GPU part: {parts:?}");
     let left = parts.iter().map(|(_, r)| r.left()).fold(f32::INFINITY, f32::min);
-    let right = parts.iter().map(|(_, r)| r.right()).fold(0.0, f32::max);
-    let fits = said.left() + 160.0 + gap + (right - left) + (1400.0 - right);
+    let fits = said.left() + room + gap + (width - left);
     for i in 0..14 {
         let width = (fits - 20.0 + 2.0 * i as f32).round();
         h.set_size(egui::vec2(width, height));
@@ -397,11 +395,11 @@ fn the_status_bar_holds_about_where_a_part_is_left_out() {
         let mut seen = Vec::new();
         for _ in 0..3 {
             h.step();
-            let (said, parts) = status_bar(&h, height);
+            let (said, parts) = status_bar(&h, height, box_hint());
             let left = parts.iter().map(|(_, r)| r.left()).fold(f32::INFINITY, f32::min);
             assert!(said.right() <= left - gap + 0.5, "at {width}, a part runs over the text: {said:?} {parts:?}");
-            let room = left - gap - said.left();
-            assert!(room >= 159.5, "at {width}, the text has {room} points: {parts:?}");
+            let has = left - gap - said.left();
+            assert!(has >= room - 0.5, "at {width}, the text has {has} points: {parts:?}");
             seen.push(parts.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>());
         }
         assert!(seen.windows(2).all(|w| w[0] == w[1]), "at {width}, the parts shown change: {seen:?}");
@@ -414,33 +412,49 @@ fn the_status_bar_holds_about_where_a_part_is_left_out() {
     }
 }
 
-/// The scripts part is drawn by what was read when it was chosen: a script leaving between
-/// the two shows no "Let in" (it is not shut out), nor costs the frame another pass.
+/// The scripts part is drawn by what the frame read, not by the server read again (which
+/// another thread may have changed meanwhile, a script leaving): here the server, there being
+/// none, would say none are connected, and so none shut out.
 #[test]
-fn the_status_bar_s_scripts_part_is_drawn_as_it_was_chosen() {
+fn the_status_bar_s_scripts_part_is_drawn_by_what_the_frame_read() {
     use egui_kittest::kittest::by;
     let _gpu = gpu_lock();
     let mut h = harness();
-    let file = std::env::temp_dir().join(format!("opal-ui-scripts-{}.json", std::process::id()));
-    let server = crate::server::Server::start(file.clone(), h.ctx.clone()).expect("the server starts");
-    server.pretend_connected(1);
-    h.state_mut().set_server(server);
-    h.run();
     let connected = |h: &Harness<'static, OpalApp>| h.query(by().label_contains("A script is connected")).is_some();
     let let_in = |h: &Harness<'static, OpalApp>| h.query(by().label("Let in")).is_some();
-    assert!(connected(&h), "the script is not shown");
-    // It leaves just after the bar reads how many are connected.
-    h.state().server().leave_after_next_read();
-    let before = h.ctx.cumulative_pass_nr();
-    h.step();
-    let passes = h.ctx.cumulative_pass_nr() - before;
+    h.state_mut().pretend_status(1, 0);
+    h.run();
+    assert!(connected(&h), "not drawn as the frame read it");
     assert!(!let_in(&h), "shown as shut out, which it is not");
-    assert!(connected(&h), "not drawn as it was read");
-    assert_eq!(passes, 1, "the frame took another pass");
-    // The next frame reads it gone.
-    h.step();
+    // Read gone, it goes.
+    h.state_mut().pretend_status(0, 0);
+    h.run();
     assert!(!connected(&h) && !let_in(&h), "still shown");
-    std::fs::remove_file(&file).ok();
+}
+
+/// The status bar is laid out again in the frame only where its parts grow past the room it
+/// gave them: narrower, the next frame does.
+#[test]
+fn the_status_bar_takes_another_pass_only_where_its_parts_grow() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    pasting(&mut h);
+    h.state_mut().pin_gpu_memory((212 << 20, 48 << 30));
+    h.state_mut().pretend_status(0, 0);
+    h.state_mut().state_mut().set_unit(opal_core::units::Unit::Mm);
+    h.run();
+    let passes = |h: &mut Harness<'static, OpalApp>| {
+        let before = h.ctx.cumulative_pass_nr();
+        h.step();
+        h.ctx.cumulative_pass_nr() - before
+    };
+    assert_eq!(passes(&mut h), 1, "a frame with nothing changed took another pass");
+    // In pixels, the canvas's size is shorter: no other pass.
+    h.state_mut().state_mut().set_unit(opal_core::units::Unit::Px);
+    assert_eq!(passes(&mut h), 1, "parts grown narrower took another pass");
+    // In millimetres again, longer: another pass, so that it does not run over the text.
+    h.state_mut().state_mut().set_unit(opal_core::units::Unit::Mm);
+    assert_eq!(passes(&mut h), 2, "parts grown wider took no other pass");
 }
 
 /// The Presets menu beside a tool's name saves its settings under a name, applies them, and

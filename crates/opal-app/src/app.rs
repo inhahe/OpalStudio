@@ -49,6 +49,10 @@ pub struct OpalApp {
     fitted_to_monitor: bool,
     /// Where windows go on the monitor at a point ([`work_area`]; another in tests).
     work_area: fn(egui::Pos2) -> Option<egui::Rect>,
+    /// What the status bar is to show of what other threads change, in place of reading it,
+    /// in tests ([`OpalApp::pretend_status`]).
+    #[cfg(test)]
+    status_given: Option<StatusSeen>,
     /// Whether settings are saved (not in tests).
     persist: bool,
     /// The API's connection for scripts and assistants (not in tests); `None` if it could
@@ -112,6 +116,8 @@ impl OpalApp {
             alt_down: false,
             field_had_keys: false,
             fitted_to_monitor: false,
+            #[cfg(test)]
+            status_given: None,
             work_area,
             alt_alone: false,
             persist,
@@ -185,16 +191,12 @@ impl OpalApp {
         self.tree.tiles.rect(tile).expect("the pane was shown").shrink(f32::from(PANE_INSET))
     }
 
-    /// Makes `server` the API's server, as if this editor served scripts, for tests.
+    /// Makes the status bar show `scripts` connected (none in a step, none shut out) and
+    /// `on_disk` bytes of tiles on disk, whatever the server and the tile store say, for tests.
     #[cfg(test)]
-    pub fn set_server(&mut self, server: crate::server::Server) {
-        self.server = Some(server);
-    }
-
-    /// The API's server, for tests.
-    #[cfg(test)]
-    pub fn server(&self) -> &crate::server::Server {
-        self.server.as_ref().expect("a server was given")
+    pub fn pretend_status(&mut self, scripts: usize, on_disk: u64) {
+        let tiles = opal_core::store::Status { on_disk, ..Default::default() };
+        self.status_given = Some(StatusSeen { clients: scripts, steps: Vec::new(), shut_out: false, tiles });
     }
 
     /// Makes the GPU memory shown `memory` (used and budget, in bytes), no longer polled, for
@@ -678,6 +680,10 @@ impl OpalApp {
 
     /// What the status bar shows of what other threads change.
     fn status_seen(&self) -> StatusSeen {
+        #[cfg(test)]
+        if let Some(given) = &self.status_given {
+            return given.clone();
+        }
         let (clients, steps, shut_out) = match &self.server {
             Some(s) => (s.clients(), s.open_steps(), s.shut_out()),
             None => (0, Vec::new(), false),
@@ -688,7 +694,7 @@ impl OpalApp {
     /// The parts of the status bar there is something for, from its right end, by `seen`.
     fn status_parts(&self, seen: &StatusSeen) -> Vec<StatusPart> {
         let mut parts = Vec::new();
-        if self.server.is_some() && (seen.clients > 0 || seen.shut_out) {
+        if seen.clients > 0 || seen.shut_out {
             parts.push(StatusPart::Scripts);
         }
         if self.st.writer.pending().next().is_some() {
@@ -721,9 +727,8 @@ impl OpalApp {
         };
         match part {
             // Scripts and assistants connected, and a way to send them off; once sent off, a
-            // way to let them in again.
+            // way to let them in again. Drawn by `seen` alone (the server only told a click).
             StatusPart::Scripts => {
-                let Some(server) = &self.server else { return };
                 let n = seen.clients;
                 if n > 0 {
                     if ui
@@ -733,6 +738,7 @@ impl OpalApp {
                              request), and keep them out until you let them in again.",
                         )
                         .clicked()
+                        && let Some(server) = &self.server
                     {
                         server.disconnect_all();
                     }
@@ -746,7 +752,9 @@ impl OpalApp {
                     let strong = self.st.palette.strong_text;
                     capped(ui, RichText::new(format!("{}  {who}", crate::icons::INFO)).color(strong));
                 } else {
-                    if ui.small_button("Let in").on_hover_text("Let scripts and assistants connect again.").clicked() {
+                    if ui.small_button("Let in").on_hover_text("Let scripts and assistants connect again.").clicked()
+                        && let Some(server) = &self.server
+                    {
                         server.let_in();
                     }
                     ui.label(RichText::new(format!("{}  Scripts are disconnected", crate::icons::INFO)).color(weak));
@@ -892,6 +900,7 @@ impl StatusPart {
 
 /// What the status bar shows of what other threads change (the server's, the tile store's),
 /// read once a frame, so that its parts are chosen and drawn by the same.
+#[derive(Clone)]
 struct StatusSeen {
     clients: usize,
     steps: Vec<String>,
@@ -916,7 +925,7 @@ impl StatusWidths {
 }
 
 /// The room the status bar keeps for what the canvas does, before its parts, in points.
-const STATUS_TEXT_ROOM: f32 = 160.0;
+pub(crate) const STATUS_TEXT_ROOM: f32 = 160.0;
 
 /// The widest a part of the status bar's text may be, in points (the scripts' open steps,
 /// the file being written): longer, it is cut short.
@@ -1083,6 +1092,13 @@ fn find_docs_container(tiles: &Tiles<Pane>) -> Option<TileId> {
         .find(|(_, t)| matches!(t, egui_tiles::Tile::Pane(Pane::Document(_) | Pane::Welcome)))
         .map(|(id, _)| *id)?;
     tiles.parent_of(pane)
+}
+
+/// Where windows go on a full-HD screen whose taskbar is 48 pixels tall, in physical pixels,
+/// at any point, for tests.
+#[cfg(test)]
+pub(crate) fn full_hd_work_area(_: egui::Pos2) -> Option<egui::Rect> {
+    Some(egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1920.0, 1032.0)))
 }
 
 /// The size the window starts at, in points at 100% interface scale (logical pixels).
@@ -1445,7 +1461,7 @@ mod tests {
     #[test]
     fn the_window_is_moved_or_maximized_into_where_windows_go() {
         // A full-HD screen at 100%, its taskbar 48 points: the window, in its middle, fits.
-        let room = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1920.0, 1032.0));
+        let room = full_hd_work_area(egui::Pos2::ZERO).expect("a work area");
         let middle = starting([232.0, 70.0]);
         assert_eq!(fitting(middle, room), None);
         // Cascaded down so that its bottom is under the taskbar: moved up, into the middle.
@@ -1464,9 +1480,6 @@ mod tests {
     #[test]
     fn the_window_s_fit_waits_for_the_interface_s_zoom() {
         use egui::{Rect, ViewportCommand, ViewportId, pos2, vec2};
-        fn full_hd(_: egui::Pos2) -> Option<Rect> {
-            Some(Rect::from_min_max(pos2(0.0, 0.0), pos2(1920.0, 1032.0)))
-        }
         let ctx = egui::Context::default();
         ctx.set_zoom_factor(1.25);
         // In the middle of a full-HD screen at 100%, in physical pixels: it fits.
@@ -1483,7 +1496,7 @@ mod tests {
             v.inner_rect = Some(Rect::from_min_max(inner.min / scale, inner.max / scale));
             v.monitor_size = Some(vec2(1920.0, 1080.0) / scale);
             let mut decided = false;
-            let mut out = ctx.run_ui(input, |ui| decided = fit_to_monitor(ui.ctx(), full_hd));
+            let mut out = ctx.run_ui(input, |ui| decided = fit_to_monitor(ui.ctx(), full_hd_work_area));
             // The fonts' textures, which nothing here draws with.
             out.textures_delta.clear();
             let asked: Vec<ViewportCommand> = out.viewport_output.get(&ViewportId::ROOT).map_or_else(Vec::new, |v| {
