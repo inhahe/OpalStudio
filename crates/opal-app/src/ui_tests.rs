@@ -224,33 +224,61 @@ fn a_grid_of_points_is_one_tab_stop_and_the_arrows_move_in_it() {
     pasting(&mut h);
     h.state_mut().state_mut().box_numbers = true;
     h.run();
-    let focused = |h: &Harness<'static, OpalApp>| {
+    let focus_on = |h: &Harness<'static, OpalApp>| {
         use egui_kittest::kittest::NodeT;
-        h.get(by().predicate(|n| n.is_focused())).accesskit_node().label().unwrap_or_default()
+        h.get(focused()).accesskit_node().label().unwrap_or_default()
     };
+    let chosen = |h: &Harness<'static, OpalApp>| h.state().state().prefs.choice("transform.reference");
+    let units = || on_side(by().label("Units").role(egui::accesskit::Role::ComboBox), true);
     // From the units, Tab reaches the point chosen, then the next menu.
-    h.get(on_side(by().label("Units").role(egui::accesskit::Role::ComboBox), true)).focus();
+    h.get(units()).focus();
     h.run();
     h.key_press(egui::Key::Tab);
     h.run();
-    assert_eq!(focused(&h), "Top left");
+    assert_eq!(focus_on(&h), "Top left");
     h.key_press(egui::Key::ArrowRight);
     h.run();
     h.key_press(egui::Key::ArrowDown);
     h.run();
-    assert_eq!(h.state().state().prefs.choice("transform.reference"), "center", "the arrows did not move the choice");
-    assert_eq!(focused(&h), "Center", "the focus did not move with the choice");
+    assert_eq!(chosen(&h), "center", "the arrows did not move the choice");
+    assert_eq!(focus_on(&h), "Center", "the focus did not move with the choice");
     // At the grid's edge an arrow moves nothing, and the focus stays (egui, given the arrow,
     // would move it on to what lies that way: the units).
     h.key_press(egui::Key::ArrowUp);
     h.run();
     h.key_press(egui::Key::ArrowUp);
     h.run();
-    assert_eq!(h.state().state().prefs.choice("transform.reference"), "top");
-    assert_eq!(focused(&h), "Top", "the focus left the grid at its edge");
+    assert_eq!(chosen(&h), "top");
+    assert_eq!(focus_on(&h), "Top", "the focus left the grid at its edge");
     h.key_press(egui::Key::Tab);
     h.run();
-    assert_eq!(focused(&h), "From", "Tab went through the other points");
+    assert_eq!(focus_on(&h), "From", "Tab went through the other points");
+    // Shift+Tab goes back to the point chosen, past the others.
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+    h.run();
+    assert_eq!(focus_on(&h), "Top", "Shift+Tab went through the other points");
+    // Arrows pressed between two frames each count (kittest gives each queued event a frame of
+    // its own, so these go into one frame's input directly).
+    for _ in 0..2 {
+        let down = |pressed| egui::Event::Key {
+            key: egui::Key::ArrowDown,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        h.input_mut().events.extend([down(true), down(false)]);
+    }
+    h.step();
+    h.run();
+    assert_eq!(chosen(&h), "bottom", "an arrow was lost");
+    assert_eq!(focus_on(&h), "Bottom");
+    // From the units, the down arrow reaches the point chosen, not one chosen before it.
+    h.get(units()).focus();
+    h.run();
+    h.key_press(egui::Key::ArrowDown);
+    h.run();
+    assert_eq!(focus_on(&h), "Bottom", "the down arrow did not reach the point chosen");
 }
 
 /// A unit chosen in the menu below a box's numbers shows them in it in the same frame.
@@ -284,8 +312,7 @@ fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
     // Typed into the numbers by the box (the tool settings show the same).
     h.state_mut().state_mut().box_numbers = true;
     h.run();
-    let params = |h: &Harness<'static, OpalApp>| box_params(h);
-    let x = |h: &Harness<'static, OpalApp>| params(h).x;
+    let x = |h: &Harness<'static, OpalApp>| box_params(h).x;
     let at = x(&h);
     // The From label is level with the menu it names, and the grid of points the position
     // counts from lies between the menu and what follows the fields.
@@ -305,11 +332,11 @@ fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
     // A layer's edge, the box's own width, and a bare number in the field's unit (pixels):
     // shown whole, with what it comes to, below the field (which may be too narrow to show
     // it), while what is beside the field stays where it was.
-    let beside = h.get(box_field(params(&h).y, 1e-6)).rect();
+    let beside = h.get(box_field(box_params(&h).y, 1e-6)).rect();
     type_into(&mut h, box_field(at, 1e-6), "Background.right - width - 10");
     let whole = h.query_all(by().label_contains("Background.right - width - 10  = 340 px")).count();
     assert_eq!(whole, 1, "what is typed, and what it comes to, are not shown whole");
-    assert_eq!(h.get(box_field(params(&h).y, 1e-6)).rect(), beside, "what is beside the field moved");
+    assert_eq!(h.get(box_field(box_params(&h).y, 1e-6)).rect(), beside, "what is beside the field moved");
     h.key_press(egui::Key::Enter);
     h.run();
     assert_eq!(x(&h), 340.0);
@@ -1060,12 +1087,17 @@ fn box_field(v: f64, within: f64) -> egui_kittest::kittest::By<'static> {
     field_showing(v, within, true)
 }
 
+/// The widget with the keyboard focus.
+fn focused() -> egui_kittest::kittest::By<'static> {
+    egui_kittest::kittest::by().predicate(|n| n.is_focused())
+}
+
 /// Types `text` into `field`, in place of what it shows.
 fn type_into(h: &mut Harness<'static, OpalApp>, field: egui_kittest::kittest::By<'static>, text: &str) {
     h.get(field).click();
     h.run();
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
-    h.get(egui_kittest::kittest::by().predicate(|n| n.is_focused())).type_text(text);
+    h.get(focused()).type_text(text);
     h.run();
 }
 

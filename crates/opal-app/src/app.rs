@@ -170,11 +170,12 @@ impl OpalApp {
         l.shares.set_share(tabs, share);
     }
 
-    /// Where `pane` was shown in the last frame (below its tab), for tests.
+    /// Where `pane`'s contents showed in the last frame (below its tab, within its inset), for
+    /// tests.
     #[cfg(test)]
     pub fn pane_rect(&self, pane: Pane) -> egui::Rect {
         let tile = self.tree.tiles.find_pane(&pane).expect("the pane is in the tree");
-        self.tree.tiles.rect(tile).expect("the pane was shown")
+        self.tree.tiles.rect(tile).expect("the pane was shown").shrink(f32::from(PANE_INSET))
     }
 
     /// Whether the start page is in the panel tree, for tests.
@@ -909,6 +910,9 @@ fn find_docs_container(tiles: &Tiles<Pane>) -> Option<TileId> {
     tiles.parent_of(pane)
 }
 
+/// The margin between the side panels' edges and what they show, in points.
+const PANE_INSET: i8 = 8;
+
 /// The starting layout: images in tabs on the left; Tool settings above Layers and History
 /// on the right.
 fn default_tree(st: &AppState) -> egui_tiles::Tree<Pane> {
@@ -965,7 +969,7 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
 
     fn pane_ui(&mut self, ui: &mut egui::Ui, _tile_id: TileId, pane: &mut Pane) -> UiResponse {
         let inset = |ui: &mut egui::Ui, f: &mut dyn FnMut(&mut egui::Ui)| {
-            egui::Frame::NONE.inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+            egui::Frame::NONE.inner_margin(egui::Margin::same(PANE_INSET)).show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
                 f(ui);
             });

@@ -291,6 +291,10 @@ pub fn reference_grid(ui: &mut egui::Ui, chosen: &mut usize, what: Option<&str>,
                 r.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, on, &name));
                 ids[i] = r.id;
                 focused |= on && r.has_focus();
+                if on && r.gained_focus() {
+                    // Another frame at once, which locks the arrows (below) before one comes.
+                    ui.ctx().request_repaint();
+                }
                 if r.clicked() {
                     *chosen = i;
                 }
@@ -301,29 +305,32 @@ pub fn reference_grid(ui: &mut egui::Ui, chosen: &mut usize, what: Option<&str>,
     if !focused {
         return;
     }
-    // The arrows are the grid's while it has the focus: at its edges, where they move nothing,
-    // egui would move the focus out of it by them.
+    // The arrows are the grid's while it has the focus (from the frame after it got it): at
+    // its edges, where they move nothing, egui would move the focus out of it by them.
     let arrows = egui::EventFilter { horizontal_arrows: true, vertical_arrows: true, ..Default::default() };
     ui.memory_mut(|m| m.set_focus_lock_filter(ids[*chosen], arrows));
-    let (row, col) = (*chosen / 3, *chosen % 3);
+    // Each arrow pressed since the last frame, in turn.
     let next = ui.input_mut(|input| {
-        let mut pressed = |key| input.consume_key(egui::Modifiers::NONE, key);
-        if pressed(egui::Key::ArrowLeft) {
-            (col > 0).then(|| *chosen - 1)
-        } else if pressed(egui::Key::ArrowRight) {
-            (col < 2).then(|| *chosen + 1)
-        } else if pressed(egui::Key::ArrowUp) {
-            (row > 0).then(|| *chosen - 3)
-        } else if pressed(egui::Key::ArrowDown) {
-            (row < 2).then(|| *chosen + 3)
-        } else {
-            None
-        }
+        let mut at = *chosen;
+        input.events.retain(|e| {
+            let egui::Event::Key { key, pressed: true, modifiers, .. } = e else { return true };
+            let (row, col) = (at / 3, at % 3);
+            let to = match key {
+                egui::Key::ArrowLeft if modifiers.is_none() => (col > 0).then(|| at - 1),
+                egui::Key::ArrowRight if modifiers.is_none() => (col < 2).then(|| at + 1),
+                egui::Key::ArrowUp if modifiers.is_none() => (row > 0).then(|| at - 3),
+                egui::Key::ArrowDown if modifiers.is_none() => (row < 2).then(|| at + 3),
+                _ => return true,
+            };
+            at = to.unwrap_or(at);
+            false
+        });
+        at
     });
-    if let Some(next) = next {
+    if next != *chosen {
         *chosen = next;
         ui.memory_mut(|m| m.request_focus(ids[next]));
-        // At once, so that the next point locks the arrows before the next is pressed.
+        // Another frame at once, in which the point chosen locks the arrows.
         ui.ctx().request_repaint();
     }
 }
