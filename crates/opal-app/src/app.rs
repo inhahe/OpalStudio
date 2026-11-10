@@ -588,8 +588,13 @@ impl OpalApp {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let weak = self.st.palette.weak_text;
         ui.horizontal(|ui| {
+            // What the canvas does: the transform box's, while one is open, takes its drags.
             let tool = self.st.tool.info();
-            // A recent notice, for a few seconds, instead of the tool's description.
+            let (glyph, does) = match self.st.active().and_then(|d| d.transform.as_ref()) {
+                Some(_) => (crate::icons::TRANSFORM, crate::transform_ui::HINT),
+                None => (tool.icon, tool.description),
+            };
+            // A recent notice, for a few seconds, instead of what the canvas does.
             const SHOWN: std::time::Duration = crate::state::NOTICE_SHOWN;
             match &self.st.notice {
                 Some((text, at)) if at.elapsed() < SHOWN => {
@@ -599,7 +604,7 @@ impl OpalApp {
                     ui.ctx().request_repaint_after(SHOWN.saturating_sub(at.elapsed()));
                 }
                 _ => {
-                    ui.label(RichText::new(format!("{}  {}", tool.icon, tool.description)).color(weak));
+                    ui.label(RichText::new(format!("{glyph}  {does}")).color(weak));
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

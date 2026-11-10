@@ -454,6 +454,10 @@ A docked panel: the active tool's variant picker at the top, then its basic sett
 its Advanced section. It is a panel rather than a bar because the Advanced settings include
 curve editors.
 
+- **The heading is the tool's name**, which says what the tool does on hover, so that in a
+  short panel the settings start high. What the tool does is said by the status bar too,
+  which, while a transform box is open, says instead how the box is used
+  (`transform_ui::HINT`), the canvas being the box's then.
 - It scrolls, its scroll area as wide as the pane whatever it holds, so that the scroll bar
   is at the pane's edge.
 

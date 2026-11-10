@@ -573,12 +573,7 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
     }
     let tool = st.tool;
     let info = tool.info();
-    ui.horizontal(|ui| {
-        ui.label(icon(info.icon, 20.0));
-        ui.heading(info.name);
-    });
-    ui.label(RichText::new(info.description).color(st.palette.weak_text));
-    ui.add_space(4.0);
+    heading(ui, info.icon, info.name, info.description);
     if info.settings.is_empty() {
         ui.label(RichText::new("This tool has no settings.").color(st.palette.weak_text));
         return;
@@ -598,6 +593,17 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
         ui.label(RichText::new("Box").strong());
         crate::box_fields::crop(ui, st, id, "crop-panel");
     }
+}
+
+/// The heading of what the tool settings show: `glyph` and `name`, which say on hover what
+/// it `does` (the status bar says it too, kept short, so that the settings show below it).
+pub fn heading(ui: &mut egui::Ui, glyph: char, name: &str, does: &str) {
+    ui.horizontal(|ui| {
+        ui.label(icon(glyph, 20.0));
+        ui.heading(name);
+    })
+    .response
+    .on_hover_text(does);
 }
 
 /// Saving the current tool's settings under a name, and applying saved ones.

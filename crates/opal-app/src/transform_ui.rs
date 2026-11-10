@@ -358,24 +358,17 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen
     }
 }
 
+/// How the transform box is used: said by the status bar while it is open, and by its heading
+/// in the tool settings on hover.
+pub const HINT: &str = "Drag the box to move, a corner or edge to scale, the round handle or anywhere outside to \
+                        rotate. Enter applies, Esc cancels.";
+
 /// The box's numbers and drawing method, in the tool settings panel.
 pub fn settings(ui: &mut egui::Ui, st: &mut AppState) {
     let palette = st.palette;
     let Some(id) = st.active_doc else { return };
     let Some(s) = st.doc(id).and_then(|d| d.transform.as_ref()) else { return };
-    let label = s.label();
-    ui.horizontal(|ui| {
-        ui.label(icon(icons::TRANSFORM, 20.0));
-        ui.heading(label);
-    });
-    ui.label(
-        RichText::new(
-            "Drag the box to move, a corner or edge to scale, the round handle or anywhere outside to rotate. \
-             Enter applies, Esc cancels.",
-        )
-        .color(palette.weak_text),
-    );
-    ui.add_space(4.0);
+    crate::panels::heading(ui, icons::TRANSFORM, s.label(), HINT);
     crate::box_fields::transform(ui, st, id, "transform-panel");
     ui.add_space(6.0);
     ui.label(RichText::new("Drawing").strong());

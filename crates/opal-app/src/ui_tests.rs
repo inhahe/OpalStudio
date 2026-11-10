@@ -213,6 +213,41 @@ fn the_tool_settings_show_the_crop_box_s_numbers_without_scrolling() {
     in_the_tool_settings(&h, &[("width", 400.0), ("height", 300.0)]);
 }
 
+/// What a tool or the transform box does is said by the status bar, and by the heading of the
+/// tool settings on hover, not in them.
+#[test]
+fn the_status_bar_and_the_heading_say_what_the_canvas_does() {
+    use egui_kittest::kittest::by;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    h.state_mut().state_mut().tool = crate::tools::ToolId::Crop;
+    image_of(&mut h, 400, 300);
+    h.run();
+    // Where it shows (egui also gives each hover text to screen readers, in a node not drawn).
+    let said = |h: &Harness<'static, OpalApp>, does: &str| {
+        let shown = by().label_contains(does).predicate(|n| n.bounding_box().is_some());
+        h.query_all(shown).map(|n| n.rect()).collect::<Vec<_>>()
+    };
+    let crop = crate::tools::ToolId::Crop.info().description;
+    let pane = h.state().pane_rect(crate::app::Pane::ToolSettings);
+    let in_status_bar = |r: &egui::Rect| r.top() > pane.bottom() && r.left() < pane.left();
+    let shown = said(&h, crop);
+    assert!(shown.len() == 1 && in_status_bar(&shown[0]), "the crop tool's description: {shown:?}");
+    // On the heading, it shows on hover.
+    h.get(on_side(by().label("Crop").role(egui::accesskit::Role::Label), false)).hover();
+    for _ in 0..8 {
+        h.step();
+    }
+    assert_eq!(said(&h, crop).len(), 2, "the heading does not say on hover what the tool does");
+    // While a box is open, the canvas moves it, and the status bar says how.
+    h.event(egui::Event::PointerGone);
+    put_on_clipboard(&mut h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
+    h.event(egui::Event::Paste(String::new()));
+    h.run();
+    let shown = said(&h, crate::transform_ui::HINT);
+    assert!(shown.len() == 1 && in_status_bar(&shown[0]), "the box's hint: {shown:?}");
+}
+
 /// A grid of a box's points is one stop for Tab, the point chosen, and the arrow keys move the
 /// choice within it.
 #[test]
