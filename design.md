@@ -461,8 +461,7 @@ curve editors.
   saved one; delete one, from a submenu of its own so that a slip applies rather than
   deletes). What the tool does is said by the status bar too, which, while a transform box
   is open, says instead how the box is used (`transform_ui::HINT`), the canvas being the
-  box's then; it is cut short, whole on hover, where the items at the bar's right leave it
-  too little room.
+  box's then (see *Status bar*).
 - It scrolls, its scroll area as wide as the pane whatever it holds, so that the scroll bar
   is at the pane's edge.
 
@@ -476,6 +475,19 @@ curve editors.
   pixels for a taskbar. (`app::fit_to_monitor`.)
 - The starting layout's split gives the tool settings half the right column, which shows
   the crop box's numbers without scrolling in a window maximized on such a screen.
+
+### Status bar
+
+- At its left, what the canvas does (the tool's description, or the transform box's hint),
+  or for a few seconds a notice; at its right, parts from its end: scripts connected, a
+  save or export under way, tiles on disk, GPU memory, and the active image's zoom, size,
+  resolution and the pointer's place.
+- The text is laid out first, so that it is read out first, in the room the parts took
+  when last shown (another pass at once where they changed width), and cut short, whole
+  on hover, where it does not fit. Where the parts would leave it less than 160 points,
+  the least needed are left out (tiles on disk, GPU memory, the pointer's place, and so
+  on, a save under way last); the scripts' open steps and the file's name are cut short
+  past 260 points (`app::StatusPart`).
 
 ### Look
 

@@ -255,20 +255,39 @@ fn the_status_bar_and_the_heading_say_what_the_canvas_does() {
     assert_eq!(said(&h, crate::transform_ui::HINT).len(), 2, "the box's heading does not say on hover how it is used");
 }
 
-/// In a window as narrow as one can be, what the canvas does is cut short in the status bar
-/// rather than run under the items at its right.
+/// In a window as narrow as one can be, what the canvas does is read out first in the status
+/// bar, and shows, cut short, left of its parts, which leave it room by leaving out the least
+/// needed of them.
 #[test]
 fn the_status_bar_cuts_short_what_does_not_fit() {
-    use egui_kittest::kittest::by;
+    use egui_kittest::kittest::{NodeT, by};
     let _gpu = gpu_lock();
     let mut h = harness_of([720.0, 600.0]);
     pasting(&mut h);
+    // In millimetres, the canvas's size is long, and with the pointer's place too the parts do
+    // not all fit.
+    h.state_mut().state_mut().set_unit(opal_core::units::Unit::Mm);
+    h.event(egui::Event::PointerMoved(egui::pos2(250.0, 300.0)));
     h.run();
+    assert!(h.state().state().gpu.memory.is_some(), "no GPU memory to leave out");
+    assert!(h.state().state().cursor_shown.is_some(), "the pointer is not over the canvas");
+    // What the bar's row shows, in the order it is read out (a label's text is its value).
+    let in_bar = by().predicate(|n| n.bounding_box().is_some_and(|b| b.y0 > 570.0 && b.y1 <= 600.0));
+    let text = |n: &egui_kittest::Node| {
+        let a = n.accesskit_node();
+        a.label().or(a.value()).unwrap_or_default()
+    };
+    let parts: Vec<(String, egui::Rect)> =
+        h.query_all(in_bar).map(|n| (text(&n), n.rect())).filter(|(t, _)| !t.is_empty()).collect();
     let start = &crate::transform_ui::HINT[..20];
-    let hint = h.get(by().label_contains(start).predicate(|n| n.bounding_box().is_some())).rect();
-    // The leftmost of the items: the image's resolution.
-    let resolution = h.get(by().label("100 ppi")).rect();
-    assert!(hint.right() <= resolution.left(), "the hint runs under the items: {hint:?} {resolution:?}");
+    let (first, hint) = parts.first().cloned().expect("the status bar shows something");
+    assert!(first.contains(start), "what is read first is not what the canvas does: {parts:?}");
+    assert!(hint.width() >= 150.0, "the parts leave it too little room: {hint:?}");
+    for (label, r) in &parts[1..] {
+        assert!(r.left() >= hint.right(), "{label:?} runs over what the canvas does: {r:?} {hint:?}");
+    }
+    assert!(!parts.iter().any(|(l, _)| l.starts_with("GPU")), "the least needed part was kept: {parts:?}");
+    assert!(parts.iter().any(|(l, _)| l.ends_with("ppi")), "a part more needed was left out: {parts:?}");
 }
 
 /// The Presets menu beside a tool's name saves its settings under a name, applies them, and
@@ -1222,7 +1241,8 @@ fn box_params(h: &Harness<'static, OpalApp>) -> crate::transform::Params {
 }
 
 /// Where, across the window, the numbers by the box end and the side panels begin (which
-/// take the right 22% of the window: from 1092 in the harnesses, all 1400 points wide).
+/// take the right 22% of the window: from 1092 in a harness 1400 points wide, as all are
+/// that use this; in a narrower one they begin further left).
 const PANELS_LEFT: f64 = 1000.0;
 
 /// What `b` finds among the numbers by the box (left of the side panels) if `by_the_box`,
