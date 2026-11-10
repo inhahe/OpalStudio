@@ -86,11 +86,13 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Opal Studio")
-            // Maximized at the start instead where it does not fit (app.rs, fit_to_monitor).
-            .with_inner_size([1440.0, 900.0])
+            // Moved, or maximized, where it does not fit (app.rs, fit_to_monitor).
+            .with_inner_size(app::START_SIZE)
             .with_min_inner_size([720.0, 480.0])
             .with_drag_and_drop(true),
         renderer: eframe::Renderer::Wgpu,
+        // In the middle of its monitor, rather than cascaded down from its corner.
+        centered: true,
         // See paste_keys.rs: Ctrl+V with only files on the clipboard.
         #[cfg(windows)]
         event_loop_builder: Some(Box::new(|builder| {

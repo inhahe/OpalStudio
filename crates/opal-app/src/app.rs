@@ -914,19 +914,73 @@ fn find_docs_container(tiles: &Tiles<Pane>) -> Option<TileId> {
     tiles.parent_of(pane)
 }
 
-/// Room a monitor keeps for its taskbar, in points (Windows 11's is 48).
+/// The size the window starts at, in points at 100% interface scale (logical pixels).
+pub const START_SIZE: [f32; 2] = [1440.0, 900.0];
+
+/// Room a monitor keeps for a taskbar at its bottom, in logical pixels (Windows 11's), where
+/// the system does not say what its docks take.
 const TASKBAR: f32 = 48.0;
 
-/// Maximizes the window if it does not fit its monitor with room for a taskbar, as the
-/// starting size (`main.rs`) does not on a small screen, or a full-HD one at 125%. Returns
-/// whether it could tell (the window's and the monitor's sizes known).
+/// Puts the window all where windows go on its monitor (not under the taskbar or another
+/// dock): moved there if it fits, maximized if not, as the starting size does not on a small
+/// screen or a full-HD one at 125%. Returns whether it could tell: not while the window is
+/// minimized, nor before its size is known.
 fn fit_to_monitor(ctx: &egui::Context) -> bool {
-    let (outer, monitor) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().monitor_size));
-    let (Some(outer), Some(monitor)) = (outer, monitor) else { return false };
-    if outer.width() > monitor.x || outer.height() + TASKBAR > monitor.y {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+    let (outer, inner, monitor, minimized) = ctx.input(|i| {
+        let v = i.viewport();
+        (v.outer_rect, v.inner_rect, v.monitor_size, v.minimized)
+    });
+    // Its frame where the system says where it is (not on Wayland), else what it shows.
+    let Some(window) = outer.or(inner).filter(|_| minimized != Some(true)) else { return false };
+    let ppp = ctx.pixels_per_point();
+    let room = match work_area(window.center() * ppp) {
+        Some(px) => egui::Rect::from_min_max(px.min / ppp, px.max / ppp),
+        // Where the system does not say, the monitor's size, less a taskbar at the bottom; and
+        // not where on it the window is, so it is only ever maximized.
+        None => {
+            let Some(monitor) = monitor else { return false };
+            egui::Rect::from_min_size(window.min, monitor - egui::vec2(0.0, TASKBAR / ctx.zoom_factor()))
+        }
+    };
+    if let Some(cmd) = fitting(window, room) {
+        ctx.send_viewport_cmd(cmd);
     }
     true
+}
+
+/// What puts the window at `window` all in `room` (both in points): nothing if it is; moved to
+/// the middle of `room` if it fits there; else maximized.
+fn fitting(window: egui::Rect, room: egui::Rect) -> Option<egui::ViewportCommand> {
+    if room.contains_rect(window) {
+        None
+    } else if window.width() <= room.width() && window.height() <= room.height() {
+        Some(egui::ViewportCommand::OuterPosition(room.center() - window.size() / 2.0))
+    } else {
+        Some(egui::ViewportCommand::Maximized(true))
+    }
+}
+
+/// Where windows go on the monitor at `point` (in physical pixels): what its taskbar and other
+/// docks leave, in physical pixels.
+#[cfg(windows)]
+fn work_area(point: egui::Pos2) -> Option<egui::Rect> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint};
+    let at = POINT { x: point.x.round() as i32, y: point.y.round() as i32 };
+    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    // SAFETY: MonitorFromPoint takes any point (the nearest monitor, for one on none), and
+    // GetMonitorInfoW writes only into `info`, whose size it is told.
+    let known = unsafe { GetMonitorInfoW(MonitorFromPoint(at, MONITOR_DEFAULTTONEAREST), &mut info) }.as_bool();
+    let r = info.rcWork;
+    known.then(|| {
+        egui::Rect::from_min_max(egui::pos2(r.left as f32, r.top as f32), egui::pos2(r.right as f32, r.bottom as f32))
+    })
+}
+
+/// Where windows go on the monitor at a point: not known here.
+#[cfg(not(windows))]
+fn work_area(_point: egui::Pos2) -> Option<egui::Rect> {
+    None
 }
 
 /// The margin between the side panels' edges and what they show, in points.
@@ -1190,5 +1244,33 @@ impl OpalApp {
                 self.st.scripts_unserved = Some(why);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The window as it starts, its frame about it (a title bar 31 points tall, borders of 8),
+    /// its top-left corner at `at`.
+    fn starting(at: [f32; 2]) -> egui::Rect {
+        let [w, h] = START_SIZE;
+        egui::Rect::from_min_size(at.into(), egui::vec2(w + 16.0, h + 31.0 + 8.0))
+    }
+
+    #[test]
+    fn the_window_is_moved_or_maximized_into_where_windows_go() {
+        // A full-HD screen at 100%, its taskbar 48 points: the window, in its middle, fits.
+        let room = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1920.0, 1032.0));
+        let middle = starting([232.0, 70.0]);
+        assert_eq!(fitting(middle, room), None);
+        // Cascaded down so that its bottom is under the taskbar: moved up, into the middle.
+        let low = starting([300.0, 150.0]);
+        let moved = egui::ViewportCommand::OuterPosition(room.center() - low.size() / 2.0);
+        assert_eq!(fitting(low, room), Some(moved));
+        assert!(room.contains_rect(egui::Rect::from_center_size(room.center(), low.size())));
+        // At 125% the same screen is 1536 x 825.6 points where windows go: too short for it.
+        let room = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1536.0, 825.6));
+        assert_eq!(fitting(starting([40.0, 0.0]), room), Some(egui::ViewportCommand::Maximized(true)));
     }
 }

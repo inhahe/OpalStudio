@@ -465,10 +465,17 @@ curve editors.
   too little room.
 - It scrolls, its scroll area as wide as the pane whatever it holds, so that the scroll bar
   is at the pane's edge.
-- **The window** starts 1440 × 900 points, maximized instead where that does not fit the
-  monitor with room for a taskbar (a full-HD screen at 125% is 864 points tall). The
-  starting layout's split gives the tool settings half the right column, which shows the
-  crop box's numbers in such a window, maximized.
+
+### The window
+
+- It starts 1440 × 900 logical pixels (`app::START_SIZE`), in the middle of its monitor.
+  Once its place and the monitor are known, it is put all where windows go there (what the
+  taskbar and other docks leave, as Windows reports it): moved there if it fits, maximized
+  if not, as on a full-HD screen at 125% (864 logical pixels tall). Elsewhere, where the
+  system does not say, it is maximized if it does not fit the monitor with 48 logical
+  pixels for a taskbar. (`app::fit_to_monitor`.)
+- The starting layout's split gives the tool settings half the right column, which shows
+  the crop box's numbers without scrolling in a window maximized on such a screen.
 
 ### Look
 
