@@ -178,14 +178,7 @@ fn a_box_s_field_takes_an_expression_and_says_what_it_comes_to() {
     use egui_kittest::kittest::by;
     let _gpu = gpu_lock();
     let mut h = harness();
-    h.state_mut().state_mut().create_image(&crate::state::NewImage {
-        width: 400,
-        height: 300,
-        background: crate::state::Background::White,
-        resolution: 100.0,
-    });
-    put_on_clipboard(&mut h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
-    h.event(egui::Event::Paste(String::new()));
+    pasting(&mut h);
     // Typed into the numbers by the box (the tool settings show the same, past the bottom of
     // their panel at this window's height).
     h.state_mut().state_mut().box_numbers = true;
@@ -264,14 +257,7 @@ fn a_field_brings_back_what_was_entered_in_an_earlier_session() {
         ("box.x.in".to_owned(), vec!["2".to_owned()]),
     ]);
     crate::number_field::load_entries(&h.ctx, earlier);
-    h.state_mut().state_mut().create_image(&crate::state::NewImage {
-        width: 400,
-        height: 300,
-        background: crate::state::Background::White,
-        resolution: 100.0,
-    });
-    put_on_clipboard(&mut h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
-    h.event(egui::Event::Paste(String::new()));
+    pasting(&mut h);
     h.state_mut().state_mut().box_numbers = true;
     h.run();
     let at = h.state().state().active().unwrap().transform.as_ref().unwrap().params().x;
@@ -391,7 +377,7 @@ fn an_expression_typed_into_the_box_places_the_layer_so_again() {
     h.run();
     assert!(h.query_all(by().label("x = canvas.width - 60")).count() >= 1, "the box does not say how it was placed");
     let again = format!("{}  Re-apply", crate::icons::REAPPLY);
-    h.get(by().label(&again).predicate(|n| n.bounding_box().is_some_and(|b| b.x0 < 1000.0))).click();
+    h.get(on_side(by().label(&again), true)).click();
     h.run();
     assert_eq!(x(&h), 440.0, "Re-apply did not work it out again");
 }
@@ -957,6 +943,25 @@ fn pasted(w: u32, h: u32, rgba: [f32; 4]) -> crate::clipboard::Pasted {
     }
 }
 
+/// Opens the box on a 50 × 40 red paste in a new white image, 400 × 300 at 100 ppi (for the
+/// next run).
+fn pasting(h: &mut Harness<'static, OpalApp>) {
+    h.state_mut().state_mut().create_image(&crate::state::NewImage {
+        width: 400,
+        height: 300,
+        background: crate::state::Background::White,
+        resolution: 100.0,
+    });
+    put_on_clipboard(h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
+    h.event(egui::Event::Paste(String::new()));
+}
+
+/// What `b` finds among the numbers by the box (left of the side panels) if `by_the_box`,
+/// else in the side panels (where the tool settings show the same).
+fn on_side(b: egui_kittest::kittest::By<'_>, by_the_box: bool) -> egui_kittest::kittest::By<'_> {
+    b.predicate(move |n| n.bounding_box().is_some_and(|r| (r.x0 < 1000.0) == by_the_box))
+}
+
 /// The field that shows `v`, to within `within`: of the numbers by the box (left of the side
 /// panels), or of the tool settings (which show the same), as `by_the_box` says.
 fn field_showing(v: f64, within: f64, by_the_box: bool) -> egui_kittest::kittest::By<'static> {
@@ -1029,14 +1034,7 @@ fn ctrl_v_opens_the_box_and_enter_places_the_paste_as_one_state() {
 fn the_numbers_button_by_the_box_opens_its_fields_in_the_unit_chosen() {
     let _gpu = gpu_lock();
     let mut h = harness();
-    h.state_mut().state_mut().create_image(&crate::state::NewImage {
-        width: 400,
-        height: 300,
-        background: crate::state::Background::White,
-        resolution: 100.0,
-    });
-    put_on_clipboard(&mut h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
-    h.event(egui::Event::Paste(String::new()));
+    pasting(&mut h);
     h.run();
     let angles = |h: &Harness<'static, OpalApp>| h.query_all_by_label("Angle").count();
     let before = angles(&h);
