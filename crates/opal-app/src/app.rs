@@ -185,6 +185,26 @@ impl OpalApp {
         self.tree.tiles.rect(tile).expect("the pane was shown").shrink(f32::from(PANE_INSET))
     }
 
+    /// Makes `server` the API's server, as if this editor served scripts, for tests.
+    #[cfg(test)]
+    pub fn set_server(&mut self, server: crate::server::Server) {
+        self.server = Some(server);
+    }
+
+    /// The API's server, for tests.
+    #[cfg(test)]
+    pub fn server(&self) -> &crate::server::Server {
+        self.server.as_ref().expect("a server was given")
+    }
+
+    /// Makes the GPU memory shown `memory` (used and budget, in bytes), no longer polled, for
+    /// tests.
+    #[cfg(test)]
+    pub fn pin_gpu_memory(&mut self, memory: (u64, u64)) {
+        self.st.gpu.memory = Some(memory);
+        self.gpu_memory = None;
+    }
+
     /// Makes `f` say where windows go on the monitor at a point, for tests.
     #[cfg(test)]
     pub fn set_work_area(&mut self, f: fn(egui::Pos2) -> Option<egui::Rect>) {
@@ -1437,6 +1457,7 @@ mod tests {
         let room = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1536.0, 825.6));
         assert_eq!(fitting(starting([40.0, 0.0]), room), Some(egui::ViewportCommand::Maximized(true)));
     }
+
     /// The interface zoomed (as its size preference does before the first frame), the first
     /// frame's sizes measured as if it were not (as egui-winit measures them then): nothing is
     /// decided by them. In the next frame's, in the zoom's units, a window that fits is left.

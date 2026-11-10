@@ -94,6 +94,10 @@ struct Shared {
     step_idle: Mutex<Duration>,
     /// Whether the user has asked to quit: hellos are refused.
     quitting: AtomicBool,
+    /// In a test, whether a client is to leave just after the next reading of how many are
+    /// connected ([`Server::leave_after_next_read`]).
+    #[cfg(test)]
+    leaving: AtomicBool,
     ctx: egui::Context,
     /// Where the pipe's name and the token are written, and the pipe's name.
     file: PathBuf,
@@ -306,6 +310,8 @@ impl Server {
             open_steps: Mutex::new(HashMap::new()),
             step_idle: Mutex::new(STEP_IDLE),
             quitting: AtomicBool::new(false),
+            #[cfg(test)]
+            leaving: AtomicBool::new(false),
             ctx,
             file,
             pipe,
@@ -347,7 +353,26 @@ impl Server {
 
     /// How many clients are connected (have said hello).
     pub fn clients(&self) -> usize {
-        self.shared.clients.lock().expect("not poisoned").connected
+        let n = self.shared.clients.lock().expect("not poisoned").connected;
+        #[cfg(test)]
+        if self.shared.leaving.swap(false, Ordering::Relaxed) {
+            let mut c = self.shared.clients.lock().expect("not poisoned");
+            c.connected = c.connected.saturating_sub(1);
+        }
+        n
+    }
+
+    /// Counts `n` clients connected, as if they had said hello, for tests.
+    #[cfg(test)]
+    pub fn pretend_connected(&self, n: usize) {
+        self.shared.clients.lock().expect("not poisoned").connected = n;
+    }
+
+    /// Has a client leave just after the next reading of how many are connected (as one
+    /// could, on its own thread), for tests.
+    #[cfg(test)]
+    pub fn leave_after_next_read(&self) {
+        self.shared.leaving.store(true, Ordering::Relaxed);
     }
 
     /// Drops every connection (each goes at its next request, unanswered, and no longer

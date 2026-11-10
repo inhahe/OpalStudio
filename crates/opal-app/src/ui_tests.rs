@@ -352,6 +352,97 @@ fn the_status_bar_cuts_short_what_does_not_fit() {
     assert!(parts.iter().any(|(l, _)| l.ends_with("ppi")), "a part more needed was left out: {parts:?}");
 }
 
+/// The status bar's text, and its parts (what each says, and where), in a window `height`
+/// points tall: what its row shows, in the order it is read out.
+fn status_bar(h: &Harness<'static, OpalApp>, height: f32) -> (egui::Rect, Vec<(String, egui::Rect)>) {
+    use egui_kittest::kittest::{NodeT, by};
+    let in_bar = by().predicate(move |n| {
+        n.bounding_box().is_some_and(|b| b.y0 > f64::from(height) - 30.0 && b.y1 <= f64::from(height))
+    });
+    let text = |n: &egui_kittest::Node| {
+        let a = n.accesskit_node();
+        a.label().or(a.value()).unwrap_or_default()
+    };
+    let mut shown: Vec<(String, egui::Rect)> =
+        h.query_all(in_bar).map(|n| (text(&n), n.rect())).filter(|(t, _)| !t.is_empty()).collect();
+    let (_, said) = shown.remove(0);
+    (said, shown)
+}
+
+/// About the width where the status bar's parts no longer all fit, the text keeps its 160
+/// points, no part runs over it, and which parts show holds from frame to frame: a part is as
+/// wide wherever it stands (first, or after a separator).
+#[test]
+fn the_status_bar_holds_about_where_a_part_is_left_out() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    pasting(&mut h);
+    // Long parts, of a width that holds: the size in millimetres, the GPU's memory fixed.
+    h.state_mut().state_mut().set_unit(opal_core::units::Unit::Mm);
+    h.state_mut().pin_gpu_memory((212 << 20, 48 << 30));
+    h.run();
+    let gap = h.ctx.global_style().spacing.item_spacing.x;
+    let height = 860.0;
+    // Where they would just fit: the text's start, its 160 points and the gap after them, the
+    // parts, and what is right of them.
+    let (said, parts) = status_bar(&h, height);
+    assert!(parts.iter().any(|(t, _)| t.starts_with("GPU")), "no GPU part: {parts:?}");
+    let left = parts.iter().map(|(_, r)| r.left()).fold(f32::INFINITY, f32::min);
+    let right = parts.iter().map(|(_, r)| r.right()).fold(0.0, f32::max);
+    let fits = said.left() + 160.0 + gap + (right - left) + (1400.0 - right);
+    for i in 0..14 {
+        let width = (fits - 20.0 + 2.0 * i as f32).round();
+        h.set_size(egui::vec2(width, height));
+        h.run();
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            h.step();
+            let (said, parts) = status_bar(&h, height);
+            let left = parts.iter().map(|(_, r)| r.left()).fold(f32::INFINITY, f32::min);
+            assert!(said.right() <= left - gap + 0.5, "at {width}, a part runs over the text: {said:?} {parts:?}");
+            let room = left - gap - said.left();
+            assert!(room >= 159.5, "at {width}, the text has {room} points: {parts:?}");
+            seen.push(parts.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>());
+        }
+        assert!(seen.windows(2).all(|w| w[0] == w[1]), "at {width}, the parts shown change: {seen:?}");
+        let gpu = seen[0].iter().any(|t| t.starts_with("GPU"));
+        if width >= fits + 4.0 {
+            assert!(gpu, "at {width}, where all fit, the GPU part was left out");
+        } else if width <= fits - 4.0 {
+            assert!(!gpu, "at {width}, where they do not all fit, the GPU part was kept");
+        }
+    }
+}
+
+/// The scripts part is drawn by what was read when it was chosen: a script leaving between
+/// the two shows no "Let in" (it is not shut out), nor costs the frame another pass.
+#[test]
+fn the_status_bar_s_scripts_part_is_drawn_as_it_was_chosen() {
+    use egui_kittest::kittest::by;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    let file = std::env::temp_dir().join(format!("opal-ui-scripts-{}.json", std::process::id()));
+    let server = crate::server::Server::start(file.clone(), h.ctx.clone()).expect("the server starts");
+    server.pretend_connected(1);
+    h.state_mut().set_server(server);
+    h.run();
+    let connected = |h: &Harness<'static, OpalApp>| h.query(by().label_contains("A script is connected")).is_some();
+    let let_in = |h: &Harness<'static, OpalApp>| h.query(by().label("Let in")).is_some();
+    assert!(connected(&h), "the script is not shown");
+    // It leaves just after the bar reads how many are connected.
+    h.state().server().leave_after_next_read();
+    let before = h.ctx.cumulative_pass_nr();
+    h.step();
+    let passes = h.ctx.cumulative_pass_nr() - before;
+    assert!(!let_in(&h), "shown as shut out, which it is not");
+    assert!(connected(&h), "not drawn as it was read");
+    assert_eq!(passes, 1, "the frame took another pass");
+    // The next frame reads it gone.
+    h.step();
+    assert!(!connected(&h) && !let_in(&h), "still shown");
+    std::fs::remove_file(&file).ok();
+}
+
 /// The Presets menu beside a tool's name saves its settings under a name, applies them, and
 /// deletes them.
 #[test]
