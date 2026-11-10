@@ -255,6 +255,68 @@ fn the_status_bar_and_the_heading_say_what_the_canvas_does() {
     assert_eq!(said(&h, crate::transform_ui::HINT).len(), 2, "the box's heading does not say on hover how it is used");
 }
 
+/// The window is put all where windows go on its monitor, once: left where it is if it is,
+/// moved there if it fits, maximized if not; nothing done while it is minimized; and in the
+/// interface's zoom as in none.
+#[test]
+fn the_window_is_put_where_windows_go_on_its_monitor() {
+    use egui::{Rect, ViewportCommand, pos2, vec2};
+    let _gpu = gpu_lock();
+    // A full-HD screen's room for windows, and a 1440p one's, in physical pixels.
+    fn full_hd(_: egui::Pos2) -> Option<Rect> {
+        Some(Rect::from_min_max(pos2(0.0, 0.0), pos2(1920.0, 1032.0)))
+    }
+    fn qhd(_: egui::Pos2) -> Option<Rect> {
+        Some(Rect::from_min_max(pos2(0.0, 0.0), pos2(2560.0, 1400.0)))
+    }
+    // The commands asked for in two frames, on a monitor whose room is `room`, of a window whose
+    // content is `content` physical pixels at `at` (its frame's corner: a title bar of 31
+    // above, borders of 8 unseen about the rest), in an interface zoomed `zoom`, minimized
+    // for the first frame if `minimized`.
+    let asked = |content: [f32; 2], at: [f32; 2], room: fn(egui::Pos2) -> Option<Rect>, zoom: f32, minimized: bool| {
+        let mut h = harness();
+        h.state_mut().set_work_area(room);
+        h.ctx.set_zoom_factor(zoom);
+        h.run();
+        let inner = Rect::from_min_size(pos2(at[0] + 8.0, at[1] + 31.0), content.into());
+        let outer = Rect::from_min_max(at.into(), inner.max + vec2(8.0, 8.0));
+        let in_points = |r: Rect| Rect::from_min_max(r.min / zoom, r.max / zoom);
+        let mut frames = Vec::new();
+        for frame in 0..3 {
+            let root = h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default();
+            root.outer_rect = Some(in_points(outer));
+            root.inner_rect = Some(in_points(inner));
+            root.minimized = Some(minimized && frame == 0);
+            h.step();
+            let output = h.output().viewport_output.get(&egui::ViewportId::ROOT);
+            let cmds = output.map(|v| v.commands.clone()).unwrap_or_default();
+            frames.push(
+                cmds.into_iter()
+                    .filter(|c| matches!(c, ViewportCommand::Maximized(_) | ViewportCommand::OuterPosition(_)))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert!(frames[2].is_empty(), "asked again: {frames:?}");
+        if minimized {
+            assert!(frames[0].is_empty(), "asked while minimized: {frames:?}");
+        }
+        frames.into_iter().flatten().collect::<Vec<_>>()
+    };
+    let start = crate::app::START_SIZE;
+    // In the middle of a full-HD screen at 100%: left where it is.
+    assert_eq!(asked(start, [232.0, 50.0], full_hd, 1.0, false), []);
+    // Cascaded down, its bottom under the taskbar: moved into the middle, once restored.
+    let moved = asked(start, [300.0, 150.0], full_hd, 1.0, true);
+    let shown = vec2(start[0], start[1] + 31.0);
+    let corner = pos2(960.0, 516.0) - shown / 2.0 - vec2(8.0, 0.0);
+    assert_eq!(moved, [ViewportCommand::OuterPosition(corner)], "not moved into the room");
+    // At 125% (its content a quarter larger): too tall, maximized.
+    let large = [start[0] * 1.25, start[1] * 1.25];
+    assert_eq!(asked(large, [0.0, 0.0], full_hd, 1.0, false), [ViewportCommand::Maximized(true)]);
+    // On a 1440p screen, the interface zoomed 125%: the window fits, and is left.
+    assert_eq!(asked(start, [560.0, 200.0], qhd, 1.25, false), [], "the zoom made it not fit");
+}
+
 /// In a window as narrow as one can be, what the canvas does is read out first in the status
 /// bar, and shows, cut short, left of its parts, which leave it room by leaving out the least
 /// needed of them.

@@ -44,9 +44,11 @@ pub struct OpalApp {
     /// Whether a field had the keyboard at the end of the last frame: the keys pressed since
     /// are its, though egui lets go of the focus on Esc before the frame begins.
     field_had_keys: bool,
-    /// Whether the window has been fitted to its monitor ([`fit_to_monitor`]): once, at the
-    /// start, as soon as the monitor's size is known.
+    /// Whether the window has been put where windows go on its monitor ([`fit_to_monitor`]):
+    /// once, at the start, as soon as where it is can be told.
     fitted_to_monitor: bool,
+    /// Where windows go on the monitor at a point ([`work_area`]; another in tests).
+    work_area: fn(egui::Pos2) -> Option<egui::Rect>,
     /// Whether settings are saved (not in tests).
     persist: bool,
     /// The API's connection for scripts and assistants (not in tests); `None` if it could
@@ -110,6 +112,7 @@ impl OpalApp {
             alt_down: false,
             field_had_keys: false,
             fitted_to_monitor: false,
+            work_area,
             alt_alone: false,
             persist,
             server,
@@ -180,6 +183,12 @@ impl OpalApp {
     pub fn pane_rect(&self, pane: Pane) -> egui::Rect {
         let tile = self.tree.tiles.find_pane(&pane).expect("the pane is in the tree");
         self.tree.tiles.rect(tile).expect("the pane was shown").shrink(f32::from(PANE_INSET))
+    }
+
+    /// Makes `f` say where windows go on the monitor at a point, for tests.
+    #[cfg(test)]
+    pub fn set_work_area(&mut self, f: fn(egui::Pos2) -> Option<egui::Rect>) {
+        self.work_area = f;
     }
 
     /// Whether the start page is in the panel tree, for tests.
@@ -868,7 +877,7 @@ impl eframe::App for OpalApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if !self.fitted_to_monitor {
-            self.fitted_to_monitor = fit_to_monitor(&ctx);
+            self.fitted_to_monitor = fit_to_monitor(&ctx, self.work_area);
         }
         let before = self.signature();
         // The scheme can change under us when following the system's.
@@ -1036,33 +1045,46 @@ const TASKBAR: f32 = 48.0;
 
 /// Puts the window all where windows go on its monitor (not under the taskbar or another
 /// dock): moved there if it fits, maximized if not, as the starting size does not on a small
-/// screen or a full-HD one at 125%. Returns whether it could tell: not while the window is
-/// minimized, nor before its size is known.
-fn fit_to_monitor(ctx: &egui::Context) -> bool {
+/// screen or a full-HD one at 125%. `work_area` says where windows go on the monitor at a
+/// point (in physical pixels), where the system can say. Returns whether it could tell: not in
+/// the first frame (whose sizes are measured before the interface's zoom applies), nor while
+/// the window is minimized, nor where the system does not say where it is (Wayland).
+fn fit_to_monitor(ctx: &egui::Context, work_area: fn(egui::Pos2) -> Option<egui::Rect>) -> bool {
+    if ctx.cumulative_frame_nr() == 0 {
+        return false;
+    }
     let (outer, inner, monitor, minimized) = ctx.input(|i| {
         let v = i.viewport();
         (v.outer_rect, v.inner_rect, v.monitor_size, v.minimized)
     });
-    // Its frame where the system says where it is (not on Wayland), else what it shows.
-    let Some(window) = outer.or(inner).filter(|_| minimized != Some(true)) else { return false };
+    let (Some(outer), Some(inner), false) = (outer, inner, minimized == Some(true)) else { return false };
+    // What of it shows: its frame, less the borders Windows keeps unseen at its left, right and
+    // bottom for resizing (its title bar is its top).
+    let shown = egui::Rect::from_min_max(egui::pos2(inner.min.x, outer.min.y), inner.max);
     let ppp = ctx.pixels_per_point();
-    let room = match work_area(window.center() * ppp) {
+    let room = match work_area(shown.center() * ppp) {
         Some(px) => egui::Rect::from_min_max(px.min / ppp, px.max / ppp),
         // Where the system does not say, the monitor's size, less a taskbar at the bottom; and
         // not where on it the window is, so it is only ever maximized.
         None => {
             let Some(monitor) = monitor else { return false };
-            egui::Rect::from_min_size(window.min, monitor - egui::vec2(0.0, TASKBAR / ctx.zoom_factor()))
+            egui::Rect::from_min_size(shown.min, monitor - egui::vec2(0.0, TASKBAR / ctx.zoom_factor()))
         }
     };
-    if let Some(cmd) = fitting(window, room) {
-        ctx.send_viewport_cmd(cmd);
+    match fitting(shown, room) {
+        // Moved by its frame, the unseen borders with it.
+        Some(egui::ViewportCommand::OuterPosition(to)) => {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(to - (shown.min - outer.min)));
+        }
+        Some(cmd) => ctx.send_viewport_cmd(cmd),
+        None => {}
     }
     true
 }
 
-/// What puts the window at `window` all in `room` (both in points): nothing if it is; moved to
-/// the middle of `room` if it fits there; else maximized.
+/// What puts what shows of the window, `window`, all in `room` (both in points): nothing if it
+/// is; moved so that its corner is at the place given, the middle of `room`, if it fits
+/// there; else maximized.
 fn fitting(window: egui::Rect, room: egui::Rect) -> Option<egui::ViewportCommand> {
     if room.contains_rect(window) {
         None
