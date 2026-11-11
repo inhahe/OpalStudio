@@ -389,7 +389,8 @@ proportions), and from just outside a corner turns it; upright, a side dragged g
 nearest pixel edge (the others stay where they are), and a move puts its corner on a pixel's
 corner, keeping its size as it is. Elsewhere, or where a drag would combine a new shape with
 what is selected, a drag draws one as above, and the pointer says so. A drag edits that step in place, the steps
-before it kept (worked out once, as it begins), as one history state: *Move selection*,
+before it kept as they were worked out (a selection keeps the mask its steps but the last
+make, which its own mask was worked out from), as one history state: *Move selection*,
 *Resize selection* or *Rotate selection* (none, if it comes back to where it began); Esc
 gives it up, as does its image not being drawn (shown in no pane) before it is let go
 (`AppState::leave_undrawn`, which also drops that image's overlay textures). An edit that

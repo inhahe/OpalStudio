@@ -1038,12 +1038,13 @@ mod tests {
         h.commit(d.clone(), "Select");
         assert_eq!(h.memory(), 0, "the current state's selection was counted");
         assert!(counted_right(&h));
-        // Another selection current: the first's tiles count, as no other state shares them.
-        d.selection = Some(Arc::new(first.then(Step::Invert)));
-        h.commit(d, "Invert");
+        // Another selection current (not made from it, which would keep its mask): the
+        // first's tiles count, as no other state shares them.
+        d.selection = Some(Arc::new(Selection::new(Step::Shape { shape: shape(600.0), combine: Combine::Replace })));
+        h.commit(d, "Select");
         assert_eq!(h.memory(), bytes);
         assert!(counted_right(&h));
-        // Back to it: the inverted one's count instead.
+        // Back to it: the other one's count instead.
         h.undo();
         assert!(counted_right(&h));
         assert_eq!(h.memory(), h.node(h.redo_target().unwrap()).doc.selection.as_ref().unwrap().mask().bytes());

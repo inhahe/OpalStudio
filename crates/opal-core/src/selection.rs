@@ -123,10 +123,21 @@ fn even_scale(m: &Affine) -> Option<f64> {
 
 /// A selection: see the module's description. Its mask is worked out from its steps when it
 /// is made, and shared by its copies.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Selection {
     steps: Vec<Step>,
     mask: Arc<Mask>,
+    /// The mask its steps but the last make, kept as it was worked out on the way (so that
+    /// the box round its last shape need not work them out again), if it was.
+    before: Option<Arc<Mask>>,
+}
+
+/// Selections are alike if their steps and what they make are: what was kept on the way to it
+/// does not count.
+impl PartialEq for Selection {
+    fn eq(&self, other: &Selection) -> bool {
+        self.steps == other.steps && self.mask == other.mask
+    }
 }
 
 impl Selection {
@@ -135,12 +146,16 @@ impl Selection {
     pub fn of(steps: Vec<Step>) -> Selection {
         let first = steps.iter().rposition(Step::starts_over).unwrap_or(0);
         let steps = steps[first..].to_vec();
-        // A mask step alone is the mask: shared, not copied.
-        let mask = match &steps[..] {
-            [Step::Mask { mask }] => mask.clone(),
-            _ => Arc::new(steps.iter().fold(Mask::none(), |m, s| s.apply(&m))),
-        };
-        Selection { steps, mask }
+        let (mut mask, mut before) = (Arc::new(Mask::none()), None);
+        for s in &steps {
+            // A mask step's mask is shared, not copied.
+            let next = match s {
+                Step::Mask { mask } => mask.clone(),
+                _ => Arc::new(s.apply(&mask)),
+            };
+            before = Some(std::mem::replace(&mut mask, next));
+        }
+        Selection { steps, mask, before }
     }
 
     /// This selection with `step` after its steps (worked out from its mask, not again from
@@ -163,7 +178,7 @@ impl Selection {
         let mask = step.apply_unless(&self.mask, stop)?;
         let mut steps = self.steps.clone();
         steps.push(step);
-        Some(Selection { steps, mask: Arc::new(mask) })
+        Some(Selection { steps, mask: Arc::new(mask), before: Some(self.mask.clone()) })
     }
 
     /// The selection `step` alone makes.
@@ -180,9 +195,10 @@ impl Selection {
         &self.mask
     }
 
-    /// Every mask it holds: the one its steps come to, and those its mask steps keep.
+    /// Every mask it holds: the one its steps come to, the one they but the last come to (if
+    /// kept), and those its mask steps keep.
     pub fn masks(&self) -> impl Iterator<Item = &Arc<Mask>> {
-        std::iter::once(&self.mask).chain(self.steps.iter().filter_map(|s| match s {
+        std::iter::once(&self.mask).chain(&self.before).chain(self.steps.iter().filter_map(|s| match s {
             Step::Mask { mask } => Some(mask),
             _ => None,
         }))
@@ -201,9 +217,14 @@ impl Selection {
         }
     }
 
-    /// The selection its steps but the last make (nothing selected, if it has one step).
+    /// The selection its steps but the last make (nothing selected, if it has one step): its
+    /// mask the one kept, if one was, else worked out again.
     pub fn before_last(&self) -> Selection {
-        Selection::of(self.steps[..self.steps.len().saturating_sub(1)].to_vec())
+        let steps = self.steps[..self.steps.len().saturating_sub(1)].to_vec();
+        match &self.before {
+            Some(mask) => Selection { steps, mask: mask.clone(), before: None },
+            None => Selection::of(steps),
+        }
     }
 
     /// The selection `m` carries this one to, as Rotate, Flip and Resize Image carry the
@@ -219,6 +240,8 @@ impl Selection {
             Some(last) => {
                 let up_to = if last + 1 == self.steps.len() {
                     self.mask.clone()
+                } else if last + 2 == self.steps.len() {
+                    self.before_last().mask
                 } else {
                     Selection::of(self.steps[..=last].to_vec()).mask
                 };
@@ -272,6 +295,11 @@ mod tests {
         // Its last step a shape, the box round it edits it; the steps before it make the rest.
         assert_eq!(b.last_shape(), Some((rect(200.0, 0.0, 300.0, 100.0), Combine::Add)));
         assert_eq!(b.before_last(), a);
+        // Kept on the way, not worked out again, whether made step by step or all at once.
+        assert!(Arc::ptr_eq(b.before_last().mask(), a.mask()), "worked out again");
+        let all_at_once = Selection::of(c.steps().to_vec());
+        assert_eq!(all_at_once.before_last(), b);
+        assert!(all_at_once.masks().any(|m| Arc::ptr_eq(m, all_at_once.before_last().mask())));
         assert_eq!(c.last_shape(), None, "an inverting step is no shape");
         assert!(a.before_last().is_empty());
         // A new shape replacing it is all there is.
