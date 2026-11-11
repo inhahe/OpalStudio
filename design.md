@@ -303,8 +303,9 @@ red, a preference.
   change from column to column alone, or from row to row (along a straight edge on the
   pixel grid), keeps a level a column or a row, alike ones (along one side) sharing them;
   only the rest keep a level a pixel. A Select All on a canvas 300,000 pixels a side takes a
-  few hundred kilobytes. A mask keeps no tile past `MASK_REACH` tiles from the origin (33.5
-  million pixels either way, the pixels past that at its level outside): every mask is cut
+  few hundred kilobytes. A mask keeps no tile past `MASK_REACH` tiles from the origin (2^37
+  pixels either way, twice as far as anything a document may hold, `MAX_COORD`, 2^36; the
+  pixels past that at its level outside): every mask is cut
   to it as it is made, so that every one can be written to a file and read back, and what
   makes a mask of a shape or outline, or carries one, works nothing out past it, however far
   the shape reaches. A shape's or an outline's mask is made within the memory free: each row
@@ -468,7 +469,8 @@ the steps, each with buttons to load it (in place of what is selected) and to de
 (*Delete saved selection*). History counts their masks; they are part of what a file saves,
 so saving or deleting one makes the image unsaved. Files keep them (*Native file format*,
 version 3): each one's recipe, the mask it comes to and the one its steps but the last come
-to (neither worked out again on opening, nor when its last shape's box is first touched) and
+to, if it has more than one (neither worked out again on opening, nor when its last shape's
+box is first touched), and
 how the image has changed since. Load Selection and Reselect bring a kept selection back the
 same way (`select::brought_back`), refused if it selects nothing. Scripts: `save_selection(name)`, `load_selection(name,
 combine, invert)`, `delete_saved_selection(name)`, and the `saved_selections` query (each
@@ -641,10 +643,11 @@ curves, fewer for each in proportion past that). Its mask is made a row of tiles
 wholly in or out, are told by the winding at their middles, so that the work follows the
 outline's length, not the area it encloses. Smooth, each pixel as much as the polygon covers
 it, exactly, however it crosses itself or nests (`Coverage::tile`): each row of pixels is cut
-where the edges reaching into it begin, end or cross, and between the cuts each stretch the
-outline goes round (from where the winding leaves 0 to where it comes back) adds the area it
-covers along the row's cells, those left of the tile standing at its left side, a running
-sum along the row giving each pixel's share. Sharp, each pixel by whether its middle is
+where the edges reaching into it begin, end or cross (those wholly left of the tile counted
+only as the winding at its left side, which changes where they end), and between the cuts,
+the edges taken left to right as they lie at its middle, each stretch the outline goes round
+(from where the winding leaves 0 to where it comes back) adds the area it covers along the
+row's cells, a running sum along the row giving each pixel's share. Sharp, each pixel by whether its middle is
 enclosed, counting the edges crossing its row.
 Edge snapping (live-wire) and editing an outline's points come next.
 

@@ -152,9 +152,10 @@ pub struct ImageObject {
     pub sampling: Sampling,
 }
 
-/// Coordinates beyond this (2^40 pixels, a thousand times past any canvas) are not used:
-/// they would overflow arithmetic on rectangles.
-pub const MAX_COORD: i64 = 1 << 40;
+/// Coordinates beyond this (2^36 pixels, 68 billion, far past any canvas) are not used: the
+/// tiles' places (an `i32` of tiles) and arithmetic on rectangles would overflow past them,
+/// and a selection's mask reaches only so far (`mask::MASK_REACH`, twice as far).
+pub const MAX_COORD: i64 = 1 << 36;
 
 /// The largest stretch or squash an image object's transform may apply, either way.
 pub const MAX_SCALE: f64 = 1e6;

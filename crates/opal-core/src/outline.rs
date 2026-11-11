@@ -20,8 +20,8 @@ use std::collections::HashMap;
 /// How far a curve's flattening may stray from it, in pixels.
 const TOLERANCE: f64 = 0.05;
 
-/// The most points a curve is flattened to, however long it is.
-const MOST_POINTS: usize = 4096;
+/// The most pieces a curve is flattened to, however long it is.
+const MOST_PIECES: usize = 4096;
 
 /// The most points an outline's curves are flattened to, all together.
 const MOST_FLATTENED: usize = 4_000_000;
@@ -109,7 +109,7 @@ impl Outline {
 /// How many pieces each of `segments` (from `start`) is flattened to before the share
 /// [`MOST_FLATTENED`] leaves: a line one, a curve enough that each strays at most
 /// [`TOLERANCE`] (a cubic's distance from its chord is at most 3/4 of its control polygon's
-/// second differences), up to [`MOST_POINTS`].
+/// second differences), up to [`MOST_PIECES`].
 fn pieces(start: [f64; 2], segments: &[Segment]) -> Vec<usize> {
     let mut at = start;
     segments
@@ -122,7 +122,7 @@ fn pieces(start: [f64; 2], segments: &[Segment]) -> Vec<usize> {
                         (a[0] - 2.0 * b[0] + c[0]).hypot(a[1] - 2.0 * b[1] + c[1])
                     };
                     let bend = d(at, c1, c2).max(d(c1, c2, to));
-                    ((0.75 * bend / TOLERANCE).sqrt().ceil() as usize).clamp(1, MOST_POINTS)
+                    ((0.75 * bend / TOLERANCE).sqrt().ceil() as usize).clamp(1, MOST_PIECES)
                 }
             };
             at = s.end();
@@ -172,31 +172,6 @@ pub fn flattened(start: [f64; 2], segments: &[Segment]) -> Vec<[f64; 2]> {
 struct Edge {
     a: [f64; 2],
     b: [f64; 2],
-}
-
-impl Edge {
-    /// The distance from `p` to the edge.
-    fn distance(&self, p: [f64; 2]) -> f64 {
-        let (dx, dy) = (self.b[0] - self.a[0], self.b[1] - self.a[1]);
-        let len2 = dx * dx + dy * dy;
-        let t =
-            if len2 > 0.0 { (((p[0] - self.a[0]) * dx + (p[1] - self.a[1]) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
-        (p[0] - self.a[0] - t * dx).hypot(p[1] - self.a[1] - t * dy)
-    }
-
-    /// How it winds about the point `p` seen along the ray to its right: +1 crossing it
-    /// downward, -1 upward, 0 not at all (a point's row counted half-open, so an edge's ends
-    /// count once).
-    fn winding(&self, p: [f64; 2]) -> i32 {
-        let ([x0, y0], [x1, y1]) = (self.a, self.b);
-        let down = y0 <= p[1] && p[1] < y1;
-        let up = y1 <= p[1] && p[1] < y0;
-        if !down && !up {
-            return 0;
-        }
-        let x = x0 + (p[1] - y0) / (y1 - y0) * (x1 - x0);
-        if x > p[0] { if down { 1 } else { -1 } } else { 0 }
-    }
 }
 
 /// A polygon filled by the nonzero rule, as a mask is made of it (see the module's
@@ -273,11 +248,6 @@ impl Filled {
         held(self.edges.len() as u64, self.rows.values().map(|r| r.len() as u64).sum())
     }
 
-    /// The winding number of the point `p`: how many times the outline goes round it.
-    fn winding(&self, p: [f64; 2]) -> i32 {
-        self.rows.get(&tile_of(p[1])).map_or(0, |row| row.iter().map(|&i| self.edges[i].winding(p)).sum())
-    }
-
     /// The edges reaching into row `y` of tiles, but those wholly right of `right` (pixels):
     /// what lies left of `right` does not depend on them.
     fn row_edges(&self, y: i32, right: f64) -> impl Iterator<Item = &Edge> {
@@ -285,8 +255,9 @@ impl Filled {
     }
 
     /// The levels of tile `c`, smooth: each pixel as much of it as the polygon covers, by the
-    /// nonzero rule. Each row of pixels is cut where an edge begins, ends or crosses another,
-    /// so that between the cuts the edges lie side by side; there each stretch the outline goes
+    /// nonzero rule. Each row of pixels is cut where an edge begins, ends or crosses another
+    /// (the edges wholly left of the tile counted only as the winding at its left side), so
+    /// that between the cuts the edges lie side by side; there each stretch the outline goes
     /// round (from the edge where the winding leaves 0 to the one where it comes back to it)
     /// adds what it covers of each pixel. The stretches never overlap, so what they add is
     /// exact however the outline crosses itself or nests.
@@ -297,7 +268,7 @@ impl Filled {
         // Each row's cells, and one past them for what reaches the tile's right side.
         let stride = w + 2;
         let mut acc = vec![0.0f32; stride * w];
-        let edges: Vec<Down> = self
+        let all: Vec<Down> = self
             .row_edges(c.y, r.x1 as f64)
             .filter_map(|e| {
                 let (a, b) = ([e.a[0] - ox, e.a[1] - oy], [e.b[0] - ox, e.b[1] - oy]);
@@ -309,19 +280,46 @@ impl Filled {
                 }
             })
             .collect();
-        // The edges across each row of pixels.
-        let mut by_row: Vec<Vec<usize>> = vec![Vec::new(); w];
-        for (i, (a, b, _)) in edges.iter().enumerate() {
+        // Edges wholly left of the tile only wind: each row of pixels takes them as the winding
+        // at its left side, which changes at their ends (and does not where one ends as
+        // another begins, along a line of them).
+        let (beside, edges): (Vec<Down>, Vec<Down>) = all.into_iter().partition(|(a, b, _)| a[0].max(b[0]) <= 0.0);
+        let rows_of = |(a, b, _): &Down| {
             let first = a[1].floor().max(0.0) as usize;
             let past = (b[1].ceil().min(w as f64).max(0.0)) as usize;
-            for row in &mut by_row[first.min(past)..past] {
+            first.min(past)..past
+        };
+        let mut by_row: Vec<Vec<usize>> = vec![Vec::new(); w];
+        for (i, e) in edges.iter().enumerate() {
+            for row in &mut by_row[rows_of(e)] {
                 row.push(i);
+            }
+        }
+        let mut sides: Vec<Vec<(f64, i32)>> = vec![Vec::new(); w];
+        for e in &beside {
+            let (a, b, winds) = *e;
+            for y in rows_of(e) {
+                sides[y].extend([(a[1].max(y as f64), winds), (b[1].min(y as f64 + 1.0), -winds)]);
             }
         }
         let mut cuts: Vec<f64> = Vec::new();
         let mut across: Vec<(f64, f64, usize)> = Vec::new();
+        let mut side: Vec<(f64, i32)> = Vec::new();
         for (y, here) in by_row.iter().enumerate() {
-            if here.is_empty() {
+            // The left side's winding: from each height on, where it changes.
+            let steps = &mut sides[y];
+            steps.sort_by(|p, q| p.0.total_cmp(&q.0));
+            side.clear();
+            let mut sum = 0;
+            for &(at, winds) in steps.iter() {
+                sum += winds;
+                match side.last_mut() {
+                    Some(last) if last.0 == at => last.1 = sum,
+                    _ => side.push((at, sum)),
+                }
+            }
+            side.dedup_by(|later, earlier| later.1 == earlier.1);
+            if here.is_empty() && side.iter().all(|s| s.1 == 0) {
                 continue;
             }
             let (top, bottom) = (y as f64, y as f64 + 1.0);
@@ -331,11 +329,12 @@ impl Filled {
                 let (a, b, _) = edges[i];
                 cuts.extend([a[1], b[1]].into_iter().filter(|&v| v > top && v < bottom));
             }
+            cuts.extend(side.iter().map(|s| s.0).filter(|&v| v > top && v < bottom));
             cuts.sort_by(f64::total_cmp);
             cuts.dedup();
             // As many as the edges' ends and their crossings can make: past that, only a
             // rounding error would be cutting further.
-            let most = 2 + 2 * here.len() + here.len() * here.len();
+            let most = 2 + 2 * here.len() + here.len() * here.len() + side.len();
             let mut k = 0;
             while k + 1 < cuts.len() {
                 let (ya, yb) = (cuts[k], cuts[k + 1]);
@@ -353,7 +352,12 @@ impl Filled {
                     cuts.insert(k + 1, yc);
                     continue;
                 }
-                // Left to right (as they lie at both cuts), each stretch gone round.
+                // Left to right as they lie in the middle between the cuts (at a cut just
+                // made where two cross, rounding may leave them either way round), from the
+                // left side's winding, each stretch gone round.
+                across.sort_by(|p, q| (p.0 + p.1).total_cmp(&(q.0 + q.1)));
+                let middle = (ya + yb) / 2.0;
+                let start = side.partition_point(|s| s.0 <= middle).checked_sub(1).map_or(0, |i| side[i].1);
                 let mut stretch = |from: (f64, f64), sign: f64| {
                     let (p, q) = ([from.0, ya], [from.1, yb]);
                     let (p, q) = if sign > 0.0 { (p, q) } else { (q, p) };
@@ -361,8 +365,8 @@ impl Filled {
                         draw(&mut acc, stride, w, p, q);
                     }
                 };
-                let mut winding = 0;
-                let mut left: Option<(f64, f64)> = None;
+                let mut winding = start;
+                let mut left: Option<(f64, f64)> = (start != 0).then_some((0.0, 0.0));
                 for &(xa, xb, i) in &across {
                     let was = winding;
                     winding += edges[i].2;
@@ -548,33 +552,11 @@ impl Coverage for Filled {
         self.bounds
     }
 
-    fn distance(&self, x: f64, y: f64) -> f64 {
-        // The edges in the row of tiles the point is in and the rows above and below it: any
-        // farther is a tile's side away at least, which a nearer one leaves aside.
-        let ty = tile_of(y);
-        let mut near = f64::from(TILE_SIZE);
-        for dy in -1..=1 {
-            for &i in self.rows.get(&(ty + dy)).into_iter().flatten() {
-                near = near.min(self.edges[i].distance([x, y]));
-            }
-        }
-        if self.winding([x, y]) != 0 { -near } else { near }
+    fn tile(&self, c: TileCoord) -> MaskTile {
+        MaskTile::from_levels(if self.smooth { self.smooth_tile(c) } else { self.sharp_tile(c) })
     }
 
-    fn at(&self, x: f64, y: f64) -> f32 {
-        // A pixel alone, as its tile would have it.
-        let c = TileCoord::containing(x.floor() as i64, y.floor() as i64);
-        let r = c.rect(0);
-        let levels = self.tile(c).map(|t| t.get((x.floor() as i64 - r.x0) as u32, (y.floor() as i64 - r.y0) as u32));
-        crate::mask::fraction(levels.unwrap_or(0))
-    }
-
-    fn tile(&self, c: TileCoord) -> Option<MaskTile> {
-        let levels = if self.smooth { self.smooth_tile(c) } else { self.sharp_tile(c) };
-        Some(MaskTile::from_levels(levels))
-    }
-
-    fn row(&self, y: i32, x0: i32, x1: i32) -> Option<Vec<(i32, i32, Class)>> {
+    fn row(&self, y: i32, x0: i32, x1: i32) -> Vec<(i32, i32, Class)> {
         // The tiles an edge passes through (each edge's stretch within the row), and, between
         // them, tiles wholly in or out, told by the winding at their middles, which no edge
         // between them changes: the work follows the outline's length, not its area.
@@ -644,7 +626,7 @@ impl Coverage for Filled {
         if x < x1 {
             gap(x, x1, &mut told);
         }
-        Some(told)
+        told
     }
 }
 
@@ -745,34 +727,39 @@ mod tests {
     }
 
     #[test]
-    fn an_outline_s_mask_is_worked_out_along_its_length_within_the_mask_s_reach() {
-        // A square far larger than a mask reaches: every row of tiles within reach told in a
-        // stroke, wholly selected, no tile told apart by itself (which would take 70 billion).
-        struct Alone(Filled);
-        impl Coverage for Alone {
-            fn bounds(&self) -> IRect {
-                self.0.bounds()
-            }
-            fn distance(&self, _: f64, _: f64) -> f64 {
-                panic!("a tile told apart by itself")
-            }
-            fn at(&self, x: f64, y: f64) -> f32 {
-                self.0.at(x, y)
-            }
-            fn tile(&self, c: TileCoord) -> Option<MaskTile> {
-                self.0.tile(c)
-            }
-            fn row(&self, y: i32, x0: i32, x1: i32) -> Option<Vec<(i32, i32, Class)>> {
-                self.0.row(y, x0, x1)
+    fn figure_eights_crossing_anywhere_cover_exactly_their_lobes() {
+        // Their crossings at heights a binary fraction does not hold: each covers its two
+        // lobes, a quarter of its box each, whichever way rounding leaves the sides at the cut
+        // through the crossing.
+        let mut worst: f64 = 0.0;
+        for i in 0..12 {
+            for j in 0..12 {
+                let (a, b) = (7.3 + f64::from(i) * 0.37, 5.1 + f64::from(j) * 0.53);
+                let eight = polygon(&[[0.2, 0.1], [0.2 + a, 0.1 + b], [0.2 + a, 0.1], [0.2, 0.1 + b]], true);
+                let m = Mask::of(&eight.filled());
+                let area: f64 = (0..16)
+                    .flat_map(|y| (0..16).map(move |x| (x, y)))
+                    .map(|(x, y)| f64::from(crate::mask::fraction(m.level_at(x, y))))
+                    .sum();
+                worst = worst.max((area - a * b / 2.0).abs());
             }
         }
-        let huge = polygon(&[[-1e9, -1e9], [1e9, -1e9], [1e9, 1e9], [-1e9, 1e9]], true);
-        assert_eq!(Mask::of(&Alone(huge.filled())).extent(), Extent::Within(world()));
+        assert!(worst < 0.01, "{worst} of a pixel off at worst");
+    }
+
+    #[test]
+    fn an_outline_s_mask_is_worked_out_along_its_length_within_the_mask_s_reach() {
+        // A square ten million pixels across: told a row of tiles at a time (39,000 rows, where
+        // its area is 1.5 billion tiles), wholly selected inside.
+        let huge = polygon(&[[-5e6, -5e6], [5e6, -5e6], [5e6, 5e6], [-5e6, 5e6]], true);
+        let m = Mask::of(&huge.filled());
+        assert_eq!(m.extent(), Extent::Within(IRect::new(-5_000_000, -5_000_000, 5_000_000, 5_000_000)));
+        assert_eq!(m.level_at(1_234_567, -2_345_678), FULL);
         // A row of a triangle with a long slanting side: the tiles its sides pass through, and
         // the runs between them.
         let f = polygon(&[[0.0, 0.0], [1e6, 0.0], [0.0, 1e6]], true).filled();
         assert_eq!(
-            f.row(1000, -10, 4000).expect("told in runs"),
+            f.row(1000, -10, 4000),
             vec![
                 (-10, 0, Class::Outside),
                 (0, 1, Class::Edge),

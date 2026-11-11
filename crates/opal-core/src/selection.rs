@@ -195,7 +195,8 @@ pub struct Selection {
     steps: Vec<Step>,
     mask: Arc<Mask>,
     /// The mask its steps but the last make, kept as it was worked out on the way (so that
-    /// the box round its last shape need not work them out again), if it was.
+    /// the box round its last shape need not work them out again), if it was; never for a
+    /// selection of one step, before which nothing is selected.
     before: Option<Arc<Mask>>,
 }
 
@@ -229,7 +230,9 @@ impl Selection {
                 Step::Mask { mask, combine: Combine::Replace, .. } => mask.clone(),
                 _ => Arc::new(s.apply(&mask, bounds)?),
             };
-            let gone = before.replace(std::mem::replace(&mut mask, next));
+            // (Before the first step nothing is selected: no mask is kept for that.)
+            let made = std::mem::replace(&mut mask, next);
+            let gone = if i == 0 { None } else { before.replace(made) };
             if made_before && let Some(gone) = gone {
                 give_back(gone, bounds);
             }
@@ -412,7 +415,7 @@ pub fn with_maker_within(before: Option<&Selection>, step: Step, bounds: Bounds)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mask::{Coverage, FULL, ShapeKind};
+    use crate::mask::{FULL, ShapeKind};
 
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Shape {
         Shape {

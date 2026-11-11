@@ -27,12 +27,18 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// How far from the origin (tiles) a mask reaches: it keeps no tile past `MASK_REACH` tiles
-/// (33.5 million pixels) either way, every pixel there being at its level outside, so that its
-/// tiles' places stay well within an `i32` and working along a row of it stays cheap. Every
-/// mask is cut to it as it is made ([`Mask::shared`]), and [`Mask::of`] and
+/// (2^37 pixels) either way, every pixel there being at its level outside, so that its tiles'
+/// places, and the spans between them, stay within an `i32`. It is twice as far as anything a
+/// document holds may be (`MAX_COORD`), so that a selection round anything there is whole.
+/// Every mask is cut to it as it is made ([`Mask::shared`]), and [`Mask::of`] and
 /// [`Mask::transformed`] work nothing out past it; a mask read from bytes reaching past it is
 /// refused.
-pub const MASK_REACH: i32 = 1 << 17;
+pub const MASK_REACH: i32 = 1 << 29;
+
+const _: () = assert!(
+    2 * crate::document::MAX_COORD <= MASK_REACH as i64 * TILE_SIZE as i64,
+    "what a document holds lies within a mask's reach"
+);
 
 /// The pixels a mask may keep tiles for: within [`MASK_REACH`] tiles of the origin.
 pub fn world() -> IRect {
@@ -295,39 +301,19 @@ impl Combine {
     }
 }
 
-/// What a mask can be made of: how much of each pixel a shape covers.
+/// What a mask is made of (`Mask::of`): a shape or an outline, told apart a row of tiles at a
+/// time, and worked out a tile at a time where its edge crosses.
 pub trait Coverage: Sync {
     /// The pixels outside of which it covers nothing.
     fn bounds(&self) -> IRect;
 
-    /// The distance from `(x, y)` to its edge, less than 0 inside it: never farther from the
-    /// edge than `(x, y)` truly is, so that a whole area can be told inside or outside from its
-    /// middle.
-    fn distance(&self, x: f64, y: f64) -> f64;
-
-    /// How much of the pixel whose middle is `(x, y)` it covers, from 0 to 1.
-    fn at(&self, x: f64, y: f64) -> f32;
-
-    /// Whether it is convex: along a row, it then covers every tile between two it covers
-    /// wholly, which spares looking at them.
-    fn convex(&self) -> bool {
-        false
-    }
-
-    /// Tile `c` of its mask worked out whole, if it can do that faster than a pixel at a time
-    /// (an outline does: see `outline`); else `None`, and [`at`](Self::at) is asked of each
-    /// pixel near its edge.
-    fn tile(&self, _c: TileCoord) -> Option<MaskTile> {
-        None
-    }
-
     /// Row `y` of tiles from `x0` to `x1` told apart, as runs `(from, to, class)` left to right
-    /// covering them all, each of an edge one tile long, if it can tell them faster than tile by
-    /// tile (an outline can: see `outline`); else `None`, and each tile is told from
-    /// [`distance`](Self::distance) at its middle.
-    fn row(&self, _y: i32, _x0: i32, _x1: i32) -> Option<Vec<(i32, i32, Class)>> {
-        None
-    }
+    /// covering them all, each of an edge one tile long.
+    fn row(&self, y: i32, x0: i32, x1: i32) -> Vec<(i32, i32, Class)>;
+
+    /// Tile `c` of its mask, one its edge may cross, worked out: each pixel's level, how much
+    /// of it it covers.
+    fn tile(&self, c: TileCoord) -> MaskTile;
 }
 
 /// Tiles side by side along a row of tiles, `x0..x1` (in tiles), all `tile`: only one tile,
@@ -425,23 +411,31 @@ impl Mask {
     fn shared(rows: Vec<(i32, Vec<Run>)>, outside: u16) -> Mask {
         let mut seen: std::collections::HashSet<(bool, Arc<[u16]>)> = std::collections::HashSet::new();
         // Nothing past the reach is kept (a run of tiles of levels is one tile long, so cutting
-        // a run never splits one).
+        // a run never splits one); the rows are rebuilt only if one reaches past it.
         let reach = -MASK_REACH..MASK_REACH;
-        let mut rows: Vec<(i32, Vec<Run>)> = rows
-            .into_iter()
-            .filter(|(y, _)| reach.contains(y))
-            .map(|(y, row)| {
-                let row = row
-                    .into_iter()
-                    .filter_map(|r| {
-                        let (x0, x1) = (r.x0.max(reach.start), r.x1.min(reach.end));
-                        (x0 < x1).then_some(Run { x0, x1, ..r })
-                    })
-                    .collect::<Vec<Run>>();
-                (y, row)
-            })
-            .filter(|(_, row)| !row.is_empty())
-            .collect();
+        let past = |(y, row): &(i32, Vec<Run>)| {
+            !reach.contains(y)
+                || row.first().is_some_and(|r| r.x0 < reach.start)
+                || row.last().is_some_and(|r| r.x1 > reach.end)
+        };
+        let mut rows = rows;
+        if rows.iter().any(past) {
+            rows = rows
+                .into_iter()
+                .filter(|(y, _)| reach.contains(y))
+                .map(|(y, row)| {
+                    let row = row
+                        .into_iter()
+                        .filter_map(|r| {
+                            let (x0, x1) = (r.x0.max(reach.start), r.x1.min(reach.end));
+                            (x0 < x1).then_some(Run { x0, x1, ..r })
+                        })
+                        .collect::<Vec<Run>>();
+                    (y, row)
+                })
+                .filter(|(_, row)| !row.is_empty())
+                .collect();
+        }
         for (_, row) in &mut rows {
             for r in row.iter_mut() {
                 let (columns, levels) = match &r.tile {
@@ -1019,7 +1013,7 @@ pub enum Class {
 
 /// How the square of side `side` about `(cx, cy)` lies against `shape`, told from its middle
 /// (every pixel's middle in it is nearer the square's middle than its corners are).
-fn class(shape: &impl Coverage, cx: f64, cy: f64, side: f64) -> Class {
+fn class(shape: &Shape, cx: f64, cy: f64, side: f64) -> Class {
     let far = side * std::f64::consts::FRAC_1_SQRT_2 + 1.0;
     let d = shape.distance(cx, cy);
     if d >= far {
@@ -1045,7 +1039,7 @@ fn row_of(
     if (bounds.stop)() {
         return Err(Halt::Stopped);
     }
-    let told = shape.row(y, x0, x1).unwrap_or_else(|| tile_by_tile(shape, y, x0, x1));
+    let told = shape.row(y, x0, x1);
     // Its edge tiles at a level a pixel, its runs one a tile told apart, and the row itself.
     let edges = told.iter().filter(|t| t.2 == Class::Edge).count() as u64;
     let runs = |n: usize| (n * std::mem::size_of::<Run>() + std::mem::size_of::<(i32, Vec<Run>)>()) as u64;
@@ -1060,7 +1054,7 @@ fn row_of(
             Class::Inside => Some((a, b, MaskTile::Level(FULL))),
             Class::Edge => {
                 debug_assert_eq!(b, a + 1, "a run of edge tiles");
-                Some((a, b, edge_tile(shape, TileCoord::new(a, y))))
+                Some((a, b, shape.tile(TileCoord::new(a, y))))
             }
         })
         .collect();
@@ -1074,21 +1068,21 @@ fn row_of(
     Ok((row, kept))
 }
 
-/// Row `y` of tiles, those from `x0` to `x1`, told apart tile by tile (as `Coverage::row`
-/// tells them).
-fn tile_by_tile(shape: &impl Coverage, y: i32, x0: i32, x1: i32) -> Vec<(i32, i32, Class)> {
+/// Row `y` of tiles of `shape`'s mask, those from `x0` to `x1`, told apart as `Coverage::row`
+/// tells them: each tile by its middle's distance to the edge.
+fn tile_by_tile(shape: &Shape, y: i32, x0: i32, x1: i32) -> Vec<(i32, i32, Class)> {
     let side = f64::from(TILE_SIZE);
     let class_of = |x: i32| {
         let [cx, cy] = TileCoord::new(x, y).rect(0).to_f().center();
         class(shape, cx, cy, side)
     };
-    // The tiles told apart, left to right: of a convex shape, those up to the first wholly
-    // inside it and from the last, every one between those inside it too.
+    // The tiles told apart, left to right: those up to the first wholly inside it and from the
+    // last, every one between those inside it too, as it is convex.
     let mut told: Vec<(i32, i32, Class)> = Vec::new();
     let mut x = x0;
     while x < x1 {
         let c = class_of(x);
-        if c == Class::Inside && shape.convex() {
+        if c == Class::Inside {
             break;
         }
         told.push((x, x + 1, c));
@@ -1117,10 +1111,7 @@ const BLOCK: u32 = 16;
 
 /// The tile at `c` of the mask of `shape`, which its edge may cross: told apart block by
 /// block, the pixels of the blocks the edge may cross one by one.
-fn edge_tile(shape: &impl Coverage, c: TileCoord) -> MaskTile {
-    if let Some(tile) = shape.tile(c) {
-        return tile;
-    }
+fn edge_tile(shape: &Shape, c: TileCoord) -> MaskTile {
     let r = c.rect(0);
     let mut levels = vec![0u16; TILE_PIXELS];
     for by in (0..TILE_SIZE).step_by(BLOCK as usize) {
@@ -1481,16 +1472,11 @@ impl Shape {
     }
 }
 
-impl Coverage for Shape {
-    fn bounds(&self) -> IRect {
-        let [w, h] = self.size.map(|v| v.abs() / 2.0);
-        let (s, c) = self.angle.to_radians().sin_cos();
-        let (ex, ey) = (w * c.abs() + h * s.abs(), w * s.abs() + h * c.abs());
-        let [x, y] = self.center;
-        IRect::covering(&FRect::new(x - ex, y - ey, x + ex, y + ey)).expand(1)
-    }
-
-    fn distance(&self, x: f64, y: f64) -> f64 {
+impl Shape {
+    /// The distance from `(x, y)` to its edge, less than 0 inside it: never farther from the
+    /// edge than `(x, y)` truly is, so that a whole area can be told inside or outside from its
+    /// middle.
+    pub fn distance(&self, x: f64, y: f64) -> f64 {
         let [lx, ly] = self.local(x, y);
         let [a, b] = self.size.map(|v| v.abs() / 2.0);
         match self.kind {
@@ -1502,7 +1488,8 @@ impl Coverage for Shape {
         }
     }
 
-    fn at(&self, x: f64, y: f64) -> f32 {
+    /// How much of the pixel whose middle is `(x, y)` it covers, from 0 to 1.
+    pub fn at(&self, x: f64, y: f64) -> f32 {
         // Most of an ellipse's pixels are told without the distance's bisection.
         if self.kind == ShapeKind::Ellipse
             && let Some(inside) = self.ellipse_far(x, y, if self.smooth { 0.5 } else { 0.0 })
@@ -1512,9 +1499,23 @@ impl Coverage for Shape {
         let d = self.distance(x, y);
         if self.smooth { (0.5 - d).clamp(0.0, 1.0) as f32 } else { f32::from(u8::from(d <= 0.0)) }
     }
+}
 
-    fn convex(&self) -> bool {
-        true
+impl Coverage for Shape {
+    fn bounds(&self) -> IRect {
+        let [w, h] = self.size.map(|v| v.abs() / 2.0);
+        let (s, c) = self.angle.to_radians().sin_cos();
+        let (ex, ey) = (w * c.abs() + h * s.abs(), w * s.abs() + h * c.abs());
+        let [x, y] = self.center;
+        IRect::covering(&FRect::new(x - ex, y - ey, x + ex, y + ey)).expand(1)
+    }
+
+    fn row(&self, y: i32, x0: i32, x1: i32) -> Vec<(i32, i32, Class)> {
+        tile_by_tile(self, y, x0, x1)
+    }
+
+    fn tile(&self, c: TileCoord) -> MaskTile {
+        edge_tile(self, c)
     }
 }
 
@@ -1619,13 +1620,23 @@ mod tests {
     }
 
     #[test]
+    fn a_selection_round_anything_a_document_may_hold_is_whole() {
+        // A canvas as far out as a document's coordinates go, and a rectangle round it.
+        let far = crate::document::MAX_COORD as f64 - 1000.0;
+        let m = Mask::of(&rect(far, -far, far + 300.0, -far + 200.0));
+        let (x, y) = (far as i64, -far as i64);
+        assert_eq!(m.extent(), Extent::Within(IRect::new(x, y, x + 300, y + 200)));
+    }
+
+    #[test]
     fn no_mask_keeps_a_tile_past_its_reach_so_every_one_is_read_back_from_bytes() {
         let edge = world().x1 as f64;
         // Grown past the reach from just inside it: cut there.
         let near = Mask::of(&rect(edge - 60.0, 0.0, edge - 10.0, 50.0)).grown(100.0, crate::modify::Reach::Square);
         // Carried past it, and stretched across it.
         let far = Mask::of(&rect(0.0, 0.0, 100.0, 100.0)).transformed(&Affine::translate(edge + 1e6, 0.0));
-        let across = Mask::of(&rect(0.0, 0.0, 100.0, 100.0)).transformed(&Affine::scale(1e6, 1.0));
+        let across = Mask::of(&rect(edge - 100.0, 0.0, edge - 50.0, 50.0))
+            .transformed(&Affine::scale(4.0, 1.0).about(edge - 100.0, 0.0));
         assert_eq!(far.extent(), Extent::Nothing);
         for m in [&near, &across] {
             let Extent::Within(r) = m.extent() else { panic!("{:?}", m.extent()) };

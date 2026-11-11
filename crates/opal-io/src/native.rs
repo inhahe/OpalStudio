@@ -929,6 +929,9 @@ mod tests {
         }];
         save(&doc, &ids, &path, &Progress::default()).unwrap();
         assert_eq!(version(&path), serde_json::json!(3));
+        // A selection of one step keeps no mask before it: one mask in the file, not two.
+        let zip = ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        assert_eq!(zip.file_names().filter(|n| n.as_ref().is_ok_and(|n| n.starts_with("masks/"))).count(), 1);
         assert!(matches!(load(&path, Some(Free::memory(12 << 20))), Err(IoError::TooLarge { .. })));
         assert!(load(&path, Some(Free::memory(1 << 30))).is_ok());
         std::fs::remove_file(&path).unwrap();

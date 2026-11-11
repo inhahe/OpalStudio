@@ -10,8 +10,9 @@ use opal_core::mask::{Combine, Extent, Mask, Shape};
 use opal_core::selection::{Selection, Step};
 use std::sync::Arc;
 
-/// A selection's outline: closed lines, in document coordinates (see `Mask::outline`).
-pub type Outline = Arc<Vec<Vec<[f64; 2]>>>;
+/// A selection's marching ants: closed lines round what its mask selects, in document
+/// coordinates (see `Mask::outline`).
+pub type Ants = Arc<Vec<Vec<[f64; 2]>>>;
 
 /// A modifier's dialog (Grow or Shrink, Feather, Smooth, Border), while it is open: the image it
 /// acts on, the step it adds (or, from the selection panel, the step of the recipe it changes),
@@ -229,7 +230,7 @@ impl crate::doc::DocState {
     /// round the pixels selected at least `threshold` (a level): worked out once for each
     /// selection's mask and threshold, and kept until another is asked for, or none (nothing
     /// is selected).
-    pub fn selection_outline(&mut self, threshold: u16) -> Option<Outline> {
+    pub fn selection_outline(&mut self, threshold: u16) -> Option<Ants> {
         let Some(s) = self.pixel_selection() else {
             self.outline = None;
             return None;

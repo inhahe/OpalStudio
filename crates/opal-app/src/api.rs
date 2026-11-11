@@ -1904,8 +1904,11 @@ fn check_value(p: &Param, value: &Value) -> Result<(), String> {
 }
 
 /// What a value of `kind` is, in words.
-pub fn kind_text(kind: Kind) -> &'static str {
-    match kind {
+pub fn kind_text(kind: Kind) -> std::borrow::Cow<'static, str> {
+    let text = match kind {
+        Kind::Points { min } => {
+            return format!("a list of {min} to a million points, each [x, y] within 1e7 pixels").into();
+        }
         Kind::Bool => "true or false",
         Kind::Int { .. } => "a whole number, or an expression",
         Kind::Number { .. } => "a number, or an expression",
@@ -1919,8 +1922,8 @@ pub fn kind_text(kind: Kind) -> &'static str {
         Kind::Document => "an image's id",
         Kind::Layer => "a layer's id",
         Kind::Layers => "a list of layers' ids, not empty",
-        Kind::Points { .. } => "a list of points (enough, at most a million), each [x, y] within 1e7 pixels",
-    }
+    };
+    text.into()
 }
 
 /// What a call answers.
@@ -3789,7 +3792,7 @@ mod tests {
         let s = now(&mut st, "select_outline", more).unwrap();
         assert_eq!(s["bounds"], json!([10, 10, 240, 140]), "{s}");
         let why = now(&mut st, "select_outline", json!({ "points": [[0, 0], [5, 5]] })).unwrap_err();
-        assert!(why.contains("a list of points"), "{why}");
+        assert!(why.contains("a list of 3 to a million points"), "{why}");
         // A slanting outline whose mask would take more memory than is free: refused, said so,
         // nothing changed.
         let before = st.active().unwrap().pixel_selection().cloned();

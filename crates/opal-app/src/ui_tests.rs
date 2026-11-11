@@ -3610,6 +3610,27 @@ fn an_outline_drawn_point_by_point_survives_backspace_mid_pull_space_and_ctrl_cl
     assert_eq!(points(&h), Some(2), "Ctrl+click added a point");
     click_image(&mut h, [150.0, 200.0], none);
     assert_eq!(points(&h), Some(3));
+    // A double-click on the first point closes it, and its second click begins no other.
+    let v = h.state().state().active().unwrap().view;
+    let first = v.screen_rect.min + v.to_screen(egui::vec2(100.0, 100.0)) / h.ctx.pixels_per_point();
+    h.hover_at(first);
+    h.run();
+    // A click a frame (a quarter of a second apart, within a double-click's time), so that the
+    // second is a frame's own, as when a hand double-clicks.
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            h.input_mut().events.push(egui::Event::PointerButton {
+                pos: first,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: none,
+            });
+        }
+        h.step();
+    }
+    h.run();
+    assert!(h.state().state().active().unwrap().outlining.is_none(), "a double-click's second click began another");
+    assert!(h.state().state().active().unwrap().pixel_selection().is_some(), "not closed and selected");
 }
 
 #[test]

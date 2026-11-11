@@ -167,6 +167,9 @@ pub fn canvas(
             d.outlining = Some(Outlining::begun(to_doc(origin), combine, true));
             d.revision += 1;
         } else if response.clicked_by(PointerButton::Primary)
+            // (Not the second click of a double-click, whose first closed one.)
+            && !response.double_clicked_by(PointerButton::Primary)
+            && !response.triple_clicked_by(PointerButton::Primary)
             && let Some(p) = response.interact_pointer_pos()
         {
             d.outlining = Some(Outlining::begun(to_doc(p), combine, false));

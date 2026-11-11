@@ -153,7 +153,7 @@ pub struct DocState {
     /// and the level it runs at (see `DocState::selection_outline`): the mask weakly, so that
     /// it keeps alive no mask that history has let go (and no other mask takes that one's
     /// place while it is held so).
-    pub outline: Option<(std::sync::Weak<opal_core::mask::Mask>, u16, crate::select::Outline)>,
+    pub outline: Option<(std::sync::Weak<opal_core::mask::Mask>, u16, crate::select::Ants)>,
     /// What the selection overlay keeps of the mask's tiles (see `mask_view`).
     pub overlay: crate::mask_view::Textures,
     /// The egui pass the image was last drawn in (see `AppState::leave_undrawn`).
