@@ -296,9 +296,12 @@ option shows the mask as a red overlay.
   or 1 once inverted, so that a selection can be the plane but for a hole); tiles side by
   side all of one level are kept as one run along their row of tiles; a tile whose levels
   change from column to column alone, or from row to row (along a straight edge on the
-  pixel grid), keeps a level a column or a row; only the rest keep a level a pixel. A
-  Select All on a canvas 300,000 pixels a side takes about a megabyte. Copies share tiles
-  until one changes; history counts a state's mask with its layers' tiles. Operations
+  pixel grid), keeps a level a column or a row, alike ones (along one side) sharing them;
+  only the rest keep a level a pixel. A Select All on a canvas 300,000 pixels a side takes a
+  few hundred kilobytes. Copies share tiles until one changes, and combining keeps sharing a
+  tile the other mask leaves as it is (adding nothing to it, say); history counts a state's
+  masks (the one its selection comes to, and those its mask steps keep) with its layers'
+  tiles. Operations
   through the mask skip the tiles it leaves wholly alone, and Clear drops those it selects
   wholly, without looking at their pixels.
 - **Shapes** (rectangles and ellipses, turned or not) give each pixel the part of it they

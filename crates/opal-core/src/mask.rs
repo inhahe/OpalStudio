@@ -121,10 +121,14 @@ impl MaskTile {
         }
     }
 
-    /// `a` and `b` combined pixel by pixel, as `how` says.
+    /// `a` and `b` combined pixel by pixel, as `how` says: one of them itself (its levels
+    /// shared) where the other, all one level, leaves it as it is.
     fn combined(a: &MaskTile, b: &MaskTile, how: Combine) -> MaskTile {
-        if let (MaskTile::Level(x), MaskTile::Level(y)) = (a, b) {
-            return MaskTile::Level(how.level(*x, *y));
+        match (a, b) {
+            (MaskTile::Level(x), MaskTile::Level(y)) => return MaskTile::Level(how.level(*x, *y)),
+            (_, MaskTile::Level(y)) if how.keeps_before(*y) => return a.clone(),
+            (MaskTile::Level(x), _) if how.keeps_new(*x) => return b.clone(),
+            _ => {}
         }
         for along in [Line::Columns, Line::Rows] {
             if let (Some(la), Some(lb)) = (a.line(along), b.line(along)) {
@@ -217,6 +221,25 @@ pub enum Combine {
 }
 
 impl Combine {
+    /// Whether a new mask's level `new` leaves every level before as it is.
+    fn keeps_before(self, new: u16) -> bool {
+        match self {
+            Combine::Replace => false,
+            Combine::Add | Combine::Subtract => new == 0,
+            Combine::Intersect => new == FULL,
+        }
+    }
+
+    /// Whether the level before, `before`, leaves every new mask's level as it is.
+    fn keeps_new(self, before: u16) -> bool {
+        match self {
+            Combine::Replace => true,
+            Combine::Add => before == 0,
+            Combine::Subtract => false,
+            Combine::Intersect => before == FULL,
+        }
+    }
+
     /// The level a pixel gets where the selection before has `before` and the new mask `new`.
     pub fn level(self, before: u16, new: u16) -> u16 {
         match self {
@@ -337,6 +360,33 @@ impl Mask {
         self.outside
     }
 
+    /// The mask of `rows` (each a row of tiles' runs, in the order [`Mask::rows`] keeps) and
+    /// the level `outside`, alike tiles of a level a column (or a row) sharing their levels,
+    /// as those along a straight edge do.
+    fn shared(rows: Vec<(i32, Vec<Run>)>, outside: u16) -> Mask {
+        let mut seen: std::collections::HashSet<(bool, Arc<[u16]>)> = std::collections::HashSet::new();
+        let mut rows = rows;
+        for (_, row) in &mut rows {
+            for r in row.iter_mut() {
+                let (columns, levels) = match &r.tile {
+                    MaskTile::Columns(l) => (true, l),
+                    MaskTile::Rows(l) => (false, l),
+                    _ => continue,
+                };
+                match seen.get(&(columns, levels.clone())) {
+                    Some((_, first)) => {
+                        let first = first.clone();
+                        r.tile = if columns { MaskTile::Columns(first) } else { MaskTile::Rows(first) };
+                    }
+                    None => {
+                        seen.insert((columns, levels.clone()));
+                    }
+                }
+            }
+        }
+        Mask { rows: rows.into_iter().collect(), outside }
+    }
+
     /// The runs of row `y` of tiles (none, if it keeps no tile).
     fn row(&self, y: i32) -> &[Run] {
         self.rows.get(&y).map_or(NO_RUNS, Vec::as_slice)
@@ -368,11 +418,13 @@ impl Mask {
 
     /// The memory it takes.
     pub fn bytes(&self) -> u64 {
-        self.parts().map(|(_, b)| b).sum()
+        let parts: HashMap<usize, u64> = self.parts().collect();
+        parts.values().sum()
     }
 
-    /// What it takes memory for, each part with where it is kept, so that what copies share
-    /// can be counted once: its runs (kept where the mask is), then each tile's levels.
+    /// What it takes memory for, each part with where it is kept, so that what copies (and
+    /// alike tiles) share can be counted once: its runs (kept where the mask is), then each
+    /// tile's levels.
     pub fn parts(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
         let runs: usize = self.rows.values().map(Vec::len).sum();
         let own = self.rows.len() * std::mem::size_of::<(i32, Vec<Run>)>() + runs * std::mem::size_of::<Run>();
@@ -415,7 +467,7 @@ impl Mask {
             .map(|y| (y, row_of(shape, y, first.x, last.x + 1)))
             .filter(|(_, r)| !r.is_empty())
             .collect();
-        Mask { rows: rows.into_iter().collect(), outside: 0 }
+        Mask::shared(rows, 0)
     }
 
     /// The opposite: selected where it is not, and the other way round.
@@ -427,7 +479,7 @@ impl Mask {
                 (y, row.iter().map(|r| Run { x0: r.x0, x1: r.x1, tile: r.tile.map(|l| FULL - l) }).collect())
             })
             .collect();
-        Mask { rows: rows.into_iter().collect(), outside: FULL - self.outside }
+        Mask::shared(rows, FULL - self.outside)
     }
 
     /// `new` combined with this one, as `how` says.
@@ -455,7 +507,7 @@ impl Mask {
             })
             .filter(|(_, r)| !r.is_empty())
             .collect();
-        Mask { rows: rows.into_iter().collect(), outside }
+        Mask::shared(rows, outside)
     }
 
     /// The rectangle round every tile kept, if any is.
@@ -488,14 +540,21 @@ impl Mask {
             if let Some(l) = self.uniform_in(&from) {
                 return MaskTile::Level(l);
             }
-            let source = self.levels_in(&from);
-            let w = from.width() as usize;
-            let at = |x: i64, y: i64| -> f32 {
-                f32::from(if from.contains(x, y) {
-                    source[(y - from.y0) as usize * w + (x - from.x0) as usize]
-                } else {
-                    self.outside
-                })
+            // Read pixel by pixel, the tile last read kept at hand: what it comes from may be
+            // far larger than a tile (shrunk to a hundredth, a hundred times as wide).
+            let mut last: Option<(TileCoord, Option<&MaskTile>)> = None;
+            let mut at = |x: i64, y: i64| -> f32 {
+                let c = TileCoord::containing(x, y);
+                let t = match last {
+                    Some((at, t)) if at == c => t,
+                    _ => {
+                        let t = self.tile(c);
+                        last = Some((c, t));
+                        t
+                    }
+                };
+                let r = c.rect(0);
+                f32::from(t.map_or(self.outside, |t| t.get((x - r.x0) as u32, (y - r.y0) as u32)))
             };
             let mut levels = vec![0u16; TILE_PIXELS];
             for (i, l) in levels.iter_mut().enumerate() {
@@ -527,7 +586,7 @@ impl Mask {
             })
             .filter(|(_, r)| !r.is_empty())
             .collect();
-        Mask { rows: rows.into_iter().collect(), outside: self.outside }
+        Mask::shared(rows, self.outside)
     }
 
     /// The levels of the pixels of `area`, row by row.
@@ -986,6 +1045,11 @@ fn upright(size: [f64; 2], angle: f64) -> ([f64; 2], f64) {
 }
 
 impl Shape {
+    /// The rectangle `r` (document pixels), upright; smoothed if `smooth`.
+    pub fn rectangle(r: &FRect, smooth: bool) -> Shape {
+        Shape { kind: ShapeKind::Rectangle, center: r.center(), size: [r.width(), r.height()], angle: 0.0, smooth }
+    }
+
     /// The shape `m` carries this one to, if it is one: an ellipse always is, a rectangle
     /// only while `m` keeps its sides at right angles (not once a turned one is stretched
     /// along another way). It is turned by an eighth or less (see [`upright`]).
@@ -1174,6 +1238,9 @@ mod tests {
         // and its bottom, a tile at a time.
         assert!(m.rows.values().rev().skip(1).all(|r| r.len() == 2), "a run and a tile a row");
         assert_eq!(m.row(1171).len(), 1172);
+        // Alike, the tiles along each side share their levels: one a side, and the corner's.
+        let arrays: std::collections::HashSet<usize> = m.parts().skip(1).map(|(a, _)| a).collect();
+        assert!(arrays.len() <= 3, "{} arrays of levels", arrays.len());
         assert!(m.bytes() < 2_000_000, "{} bytes", m.bytes());
         assert_eq!(m.extent(), Extent::Within(IRect::new(0, 0, 300_000, 300_000)));
         assert_eq!(m.level_at(150_000, 150_000), FULL);
@@ -1190,6 +1257,39 @@ mod tests {
         // About 7000 tiles along its four edges and its hole's, each a level a column or a row.
         assert!(frame.bytes() < 8_000_000, "{} bytes", frame.bytes());
         assert_eq!(frame.combined(&inner, Combine::Add), m);
+    }
+
+    #[test]
+    fn combining_with_what_leaves_a_tile_as_it_is_shares_that_tile() {
+        let e = Mask::of(&Shape {
+            kind: ShapeKind::Ellipse,
+            center: [500.5, 500.5],
+            size: [600.0, 400.0],
+            angle: 20.0,
+            smooth: true,
+        });
+        let far = Mask::of(&rect(5000.0, 0.0, 5100.0, 100.0));
+        let arrays = |m: &Mask| m.parts().skip(1).map(|(a, _)| a).collect::<std::collections::HashSet<usize>>();
+        assert!(!arrays(&e).is_empty());
+        for (how, with) in [(Combine::Add, &far), (Combine::Subtract, &far), (Combine::Intersect, &Mask::all())] {
+            assert!(arrays(&e).is_subset(&arrays(&e.combined(with, how))), "{how:?} copied the ellipse's tiles");
+        }
+        // Added to nothing there, the new mask's tiles are shared too.
+        assert!(arrays(&far).is_subset(&arrays(&Mask::none().combined(&far, Combine::Add))));
+    }
+
+    #[test]
+    fn a_mask_shrunk_a_hundredfold_is_read_only_where_its_pixels_come_from() {
+        // A turned square 30,000 pixels a side, no longer one once stretched: carried pixel by
+        // pixel, each read from the four it lies between.
+        let m = Mask::of(&Shape { angle: 10.0, ..rect(0.0, 0.0, 30_000.0, 30_000.0) });
+        let small = m.transformed(&Affine::scale(0.01, 0.0067));
+        assert_eq!(small.level_at(150, 100), FULL);
+        assert_eq!([small.level_at(400, 400), small.level_at(-50, 100)], [0, 0]);
+        let Extent::Within(r) = small.extent() else { panic!("{:?}", small.extent()) };
+        // The turned square's corners reach 15,000·(cos 10° + sin 10°) from its middle.
+        let reach = 15_000.0 * (10f64.to_radians().cos() + 10f64.to_radians().sin());
+        assert!((r.x1 as f64 - (15_000.0 + reach) * 0.01).abs() < 2.0, "{r:?}");
     }
 
     #[test]

@@ -95,6 +95,14 @@ impl Selection {
         &self.mask
     }
 
+    /// Every mask it holds: the one its steps come to, and those its mask steps keep.
+    pub fn masks(&self) -> impl Iterator<Item = &Arc<Mask>> {
+        std::iter::once(&self.mask).chain(self.steps.iter().filter_map(|s| match s {
+            Step::Mask { mask } => Some(mask),
+            _ => None,
+        }))
+    }
+
     /// Whether it selects nothing at all.
     pub fn is_empty(&self) -> bool {
         self.mask.is_none()
@@ -118,17 +126,21 @@ impl Selection {
     /// rectangle stretched along another way is no longer a rectangle), the selection up to
     /// it becomes its mask, carried pixel by pixel (see [`Mask::transformed`]).
     pub fn transformed(&self, m: &Affine) -> Selection {
-        let carried: Vec<Option<Step>> = self.steps.iter().map(|s| s.transformed(m)).collect();
-        let Some(last) = carried.iter().rposition(Option::is_none) else {
-            return Selection::of(carried.into_iter().flatten().collect());
+        // The last step that cannot be carried, found before any is (carrying a mask step,
+        // pixel by pixel, would be wasted on one that the mask taken in its place holds).
+        let stuck = self.steps.iter().rposition(|s| matches!(s, Step::Shape { shape, .. } if shape.transformed(m).is_none()));
+        let (mut steps, rest) = match stuck {
+            None => (Vec::new(), &self.steps[..]),
+            Some(last) => {
+                let up_to = if last + 1 == self.steps.len() {
+                    self.mask.clone()
+                } else {
+                    Selection::of(self.steps[..=last].to_vec()).mask
+                };
+                (vec![Step::Mask { mask: Arc::new(up_to.transformed(m)) }], &self.steps[last + 1..])
+            }
         };
-        let up_to = if last + 1 == self.steps.len() {
-            self.mask.clone()
-        } else {
-            Selection::of(self.steps[..=last].to_vec()).mask
-        };
-        let mut steps = vec![Step::Mask { mask: Arc::new(up_to.transformed(m)) }];
-        steps.extend(carried.into_iter().skip(last + 1).flatten());
+        steps.extend(rest.iter().map(|s| s.transformed(m).expect("every step after the last stuck is carried")));
         Selection::of(steps)
     }
 }

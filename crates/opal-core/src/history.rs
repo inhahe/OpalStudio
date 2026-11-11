@@ -719,10 +719,10 @@ fn images_of(l: &Layer) -> Vec<Arc<RasterImage>> {
     images
 }
 
-/// What a selection's mask takes memory for (by address), with the memory each part takes,
-/// each once (see `Mask::parts`).
+/// What a selection's masks (its own, and its mask steps') take memory for (by address),
+/// with the memory each part takes, each once (see `Mask::parts`).
 fn mask_tiles(s: &crate::selection::Selection) -> Vec<(usize, u64)> {
-    let mut out: Vec<(usize, u64)> = s.mask().parts().collect();
+    let mut out: Vec<(usize, u64)> = s.masks().flat_map(|m| m.parts()).collect();
     out.sort_unstable();
     out.dedup();
     out
@@ -1042,6 +1042,25 @@ mod tests {
         h.undo();
         assert!(counted_right(&h));
         assert_eq!(h.memory(), h.node(h.redo_target().unwrap()).doc.selection.as_ref().unwrap().mask().bytes());
+    }
+
+    #[test]
+    fn a_mask_step_s_mask_is_counted_as_well_as_the_mask_its_selection_comes_to() {
+        use crate::mask::{Mask, Shape, ShapeKind};
+        use crate::selection::{Selection, Step};
+        let shape = Shape { kind: ShapeKind::Ellipse, center: [300.0, 300.0], size: [400.0, 300.0], angle: 0.0, smooth: true };
+        let held = Arc::new(Mask::of(&shape));
+        // Inverted after it: the selection comes to a mask of its own, and its step keeps the
+        // one it was.
+        let s = Selection::of(vec![Step::Mask { mask: held.clone() }, Step::Invert]);
+        let mut h = History::new(Document::new(1000, 1000), "new");
+        let mut d = h.doc().clone();
+        d.selection = Some(Arc::new(s.clone()));
+        h.commit(d.clone(), "Select");
+        d.selection = None;
+        h.commit(d, "Deselect");
+        assert_eq!(h.memory(), held.bytes() + s.mask().bytes(), "the step's mask was not counted");
+        assert!(counted_right(&h));
     }
 
     #[test]

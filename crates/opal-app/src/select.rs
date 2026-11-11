@@ -5,7 +5,7 @@
 use crate::state::{AppState, MessageKind};
 use opal_core::document::{Document, Layer, LayerContent, LayerId, ObjectKind};
 use opal_core::geom::IRect;
-use opal_core::mask::{Combine, Extent, Mask, Shape, ShapeKind};
+use opal_core::mask::{Combine, Extent, Mask, Shape};
 use opal_core::selection::{Selection, Step};
 use std::sync::Arc;
 
@@ -53,14 +53,7 @@ impl AppState {
     /// selected.
     pub(crate) fn select_all(&mut self) {
         let d = self.active_mut().expect("available");
-        let r = d.doc().canvas.rect().to_f();
-        let shape = Shape {
-            kind: ShapeKind::Rectangle,
-            center: r.center(),
-            size: [r.width(), r.height()],
-            angle: 0.0,
-            smooth: false,
-        };
+        let shape = Shape::rectangle(&d.doc().canvas.rect().to_f(), false);
         let s = Selection::new(Step::Shape { shape, combine: Combine::Replace });
         d.set_pixel_selection(Some(s), "Select all");
     }
@@ -91,10 +84,7 @@ impl AppState {
         let d = self.active_mut().expect("available");
         let mut mask = d.pixel_selection().expect("available").mask().clone();
         if let Some(r) = area {
-            let r = r.to_f();
-            let shape =
-                Shape { kind: ShapeKind::Rectangle, center: r.center(), size: [r.width(), r.height()], angle: 0.0, smooth: false };
-            mask = Arc::new(mask.combined(&Mask::of(&shape), Combine::Intersect));
+            mask = Arc::new(mask.combined(&Mask::of(&Shape::rectangle(&r.to_f(), false)), Combine::Intersect));
         }
         let layers: Vec<LayerId> = cleared(d).iter().filter(|l| !l.is_group()).map(|l| l.id).collect();
         let mut changed = false;
