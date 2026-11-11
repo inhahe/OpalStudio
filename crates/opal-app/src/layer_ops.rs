@@ -83,7 +83,7 @@ impl AppState {
     /// Copies each selected layer, just above itself.
     pub(crate) fn duplicate_layers(&mut self) {
         let d = self.active_mut().expect("available");
-        let sel = d.selection();
+        let sel = d.selected_layers();
         let label = if sel.len() > 1 { "Duplicate layers" } else { "Duplicate layer" };
         let result = d.apply(label, |doc, ids| {
             for src in sel {
@@ -100,7 +100,7 @@ impl AppState {
 
     pub(crate) fn delete_layers(&mut self) {
         let d = self.active_mut().expect("available");
-        let sel = d.selection();
+        let sel = d.selected_layers();
         let label = if sel.len() > 1 { "Delete layers" } else { "Delete layer" };
         let result = d.apply(label, |doc, _| {
             for id in sel {
@@ -114,7 +114,7 @@ impl AppState {
     /// Puts the selected layers into a new group, where the topmost of them was.
     pub(crate) fn group_layers(&mut self) {
         let d = self.active_mut().expect("available");
-        let sel = d.selection();
+        let sel = d.selected_layers();
         let Some(&top) = sel.last() else { return };
         let mut group_id = None;
         let result = d.apply("Group layers", |doc, ids| {
@@ -188,7 +188,7 @@ impl AppState {
     pub(crate) fn merge_selected(&mut self) {
         let d = self.active().expect("available");
         let doc = d.doc();
-        let sel: Vec<LayerId> = d.selection().into_iter().filter(|&l| shows_in(doc, l)).collect();
+        let sel: Vec<LayerId> = d.selected_layers().into_iter().filter(|&l| shows_in(doc, l)).collect();
         let Some(&top) = sel.last() else { return };
         let layers: Vec<Arc<Layer>> = sel.iter().map(|&l| Arc::new(doc.layer(l).expect("selected").clone())).collect();
         // What compositing the selected groups leaves out stays, just below the result.
@@ -333,7 +333,7 @@ impl AppState {
     /// groups) into pixel objects, drawn as the canvas shows them.
     pub(crate) fn rasterize(&mut self) {
         let d = self.active().expect("available");
-        let sel = d.selection();
+        let sel = d.selected_layers();
         let doc = d.doc();
         let targets: Vec<Arc<Layer>> = sel.iter().filter_map(|&l| doc.layer(l)).map(|l| Arc::new(l.clone())).collect();
         // Kept while the work runs: it caps the tiles' memory.

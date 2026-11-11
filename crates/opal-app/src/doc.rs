@@ -208,14 +208,14 @@ impl DocState {
         self.active
     }
 
-    /// The active layer and the selection, to be put back ([`set_selection_state`]).
+    /// The active layer and the selected layers, to be put back ([`set_layer_selection_state`]).
     ///
-    /// [`set_selection_state`]: Self::set_selection_state
-    pub(crate) fn selection_state(&self) -> (Option<LayerId>, HashSet<LayerId>) {
+    /// [`set_layer_selection_state`]: Self::set_layer_selection_state
+    pub(crate) fn layer_selection_state(&self) -> (Option<LayerId>, HashSet<LayerId>) {
         (self.active, self.selected.clone())
     }
 
-    pub(crate) fn set_selection_state(&mut self, (active, selected): (Option<LayerId>, HashSet<LayerId>)) {
+    pub(crate) fn set_layer_selection_state(&mut self, (active, selected): (Option<LayerId>, HashSet<LayerId>)) {
         self.active = active;
         self.selected = selected;
     }
@@ -235,7 +235,7 @@ impl DocState {
         } else if self.selected.len() > 1 {
             self.selected.remove(&id);
             if self.active == Some(id) {
-                self.active = self.selection().last().copied();
+                self.active = self.selected_layers().last().copied();
             }
         }
     }
@@ -271,7 +271,7 @@ impl DocState {
     /// The selected layers that exist, in document order (depth first, bottom to top),
     /// leaving out those inside a selected group: what commands acting on several layers
     /// act on, each layer once.
-    pub fn selection(&self) -> Vec<LayerId> {
+    pub fn selected_layers(&self) -> Vec<LayerId> {
         // One walk, which does not look inside a selected group.
         fn walk(
             layers: &[std::sync::Arc<opal_core::document::Layer>],
@@ -292,10 +292,10 @@ impl DocState {
     }
 
     /// The selected layers and every layer inside the selected groups.
-    pub fn selection_and_inside(&self) -> Vec<LayerId> {
+    pub fn selected_layers_and_inside(&self) -> Vec<LayerId> {
         let doc = self.doc();
         let mut out = Vec::new();
-        for id in self.selection() {
+        for id in self.selected_layers() {
             if let Some(l) = doc.layer(id) {
                 let mut add = |l: &opal_core::document::Layer| out.push(l.id);
                 fn walk(l: &opal_core::document::Layer, f: &mut dyn FnMut(&opal_core::document::Layer)) {

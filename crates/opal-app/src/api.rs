@@ -1606,8 +1606,9 @@ impl AppState {
         let notice = self.notice.clone();
         // The image and layers the user had, to put back if the change is refused (it makes
         // those it names the active ones).
-        let view = (method.role == Role::Command)
-            .then(|| (self.active_doc, self.docs.iter().map(|d| (d.id, d.selection_state())).collect::<Vec<_>>()));
+        let view = (method.role == Role::Command).then(|| {
+            (self.active_doc, self.docs.iter().map(|d| (d.id, d.layer_selection_state())).collect::<Vec<_>>())
+        });
         let reply = match method.cmd {
             Some(cmd) => self.carry_out(cmd, method.params, &args, ctx),
             None if method.name == "image" => self.image_by_args(&args, ctx),
@@ -1639,7 +1640,7 @@ impl AppState {
         {
             for (id, s) in selections {
                 if let Some(d) = self.doc_mut(id) {
-                    d.set_selection_state(s);
+                    d.set_layer_selection_state(s);
                 }
             }
             if let Some(id) = active.filter(|id| self.doc(*id).is_some()) {
@@ -1870,7 +1871,7 @@ impl AppState {
                 let visibility = cmd == Cmd::ToggleVisible;
                 let wanted = args.flag(if visibility { "visible" } else { "locked" });
                 let d = self.active_mut().expect("available");
-                let ids = d.selection();
+                let ids = d.selected_layers();
                 let flag = |l: &Layer| if visibility { l.visible } else { l.locked };
                 // Already as asked: nothing to record.
                 if wanted.is_some_and(|w| ids.iter().all(|&id| d.doc().layer(id).is_none_or(|l| flag(l) == w))) {
@@ -2080,7 +2081,7 @@ impl AppState {
             "angle": b.angle,
         });
         let out = if kind == crate::transform::Kind::Transform {
-            json!({ "layers": d.selection().iter().map(|l| l.0).collect::<Vec<_>>(), "box": boxed })
+            json!({ "layers": d.selected_layers().iter().map(|l| l.0).collect::<Vec<_>>(), "box": boxed })
         } else {
             json!({ "layer": layer.0, "box": boxed })
         };
@@ -2464,7 +2465,7 @@ impl AppState {
     fn selection_json(&self) -> Value {
         match self.active() {
             Some(d) => json!({
-                "layers": d.selection().iter().map(|l| l.0).collect::<Vec<_>>(),
+                "layers": d.selected_layers().iter().map(|l| l.0).collect::<Vec<_>>(),
                 "active": d.active_layer().map(|l| l.0),
             }),
             None => json!({}),
@@ -3284,7 +3285,7 @@ mod tests {
         assert!(refused.contains("empty"), "{refused}");
         assert_eq!(st.active_doc.map(|d| d.0), Some(second), "the active image changed");
         let d = st.doc(DocId(first)).unwrap();
-        assert_eq!(d.selection(), [LayerId(a), LayerId(b)], "the selection changed");
+        assert_eq!(d.selected_layers(), [LayerId(a), LayerId(b)], "the selection changed");
         // Ids named twice, each once.
         let both = now(&mut st, "toggle_visible", json!({ "document": first, "layers": [a, b, a], "visible": false }))
             .unwrap();
@@ -4117,10 +4118,10 @@ mod tests {
         // With nothing selected, nothing is selected after.
         let sampling = crate::prefs::sampling(&st.prefs, "transform");
         let d = st.active_mut().unwrap();
-        d.set_selection_state((None, std::collections::HashSet::new()));
+        d.set_layer_selection_state((None, std::collections::HashSet::new()));
         d.reapply_all_placements(sampling);
         assert_eq!(
-            d.selection_state(),
+            d.layer_selection_state(),
             (None, std::collections::HashSet::new()),
             "the selection was not left as it was"
         );

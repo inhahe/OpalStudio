@@ -862,7 +862,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             (_, Some(name)) => Err(format!("{name} is running: stop it in the Console panel first.")),
             _ => Ok(()),
         },
-        Copy | GroupLayers => selection(st).map(|_| ()),
+        Copy | GroupLayers => selected_layers(st).map(|_| ()),
         ReapplyPlacement => {
             let d = st.active().ok_or("Open or create an image first.")?;
             if d.transform.is_some() {
@@ -892,7 +892,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             Ok(())
         }
         Transform | Rasterize => {
-            let (d, sel) = selection(st)?;
+            let (d, sel) = selected_layers(st)?;
             let layers: Vec<&opal_core::document::Layer> = sel.iter().filter_map(|&l| d.doc().layer(l)).collect();
             if let Some(l) = layers.iter().find_map(|l| first_locked(l)) {
                 return Err(format!("\"{}\" is locked. Unlock it first.", l.name));
@@ -906,7 +906,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             Ok(())
         }
         MergeSelected => {
-            let (d, sel) = selection(st)?;
+            let (d, sel) = selected_layers(st)?;
             let doc = d.doc();
             let shown: Vec<&opal_core::document::Layer> =
                 sel.iter().filter(|&&l| crate::layer_ops::shows_in(doc, l)).filter_map(|&l| doc.layer(l)).collect();
@@ -969,9 +969,9 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             }
         }
         ToggleVisible | ToggleLock | Rename => active_layer(st).map(|_| ()),
-        Duplicate => selection(st).map(|_| ()),
+        Duplicate => selected_layers(st).map(|_| ()),
         DeleteLayer => {
-            let (d, sel) = selection(st)?;
+            let (d, sel) = selected_layers(st)?;
             match sel.iter().filter_map(|&l| d.doc().layer(l)).find_map(first_locked) {
                 Some(l) => Err(format!("\"{}\" is locked. Unlock it first.", l.name)),
                 None => Ok(()),
@@ -1025,10 +1025,10 @@ pub(crate) fn first_locked(layer: &opal_core::document::Layer) -> Option<&opal_c
     layer.children()?.iter().find_map(|c| first_locked(c))
 }
 
-/// The active document and its selected layers (see `DocState::selection`).
-fn selection(st: &AppState) -> Result<(&crate::doc::DocState, Vec<opal_core::document::LayerId>), String> {
+/// The active document and its selected layers (see `DocState::selected_layers`).
+fn selected_layers(st: &AppState) -> Result<(&crate::doc::DocState, Vec<opal_core::document::LayerId>), String> {
     let d = st.active().ok_or("Open or create an image first.")?;
-    let sel = d.selection();
+    let sel = d.selected_layers();
     if sel.is_empty() { Err("Select a layer in the Layers panel first.".into()) } else { Ok((d, sel)) }
 }
 

@@ -382,7 +382,7 @@ impl OpalApp {
             }
             return;
         }
-        if arrows != [0, 0] && !d.selection().is_empty() {
+        if arrows != [0, 0] && !d.selected_layers().is_empty() {
             match crate::move_tool::locked_in_selection(d) {
                 Some(name) => self.st.notify(format!("\"{name}\" is locked, so it cannot be moved. Unlock it first.")),
                 None => d.nudge_selection(arrows),
@@ -591,7 +591,7 @@ impl OpalApp {
                 (std::sync::Arc::as_ptr(l) as usize).hash(&mut h);
             }
             d.active_layer().hash(&mut h);
-            d.selection().hash(&mut h);
+            d.selected_layers().hash(&mut h);
             d.expanded.len().hash(&mut h);
             d.view.zoom.to_bits().hash(&mut h);
             d.view.offset.x.to_bits().hash(&mut h);

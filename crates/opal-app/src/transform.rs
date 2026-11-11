@@ -593,7 +593,7 @@ impl DocState {
         let was_selected = self.selection_with_active_last();
         let mut doc = self.history.doc().clone();
         let (mut found, mut placed) = (Vec::new(), Vec::new());
-        for id in self.selection() {
+        for id in self.selected_layers() {
             if let Some(l) = doc.layer_mut(id) {
                 let had = found.len();
                 take_targets(l, sampling, &mut found);
@@ -819,7 +819,7 @@ impl DocState {
         self.commit_pending();
         let (placement, layers) = placement_group(self.history.doc(), layer)?;
         let placement = placement.clone();
-        let selected = self.selection_state();
+        let selected = self.layer_selection_state();
         self.select_layers(&layers, layer);
         let done = if self.begin_transform(sampling) {
             if let Some(p) = self.pending.as_mut() {
@@ -839,7 +839,7 @@ impl DocState {
                 Ok(())
             }
             Err(why) => {
-                self.set_selection_state(selected);
+                self.set_layer_selection_state(selected);
                 Err(why)
             }
         }
@@ -889,7 +889,7 @@ impl DocState {
                     .collect()
             })
             .collect();
-        let selected = self.selection_state();
+        let selected = self.layer_selection_state();
         // The state it began from is kept, however many states it makes before joining them.
         let start = self.history.current();
         self.history.hold(start);
@@ -941,7 +941,7 @@ impl DocState {
             self.join_states(&made, "Re-apply All Placements");
         }
         self.history.release(start);
-        self.set_selection_state(selected);
+        self.set_layer_selection_state(selected);
         out
     }
 
@@ -1045,7 +1045,8 @@ impl DocState {
 
     /// The selected layers with the active one last (to restore them).
     fn selection_with_active_last(&self) -> Vec<LayerId> {
-        let mut v: Vec<LayerId> = self.selection().into_iter().filter(|&l| Some(l) != self.active_layer()).collect();
+        let mut v: Vec<LayerId> =
+            self.selected_layers().into_iter().filter(|&l| Some(l) != self.active_layer()).collect();
         v.extend(self.active_layer());
         v
     }

@@ -479,7 +479,7 @@ fn draw_outlines(
 ) {
     let painter = ui.painter().with_clip_rect(rect);
     let doc = d.doc();
-    for l in d.selection() {
+    for l in d.selected_layers() {
         let Some(layer) = doc.layer(l) else { continue };
         if !layer.visible {
             continue;

@@ -73,14 +73,14 @@ pub fn locked_in_selection(d: &DocState) -> Option<String> {
         }
         l.children()?.iter().find_map(|c| find(c))
     }
-    d.selection().iter().find_map(|&id| find(d.doc().layer(id)?))
+    d.selected_layers().iter().find_map(|&id| find(d.doc().layer(id)?))
 }
 
 impl DocState {
     /// The bounds of the selected layers' content.
     pub fn selection_bounds(&self) -> Option<FRect> {
         let doc = self.doc();
-        self.selection()
+        self.selected_layers()
             .iter()
             .filter_map(|&l| doc.layer(l)?.bounds())
             .reduce(|a, b| FRect::new(a.x0.min(b.x0), a.y0.min(b.y0), a.x1.max(b.x1), a.y1.max(b.y1)))
@@ -93,14 +93,14 @@ impl DocState {
             self.commit_pending();
         }
         self.pending = (d != [0, 0])
-            .then(|| Pending { doc: moved(self.history.doc(), &self.selection(), d), label: "Move".into() });
+            .then(|| Pending { doc: moved(self.history.doc(), &self.selected_layers(), d), label: "Move".into() });
         self.revision += 1;
     }
 
     /// Moves the selected layers by `d` more, as a pending "Nudge" that gathers consecutive
     /// nudges into one history state (committed when the keys are let go).
     pub fn nudge_selection(&mut self, d: [i64; 2]) {
-        let ids = self.selection();
+        let ids = self.selected_layers();
         self.edit_pending("Nudge", |doc| {
             for id in ids {
                 if let Some(l) = doc.layer_mut(id) {
@@ -129,7 +129,7 @@ impl DocState {
             && snap_distance >= 0.0
         {
             // What moves never snaps to itself: the layers inside a moved group included.
-            let targets = snap_targets(self.history.doc(), &self.selection_and_inside());
+            let targets = snap_targets(self.history.doc(), &self.selected_layers_and_inside());
             let (x0, x1, y0, y1) = (b.x0 + d[0], b.x1 + d[0], b.y0 + d[1], b.y1 + d[1]);
             let (gx, tx) = snap(&[x0, (x0 + x1) * 0.5, x1], &targets.xs, snap_distance);
             let (gy, ty) = snap(&[y0, (y0 + y1) * 0.5, y1], &targets.ys, snap_distance);

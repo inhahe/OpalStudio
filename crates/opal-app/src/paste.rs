@@ -44,7 +44,7 @@ impl AppState {
             doc.layers.clone()
         } else {
             // What the selected layers look like, hidden or not: they were chosen to copy.
-            d.selection()
+            d.selected_layers()
                 .iter()
                 .filter_map(|&l| doc.layer(l))
                 .map(|l| Arc::new(Layer { visible: true, ..l.clone() }))
