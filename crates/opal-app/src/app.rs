@@ -453,8 +453,11 @@ impl OpalApp {
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect()
         });
-        for p in dropped {
-            self.st.open_path(&p);
+        self.st.dropped.extend(dropped);
+        // Those waiting for a dialog to close are looked at again now and then, as closing it
+        // need not bring another frame.
+        if self.st.open_dropped() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
     }
 

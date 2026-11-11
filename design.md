@@ -632,6 +632,9 @@ curve editors.
   (Wayland), nothing is done. (`app::fit_to_monitor`, once.)
 - The starting layout's split gives the tool settings half the right column, which shows
   the crop box's numbers without scrolling in a window maximized on such a screen.
+- Files dropped on it open as images, in the order dropped, but not while a dialog is open
+  (one opened behind it would become the image the dialog acts on): they wait for it to
+  close (`AppState::open_dropped`, looked at again every 200 ms while any wait).
 
 ### Status bar
 

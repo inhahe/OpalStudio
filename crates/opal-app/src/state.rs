@@ -237,6 +237,9 @@ pub struct AppState {
     pub rotate_by: Option<RotateBy>,
     /// The Grow or Shrink, or Feather, dialog, while open.
     pub modifying: Option<crate::select::Modifying>,
+    /// Files dropped on the window and not yet opened, first dropped first (see
+    /// [`open_dropped`](Self::open_dropped)).
+    pub dropped: VecDeque<PathBuf>,
     pub thumbs: crate::thumbs::Thumbnails,
     /// A paste waiting for the clipboard to be read.
     pub reading: Option<Reading>,
@@ -372,6 +375,7 @@ impl AppState {
             resize_canvas: None,
             rotate_by: None,
             modifying: None,
+            dropped: VecDeque::new(),
             thumbs: Default::default(),
             reading: None,
             tile_budget: None,
@@ -780,6 +784,17 @@ impl AppState {
         }
     }
 
+    /// Opens the files dropped on the window, in the order dropped, while no dialog is open
+    /// (one opened behind a dialog would become the image it acts on); whether any still wait.
+    pub fn open_dropped(&mut self) -> bool {
+        while !self.dialog_open()
+            && let Some(path) = self.dropped.pop_front()
+        {
+            self.open_path(&path);
+        }
+        !self.dropped.is_empty()
+    }
+
     /// Opens a file, telling the user if that fails or if anything about it needs saying.
     pub fn open_path(&mut self, path: &Path) {
         // Already open: just show it.
@@ -1158,6 +1173,25 @@ mod tests {
 
     fn ctx() -> egui::Context {
         egui::Context::default()
+    }
+
+    #[test]
+    fn files_dropped_while_a_dialog_is_open_wait_until_it_closes() {
+        let mut st = app_with_image();
+        let first = st.active_doc;
+        let path = std::env::temp_dir().join(format!("opal-dropped-{}.png", std::process::id()));
+        image::RgbaImage::new(4, 4).save(&path).unwrap();
+        // Behind a dialog, it would become the image the dialog acts on: it waits.
+        st.rotate_by = Some(RotateBy { degrees: 30.0, grow: true });
+        st.dropped.push_back(path.clone());
+        assert!(st.open_dropped());
+        assert_eq!(st.active_doc, first, "opened behind the dialog");
+        st.rotate_by = None;
+        let waiting = st.open_dropped();
+        let _ = std::fs::remove_file(&path);
+        assert!(!waiting);
+        assert_eq!(st.docs.len(), 2);
+        assert_ne!(st.active_doc, first, "not opened once the dialog closed");
     }
 
     #[test]
