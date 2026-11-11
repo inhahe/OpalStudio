@@ -348,8 +348,9 @@ On the Select tab (and for scripts, by the same names):
   recipe, a mask step combined as a shape is (a mask step combines as its `combine` says;
   one replacing is what a carried selection becomes; with nothing selected, as a shape's,
   `selection::with_maker`); worked out off the interface thread (*Edits that take long*),
-  the memory of the mask's levels asked for as it is made (`Mask::of_opacity_within`, as the
-  modifiers ask: see *Feather*). One that would select nothing (an empty layer, or nothing left once
+  the memory of the mask's levels asked for as it is made, each tile's as it keeps it (a tile
+  of one level, opaque or transparent, takes none: `Mask::of_opacity_within`, as the modifiers
+  ask, see *Feather*). One that would select nothing (an empty layer, or nothing left once
   combined) is refused, saying so, and what was selected stays.
 - **Clear** (Delete) erases what is selected on the selected layers, as much of each pixel
   as it is selected; inside a selected group, on the layers shown (a hidden one is left as it
@@ -469,15 +470,22 @@ A selection is kept as an ordered list of steps, not only as its final mask:
 
 The **selection panel** (a tab beside Layers; `selection_panel`) lists the steps of the active
 image's selection, in the order they were taken, each with what it does in a few words, its
-lengths in the user's unit ("Rectangle 100 × 70 px at 100 px, 50 px", "Grown by 5 px, square
-corners", "A layer's pixels"). A modifier's button opens its dialog on it, which shows what
-the selection then comes to, worked out again from its steps with that one changed, as it
-does when adding one (`Modifying::at`); a maker's menu changes how it combines; each step's
-button takes it away. Each is one history state (*Change selection step*, *Remove selection
-step*), the selection worked out again off the interface thread (`AppState::rework_selection`,
-an edit of `edits`, memory measured as it goes); taking every step away leaves nothing
-selected. A step made to replace what was before it leaves the earlier ones out, as one made
-so would. Scripts: `edit_selection_step` (a step by its number among the `selection` query's
+lengths in the user's unit, a shape placed by its top-left corner (turned with it) from the
+canvas's corner, as its box's numbers place it ("Rectangle 100 × 70 px at 100 px, 50 px",
+"Grown by 5 px, square corners", "A layer's pixels", "The steps before, carried pixel by
+pixel": a mask step says which it is, `MaskOf`). A modifier's button opens its dialog on it,
+which shows what the selection then comes to with that step changed, as it does when adding
+one (`Modifying::at`): the steps before it worked out once, by the first preview that needs
+them, and kept for the rest; the steps after it added again; a step set back to what it was
+shows the selection as it is, without working anything out. A maker's menu changes how it
+combines; each step's button takes it away. Each is one history state (*Change selection
+step*, *Remove selection step*), the selection worked out again off the interface thread
+(`AppState::rework_selection`, an edit of `edits`, memory measured as it goes); coming to
+nothing, what was selected is kept for Reselect, as Deselect keeps it. A step made to replace
+what was before it leaves the earlier ones out, as one made so would; one that leaves the
+selection as it is (a grow by nothing) is no step, as when it is added. While a box is open
+on the image, the panel's buttons wait for it (greyed, saying why), as the modifier commands
+do: changing the steps would apply the box under the user. Scripts: `edit_selection_step` (a step by its number among the `selection` query's
 steps, and the settings of its kind: a maker's `combine`; a grow's `by` and `corners`; a
 feather's `width`, `side`, `falloff`; a smooth's `radius`; a border's `width`, `side`; others
 refused) and `remove_selection_step`, answering with what is selected then. Outlines are to be
@@ -524,8 +532,9 @@ Distances go to 1000 pixels at most (`modify::MAX_DISTANCE`).
 Two more modifiers are built the same way. **Smooth** (a radius) closes the outline (grown,
 then shrunk back), so that pinholes and notches narrower than twice the radius fill and inward
 corners round, then opens it (shrunk, then grown back), so that specks and spurs as thin go
-and outward corners round: three passes of exact distances, round (the closing's shrink and
-the opening's are one, twice as far, as round reaches add up). **Border** (a width; inward,
+and outward corners round: four passes of exact distances, round, each within the radius (the
+two shrinks, one twice as far, would need a band and windows twice as wide, which costs more
+than the pass it saves). **Border** (a width; inward,
 outward or centered) selects the band of that width along the outline in place of what was
 selected, each pixel as much as it lies in the band, in one pass.
 They work from the outline, where pixels are half selected, so a soft selection grown or

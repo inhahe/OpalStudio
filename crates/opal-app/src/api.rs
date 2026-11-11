@@ -647,9 +647,10 @@ const QUERIES: &[(&str, &str, &[Param])] = &[
          steps that made it, in order: shapes (rectangles and ellipses, by their middle, size and angle, \
          and how each combines), inversions, grow steps (by, corners), feather steps (width, side, \
          falloff), smooth steps (radius) and border steps (width, side), as grow_selection, \
-         feather_selection, smooth_selection and border_selection take them, and masks (a \"mask\" step is a layer's \
-         pixels, from select_layer_pixels, or stands for the steps before it, which Rotate, Flip or Resize \
-         Image could not carry exactly, as the mask they came to; it gives no numbers, only how it combines). \
+         feather_selection, smooth_selection and border_selection take them, and masks (a \"mask\" step is, as \
+         its of says, a layer's pixels, from select_layer_pixels, or what the steps before it came to, carried \
+         pixel by pixel by Rotate, Flip or Resize Image, which could not carry them exactly; it gives no numbers, \
+         only how it combines). \
          select_all, deselect, reselect, invert_selection and select_layer_pixels answer with it too.",
         &[DOCUMENT],
     ),
@@ -838,8 +839,6 @@ const SHAPE_PARAMS: &[Param] = &[
     UNIT,
 ];
 
-/// The changes the API alone makes (no command of the interface makes them): their names,
-/// what they do, and their parameters.
 /// Which step of the selection's recipe: its number among the selection query's steps.
 const STEP_INDEX: Param = Param {
     name: "index",
@@ -896,6 +895,8 @@ const STEP_SETTINGS: &[Param] = &[
     UNIT,
 ];
 
+/// The changes the API alone makes (no command of the interface makes them): their names,
+/// what they do, and their parameters.
 const CHANGES: &[(&str, &str, &[Param])] = &[
     (
         "remove_selection_step",
@@ -2944,9 +2945,6 @@ impl AppState {
     }
 }
 
-/// What image `d` has selected, as the `selection` query gives it: the rectangle round it and
-/// the steps that made it, positions counted from the canvas's corner, as everywhere in the
-/// API.
 /// `step` changed as `args` say (see `edit_selection_step`), or why it cannot be: it does not
 /// take a setting they give.
 fn changed_step(step: opal_core::selection::Step, args: &Args) -> Result<opal_core::selection::Step, String> {
@@ -2973,7 +2971,7 @@ fn changed_step(step: opal_core::selection::Step, args: &Args) -> Result<opal_co
     let side = |s: Side| args.text("side").and_then(Side::named).unwrap_or(s);
     Ok(match step {
         Step::Shape { shape, combine: c } => Step::Shape { shape, combine: combine(c) },
-        Step::Mask { mask, combine: c } => Step::Mask { mask, combine: combine(c) },
+        Step::Mask { mask, combine: c, of } => Step::Mask { mask, combine: combine(c), of },
         Step::Invert => Step::Invert,
         Step::Grow { by, corners } => Step::Grow {
             by: args.opt_number("by").unwrap_or(by),
@@ -2991,6 +2989,9 @@ fn changed_step(step: opal_core::selection::Step, args: &Args) -> Result<opal_co
     })
 }
 
+/// What image `d` has selected, as the `selection` query gives it: the rectangle round it and
+/// the steps that made it, positions counted from the canvas's corner, as everywhere in the
+/// API.
 fn selection_json(d: &crate::doc::DocState) -> Value {
     use opal_core::selection::Step;
     let Some(s) = d.pixel_selection() else { return json!({ "bounds": Value::Null, "steps": [] }) };

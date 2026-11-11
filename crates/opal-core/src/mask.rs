@@ -713,9 +713,10 @@ impl Mask {
         Mask::of_opacity_within(image, crate::modify::UNBOUNDED).expect("unbounded")
     }
 
-    /// [`of_opacity`](Self::of_opacity), unless `bounds` hold it back: asked first for the most
-    /// it may take (each tile's levels, and a buffer of working pixels for each thread), stopped
-    /// between tiles if they say; once made, what it holds stays taken (see `modify::Bounds`).
+    /// [`of_opacity`](Self::of_opacity), unless `bounds` hold it back: asked first for each
+    /// thread's working pixels, then for each tile's levels as it keeps them (one level, an
+    /// opaque or a transparent tile's, takes none), stopped between tiles if they say; once
+    /// made, what it holds stays taken (see `modify::Bounds`).
     pub fn of_opacity_within(image: &RasterImage, bounds: crate::modify::Bounds) -> Result<Mask, crate::modify::Halt> {
         use crate::modify::Halt;
         // Each tile's levels once, however many places share it (a filled layer's all do).
@@ -723,12 +724,13 @@ impl Mask {
         for (c, t) in image.tiles() {
             shared.entry(Arc::as_ptr(t) as usize).or_insert((t, Vec::new())).1.push(c);
         }
-        let most = (shared.len() * TILE_PIXELS * std::mem::size_of::<u16>()) as u64;
-        let buffers = (rayon::current_num_threads() * TILE_PIXELS * std::mem::size_of::<[f32; 4]>()) as u64;
-        if !(bounds.admit)(most + buffers) {
+        // A thread's pixels, and the levels it reads from them before it keeps them as it may.
+        let thread = TILE_PIXELS * (std::mem::size_of::<[f32; 4]>() + std::mem::size_of::<u16>());
+        let buffers = (rayon::current_num_threads() * thread) as u64;
+        if !(bounds.admit)(buffers) {
             return Err(Halt::NoMemory);
         }
-        let made: Vec<Option<(MaskTile, Vec<TileCoord>)>> = shared
+        let made: Result<Vec<(MaskTile, Vec<TileCoord>)>, Halt> = shared
             .into_values()
             .collect::<Vec<_>>()
             .into_par_iter()
@@ -736,20 +738,24 @@ impl Mask {
                 || vec![[0.0f32; 4]; TILE_PIXELS],
                 |px, (t, at)| {
                     if (bounds.stop)() {
-                        return None;
+                        return Err(Halt::Stopped);
                     }
-                    if t.is_transparent() {
-                        return Some((MaskTile::Level(0), at));
+                    let tile = if t.is_transparent() {
+                        MaskTile::Level(0)
+                    } else {
+                        t.to_f32(px);
+                        MaskTile::from_levels(px.iter().map(|p| level(p[3])).collect())
+                    };
+                    if !(bounds.admit)(tile.bytes()) {
+                        return Err(Halt::NoMemory);
                     }
-                    t.to_f32(px);
-                    Some((MaskTile::from_levels(px.iter().map(|p| level(p[3])).collect()), at))
+                    Ok((tile, at))
                 },
             )
             .collect();
         (bounds.give_back)(buffers);
-        let Some(made) = made.into_iter().collect::<Option<Vec<_>>>() else {
-            return Err(Halt::Stopped);
-        };
+        let made = made?;
+        let most: u64 = made.iter().map(|(t, _)| t.bytes()).sum();
         let mut tiles: Vec<(TileCoord, MaskTile)> =
             made.into_iter().flat_map(|(t, at)| at.into_iter().map(move |c| (c, t.clone()))).collect();
         tiles.sort_unstable_by_key(|(c, _)| (c.y, c.x));
@@ -1387,6 +1393,18 @@ mod tests {
         assert!(mask.bytes() > 0);
         assert_eq!(held.load(SeqCst) as u64, mask.bytes());
         assert_eq!(mask, Mask::of_opacity(&image));
+        // Opaque, its tiles take no levels: little to ask for.
+        let opaque = RasterImage::from_pixels(512, 512, &vec![pixel_from_f32([1.0; 4]); 512 * 512]);
+        held.store(0, SeqCst);
+        let most = std::sync::atomic::AtomicU64::new(0);
+        let watch = |n: u64| {
+            most.fetch_max(held.fetch_add(n as i64, SeqCst) as u64 + n, SeqCst);
+            true
+        };
+        let watched = crate::modify::Bounds { admit: &watch, give_back: &give_back, ..crate::modify::UNBOUNDED };
+        assert!(Mask::of_opacity_within(&opaque, watched).unwrap().bytes() < 1024);
+        let threads = rayon::current_num_threads() as u64;
+        assert!(most.load(SeqCst) <= threads * TILE_PIXELS as u64 * 18 + 1024, "{} asked for", most.load(SeqCst));
         // Refused, nothing is made.
         let refuse = crate::modify::Bounds { admit: &|_| false, ..crate::modify::UNBOUNDED };
         assert_eq!(Mask::of_opacity_within(&image, refuse).unwrap_err(), crate::modify::Halt::NoMemory);

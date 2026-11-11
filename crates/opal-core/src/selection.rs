@@ -27,16 +27,26 @@ pub enum Step {
     Smooth { radius: f64 },
     /// A band `width` pixels wide along the outline of the selection so far, on its `side`.
     Border { width: f64, side: Side },
-    /// A mask as it is, combined with the selection so far as `combine` says: a layer's
-    /// opacity, or (replacing it) what a selection carried through a transform its shapes
-    /// could not follow becomes (see [`Selection::transformed`]). It is told without its mask,
-    /// and so cannot be read back.
+    /// A mask as it is, combined with the selection so far as `combine` says, made as `of`
+    /// says. It is told without its mask, and so cannot be read back.
     #[serde(skip_deserializing)]
     Mask {
         #[serde(skip)]
         mask: Arc<Mask>,
         combine: Combine,
+        of: MaskOf,
     },
+}
+
+/// What a mask step's mask was made of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskOf {
+    /// A layer's pixels, each as much as it is opaque (Select Layer's Pixels).
+    LayerPixels,
+    /// The steps before it, which a transform their shapes could not follow carried pixel by
+    /// pixel (see [`Selection::transformed`]); it replaces what was before it.
+    Carried,
 }
 
 impl Step {
@@ -53,15 +63,20 @@ impl Step {
             Step::Feather { width, side, falloff } => before.feathered_within(*width, *side, *falloff, bounds)?,
             Step::Smooth { radius } => before.smoothed_within(*radius, bounds)?,
             Step::Border { width, side } => before.bordered_within(*width, *side, bounds)?,
-            Step::Mask { mask, combine } => before.combined(mask, *combine),
+            Step::Mask { mask, combine, .. } => before.combined(mask, *combine),
         })
     }
 
-    /// Whether it is a modifier at work (grow, feather, smooth or border): one whose mask takes
-    /// the memory `Bounds` admit as it is made.
-    fn modifies(&self) -> bool {
+    /// Whether it is a modifier (grow, feather, smooth or border): one with settings, which
+    /// works the selection so far out again from its outline.
+    pub fn is_modifier(&self) -> bool {
         matches!(self, Step::Grow { .. } | Step::Feather { .. } | Step::Smooth { .. } | Step::Border { .. })
-            && !self.leaves_as_is()
+    }
+
+    /// Whether it is a modifier at work: one whose mask takes the memory `Bounds` admit as it
+    /// is made.
+    fn modifies(&self) -> bool {
+        self.is_modifier() && !self.leaves_as_is()
     }
 
     /// Whether the step makes a selection of its own, the steps before it no longer counting.
@@ -92,7 +107,9 @@ impl Step {
             }
             Step::Smooth { radius } => Step::Smooth { radius: distance(*radius, false)? },
             Step::Border { width, side } => Step::Border { width: distance(*width, false)?, side: *side },
-            Step::Mask { mask, combine } => Step::Mask { mask: Arc::new(mask.transformed(m)), combine: *combine },
+            Step::Mask { mask, combine, of } => {
+                Step::Mask { mask: Arc::new(mask.transformed(m)), combine: *combine, of: *of }
+            }
         })
     }
 
@@ -154,14 +171,15 @@ impl Selection {
     /// [`of`](Self::of), unless `bounds` hold a modifier's work back.
     pub fn of_within(steps: Vec<Step>, bounds: Bounds) -> Result<Selection, Halt> {
         let first = steps.iter().rposition(Step::starts_over).unwrap_or(0);
-        let steps = steps[first..].to_vec();
+        // One that leaves the selection as it is is no step, as when it is added.
+        let steps: Vec<Step> = steps[first..].iter().filter(|s| !s.leaves_as_is()).cloned().collect();
         let (mut mask, mut before) = (Arc::new(Mask::none()), None);
         // Whether the mask before was a modifier's: what it took is given back once it goes.
         let mut made_before = false;
         for (i, s) in steps.iter().enumerate() {
             // A mask step's mask is shared, not copied.
             let next = match s {
-                Step::Mask { mask, combine: Combine::Replace } => mask.clone(),
+                Step::Mask { mask, combine: Combine::Replace, .. } => mask.clone(),
                 _ => Arc::new(s.apply(&mask, bounds)?),
             };
             let gone = before.replace(std::mem::replace(&mut mask, next));
@@ -282,7 +300,8 @@ impl Selection {
                         (made.into_mask(bounds), self.steps[last].modifies())
                     }
                 };
-                let carried = Step::Mask { mask: Arc::new(up_to.transformed(m)), combine: Combine::Replace };
+                let carried =
+                    Step::Mask { mask: Arc::new(up_to.transformed(m)), combine: Combine::Replace, of: MaskOf::Carried };
                 if made {
                     give_back(up_to, bounds);
                 }
@@ -313,8 +332,8 @@ pub fn with_maker(before: Option<&Selection>, step: Step) -> Selection {
             Step::Shape { shape, combine: Combine::Replace | Combine::Add } => {
                 Selection::new(Step::Shape { shape, combine: Combine::Replace })
             }
-            Step::Mask { mask, combine: Combine::Replace | Combine::Add } => {
-                Selection::new(Step::Mask { mask, combine: Combine::Replace })
+            Step::Mask { mask, combine: Combine::Replace | Combine::Add, of } => {
+                Selection::new(Step::Mask { mask, combine: Combine::Replace, of })
             }
             step => Selection::of(vec![step]),
         },
@@ -462,14 +481,14 @@ mod tests {
     #[test]
     fn a_mask_step_alone_is_the_selection_s_mask_and_is_not_read_back() {
         let m = Arc::new(Mask::of(&rect(0.0, 0.0, 300.0, 100.0)));
-        let s = Selection::of(vec![Step::Mask { mask: m.clone(), combine: Combine::Replace }]);
+        let s = Selection::of(vec![Step::Mask { mask: m.clone(), combine: Combine::Replace, of: MaskOf::LayerPixels }]);
         assert!(Arc::ptr_eq(s.mask(), &m), "the mask was copied");
         let told = serde_json::to_string(&s.steps()[0]).unwrap();
         assert_eq!(told, r#"{"step":"mask","combine":"replace"}"#);
         assert!(serde_json::from_str::<Step>(&told).is_err(), "read back as no mask at all");
         // Combined, as a shape is: added to a rectangle beside it, both selected.
         let beside = Selection::new(Step::Shape { shape: rect(400.0, 0.0, 500.0, 100.0), combine: Combine::Replace });
-        let both = beside.then(Step::Mask { mask: m, combine: Combine::Add });
+        let both = beside.then(Step::Mask { mask: m, combine: Combine::Add, of: MaskOf::LayerPixels });
         assert_eq!(both.steps().len(), 2);
         assert_eq!([both.mask().level_at(50, 50), both.mask().level_at(450, 50)], [FULL, FULL]);
     }
@@ -508,6 +527,16 @@ mod tests {
     }
 
     #[test]
+    fn a_step_that_leaves_the_selection_as_it_is_is_no_step_among_others() {
+        let s = Selection::of(vec![
+            Step::Shape { shape: rect(0.0, 0.0, 10.0, 10.0), combine: Combine::Replace },
+            Step::Grow { by: 0.0, corners: Reach::Round },
+            Step::Smooth { radius: 0.0 },
+        ]);
+        assert_eq!(s.steps().len(), 1, "{:?}", s.steps());
+    }
+
+    #[test]
     fn a_maker_with_nothing_selected_makes_it_when_added_or_leaves_nothing() {
         let s = rect(0.0, 0.0, 10.0, 10.0);
         let shape = |combine| with_maker(None, Step::Shape { shape: s, combine });
@@ -515,8 +544,8 @@ mod tests {
         assert!(shape(Combine::Subtract).is_empty());
         assert!(shape(Combine::Intersect).is_empty());
         let mask = Arc::new(Mask::of(&s));
-        let made = with_maker(None, Step::Mask { mask: mask.clone(), combine: Combine::Add });
+        let made = with_maker(None, Step::Mask { mask: mask.clone(), combine: Combine::Add, of: MaskOf::LayerPixels });
         assert!(matches!(made.steps(), [Step::Mask { combine: Combine::Replace, .. }]));
-        assert!(with_maker(None, Step::Mask { mask, combine: Combine::Intersect }).is_empty());
+        assert!(with_maker(None, Step::Mask { mask, combine: Combine::Intersect, of: MaskOf::LayerPixels }).is_empty());
     }
 }
