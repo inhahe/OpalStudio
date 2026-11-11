@@ -832,15 +832,11 @@ fn given_outline(value: &Value, smooth: bool) -> Option<opal_core::outline::Outl
     };
     let near = |v: f64| v.is_finite() && v.abs() <= FAR;
     let center = o.symmetry.map_or([0.0; 2], |s| s.center);
-    let all_near = o.coordinates().flatten().chain(center).all(near);
-    let step = opal_core::selection::Step::Outline { outline: o, combine: Default::default() };
-    if !all_near || step.refused().is_some() {
+    if !o.coordinates().flatten().chain(center).all(near) || o.refused().is_some() {
         return None;
     }
-    let opal_core::selection::Step::Outline { outline: o, .. } = step else { unreachable!("made one") };
-    // (A symmetric outline's slice, two points at least; else three.)
-    let (n, least) = (o.point_count(), if o.symmetry.is_some() { 2 } else { 3 });
-    (n >= least && (o.joins.is_empty() || o.joins.len() == n)).then_some(o)
+    let n = o.point_count();
+    (n >= o.fewest_points() && (o.joins.is_empty() || o.joins.len() == n)).then_some(o)
 }
 
 /// Whether `given` are arguments method `name` takes (as every call's are checked): why

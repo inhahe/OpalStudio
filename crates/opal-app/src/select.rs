@@ -139,6 +139,9 @@ pub fn next_selection_name(doc: &Document) -> String {
     (1..).map(|n| format!("Selection {n}")).find(|name| doc.saved_selection(name).is_none()).expect("one is free")
 }
 
+/// What the status bar says when a new selection selects nothing.
+pub const NOTHING_SELECTED: &str = "That selects nothing, so nothing is selected now.";
+
 /// What `make` makes within the memory free now (measured here), or why there was not memory
 /// enough for it: what a selection made on the interface thread, by a tool or a script's call,
 /// is made within.
@@ -203,10 +206,14 @@ impl crate::doc::DocState {
 
     /// Selects what the maker `step` makes with what is selected (see `with_maker`), as a
     /// history state labeled `label`, its mask made within the memory free now; or says why
-    /// not: there was not memory enough for it (nothing changes then).
+    /// not: there was not memory enough for it (nothing changes then). If that selects nothing
+    /// (an outline enclosing nothing, say), nothing is selected, and the status bar says so.
     pub fn select_with(&mut self, step: Step, label: &str) -> Result<(), String> {
         let before = self.pixel_selection().cloned();
         let made = within_memory(|b| opal_core::selection::with_maker_within(before.as_deref(), step, b))?;
+        if made.is_empty() {
+            self.notice = Some(NOTHING_SELECTED.to_owned());
+        }
         self.set_pixel_selection(Some(made), label);
         Ok(())
     }

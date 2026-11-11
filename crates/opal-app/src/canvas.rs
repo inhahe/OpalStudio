@@ -274,7 +274,9 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         if d.outline_drag.take().is_some() {
             d.discard_pending(crate::outline_tool::EDIT);
         }
-        d.symmetry_drag = None;
+        if d.symmetry_drag.take().is_some() {
+            d.discard_pending(crate::outline_tool::MOVE_SYMMETRY);
+        }
     }
     if tool == ToolId::Zoom && !boxed {
         let alt = ctx.input(|i| i.modifiers.alt);
@@ -482,7 +484,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         crate::outline_tool::draw_edited(ui, o, &crate::outline_tool::picked(d), palette.accent, rect, &to_screen);
     }
     if tool == ToolId::Outline
-        && let Some(s) = crate::outline_tool::symmetry(d, outlining)
+        && let Some((s, _)) = crate::outline_tool::shown_symmetry(d, outlining)
     {
         crate::outline_tool::draw_symmetry(ui, &s, palette.accent, rect, &to_screen);
     }

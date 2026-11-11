@@ -48,8 +48,7 @@ impl Options {
 /// and axis `d` keeps (the canvas's middle, and straight up, until moved).
 pub fn symmetry(d: &DocState, options: Options) -> Option<Symmetry> {
     (options.order > 1 || options.mirror).then(|| {
-        let r = d.doc().canvas.rect();
-        let middle = [(r.x0 + r.x1) as f64 / 2.0, (r.y0 + r.y1) as f64 / 2.0];
+        let middle = d.doc().canvas.rect().to_f().center();
         Symmetry {
             order: options.order,
             mirror: options.mirror,
@@ -105,7 +104,12 @@ impl Outlining {
     /// The fewest points it may be closed with: three, or, as a symmetric outline's slice,
     /// two.
     fn fewest(&self) -> usize {
-        if self.symmetry.is_some() { 2 } else { 3 }
+        self.sketch().fewest_points()
+    }
+
+    /// An outline of its start alone, with its symmetry: what its rules are read from.
+    fn sketch(&self) -> Outline {
+        Outline { symmetry: self.symmetry, ..Outline::new(self.start, Vec::new(), true) }
     }
 
     /// Where its last point is.
@@ -130,7 +134,8 @@ impl Outlining {
     /// Adds a side to `to` (see [`side_to`](Self::side_to)), unless it has as many points as an
     /// outline may; whether it did.
     fn add(&mut self, to: [f64; 2]) -> bool {
-        if self.points() >= MOST_POINTS {
+        // (Its copies counted, as its whole outline has them.)
+        if self.sketch().whole_size(self.segments.len() + 1) >= MOST_POINTS {
             return false;
         }
         self.segments.push(self.side_to(to));
@@ -182,46 +187,135 @@ fn guide_handles(s: &Symmetry, to_screen: &dyn Fn([f64; 2]) -> Pos2) -> (Pos2, P
     (center, center + egui::vec2(x as f32, y as f32) * AXIS_HANDLE)
 }
 
-/// What a frame's presses and drags on the canvas do to the symmetry `s` outlines are drawn
-/// with on `d`: a drag from its center moves it, one from its axis's handle turns the axis
-/// (Shift: by 15 degrees at a time). Whether they were its.
+/// Whose symmetry the canvas shows (see [`shown_symmetry`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shown {
+    /// The outline being drawn's, as it began: shown, not moved.
+    Drawn,
+    /// The outline edited's (the selection's last step, a slice): moving it changes that
+    /// outline, as a history state.
+    Edited,
+    /// The one an outline drawn now would have (the tool's settings, about the image's center
+    /// and axis).
+    New,
+}
+
+/// The history state moving or turning the symmetry of the outline edited makes.
+pub const MOVE_SYMMETRY: &str = "Move symmetry";
+
+/// The symmetry the canvas shows for `d` with the tool's `options`, and whose it is: the
+/// outline being drawn's, else the outline edited's if it is symmetric, else the one an
+/// outline drawn now would have; none if that has none.
+pub fn shown_symmetry(d: &DocState, options: Options) -> Option<(Symmetry, Shown)> {
+    if let Some(o) = &d.outlining {
+        return o.symmetry.map(|s| (s, Shown::Drawn));
+    }
+    if let Some((o, _)) = edited(d)
+        && let Some(s) = o.symmetric()
+    {
+        return Some((s, Shown::Edited));
+    }
+    symmetry(d, options).map(|s| (s, Shown::New))
+}
+
+/// A drag of the symmetry's center (`center`) or its axis's handle; of the outline edited's,
+/// that outline as it began, how it combines, and what the steps before it select.
+#[derive(Clone, Debug)]
+pub struct SymmetryDrag {
+    center: bool,
+    edited: Option<(Outline, Combine, opal_core::selection::Selection)>,
+}
+
+/// What a frame's presses and drags on the canvas do to the symmetry shown (`shown`, see
+/// [`shown_symmetry`]) on `d`: a drag from its center moves it, one from its axis's handle
+/// turns the axis (Shift: by 15 degrees at a time); the outline edited's changes that outline
+/// (a history state, pending while it goes), and the image's center and axis go with it, for
+/// outlines drawn next. A press on a point of the outline edited, or a picked point's handle,
+/// is the point's. Whether they were its.
 fn guide(
     ctx: &egui::Context,
     d: &mut DocState,
     response: &Response,
-    s: &Symmetry,
+    shown: (Symmetry, Shown),
     to_doc: &dyn Fn(Pos2) -> [f64; 2],
     to_screen: &dyn Fn([f64; 2]) -> Pos2,
 ) -> bool {
-    if let Some(center) = d.symmetry_drag {
-        if !ctx.input(|i| i.pointer.primary_down()) {
+    let (s, whose) = shown;
+    if let Some(drag) = d.symmetry_drag.clone() {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             d.symmetry_drag = None;
+            d.discard_pending(MOVE_SYMMETRY);
+        } else if !ctx.input(|i| i.pointer.primary_down()) {
+            d.symmetry_drag = None;
+            if d.pending_label() == Some(MOVE_SYMMETRY) {
+                d.commit_pending();
+            }
         } else if let Some(p) = response.interact_pointer_pos() {
-            if center {
-                d.symmetry_center = Some(to_doc(p));
+            let (mut center, mut angle) = (s.center, s.angle);
+            if drag.center {
+                center = to_doc(p);
             } else {
-                let v = p - guide_handles(s, to_screen).0;
-                let angle = f64::from(v.x).atan2(-f64::from(v.y)).to_degrees();
-                d.symmetry_angle = if ctx.input(|i| i.modifiers.shift) { (angle / 15.0).round() * 15.0 } else { angle };
+                let v = p - guide_handles(&s, to_screen).0;
+                angle = f64::from(v.x).atan2(-f64::from(v.y)).to_degrees();
+                if ctx.input(|i| i.modifiers.shift) {
+                    angle = (angle / 15.0).round() * 15.0;
+                }
+            }
+            (d.symmetry_center, d.symmetry_angle) = (Some(center), angle);
+            if let Some((start, combine, before)) = &drag.edited {
+                let moved = start.symmetry.map(|sym| Symmetry { center, angle, ..sym });
+                if moved != edited(d).and_then(|(o, _)| o.symmetry) {
+                    let outline = Outline { symmetry: moved, ..start.clone() };
+                    let step = Step::Outline { outline, combine: *combine };
+                    crate::select_tool::reshape_with(d, before, step, MOVE_SYMMETRY);
+                }
             }
         }
         return true;
     }
-    if response.drag_started_by(PointerButton::Primary)
-        && let Some(origin) = ctx.input(|i| i.pointer.press_origin())
+    if whose == Shown::Drawn || !response.drag_started_by(PointerButton::Primary) {
+        return false;
+    }
+    let Some(origin) = ctx.input(|i| i.pointer.press_origin()) else { return false };
+    // A point of the outline edited, or a picked point's handle, under the press: the point's.
+    if let Some((o, _)) = edited(d)
+        && part_at(o, &o.nodes(), &picked(d), false, origin, to_doc, to_screen).is_some()
     {
-        let (center, handle) = guide_handles(s, to_screen);
-        let on = if origin.distance(handle) <= NEAR {
-            Some(false)
-        } else {
-            (origin.distance(center) <= NEAR).then_some(true)
-        };
-        if on.is_some() {
-            d.symmetry_drag = on;
-            return true;
+        return false;
+    }
+    let (center, handle) = guide_handles(&s, to_screen);
+    let on = if origin.distance(handle) <= NEAR {
+        false
+    } else if origin.distance(center) <= NEAR {
+        true
+    } else {
+        return false;
+    };
+    let edited = (whose == Shown::Edited).then(|| {
+        let (o, combine) = edited(d).expect("an outline edited");
+        (o.clone(), combine, d.pixel_selection().expect("one with an outline").before_last())
+    });
+    d.symmetry_drag = Some(SymmetryDrag { center: on, edited });
+    true
+}
+
+/// Puts the center of the symmetry shown on `d` with `options` (see [`shown_symmetry`]) in
+/// the canvas's middle, its axis straight up: the image's for outlines drawn next, and the
+/// outline edited's, if it is shown, as a history state.
+pub fn center_symmetry(d: &mut DocState, options: Options) {
+    d.symmetry_center = None;
+    d.symmetry_angle = 0.0;
+    let Some((_, Shown::Edited)) = shown_symmetry(d, options) else { return };
+    let Some((o, combine)) = edited(d).map(|(o, c)| (o.clone(), c)) else { return };
+    let middle = d.doc().canvas.rect().to_f().center();
+    let symmetry = o.symmetry.map(|s| Symmetry { center: middle, angle: 0.0, ..s });
+    if symmetry != o.symmetry {
+        let before = d.pixel_selection().expect("one with an outline").before_last();
+        let step = Step::Outline { outline: Outline { symmetry, ..o }, combine };
+        if let Ok(made) = crate::select::within_memory(|b| before.then_within(step, b)) {
+            d.set_pixel_selection(Some(made), MOVE_SYMMETRY);
         }
     }
-    false
 }
 
 /// The symmetry `s` on `rect` (by `to_screen`): its seams (the axis turned round, and with a
@@ -407,8 +501,8 @@ pub fn join_picked(d: &mut DocState, join: Join) {
     replace(d, Some(made), points, label);
 }
 
-/// Takes the points picked on the outline edited away, as a history state; with fewer than
-/// three points left, the outline goes.
+/// Takes the points picked on the outline edited away, as a history state; with fewer points
+/// left than an outline may have (three, a slice two), the outline goes.
 pub fn delete_picked(d: &mut DocState) {
     let points = picked(d);
     if points.is_empty() || !editable(d) {
@@ -530,7 +624,11 @@ fn edit(
         }
         Some(Part::Side(i, t)) => {
             // The point added is picked alone; those after it count one more.
-            replace(d, Some(outline.split(i, t)), vec![i + 1], "Add point");
+            let added = outline.split(i, t);
+            match added.refused() {
+                None => replace(d, Some(added), vec![i + 1], "Add point"),
+                Some(why) => d.notice = Some(format!("No point was added: {why}.")),
+            }
         }
         Some(Part::Handle(..)) => {}
         // A click away from it: the points picked let go (with none picked, it begins another).
@@ -586,9 +684,8 @@ pub fn canvas(
     // one.
     let picking = modifiers.command;
     // The symmetry's center and axis, by their handles, while no outline is drawn.
-    if d.outlining.is_none()
-        && let Some(s) = symmetry(d, options)
-        && guide(ctx, d, response, &s, to_doc, to_screen)
+    if let Some(shown) = shown_symmetry(d, options)
+        && guide(ctx, d, response, shown, to_doc, to_screen)
     {
         return;
     }
@@ -797,6 +894,47 @@ mod tests {
         delete_picked(d);
         join_picked(d, Join::Smooth);
         assert_eq!(d.doc().selection, was, "changed with a box open");
+    }
+
+    #[test]
+    fn a_symmetric_slice_stops_where_its_copies_would_be_too_many_and_the_guide_shows_what_is_drawn() {
+        use crate::state::{AppState, Background, NewImage};
+        // Sixty-four copies (32, mirrored): a slice of as many points as a million allows.
+        let sym = Symmetry { order: MOST_ORDER, mirror: true, center: [0.0, 0.0], angle: 0.0 };
+        let mut o = Outlining::begun([0.0, 0.0], Combine::Replace, false, Some(sym));
+        let mut added = 0;
+        while o.add([added as f64, 1.0]) {
+            added += 1;
+        }
+        let made = o.outline(true).expect("closed");
+        assert!(made.refused().is_none() && added > 1000, "{added} points");
+        // The guide: the outline being drawn's symmetry, as it began, whatever the settings say
+        // since; else the outline edited's; else the one a new outline would have.
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let options = Options { combine: Combine::Replace, smooth: true, order: 6, mirror: false };
+        let d = st.active_mut().unwrap();
+        assert_eq!(
+            shown_symmetry(d, options).map(|(s, w)| (s.order, s.center, w)),
+            Some((6, [150.0, 100.0], Shown::New))
+        );
+        d.outlining = Some(Outlining::begun([10.0, 10.0], Combine::Replace, false, Some(Symmetry { order: 4, ..sym })));
+        assert_eq!(shown_symmetry(d, options).map(|(s, w)| (s.order, w)), Some((4, Shown::Drawn)));
+        d.outlining = None;
+        let slice = Outline {
+            symmetry: Some(Symmetry { order: 3, mirror: false, center: [40.0, 40.0], angle: 0.0 }),
+            ..Outline::new([40.0, 10.0], vec![Segment::Line { to: [60.0, 50.0] }], true)
+        };
+        let step = Step::Outline { outline: slice, combine: Combine::Replace };
+        d.set_pixel_selection(Some(opal_core::selection::Selection::new(step)), "Select");
+        assert_eq!(
+            shown_symmetry(d, options).map(|(s, w)| (s.order, s.center, w)),
+            Some((3, [40.0, 40.0], Shown::Edited))
+        );
+        // Centered on the canvas: the outline edited's, as a history state, and new outlines'.
+        center_symmetry(d, options);
+        assert_eq!(edited(d).and_then(|(o, _)| o.symmetry).map(|s| s.center), Some([150.0, 100.0]));
+        assert_eq!(d.history.undo_label(), Some(MOVE_SYMMETRY));
     }
 
     #[test]

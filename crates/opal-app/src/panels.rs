@@ -659,20 +659,22 @@ fn symmetry_place(ui: &mut egui::Ui, st: &mut AppState) {
     let options = crate::outline_tool::Options::of(st.tool_settings(crate::tools::ToolId::Outline));
     let weak = st.palette.weak_text;
     let Some(d) = st.active_mut() else { return };
-    let Some(s) = crate::outline_tool::symmetry(d, options) else { return };
-    ui.label(
-        RichText::new(format!("Centered at {:.0}, {:.0}, its axis turned {:.0}°", s.center[0], s.center[1], s.angle))
-            .color(weak)
-            .small(),
-    );
-    let moved = d.symmetry_center.is_some() || d.symmetry_angle != 0.0;
+    let Some((s, whose)) = crate::outline_tool::shown_symmetry(d, options) else { return };
+    let whose = match whose {
+        crate::outline_tool::Shown::Drawn => "The outline being drawn's",
+        crate::outline_tool::Shown::Edited => "The outline edited's",
+        crate::outline_tool::Shown::New => "New outlines'",
+    };
+    let text = format!("{whose}: centered at {:.0}, {:.0}, its axis turned {:.0}°", s.center[0], s.center[1], s.angle);
+    ui.label(RichText::new(text).color(weak).small());
+    let middle = d.doc().canvas.rect().to_f().center();
+    let movable = d.outlining.is_none() && (s.center != middle || s.angle != 0.0);
     if ui
-        .add_enabled(moved, egui::Button::new("Center on canvas"))
+        .add_enabled(movable, egui::Button::new("Center on canvas"))
         .on_hover_text("Put the center back in the canvas's middle, its axis straight up")
         .clicked()
     {
-        d.symmetry_center = None;
-        d.symmetry_angle = 0.0;
+        crate::outline_tool::center_symmetry(d, options);
     }
 }
 

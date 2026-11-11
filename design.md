@@ -1886,24 +1886,41 @@ kaleidoscope of 2n parts.
 - **The outline tool (milestone 2, built).** *Symmetry* (the order, 1 for none) and *Mirror*
   are its settings; the center and the axis are the image's (`DocState::symmetry_center`,
   `symmetry_angle`: the canvas's middle and straight up until moved; not part of its history,
-  nor kept in its file), shown while the tool is chosen and symmetry is on (`draw_symmetry`):
-  each seam a faint ray from the center (the axis turned round, and with a mirror the mirror
+  nor kept in its file). The canvas shows a symmetry (`shown_symmetry`, `draw_symmetry`): the
+  one an outline being drawn began with (shown only); else the outline edited's, if it is a
+  slice (dragging its handles changes that outline, *Move symmetry*, as a history state, and
+  the image's center and axis follow); else the one an outline drawn now would have. Each
+  seam is a faint ray from the center (the axis turned round, and with a mirror the mirror
   lines between), the axis stronger, a handle at the center to drag it and one on the axis to
-  turn it (Shift: by 15 degrees); *Center on canvas* in Tool settings puts them back. An
-  outline drawn then is one slice (`opal_core::symmetry`, `Outline::symmetry`): not closed,
-  two points enough; the whole outline (`Outline::whole`) is the slice and its copies, one
-  after another, each joined to the next by a straight side (none where one ends where the
-  next begins: draw from the axis to the next seam), with a mirror the slice after its mirror
-  image run back, the copies turned the way that puts the next one's start nearest where the
-  last ends. It shows whole as it is drawn. The slice is what is edited (its points, sides
-  and handles as any outline's, its ends with one side each; an outline left with fewer than
-  two points goes), the copies following; moving it whole moves its center too. A transform
+  turn it (Shift: by 15 degrees); a press on a point of the outline edited, or a picked
+  point's handle, is the point's, not the center's. *Center on canvas* in Tool settings puts
+  what is shown back in the canvas's middle (not while an outline is drawn). An outline
+  drawn then is one slice (`opal_core::symmetry`, `Outline::symmetry`): not closed, two points
+  enough; the whole outline (`Outline::whole`) is the slice and its copies, one after another,
+  each joined to the next by a straight side where it does not end where the next begins
+  (within a millionth of a pixel: draw from seam to seam, and none is needed), the last end
+  put on the start; with a mirror, the slice and its mirror image run back are joined first at
+  whichever end of the slice is nearer its own image (the end drawn on the axis, either way);
+  the copies turned the way that puts the next one's start nearest where the last ends. A
+  closed slice's copies stay apart: each reached from the first and left back along one
+  straight side, which, gone both ways, encloses nothing. It shows whole as it is drawn, and
+  drawing it stops where its whole outline would pass a million segments (its copies, and
+  the sides joining them, counted). The slice is what is edited (its points, sides and handles
+  as any outline's, its ends with one side each; an outline left with fewer than two points
+  goes), the copies following; an end made smooth gets its handle at right angles to the
+  mirror line it lies on, or, turned without a mirror, in line with the handle of the copy
+  it meets, so that the whole passes smoothly through the seam; moving it whole moves its
+  center too. A symmetry making no copies (order 1, no mirror) is as none, and refused where
+  it is kept (a file, a script's call). A transform
   that keeps shapes alike (turns, moves, flips, scales alike both ways) carries the slice
   and its center and axis; one that stretches one way more than another makes it the
   ordinary outline of the whole, carried. The selection panel calls it a slice ("Slice of 2
   points, turned 4 times round"). Scripts give it as an outline's `symmetry` (order, mirror,
   center, angle), the selection query tells it so, and a file keeps it; an order past
-  `MOST_ORDER` (32), or a whole outline of more than a million points, is refused.
+  `MOST_ORDER` (32), or a whole outline of more than a million segments, is refused
+  (`Outline::refused`, which a file's steps and a script's outlines are both checked by). A
+  tool's or a script's new selection that selects nothing (an outline enclosing nothing, two
+  points from the center out, say) leaves nothing selected, and the status bar says so.
 
 ## Expressions
 

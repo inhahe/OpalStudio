@@ -3778,10 +3778,13 @@ fn the_outline_tool_draws_symmetric_outlines_about_a_center_moved_and_turned_on_
     click_image(&mut h, [250.0, 150.0], none);
     drag_image(&mut h, &[[250.0, 150.0], [260.0, 150.0], [270.0, 150.0]], none);
     assert_eq!(selected(&h), Some(Extent::Within(IRect::new(130, 80, 270, 220))));
-    // Its center dragged from the canvas's middle to (100, 150), not beginning an outline.
+    // Its center dragged from the canvas's middle to (100, 150), not beginning an outline: the
+    // outline edited's symmetry moved with it, as a history state.
     drag_image(&mut h, &[[200.0, 150.0], [150.0, 150.0], [100.0, 150.0]], none);
     let d = h.state().state().active().unwrap();
     assert_eq!((d.symmetry_center, d.outlining.is_none()), (Some([100.0, 150.0]), true));
+    let moved = crate::outline_tool::edited(d).unwrap().0.symmetry.unwrap();
+    assert_eq!((moved.center, d.history.undo_label()), ([100.0, 150.0], Some(crate::outline_tool::MOVE_SYMMETRY)));
     // Its axis's handle (60 points up from the center on screen) turned to the right, with
     // Shift: a quarter turn, to the degree.
     let v = d.view;
@@ -3802,6 +3805,29 @@ fn the_outline_tool_draws_symmetric_outlines_about_a_center_moved_and_turned_on_
     h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
     h.run();
     assert_eq!(h.state().state().active().unwrap().symmetry_angle, 90.0);
+    // A slice begun at the center: a drag from there moves its point, not the center.
+    h.key_press(egui::Key::Escape);
+    h.run();
+    let d = h.state_mut().state_mut().active_mut().unwrap();
+    (d.symmetry_center, d.symmetry_angle) = (None, 0.0);
+    d.deselect_pixels();
+    // (Two points from the center out: copies enclosing nothing, which says so.)
+    click_image(&mut h, [200.0, 150.0], none);
+    click_image(&mut h, [250.0, 100.0], none);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let said = h.state().state().notice.as_ref().map(|n| n.0.clone());
+    assert_eq!(said.as_deref(), Some(crate::select::NOTHING_SELECTED));
+    for p in [[200.0, 150.0], [250.0, 100.0], [260.0, 140.0]] {
+        click_image(&mut h, p, none);
+    }
+    h.key_press(egui::Key::Enter);
+    h.run();
+    click_image(&mut h, [200.0, 150.0], none);
+    drag_image(&mut h, &[[200.0, 150.0], [205.0, 150.0], [210.0, 150.0]], none);
+    let d = h.state().state().active().unwrap();
+    let slice = crate::outline_tool::edited(d).unwrap().0.clone();
+    assert_eq!((slice.start, slice.symmetry.unwrap().center), ([210.0, 150.0], [200.0, 150.0]));
 }
 
 #[test]

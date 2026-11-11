@@ -151,8 +151,8 @@ pub struct DocState {
     /// image's history, nor kept in its file.
     pub symmetry_center: Option<[f64; 2]>,
     pub symmetry_angle: f64,
-    /// A drag moving the symmetry's center (`true`) or turning its axis (`false`).
-    pub symmetry_drag: Option<bool>,
+    /// A drag moving the symmetry's center or turning its axis.
+    pub symmetry_drag: Option<crate::outline_tool::SymmetryDrag>,
     /// The rectangle the transform box's fields fit it into (its top-left corner from the
     /// canvas's, and its size), once one has been typed; the canvas, whatever it is then,
     /// until then.
