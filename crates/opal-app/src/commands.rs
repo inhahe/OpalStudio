@@ -280,8 +280,10 @@ impl Cmd {
                 "Cut",
                 icons::CUT,
                 "Copy what is selected on the selected layers, then erase it.",
-                "Copy, then Clear: what the selected layers show within the selection goes to the \
-                 clipboard, and is erased from them, as much of each pixel as it is selected.",
+                "What the selected layers show within the selection and the canvas goes to the \
+                 clipboard, and is erased from them, as much of each pixel as it is selected (what \
+                 lies past the canvas, which a copy leaves out, stays). Should the copy not reach the \
+                 clipboard, the erasing is taken back.",
                 const { &[ctrl(Key::X)] },
             ),
             Cmd::Copy => i(
@@ -503,9 +505,11 @@ impl Cmd {
                 "Clear",
                 icons::CLEAR,
                 "Erase what is selected on the selected layers.",
-                "Each pixel is erased as much as it is selected, so a soft edge fades out. A layer \
-                 holding a placed image keeps that image's pixels as they were placed: rasterize it \
-                 first.",
+                "Each pixel is erased as much as it is selected, so a soft edge fades out, past the \
+                 canvas too. Inside a selected group, the layers shown are cleared (a hidden one is \
+                 left as it is); a selected layer or group that is hidden, or a lock on a layer to \
+                 clear or a group it is in, refuses it. A layer holding a placed image keeps that \
+                 image's pixels as they were placed: rasterize it first.",
                 const { &[plain(Key::Delete)] },
             ),
             Cmd::CropToSelection => i(

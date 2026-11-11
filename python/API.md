@@ -602,7 +602,7 @@ Puts pixels into an image, at a place on its canvas: as a new layer above the ac
 
 ### `selection`
 
-What is selected in an image: the rectangle round it, as [x, y, width, height] from the canvas's corner (null if nothing is; "unbounded" where it reaches past every edge, inverted), and the steps that made it, in order. select_all, deselect and invert_selection answer with it too.
+What is selected in an image: the rectangle round it, as [x, y, width, height] from the canvas's corner (null if nothing is; "unbounded" where it reaches past every edge, inverted), and the steps that made it, in order: shapes (rectangles and ellipses, by their middle, size and angle, and how each combines), inversions, and masks (a "mask" step stands for the steps before it, which Rotate, Flip or Resize Image could not carry exactly, as the mask they came to; it gives no numbers). select_all, deselect and invert_selection answer with it too.
 
 | Parameter | Kind | |
 |---|---|---|

@@ -48,9 +48,10 @@ pub fn tab_keytips() -> Vec<char> {
     used
 }
 
-/// The keytip letters of the commands on tab `tab`, in order of appearance. Each is unique on
-/// the tab: the first free initial of the name's words, else any free letter of the name,
-/// else a digit.
+/// The keytip letters of the commands on tab `tab`, each unique on the tab: first those with
+/// their own ([`own_keytip`]), then the others in order of appearance, each the first free
+/// initial of the name's words, else any free letter of the name, else a digit. (Look a
+/// command's up by the command: the order is not the buttons'.)
 pub fn button_keytips(tab: usize) -> Vec<(Cmd, char)> {
     let mut out: Vec<(Cmd, char)> =
         RIBBON[tab].groups.iter().flat_map(|g| g.cmds).filter_map(|&c| Some((c, own_keytip(c)?))).collect();
