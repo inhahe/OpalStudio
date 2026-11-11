@@ -109,8 +109,10 @@ cargo test --workspace                     # all tests, interface tests included
   symmetric outlines (Symmetry and Mirror in Tool settings): one slice drawn, completed by its
   copies turned round a center, mirrored across an axis, or both, the center and axis dragged
   on the image; Select All, Deselect, Reselect and Invert Selection; a layer's pixels
-  selected by Ctrl+clicking its thumbnail (with Shift to add, Alt to take away); Clear, Cut and Copy within
-  it; Layer via Copy (Ctrl+J) and Layer via Cut; Crop to Selection; Transform Selection (the
+  selected by Ctrl+clicking its thumbnail (with Shift to add, Alt to take away); Clear, Cut and
+  Copy within it (saying why, when they change nothing you can see: a layer hidden, at 0%
+  opacity or locked, no pixels there, or a layer above covering them, named); Layer via Copy
+  (Ctrl+J) and Layer via Cut; Crop to Selection; Transform Selection (the
   selection itself moved, sized or turned in the transform box); marching ants round it. The last shape keeps a box whose handles
   move, size and turn it, and whose numbers button gives its exact position, size and angle,
   in any unit; scripts select shapes so too (`select_rectangle`, `select_ellipse`). View ›

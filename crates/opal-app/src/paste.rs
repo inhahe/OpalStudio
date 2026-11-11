@@ -62,7 +62,9 @@ impl AppState {
                 (false, false) => "The selected layers show nothing",
                 (false, true) => "The selected layers show nothing selected",
             };
-            self.message(MessageKind::Info, "Copy", format!("{what} within the canvas, so there is nothing to copy."));
+            let faint = if merged { String::new() } else { crate::select::faint_note(d) };
+            let why = format!("{what} within the canvas, so there is nothing to copy.{faint}");
+            self.message(MessageKind::Info, "Copy", why);
             return false;
         };
         let (w, h) = (bounds.width() as u64, bounds.height() as u64);

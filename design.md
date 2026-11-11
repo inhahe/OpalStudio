@@ -1093,6 +1093,25 @@ selection; on a hidden layer, a locked one, or one whose transparency is locked;
 opacity; where a layer above completely covers the spot; on the layer's mask instead of the
 layer; or off the canvas (kept, but not exported).
 
+Built so far, for the commands that erase or copy within the selection:
+
+- **Refused, with the reason as the command's disabled tooltip:** Clear, Cut and Layer via Cut
+  with no selection, no layer selected, a selected layer (or a group it is in) hidden or at
+  0% opacity, one locked, or one holding a placed image. Inside a selected group, the layers
+  hidden or at 0% opacity are left alone, as nothing of them is seen.
+- **Nothing erased:** Clear says the layer (or the selected layers) has no pixels within the
+  selection, or that nothing in the selected groups is shown.
+- **Erased, but nothing that shows changed:** the composite is compared before and after,
+  only at the tiles whose content changed (`composite::tiles_changed`, told from the
+  compositor's tile keys, nothing composited; then `composite::shows_alike`, composited there,
+  stopping at the first that differs, so a change that shows costs a tile or two). If
+  nothing shows, the reason is found the same way: the layer above the cleared ones which,
+  hidden, would let it show is named; failing one, the layers above together; failing them,
+  what was cleared was too faint to show. (Layers beneath are not tried: hiding one can let
+  a faint change show by taking away what it was drawn over.)
+- **Copy and Layer via Copy** that find the selected layers show nothing add that one of
+  them is at 0% opacity, if one is.
+
 ## Paste and transform
 
 Pasting opens the **transform box** instead of placing the pixels. The same box transforms

@@ -754,6 +754,7 @@ impl AppState {
         let selected = d.selected_layers();
         let top = *selected.last().expect("available");
         let layers = d.selected_as_shown();
+        let faint = faint_note(d);
         let erased: Vec<LayerId> =
             if cut { cleared(d).iter().filter(|l| !l.is_group()).map(|l| l.id).collect() } else { Vec::new() };
         let memory = match range {
@@ -771,7 +772,7 @@ impl AppState {
             let flat = crate::edits::composited(&layers, range.as_ref(), progress)?;
             let kept = opal_core::mask::keep_selected(&flat, [0, 0], &mask);
             if kept.content_bounds().is_none() {
-                return Err("The selected layers show nothing within the selection.".to_owned());
+                return Err(format!("The selected layers show nothing within the selection.{faint}"));
             }
             if cut {
                 clear(doc, &erased, &mask);
@@ -798,8 +799,8 @@ impl AppState {
     }
 
     /// Erases what is selected on the selected layers, as a history state labeled `label`
-    /// (only within `area`, if given); whether anything was erased (if not, the user is told
-    /// why).
+    /// (only within `area`, if given); whether anything was erased. If nothing was, or nothing
+    /// that shows, the user is told why.
     fn clear_within(&mut self, label: &str, area: Option<&IRect>) -> bool {
         let d = self.active_mut().expect("available");
         let mut mask = d.pixel_selection().expect("available").mask().clone();
@@ -807,13 +808,19 @@ impl AppState {
             mask = Arc::new(mask.combined(&Mask::of(&Shape::rectangle(&r.to_f(), false)), Combine::Intersect));
         }
         let layers: Vec<LayerId> = cleared(d).iter().filter(|l| !l.is_group()).map(|l| l.id).collect();
+        let before = d.doc().clone();
         let mut changed = false;
         let result = d.apply(label, |doc, _| {
             changed = clear(doc, &layers, &mask);
             if changed { Ok(()) } else { Err(()) }
         });
-        if result == Err(crate::doc::NotMade::Failed(())) {
-            self.notify("Nothing selected on the selected layers had pixels to clear.");
+        let why = match result {
+            Err(crate::doc::NotMade::Failed(())) => Some(nothing_cleared(&before, &layers)),
+            Ok(_) => unseen(&before, d.doc(), &layers),
+            Err(_) => None,
+        };
+        if let Some(why) = why {
+            self.notify(why);
         }
         changed
     }
@@ -881,14 +888,89 @@ fn same_tiles(a: &opal_core::raster::RasterImage, b: &opal_core::raster::RasterI
     a.tile_count() == b.tile_count() && a.tiles().all(|(c, t)| b.tile(c).is_some_and(|u| Arc::ptr_eq(t, u)))
 }
 
+/// What a message that the selected layers on `d` show nothing adds: that one of them is at
+/// 0% opacity, if one is (taken as it looks, hidden or not, it shows nothing at all).
+pub(crate) fn faint_note(d: &crate::doc::DocState) -> String {
+    let doc = d.doc();
+    let faint = d.selected_layers().into_iter().filter_map(|l| doc.layer(l)).find(|l| l.opacity <= 0.0);
+    faint.map_or_else(String::new, |l| format!(" \"{}\" is at 0% opacity.", l.name))
+}
+
+/// Why clearing within the selection from `layers` of `doc` (the selected layers and those
+/// shown in the selected groups) erased nothing: there are no such layers, or they have no
+/// pixel within it.
+fn nothing_cleared(doc: &Document, layers: &[LayerId]) -> String {
+    match layers {
+        [] => "Nothing in the selected groups is shown, so there is nothing to clear.".to_owned(),
+        [one] => {
+            let name = doc.layer(*one).map_or("The layer", |l| l.name.as_str());
+            format!("\"{name}\" has no pixels within the selection to clear.")
+        }
+        _ => "The selected layers have no pixels within the selection to clear.".to_owned(),
+    }
+}
+
+/// Why erasing from the layers `cleared`, which made `after` of `before`, changed nothing
+/// that shows, if it did not: the layer above them that covers what was erased (hidden, it
+/// would show), or the layers above together, or else it was too faint to show.
+fn unseen(before: &Document, after: &Document, cleared: &[LayerId]) -> Option<String> {
+    use opal_core::composite::{occupied_tiles, shows_alike, tiles_changed};
+    let changed = tiles_changed(&before.layers, &after.layers);
+    if changed.is_empty() || !shows_alike(&before.layers, &after.layers, &changed) {
+        return None;
+    }
+    // The layers shown (not groups), topmost first: each drawn over those after it.
+    fn shown<'a>(layers: &'a [Arc<Layer>], out: &mut Vec<&'a Arc<Layer>>) {
+        for l in layers.iter().rev().filter(|l| l.visible && l.opacity > 0.0) {
+            match l.children() {
+                Some(c) => shown(c, out),
+                None => out.push(l),
+            }
+        }
+    }
+    let mut all = Vec::new();
+    shown(&after.layers, &mut all);
+    // Of them, those above the lowest cleared, over what changed, but those cleared. (Hiding
+    // one beneath may let a faint change show, as what lies under it is gone too.)
+    let lowest = all.iter().rposition(|l| cleared.contains(&l.id)).unwrap_or(all.len());
+    let near: std::collections::HashSet<_> = changed.iter().copied().collect();
+    let over: Vec<&Arc<Layer>> = all[..lowest]
+        .iter()
+        .copied()
+        .filter(|l| !cleared.contains(&l.id))
+        .filter(|l| !occupied_tiles(std::slice::from_ref(*l), None).is_disjoint(&near))
+        .collect();
+    // Whether what was erased shows with `hidden` hidden.
+    let shows_without = |hidden: &[&Arc<Layer>]| {
+        let hide = |doc: &Document| {
+            let mut doc = doc.clone();
+            for l in hidden {
+                if let Some(l) = doc.layer_mut(l.id) {
+                    l.visible = false;
+                }
+            }
+            doc
+        };
+        !shows_alike(&hide(before).layers, &hide(after).layers, &changed)
+    };
+    let why = match over.iter().find(|l| shows_without(&[l])) {
+        Some(l) => format!("Nothing you can see changed: \"{}\" covers what was cleared.", l.name),
+        None if shows_without(&over) => {
+            "Nothing you can see changed: the layers above cover what was cleared.".to_owned()
+        }
+        None => "Nothing you can see changed: what was cleared was too faint to show.".to_owned(),
+    };
+    Some(why)
+}
+
 /// What Clear and Cut act on: the selected layers, and inside the selected groups the layers
-/// and groups shown (a hidden one is left as it is: nothing of it is seen), each after the
-/// group it is in.
+/// and groups shown (one hidden or at 0% opacity is left as it is: nothing of it is seen),
+/// each after the group it is in.
 fn cleared(d: &crate::doc::DocState) -> Vec<&Layer> {
     fn walk<'a>(l: &'a Layer, out: &mut Vec<&'a Layer>) {
         out.push(l);
         for c in l.children().unwrap_or(&[]) {
-            if c.visible {
+            if c.visible && c.opacity > 0.0 {
                 walk(c, out);
             }
         }
@@ -904,9 +986,9 @@ fn cleared(d: &crate::doc::DocState) -> Vec<&Layer> {
 }
 
 /// Why the selected layers cannot be cleared within the selection, if they cannot: none is
-/// selected, or one (or a group, selected or holding one) is hidden, or one it would clear
-/// (or a group it is in) is locked, or holds a placed image (whose pixels are its own, drawn
-/// through a transform: rasterize it first).
+/// selected, or one (or a group, selected or holding one) is hidden or at 0% opacity, or one
+/// it would clear (or a group it is in) is locked, or holds a placed image (whose pixels are
+/// its own, drawn through a transform: rasterize it first).
 pub(crate) fn clear_refused(d: &crate::doc::DocState) -> Result<(), String> {
     if d.pixel_selection().is_none() {
         return Err("Select an area first (the Select tool, or Select All).".into());
@@ -921,6 +1003,12 @@ pub(crate) fn clear_refused(d: &crate::doc::DocState) -> Result<(), String> {
         selected.iter().flat_map(|l| crate::commands::groups_above(doc, l.id).into_iter().chain([*l])).collect();
     if let Some(l) = around.iter().find(|l| !l.visible) {
         return Err(format!("\"{}\" is hidden: clearing it would change nothing you can see. Show it first.", l.name));
+    }
+    if let Some(l) = around.iter().find(|l| l.opacity <= 0.0) {
+        return Err(format!(
+            "\"{}\" is at 0% opacity: clearing it would change nothing you can see. Raise its opacity first.",
+            l.name
+        ));
     }
     let layers = cleared(d);
     if let Some(l) = around.iter().chain(&layers).find(|l| l.locked) {
@@ -1756,5 +1844,122 @@ mod tests {
         // In G hidden: refused.
         flag(&mut st, g, |l| (l.locked, l.visible) = (false, false));
         assert!(refused(&st).contains("\"G\" is hidden"), "{}", refused(&st));
+        // In G at 0% opacity: refused too.
+        flag(&mut st, g, |l| (l.visible, l.opacity) = (true, 0.0));
+        assert!(refused(&st).contains("\"G\" is at 0% opacity"), "{}", refused(&st));
+        // G selected, A in it at 0% opacity and B hidden: nothing in it shown, and said so.
+        flag(&mut st, g, |l| l.opacity = 1.0);
+        flag(&mut st, a, |l| l.opacity = 0.0);
+        st.active_mut().unwrap().select_only(g);
+        assert_eq!(refused(&st), "");
+        st.notice = None;
+        st.clear_selected();
+        let said = st.notice.take().map(|n| n.0);
+        assert_eq!(said.as_deref(), Some("Nothing in the selected groups is shown, so there is nothing to clear."));
+    }
+
+    #[test]
+    fn clear_says_why_it_erased_nothing_or_nothing_that_shows() {
+        use crate::commands::Cmd;
+        use opal_core::mask::{Combine, Shape};
+        use opal_core::selection::{Selection, Step};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        // Under, red all over; Over, opaque blue over its left half; Empty, nothing.
+        let layers = [
+            ("Under", IRect::new(0, 0, 300, 200), [1.0, 0.0, 0.0, 1.0]),
+            ("Over", IRect::new(0, 0, 150, 200), [0.0, 0.0, 1.0, 1.0]),
+            ("Empty", IRect::new(0, 0, 0, 0), [0.0; 4]),
+        ];
+        let mut ids = Vec::new();
+        st.active_mut()
+            .unwrap()
+            .apply("Layers", |doc: &mut Document, made: &mut IdGen| {
+                for (i, (name, area, rgba)) in layers.into_iter().enumerate() {
+                    let id = made.layer();
+                    let image = RasterImage::filled(&area, opal_core::tile::pixel_from_f32(rgba));
+                    doc.insert(
+                        Position { parent: None, index: i + 1 },
+                        Layer::new_raster(id, made.object(), name, image),
+                    )?;
+                    ids.push(id);
+                }
+                Ok::<(), opal_core::document::TreeError>(())
+            })
+            .unwrap();
+        let (under, over, empty) = (ids[0], ids[1], ids[2]);
+        let select = |st: &mut AppState, r: IRect| {
+            let shape = Shape::rectangle(&r.to_f(), false);
+            let s = Selection::new(Step::Shape { shape, combine: Combine::Replace });
+            st.active_mut().unwrap().set_pixel_selection(Some(s), "Select");
+        };
+        let set = |st: &mut AppState, id: LayerId, opacity: f32| {
+            st.active_mut()
+                .unwrap()
+                .apply("Opacity", |doc, _| {
+                    doc.layer_mut(id).unwrap().opacity = opacity;
+                    Ok::<(), ()>(())
+                })
+                .unwrap();
+        };
+        let clear = |st: &mut AppState, r: IRect| {
+            select(st, r);
+            st.notice = None;
+            st.clear_selected();
+            st.notice.take().map(|n| n.0).unwrap_or_default()
+        };
+        st.active_mut().unwrap().select_only(under);
+        // Beneath Over: erased, but covered by it.
+        let said = clear(&mut st, IRect::new(10, 10, 60, 60));
+        assert_eq!(said, "Nothing you can see changed: \"Over\" covers what was cleared.");
+        // Where nothing covers it: erased, and nothing said.
+        assert_eq!(clear(&mut st, IRect::new(200, 10, 250, 60)), "");
+        // Beneath Over at half opacity: it shows through.
+        set(&mut st, over, 0.5);
+        assert_eq!(clear(&mut st, IRect::new(10, 70, 60, 120)), "");
+        set(&mut st, over, 1.0);
+        // Beneath Over and a copy of it: neither alone covers it, the two together do.
+        st.active_mut()
+            .unwrap()
+            .apply("Copy", |doc: &mut Document, made: &mut IdGen| {
+                let image = RasterImage::filled(
+                    &IRect::new(0, 0, 150, 200),
+                    opal_core::tile::pixel_from_f32([0.5, 0.5, 0.5, 1.0]),
+                );
+                let id = made.layer();
+                doc.insert(
+                    Position { parent: None, index: 3 },
+                    Layer::new_raster(id, made.object(), "Over again", image),
+                )
+            })
+            .unwrap();
+        st.active_mut().unwrap().select_only(under);
+        let said = clear(&mut st, IRect::new(70, 10, 120, 60));
+        assert_eq!(said, "Nothing you can see changed: the layers above cover what was cleared.");
+        // At a millionth of opacity, uncovered, over the white background: too faint to show
+        // (the background beneath is no cover).
+        set(&mut st, under, 1e-6);
+        let said = clear(&mut st, IRect::new(200, 100, 250, 150));
+        assert_eq!(said, "Nothing you can see changed: what was cleared was too faint to show.");
+        // At 0% opacity: refused.
+        set(&mut st, under, 0.0);
+        let refused = super::clear_refused(st.active().unwrap()).unwrap_err();
+        assert!(refused.contains("\"Under\" is at 0% opacity"), "{refused}");
+        // Copy and Layer via Copy say so when it shows nothing.
+        select(&mut st, IRect::new(200, 10, 300, 200));
+        let ctx = eframe::egui::Context::default();
+        st.run(Cmd::Copy, &ctx);
+        let said = st.messages.pop_back().map(|m| m.body).unwrap_or_default();
+        assert!(said.ends_with(" \"Under\" is at 0% opacity."), "{said}");
+        st.run(Cmd::LayerViaCopy, &ctx);
+        st.finish_edits();
+        let said = st.messages.pop_back().map(|m| m.body).unwrap_or_default();
+        assert!(said.ends_with(" \"Under\" is at 0% opacity."), "{said}");
+        // Empty: nothing erased, and why.
+        st.active_mut().unwrap().select_only(empty);
+        assert_eq!(
+            clear(&mut st, IRect::new(10, 10, 60, 60)),
+            "\"Empty\" has no pixels within the selection to clear."
+        );
     }
 }

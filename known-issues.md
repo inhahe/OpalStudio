@@ -11,6 +11,21 @@ its colors are off; the user is warned when the image opens. Whether a profile i
 judged from its description text. **Fix:** color management with lcms2 in milestone 5:
 convert from the embedded profile into the working space on import.
 
+## Commands from keys run in the middle of a drag on the canvas
+
+`crates/opal-app/src/app.rs` (the shortcuts and `editing_keys`), and every drag kept on
+`DocState` (`select_drag`, `shape_drag`, `outline_drag`, `symmetry_drag`, `moving`). Undo,
+Redo, Deselect, the arrow keys' nudge and the rest act while a mouse button is held on the
+canvas. A drag that works its edit out again from where it began then carries on past them:
+Ctrl+Z during a drag of an outline's point commits the edit so far and undoes it, and the
+next move makes it again (leaving a state to redo); Ctrl+D during one deselects, and the
+next move selects again. Nothing is lost, but the history fills with states the user did
+not mean. Scripts already wait while a button is held (`AppState::scripts_wait`). The
+redrawing of an outline gives itself up when the selection it began on is another, but the
+other drags do not. **Fix (needs a decision):** either keys that change the image wait (or
+are refused) while a button is held on the canvas, as Photoshop ignores them, or each drag
+gives itself up when the image changes under it other than by its own hand.
+
 ## GPU memory is only reported on Windows
 
 `crates/opal-app/src/gpu_memory.rs`. **Fix:** query `VK_EXT_memory_budget` through wgpu's

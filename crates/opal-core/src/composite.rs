@@ -947,6 +947,53 @@ pub fn composite_cost(layers: &[Arc<Layer>], range: Option<&IRect>) -> u64 {
     made as u64 * TILE_BYTES
 }
 
+/// The tiles at which `a` and `b` (an image's layers before and after a change, say) may
+/// show differently: those where what is composited (the stored tiles, the images and how
+/// they are drawn, the opacities) is not the same. Told from the layers, nothing composited.
+pub fn tiles_changed(a: &[Arc<Layer>], b: &[Arc<Layer>]) -> Vec<TileCoord> {
+    let mut coords = occupied_tiles(a, None);
+    coords.extend(occupied_tiles(b, None));
+    coords
+        .into_par_iter()
+        .filter(|&c| {
+            let (mut ka, mut kb) = (Vec::new(), Vec::new());
+            key_into(a, c, &mut ka, &object_token);
+            key_into(b, c, &mut kb, &object_token);
+            !same_key(&ka, &kb)
+        })
+        .collect()
+}
+
+/// Whether `a` and `b` show the very same pixels at each of the tiles `at`, composited there.
+pub fn shows_alike(a: &[Arc<Layer>], b: &[Arc<Layer>], at: &[TileCoord]) -> bool {
+    let Some(range) = at.iter().map(|c| c.rect(0)).reduce(|r, s| r.union(&s)) else { return true };
+    prepare(a, Some(&range));
+    prepare(b, Some(&range));
+    at.par_iter().all(|&c| composite_tile(a, c) == composite_tile(b, c))
+}
+
+/// Whether the keys `a` and `b`, of one tile, are the same: what they composite there is.
+fn same_key(a: &[Token], b: &[Token]) -> bool {
+    let same_tile = |s: &Option<Weak<Tile>>, t: &Option<Weak<Tile>>| match (s, t) {
+        (Some(s), Some(t)) => s.ptr_eq(t),
+        (s, t) => s.is_none() && t.is_none(),
+    };
+    a.len() == b.len()
+        && a.iter().zip(b).all(|pair| match pair {
+            (Token::Layer(p), Token::Layer(q)) | (Token::Group(p), Token::Group(q)) => p == q,
+            (Token::Tile(p), Token::Tile(q)) => p.ptr_eq(q),
+            (Token::Shifted { phase: p, tiles: s }, Token::Shifted { phase: q, tiles: t }) => {
+                p == q && s.iter().zip(t).all(|(s, t)| same_tile(s, t))
+            }
+            (
+                Token::Image { image: p, transform: s, sampling: u },
+                Token::Image { image: q, transform: t, sampling: v },
+            ) => p.ptr_eq(q) && s == t && u == v,
+            (Token::End, Token::End) => true,
+            _ => false,
+        })
+}
+
 /// `tokens` as numbers, alike exactly when the tiles they are the keys of composite alike
 /// wherever they are; `None` if they name an image object, whose pixels in a tile depend
 /// on where the tile is.
@@ -1984,6 +2031,41 @@ mod tests {
         // Blue at half alpha, at half opacity, over opaque red.
         assert!(close(pixel_to_f32(px[0]), [0.75, 0.0, 0.25, 1.0]), "{:?}", pixel_to_f32(px[0]));
         assert!(close(pixel_to_f32(px[3]), [1.0, 0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn a_change_beneath_an_opaque_layer_shows_nowhere() {
+        let mut ids = IdGen::default();
+        let mut d = Document::new(600, 300);
+        let under = add(&mut d, &mut ids, solid(IRect::new(0, 0, 600, 300), [1.0, 0.0, 0.0, 1.0]));
+        // Opaque over the left half; at half opacity, it would let a change show through.
+        let over = add(&mut d, &mut ids, solid(IRect::new(0, 0, 300, 300), [0.0, 0.0, 1.0, 1.0]));
+        let changed_at = |d: &Document, x: i64| {
+            let mut e = d.clone();
+            let LayerContent::Objects(o) = &mut e.layer_mut(under).unwrap().content else { panic!("a raster layer") };
+            let ObjectKind::Pixels(p) = &mut o[0].kind else { panic!("pixels") };
+            Arc::make_mut(&mut p.image).set_pixel(x, 10, pixel_from_f32([0.0, 1.0, 0.0, 1.0]));
+            e
+        };
+        // Beneath it: its tile changed, and nothing shows.
+        let hidden = changed_at(&d, 10);
+        let changed = tiles_changed(&d.layers, &hidden.layers);
+        assert_eq!(changed, vec![TileCoord::new(0, 0)]);
+        assert!(shows_alike(&d.layers, &hidden.layers, &changed));
+        // Where nothing covers it: it shows.
+        let seen = changed_at(&d, 400);
+        let changed = tiles_changed(&d.layers, &seen.layers);
+        assert_eq!(changed, vec![TileCoord::new(1, 0)]);
+        assert!(!shows_alike(&d.layers, &seen.layers, &changed));
+        // Beneath it at half opacity: it shows through.
+        d.layer_mut(over).unwrap().opacity = 0.5;
+        let through = changed_at(&d, 10);
+        assert!(!shows_alike(&d.layers, &through.layers, &tiles_changed(&d.layers, &through.layers)));
+        // An opacity changed is a change; nothing changed, none.
+        let mut faded = d.clone();
+        faded.layer_mut(under).unwrap().opacity = 0.9;
+        assert_eq!(tiles_changed(&d.layers, &faded.layers).len(), 6);
+        assert!(tiles_changed(&d.layers, &d.clone().layers).is_empty());
     }
 
     #[test]
