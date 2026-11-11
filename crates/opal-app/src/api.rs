@@ -524,8 +524,9 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
 const QUERIES: &[(&str, &str, &[Param])] = &[
     (
         "selection",
-        "What is selected in an image: the rectangle round it (null if nothing is; \"unbounded\" where it \
-         reaches past every edge, inverted), and the steps that made it, in order.",
+        "What is selected in an image: the rectangle round it, as [x, y, width, height] from the canvas's \
+         corner (null if nothing is; \"unbounded\" where it reaches past every edge, inverted), and the \
+         steps that made it, in order. select_all, deselect and invert_selection answer with it too.",
         &[DOCUMENT],
     ),
     (
@@ -1725,7 +1726,7 @@ impl AppState {
             }
             "selection" => {
                 let d = self.doc(self.which(args)?).expect("found");
-                Ok(selection_json(d.pixel_selection().map(|s| &**s)))
+                Ok(selection_json(d))
             }
             "methods" => Ok(describe()),
             "preferences" => Ok(self.preferences_json()),
@@ -1892,7 +1893,7 @@ impl AppState {
                 let flag = |l: &Layer| if visibility { l.visible } else { l.locked };
                 // Already as asked: nothing to record.
                 if wanted.is_some_and(|w| ids.iter().all(|&id| d.doc().layer(id).is_none_or(|l| flag(l) == w))) {
-                    return now(Ok(self.selection_json()));
+                    return now(Ok(self.selected_layers_json()));
                 }
                 let label = match (visibility, wanted) {
                     (true, Some(true)) => "Show layers",
@@ -1912,7 +1913,7 @@ impl AppState {
                     Ok::<(), opal_core::document::TreeError>(())
                 });
                 self.report(result);
-                now(Ok(self.selection_json()))
+                now(Ok(self.selected_layers_json()))
             }
             Cmd::Paste | Cmd::PasteInPlace => {
                 // The image named, or the active one; with none open, and none named, the
@@ -1975,10 +1976,15 @@ impl AppState {
                 self.rename_layer(doc.expect("available"), id, args.text("name").expect("required").to_owned());
                 now(Ok(json!({ "layer": id.0 })))
             }
+            Cmd::SelectAll | Cmd::Deselect | Cmd::InvertSelection => {
+                self.run(cmd, ctx);
+                // What is selected now, as the `selection` query tells it.
+                now(Ok(selection_json(self.active().expect("available"))))
+            }
             _ => {
                 // The rest take no more than the image and layers set above.
                 self.run(cmd, ctx);
-                now(Ok(self.selection_json()))
+                now(Ok(self.selected_layers_json()))
             }
         }
     }
@@ -2479,7 +2485,8 @@ impl AppState {
         json!({ "width": d.canvas.width, "height": d.canvas.height, "resolution": d.resolution })
     }
 
-    fn selection_json(&self) -> Value {
+    /// The active image's selected layers, and its active layer, as many calls answer.
+    fn selected_layers_json(&self) -> Value {
         match self.active() {
             Some(d) => json!({
                 "layers": d.selected_layers().iter().map(|l| l.0).collect::<Vec<_>>(),
@@ -2490,18 +2497,33 @@ impl AppState {
     }
 }
 
-/// Image `d`'s history, as the `history` query gives it.
-/// What `selection` (if any) selects, as the `selection` query gives it.
-fn selection_json(selection: Option<&opal_core::selection::Selection>) -> Value {
-    let Some(s) = selection else { return json!({ "bounds": Value::Null, "steps": [] }) };
+/// What image `d` has selected, as the `selection` query gives it: the rectangle round it and
+/// the steps that made it, positions counted from the canvas's corner, as everywhere in the
+/// API.
+fn selection_json(d: &crate::doc::DocState) -> Value {
+    use opal_core::selection::Step;
+    let Some(s) = d.pixel_selection() else { return json!({ "bounds": Value::Null, "steps": [] }) };
+    let c = d.doc().canvas;
     let bounds = match s.mask().extent() {
         opal_core::mask::Extent::Nothing => Value::Null,
-        opal_core::mask::Extent::Within(r) => json!([r.x0, r.y0, r.width(), r.height()]),
+        opal_core::mask::Extent::Within(r) => json!([r.x0 - c.x, r.y0 - c.y, r.width(), r.height()]),
         opal_core::mask::Extent::Unbounded => json!("unbounded"),
     };
-    json!({ "bounds": bounds, "steps": s.steps() })
+    let steps: Vec<Step> = s
+        .steps()
+        .iter()
+        .map(|step| match step {
+            Step::Shape { shape, combine } => {
+                let center = [shape.center[0] - c.x as f64, shape.center[1] - c.y as f64];
+                Step::Shape { shape: opal_core::mask::Shape { center, ..*shape }, combine: *combine }
+            }
+            other => other.clone(),
+        })
+        .collect();
+    json!({ "bounds": bounds, "steps": steps })
 }
 
+/// Image `d`'s history, as the `history` query gives it.
 fn history_json(d: &crate::doc::DocState) -> Value {
     let h = &d.history;
     let id = |n: opal_core::history::NodeId| n.0;
@@ -2850,8 +2872,9 @@ mod tests {
         assert_eq!(selection(&mut st), json!({ "bounds": null, "steps": [] }));
         let refused = now(&mut st, "clear", json!({})).unwrap_err();
         assert!(refused.contains("Select an area first"), "{refused}");
-        now(&mut st, "select_all", json!({})).unwrap();
-        let s = selection(&mut st);
+        // Selecting answers with what is selected, as the query does.
+        let s = now(&mut st, "select_all", json!({})).unwrap();
+        assert_eq!(s, selection(&mut st));
         assert_eq!(s["bounds"], json!([0, 0, 300, 200]));
         assert_eq!(s["steps"][0]["step"], json!("shape"));
         assert_eq!(s["steps"][0]["shape"]["kind"], json!("rectangle"));
@@ -2866,6 +2889,23 @@ mod tests {
         assert!(flat.content_bounds().is_none(), "the canvas was not cleared");
         now(&mut st, "deselect", json!({})).unwrap();
         assert_eq!(selection(&mut st)["bounds"], Value::Null);
+        // Positions count from the canvas's corner, wherever it is: cropped to a selection,
+        // the selection is the canvas, at (0, 0).
+        let shape = opal_core::mask::Shape {
+            kind: opal_core::mask::ShapeKind::Rectangle,
+            center: [60.0, 45.0],
+            size: [100.0, 50.0],
+            angle: 0.0,
+            smooth: true,
+        };
+        let step = opal_core::selection::Step::Shape { shape, combine: opal_core::mask::Combine::Replace };
+        let s = opal_core::selection::Selection::new(step);
+        st.active_mut().unwrap().set_pixel_selection(Some(s), "Select");
+        assert_eq!(selection(&mut st)["bounds"], json!([10, 20, 100, 50]));
+        now(&mut st, "crop_to_selection", json!({})).unwrap();
+        let s = selection(&mut st);
+        assert_eq!(s["bounds"], json!([0, 0, 100, 50]));
+        assert_eq!(s["steps"][0]["shape"]["center"], json!([50.0, 25.0]));
     }
 
     #[test]

@@ -552,7 +552,7 @@ impl DocState {
         let PasteAs { kind, name, print } = how;
         debug_assert!(kind != Kind::Transform, "a paste is placed, not transformed");
         self.commit_pending();
-        let was_selected = self.selection_with_active_last();
+        let was_selected = self.selected_layers_active_last();
         let (layer_id, object) = (self.ids.layer(), self.ids.object());
         let frame = IRect::from_size(i64::from(pasted.width), i64::from(pasted.height));
         let image = ImageObject { image: Arc::new(pasted.image.clone()), frame, transform: place, sampling };
@@ -590,7 +590,7 @@ impl DocState {
     /// was anything to transform.
     pub fn begin_transform(&mut self, sampling: Sampling) -> bool {
         self.commit_pending();
-        let was_selected = self.selection_with_active_last();
+        let was_selected = self.selected_layers_active_last();
         let mut doc = self.history.doc().clone();
         let (mut found, mut placed) = (Vec::new(), Vec::new());
         for id in self.selected_layers() {
@@ -1044,7 +1044,7 @@ impl DocState {
     }
 
     /// The selected layers with the active one last (to restore them).
-    fn selection_with_active_last(&self) -> Vec<LayerId> {
+    fn selected_layers_active_last(&self) -> Vec<LayerId> {
         let mut v: Vec<LayerId> =
             self.selected_layers().into_iter().filter(|&l| Some(l) != self.active_layer()).collect();
         v.extend(self.active_layer());

@@ -367,7 +367,7 @@ class Editor:
         name: Its new name.
         """
     def selection(self, *, document: int | None = None) -> Any:
-        """What is selected in an image: the rectangle round it (null if nothing is; "unbounded" where it reaches past every edge, inverted), and the steps that made it, in order.
+        """What is selected in an image: the rectangle round it, as [x, y, width, height] from the canvas's corner (null if nothing is; "unbounded" where it reaches past every edge, inverted), and the steps that made it, in order. select_all, deselect and invert_selection answer with it too.
 
         document: The image, by id. Default: the active image.
         """

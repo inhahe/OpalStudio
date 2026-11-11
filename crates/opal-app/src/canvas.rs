@@ -206,10 +206,10 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
             {
                 d.select_only(l);
             }
-            match crate::move_tool::locked_in_selection(d) {
+            match crate::move_tool::locked_in_selected_layers(d) {
                 Some(name) => notice = Some(format!("\"{name}\" is locked, so it cannot be moved. Unlock it first.")),
                 None => {
-                    let bounds = d.selection_bounds();
+                    let bounds = d.selected_layers_bounds();
                     d.moving =
                         Some(crate::move_tool::MoveDrag { from, bounds, guides: Default::default(), shown: None });
                 }
@@ -223,7 +223,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
                 d.move_delta(&drag, to_doc(p, &d.view), modifiers.shift, if modifiers.alt { -1.0 } else { snap });
             // Only a change of place redraws (holding still costs nothing).
             if drag.shown != Some(delta) {
-                d.move_selection_to(delta);
+                d.move_selected_layers_to(delta);
             }
             if let Some(m) = d.moving.as_mut() {
                 m.guides = guides;

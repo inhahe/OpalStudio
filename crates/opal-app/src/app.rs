@@ -387,9 +387,9 @@ impl OpalApp {
             return;
         }
         if arrows != [0, 0] && !d.selected_layers().is_empty() {
-            match crate::move_tool::locked_in_selection(d) {
+            match crate::move_tool::locked_in_selected_layers(d) {
                 Some(name) => self.st.notify(format!("\"{name}\" is locked, so it cannot be moved. Unlock it first.")),
-                None => d.nudge_selection(arrows),
+                None => d.nudge_selected_layers(arrows),
             }
         } else if !held && d.pending_label() == Some("Nudge") {
             d.commit_pending();

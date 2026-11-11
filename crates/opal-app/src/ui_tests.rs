@@ -1552,7 +1552,7 @@ fn the_numbers_button_by_the_box_opens_its_fields_in_the_unit_chosen() {
 }
 
 #[test]
-fn escape_cancels_a_paste_and_restores_the_selection() {
+fn escape_cancels_a_paste_and_restores_the_selected_layers() {
     let _gpu = gpu_lock();
     let mut h = harness();
     image_of(&mut h, 200, 200);

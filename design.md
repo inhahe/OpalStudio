@@ -345,7 +345,9 @@ On the Select tab (and for scripts, by the same names):
   becomes a *mask* step: its mask, carried pixel by pixel (exactly through quarter turns and
   flips, read between pixels otherwise), the steps after it carried as before.
 - The `selection` query tells a script the rectangle round what is selected (or that
-  nothing is, or that it is unbounded) and the steps that made it.
+  nothing is, or that it is unbounded) and the steps that made it, positions counted from the
+  canvas's corner as everywhere in the API; Select All, Deselect and Invert Selection answer
+  with the same.
 - The canvas shows the outline as marching ants: white, with black dashes moving along it a
   step every 100 ms, drawn through the middles of the screen's pixels so that they stay
   sharp.

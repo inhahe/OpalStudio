@@ -65,20 +65,15 @@ pub fn pick(d: &DocState, p: [f64; 2], min_alpha: f32, group: bool) -> Option<La
     if group { doc.position(hit).and_then(|pos| pos.parent).or(Some(hit)) } else { Some(hit) }
 }
 
-/// The name of a locked layer among the selection (or inside a selected group), if any.
-pub fn locked_in_selection(d: &DocState) -> Option<String> {
-    fn find(l: &Layer) -> Option<String> {
-        if l.locked {
-            return Some(l.name.clone());
-        }
-        l.children()?.iter().find_map(|c| find(c))
-    }
-    d.selected_layers().iter().find_map(|&id| find(d.doc().layer(id)?))
+/// The name of a locked layer among the selected layers (or inside a selected group), if any.
+pub fn locked_in_selected_layers(d: &DocState) -> Option<String> {
+    let doc = d.doc();
+    d.selected_layers().iter().find_map(|&id| crate::commands::first_locked(doc.layer(id)?)).map(|l| l.name.clone())
 }
 
 impl DocState {
     /// The bounds of the selected layers' content.
-    pub fn selection_bounds(&self) -> Option<FRect> {
+    pub fn selected_layers_bounds(&self) -> Option<FRect> {
         let doc = self.doc();
         self.selected_layers()
             .iter()
@@ -88,7 +83,7 @@ impl DocState {
 
     /// Shows the selected layers moved by `d` from where they are in history, as a pending
     /// "Move" (committed when the drag ends). Moving by nothing leaves no pending edit.
-    pub fn move_selection_to(&mut self, d: [i64; 2]) {
+    pub fn move_selected_layers_to(&mut self, d: [i64; 2]) {
         if self.pending_label().is_some_and(|l| l != "Move") || self.transform.is_some() {
             self.commit_pending();
         }
@@ -99,7 +94,7 @@ impl DocState {
 
     /// Moves the selected layers by `d` more, as a pending "Nudge" that gathers consecutive
     /// nudges into one history state (committed when the keys are let go).
-    pub fn nudge_selection(&mut self, d: [i64; 2]) {
+    pub fn nudge_selected_layers(&mut self, d: [i64; 2]) {
         let ids = self.selected_layers();
         self.edit_pending("Nudge", |doc| {
             for id in ids {
@@ -161,8 +156,8 @@ mod tests {
     #[test]
     fn a_move_is_one_history_state_and_moves_by_whole_pixels() {
         let (mut s, l) = doc_with_dot();
-        s.move_selection_to([3, 0]);
-        s.move_selection_to([10, -2]);
+        s.move_selected_layers_to([3, 0]);
+        s.move_selected_layers_to([10, -2]);
         s.commit_pending();
         assert_eq!(s.history.undo_label(), Some("Move"));
         let ObjectKind::Pixels(p) = &s.doc().layer(l).unwrap().objects()[0].kind else { panic!() };
@@ -176,8 +171,8 @@ mod tests {
     fn a_move_by_nothing_records_nothing() {
         let (mut s, _) = doc_with_dot();
         let states = s.history.nodes().count();
-        s.move_selection_to([4, 0]);
-        s.move_selection_to([0, 0]);
+        s.move_selected_layers_to([4, 0]);
+        s.move_selected_layers_to([0, 0]);
         s.commit_pending();
         assert_eq!(s.history.nodes().count(), states);
         assert!(!s.is_dirty());
@@ -193,7 +188,7 @@ mod tests {
         })
         .unwrap();
         s.select_only(g);
-        let drag = MoveDrag { from: [5.0, 5.0], bounds: s.selection_bounds(), guides: Guides::default(), shown: None };
+        let drag = MoveDrag { from: [5.0, 5.0], bounds: s.selected_layers_bounds(), guides: Guides::default(), shown: None };
         // Two pixels right: within snapping distance of the dot's own edges, which must not
         // pull it back.
         let (d, _) = s.move_delta(&drag, [7.0, 5.0], false, 3.0);
@@ -203,9 +198,9 @@ mod tests {
     #[test]
     fn nudges_add_up_into_one_state() {
         let (mut s, l) = doc_with_dot();
-        s.nudge_selection([1, 0]);
-        s.nudge_selection([1, 0]);
-        s.nudge_selection([0, 10]);
+        s.nudge_selected_layers([1, 0]);
+        s.nudge_selected_layers([1, 0]);
+        s.nudge_selected_layers([0, 10]);
         s.commit_pending();
         assert_eq!(s.history.undo_label(), Some("Nudge"));
         let ObjectKind::Pixels(p) = &s.doc().layer(l).unwrap().objects()[0].kind else { panic!() };
@@ -215,7 +210,7 @@ mod tests {
     #[test]
     fn moves_snap_to_the_canvas_edges() {
         let (s, _) = doc_with_dot();
-        let drag = MoveDrag { from: [5.0, 5.0], bounds: s.selection_bounds(), guides: Guides::default(), shown: None };
+        let drag = MoveDrag { from: [5.0, 5.0], bounds: s.selected_layers_bounds(), guides: Guides::default(), shown: None };
         // The dot (5..6) dragged to x = 96.6: its right edge, at 97.6, snaps to the canvas's at 100.
         let (d, g) = s.move_delta(&drag, [96.6, 5.0], false, 3.0);
         assert_eq!(d, [94, 0]);
