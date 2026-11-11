@@ -53,7 +53,8 @@ if not defined PUSHED (
 )
 
 rem ---- The release build, and what goes with it, zipped.
-call build-exe.bat
+rem (By its path: cmd may be set not to look in the current folder.)
+call "%~dp0build-exe.bat"
 if errorlevel 1 exit /b 1
 set "NAME=OpalStudio-%VERSION%-windows-x64"
 set "STAGE=target\release-package"
