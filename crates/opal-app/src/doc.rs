@@ -168,6 +168,8 @@ pub struct DocState {
     /// An edit worked out off the interface thread, while one is (see `edits`): the image is
     /// not to be changed until it is applied or cancelled.
     pub busy: Option<crate::edits::Busy>,
+    /// What Deselect last took away, for Reselect.
+    pub deselected: Option<std::sync::Arc<opal_core::selection::Selection>>,
 }
 
 impl DocState {
@@ -205,6 +207,7 @@ impl DocState {
             made_by: HashMap::new(),
             named: HashSet::new(),
             busy: None,
+            deselected: None,
         }
     }
 

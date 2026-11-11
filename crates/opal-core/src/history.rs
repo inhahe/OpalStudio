@@ -1082,7 +1082,10 @@ mod tests {
         let held = Arc::new(Mask::of(&shape));
         // Inverted after it: the selection comes to a mask of its own, and its step keeps the
         // one it was.
-        let s = Selection::of(vec![Step::Mask { mask: held.clone() }, Step::Invert]);
+        let s = Selection::of(vec![
+            Step::Mask { mask: held.clone(), combine: crate::mask::Combine::Replace },
+            Step::Invert,
+        ]);
         let mut h = History::new(Document::new(1000, 1000), "new");
         let mut d = h.doc().clone();
         d.selection = Some(Arc::new(s.clone()));

@@ -392,6 +392,14 @@ Select nothing.
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 
+### `reselect`
+
+Select again what was selected when you last deselected.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+
 ### `invert_selection`
 
 Select what is not selected, and nothing of what is.
@@ -399,6 +407,16 @@ Select what is not selected, and nothing of what is.
 | Parameter | Kind | |
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
+
+### `select_layer_pixels`
+
+Select the active layer's pixels, each as much as it is opaque.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `layer` | layer | The layer, by id. Default: the active layer. |
+| `combine` | `replace`, `add`, `subtract`, `intersect` | How it combines with what is selected: in its place, added to it, taken away from it, or keeping only what is in both. Default: "replace". |
 
 ### `clear`
 
@@ -643,7 +661,7 @@ Puts pixels into an image, at a place on its canvas: as a new layer above the ac
 
 ### `selection`
 
-What is selected in an image: the rectangle round it, as [x, y, width, height] from the canvas's corner (null if nothing is; "unbounded" where it reaches past every edge, inverted), and the steps that made it, in order: shapes (rectangles and ellipses, by their middle, size and angle, and how each combines), inversions, grow steps (by, corners) and feather steps (width, side, falloff), as grow_selection and feather_selection take them, and masks (a "mask" step stands for the steps before it, which Rotate, Flip or Resize Image could not carry exactly, as the mask they came to; it gives no numbers). select_all, deselect and invert_selection answer with it too.
+What is selected in an image: the rectangle round it, as [x, y, width, height] from the canvas's corner (null if nothing is; "unbounded" where it reaches past every edge, inverted), and the steps that made it, in order: shapes (rectangles and ellipses, by their middle, size and angle, and how each combines), inversions, grow steps (by, corners) and feather steps (width, side, falloff), as grow_selection and feather_selection take them, and masks (a "mask" step is a layer's pixels, from select_layer_pixels, or stands for the steps before it, which Rotate, Flip or Resize Image could not carry exactly, as the mask they came to; it gives no numbers, only how it combines). select_all, deselect, reselect, invert_selection and select_layer_pixels answer with it too.
 
 | Parameter | Kind | |
 |---|---|---|

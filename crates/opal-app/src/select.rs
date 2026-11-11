@@ -142,7 +142,44 @@ impl AppState {
 
     pub(crate) fn deselect(&mut self) {
         let d = self.active_mut().expect("available");
+        d.deselected = d.pixel_selection().cloned();
         d.set_pixel_selection(None, "Deselect");
+    }
+
+    /// Selects again what Deselect last took away in the active image.
+    pub(crate) fn reselect(&mut self) {
+        let d = self.active_mut().expect("available");
+        let again = d.deselected.as_deref().cloned();
+        d.set_pixel_selection(again, "Reselect");
+    }
+
+    /// Selects layer `id` of the active image's pixels, each as much as it is opaque (as the
+    /// layer holds them, whatever its opacity and visibility), combined with what is selected
+    /// as `combine` says, as a history state worked out off the interface thread (see `edits`).
+    pub(crate) fn select_layer_pixels(&mut self, id: LayerId, combine: Combine) {
+        let d = self.active().expect("available");
+        let Some(layer) = d.doc().layer(id) else { return };
+        let layer = Arc::new(Layer { visible: true, opacity: 1.0, ..layer.clone() });
+        let mut memory = crate::memory::Allowance::now();
+        if let Err(why) = memory.take_tiles(opal_core::composite::composite_cost(std::slice::from_ref(&layer), None)) {
+            return self.message(MessageKind::Info, "Select Layer's Pixels", why);
+        }
+        let work = move |doc: &mut Document, _: &mut opal_core::document::IdGen, progress: &opal_io::Progress| {
+            let image = crate::edits::composited(&[layer], progress)?;
+            let mask = Arc::new(Mask::of_opacity(&image));
+            let made = match (doc.selection.as_deref(), combine) {
+                (Some(s), _) => s.then(Step::Mask { mask, combine }),
+                // With nothing selected, adding is making, and taking away or keeping what is
+                // in both leaves nothing.
+                (None, Combine::Replace | Combine::Add) => {
+                    Selection::new(Step::Mask { mask, combine: Combine::Replace })
+                }
+                (None, _) => Selection::new(Step::Mask { mask, combine }),
+            };
+            doc.selection = (!made.is_empty()).then(|| Arc::new(made));
+            Ok(())
+        };
+        self.edit_later(d.id, "Select layer's pixels", memory, work, |_, _, ()| {});
     }
 
     /// Selects what is not selected, and nothing of what is (with everything selected,
@@ -562,6 +599,58 @@ mod tests {
         // Once the edit is done, nothing is selected: one way of having nothing.
         d.commit_pending();
         assert!(d.pixel_selection().is_none());
+    }
+
+    #[test]
+    fn a_layer_s_pixels_are_selected_as_they_are_opaque_and_reselect_brings_back_what_deselect_took() {
+        use crate::commands::Cmd;
+        use opal_core::mask::{Combine, FULL, Shape, level};
+        use opal_core::selection::{Selection, Step};
+        use opal_core::tile::{Tile, TileCoord};
+        use std::sync::Arc;
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 600, height: 300, background: Background::White, resolution: 72.0 });
+        let ctx = eframe::egui::Context::default();
+        // A layer holding a tile opaque, and one beside it half transparent; hidden, and at
+        // half opacity, which do not count.
+        let d = st.active_mut().unwrap();
+        let mut img = RasterImage::new();
+        let opaque = [half::f16::from_f32(1.0); 4];
+        img.set_tile(TileCoord::new(0, 0), Some(Arc::new(Tile::filled(opaque))));
+        img.set_tile(TileCoord::new(1, 0), Some(Arc::new(Tile::filled([half::f16::from_f32(0.5); 4]))));
+        let mut made = None;
+        let _ = d.apply("Add", |doc, ids| {
+            let id = ids.layer();
+            let mut l = Layer::new_raster(id, ids.object(), "pixels", img);
+            (l.visible, l.opacity) = (false, 0.5);
+            made = Some(id);
+            doc.insert(Position { parent: None, index: 1 }, l).map_err(|_| ())
+        });
+        let id = made.unwrap();
+        let level_at =
+            |st: &AppState, x, y| st.active().unwrap().pixel_selection().map_or(0, |s| s.mask().level_at(x, y));
+        st.select_layer_pixels(id, Combine::Replace);
+        assert_eq!([level_at(&st, 10, 10), level_at(&st, 300, 10), level_at(&st, 550, 10)], [FULL, level(0.5), 0]);
+        assert_eq!(st.active().unwrap().history.undo_label(), Some("Select layer's pixels"));
+        // Added to a rectangle beside it: both, as a step of the recipe after the rectangle.
+        let shape = Shape::rectangle(&IRect::new(520, 0, 580, 50).to_f(), false);
+        let d = st.active_mut().unwrap();
+        d.set_pixel_selection(Some(Selection::new(Step::Shape { shape, combine: Combine::Replace })), "Select");
+        st.select_layer_pixels(id, Combine::Add);
+        let s = st.active().unwrap().pixel_selection().unwrap().clone();
+        assert!(matches!(s.steps(), [Step::Shape { .. }, Step::Mask { combine: Combine::Add, .. }]), "{:?}", s.steps());
+        assert_eq!([level_at(&st, 10, 10), level_at(&st, 550, 10)], [FULL, FULL]);
+        // Deselected, then reselected: the same selection, steps and all, a state each.
+        st.run(Cmd::Deselect, &ctx);
+        assert!(st.active().unwrap().pixel_selection().is_none());
+        st.run(Cmd::Reselect, &ctx);
+        let d = st.active().unwrap();
+        assert_eq!(d.pixel_selection(), Some(&s));
+        assert_eq!(d.history.undo_label(), Some("Reselect"));
+        // With nothing selected, taking pixels away leaves nothing.
+        st.run(Cmd::Deselect, &ctx);
+        st.select_layer_pixels(id, Combine::Subtract);
+        assert!(st.active().unwrap().pixel_selection().is_none());
     }
 
     #[test]

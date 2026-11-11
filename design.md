@@ -330,9 +330,18 @@ red, a preference.
 On the Select tab (and for scripts, by the same names):
 
 - **Select All** (Ctrl+A) selects the canvas, as Photoshop's does: what lies past it is
-  not selected. **Deselect** (Ctrl+D). **Invert Selection** (Ctrl+Shift+I): a partly
-  selected pixel becomes as selected as it was not, and what lies past the canvas becomes
-  selected. Each is a history state.
+  not selected. **Deselect** (Ctrl+D). **Reselect** (Ctrl+Shift+D) brings back what Deselect
+  last took away in the image, steps and all (`DocState::deselected`). **Invert Selection**
+  (Ctrl+Shift+I): a partly selected pixel becomes as selected as it was not, and what lies
+  past the canvas becomes selected. Each is a history state.
+- **Select Layer's Pixels** selects the active layer's pixels, each as much as it is opaque
+  (a pixel half transparent selected half), as the layer holds them, whatever its opacity
+  and visibility (`Mask::of_opacity`), past the canvas too. Ctrl+click on a layer's
+  thumbnail does the same for that layer, Ctrl+Shift adding it to what is selected,
+  Ctrl+Alt taking it away, Ctrl+Shift+Alt keeping only what is in both. It is a step of the
+  recipe, a mask step combined as a shape is (a mask step combines as its `combine` says;
+  one replacing is what a carried selection becomes); worked out off the interface thread
+  (*Edits that take long*).
 - **Clear** (Delete) erases what is selected on the selected layers, as much of each pixel
   as it is selected; inside a selected group, on the layers shown (a hidden one is left as it
   is). It is refused, saying why, when a selected layer or group, or a group one is in, is

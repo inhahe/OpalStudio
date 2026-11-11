@@ -49,7 +49,9 @@ pub enum Cmd {
     Rasterize,
     SelectAll,
     Deselect,
+    Reselect,
     InvertSelection,
+    SelectLayerPixels,
     Clear,
     CropToSelection,
     GrowSelection,
@@ -118,7 +120,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 73] = [
+    pub const ALL: [Cmd; 75] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -158,7 +160,9 @@ impl Cmd {
         Cmd::Rasterize,
         Cmd::SelectAll,
         Cmd::Deselect,
+        Cmd::Reselect,
         Cmd::InvertSelection,
+        Cmd::SelectLayerPixels,
         Cmd::Clear,
         Cmd::CropToSelection,
         Cmd::GrowSelection,
@@ -542,6 +546,24 @@ impl Cmd {
                  as it is selected.",
                 &[],
             ),
+            Cmd::Reselect => i(
+                "Reselect",
+                icons::RESELECT,
+                "Select again what was selected when you last deselected.",
+                "Brings back the selection Deselect last took away in this image, steps and all, as a \
+                 history state of its own.",
+                const { &[ctrl_shift(Key::D)] },
+            ),
+            Cmd::SelectLayerPixels => i(
+                "Select Layer's Pixels",
+                icons::LAYER_PIXELS,
+                "Select the active layer's pixels, each as much as it is opaque.",
+                "Selects what the layer holds, however its opacity and visibility are set, a pixel \
+                 half transparent selected half. Ctrl+click a layer's thumbnail in the Layers panel \
+                 for the same, with Shift to add it to what is selected, Alt to take it away, both \
+                 to keep only what is in both.",
+                &[],
+            ),
             Cmd::InvertSelection => i(
                 "Invert Selection",
                 icons::INVERT_SELECTION,
@@ -901,7 +923,7 @@ pub static RIBBON: &[Tab] = &[
                 description: "What commands act on: all of the canvas, nothing, or the opposite. The \
                               Select tool (M) draws rectangles and ellipses.",
                 large: 1,
-                cmds: &[Cmd::SelectAll, Cmd::Deselect, Cmd::InvertSelection],
+                cmds: &[Cmd::SelectAll, Cmd::Deselect, Cmd::Reselect, Cmd::InvertSelection, Cmd::SelectLayerPixels],
             },
             Group {
                 name: "Modify",
@@ -1075,6 +1097,11 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             d.pixel_selection().map(|_| ()).ok_or_else(|| "Nothing is selected.".to_owned())
         }
         Clear | Cut => crate::select::clear_refused(st.active().ok_or("Open or create an image first.")?),
+        Reselect => {
+            let d = st.active().ok_or("Open or create an image first.")?;
+            d.deselected.as_ref().map(|_| ()).ok_or_else(|| "Nothing has been deselected in this image.".to_owned())
+        }
+        SelectLayerPixels => active_layer(st).map(|_| ()),
         Paste | PasteInPlace => Ok(()),
         RunScript => match (&st.scripts_file, st.console.running()) {
             (None, _) => Err(st.scripts_unserved.clone().unwrap_or_else(|| crate::console::NOT_SERVING.to_owned())),

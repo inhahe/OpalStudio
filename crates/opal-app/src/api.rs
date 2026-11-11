@@ -131,6 +131,13 @@ const LAYERS: Param = Param {
     help: "The layers, by id.",
     otherwise: Otherwise::Now("the selected layers"),
 };
+const COMBINE: Param = Param {
+    name: "combine",
+    kind: Kind::Choice(&opal_core::mask::Combine::NAMES),
+    help: "How it combines with what is selected: in its place, added to it, taken away from it, or keeping only \
+           what is in both.",
+    otherwise: Otherwise::Value("\"replace\""),
+};
 const LAYER: Param = Param {
     name: "layer",
     kind: Kind::Layer,
@@ -363,7 +370,8 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
         ],
         Undo | Redo | Copy | CopyMerged | MergeVisible | StampVisible | Flatten | CropToContent | RotateCw
         | RotateCcw | Rotate180 | FlipHorizontal | FlipVertical | ReapplyAllPlacements | SelectAll | Deselect
-        | InvertSelection | CropToSelection => &[DOCUMENT],
+        | Reselect | InvertSelection | CropToSelection => &[DOCUMENT],
+        SelectLayerPixels => &[DOCUMENT, LAYER, COMBINE],
         Clear | Cut => &[DOCUMENT, LAYERS],
         GrowSelection => &[
             DOCUMENT,
@@ -590,9 +598,10 @@ const QUERIES: &[(&str, &str, &[Param])] = &[
          corner (null if nothing is; \"unbounded\" where it reaches past every edge, inverted), and the \
          steps that made it, in order: shapes (rectangles and ellipses, by their middle, size and angle, \
          and how each combines), inversions, grow steps (by, corners) and feather steps (width, side, \
-         falloff), as grow_selection and feather_selection take them, and masks (a \"mask\" step stands for the steps before it, \
-         which Rotate, Flip or Resize Image could not carry exactly, as the mask they came to; it gives no \
-         numbers). select_all, deselect and invert_selection answer with it too.",
+         falloff), as grow_selection and feather_selection take them, and masks (a \"mask\" step is a layer's \
+         pixels, from select_layer_pixels, or stands for the steps before it, which Rotate, Flip or Resize \
+         Image could not carry exactly, as the mask they came to; it gives no numbers, only how it combines). \
+         select_all, deselect, reselect, invert_selection and select_layer_pixels answer with it too.",
         &[DOCUMENT],
     ),
     (
@@ -760,13 +769,7 @@ const SHAPE_PARAMS: &[Param] = &[
         help: "How far the shape is turned, in degrees clockwise, about its anchor point.",
         otherwise: Otherwise::Value("0"),
     },
-    Param {
-        name: "combine",
-        kind: Kind::Choice(&opal_core::mask::Combine::NAMES),
-        help: "How it combines with what is selected: in its place, added to it, taken away from it, or \
-               keeping only what is in both.",
-        otherwise: Otherwise::Value("\"replace\""),
-    },
+    COMBINE,
     Param {
         name: "smooth",
         kind: Kind::Bool,
@@ -2190,7 +2193,13 @@ impl AppState {
                 let name = snake(&format!("{cmd:?}"));
                 self.reply_when_done(&name, |st, id| selection_json(st.doc(id).expect("its edit was applied")))
             }
-            Cmd::SelectAll | Cmd::Deselect | Cmd::InvertSelection => {
+            Cmd::SelectLayerPixels => {
+                let combine = args.text("combine").and_then(opal_core::mask::Combine::named).unwrap_or_default();
+                let layer = self.active().and_then(|d| d.active_layer()).expect("available");
+                self.select_layer_pixels(layer, combine);
+                self.reply_when_done("select_layer_pixels", |st, id| selection_json(st.doc(id).expect("open")))
+            }
+            Cmd::SelectAll | Cmd::Deselect | Cmd::Reselect | Cmd::InvertSelection => {
                 self.run(cmd, ctx);
                 // What is selected now, as the `selection` query tells it.
                 now(Ok(selection_json(self.active().expect("available"))))

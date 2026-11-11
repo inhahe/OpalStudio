@@ -281,10 +281,22 @@ class Editor:
 
         document: The image, by id. Default: the active image.
         """
+    def reselect(self, *, document: int | None = None) -> Any:
+        """Select again what was selected when you last deselected.
+
+        document: The image, by id. Default: the active image.
+        """
     def invert_selection(self, *, document: int | None = None) -> Any:
         """Select what is not selected, and nothing of what is.
 
         document: The image, by id. Default: the active image.
+        """
+    def select_layer_pixels(self, *, document: int | None = None, layer: int | None = None, combine: Literal["replace", "add", "subtract", "intersect"] = "replace") -> Any:
+        """Select the active layer's pixels, each as much as it is opaque.
+
+        document: The image, by id. Default: the active image.
+        layer: The layer, by id. Default: the active layer.
+        combine: How it combines with what is selected: in its place, added to it, taken away from it, or keeping only what is in both. Default: "replace".
         """
     def clear(self, *, document: int | None = None, layers: list[int] | None = None) -> Any:
         """Erase what is selected on the selected layers.
@@ -396,7 +408,7 @@ class Editor:
         name: Its new name.
         """
     def selection(self, *, document: int | None = None) -> Any:
-        """What is selected in an image: the rectangle round it, as [x, y, width, height] from the canvas's corner (null if nothing is; "unbounded" where it reaches past every edge, inverted), and the steps that made it, in order: shapes (rectangles and ellipses, by their middle, size and angle, and how each combines), inversions, grow steps (by, corners) and feather steps (width, side, falloff), as grow_selection and feather_selection take them, and masks (a "mask" step stands for the steps before it, which Rotate, Flip or Resize Image could not carry exactly, as the mask they came to; it gives no numbers). select_all, deselect and invert_selection answer with it too.
+        """What is selected in an image: the rectangle round it, as [x, y, width, height] from the canvas's corner (null if nothing is; "unbounded" where it reaches past every edge, inverted), and the steps that made it, in order: shapes (rectangles and ellipses, by their middle, size and angle, and how each combines), inversions, grow steps (by, corners) and feather steps (width, side, falloff), as grow_selection and feather_selection take them, and masks (a "mask" step is a layer's pixels, from select_layer_pixels, or stands for the steps before it, which Rotate, Flip or Resize Image could not carry exactly, as the mask they came to; it gives no numbers, only how it combines). select_all, deselect, reselect, invert_selection and select_layer_pixels answer with it too.
 
         document: The image, by id. Default: the active image.
         """

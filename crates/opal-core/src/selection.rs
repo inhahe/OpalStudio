@@ -22,13 +22,15 @@ pub enum Step {
     /// The selection so far feathered: its edge falling off over `width` pixels, on the
     /// `side` of its outline, along `falloff`.
     Feather { width: f64, side: Side, falloff: Falloff },
-    /// A mask as it is, which replaces the selection so far: what a selection carried through
-    /// a transform its shapes could not follow becomes (see [`Selection::transformed`]). It
-    /// is told without its mask, and so cannot be read back.
+    /// A mask as it is, combined with the selection so far as `combine` says: a layer's
+    /// opacity, or (replacing it) what a selection carried through a transform its shapes
+    /// could not follow becomes (see [`Selection::transformed`]). It is told without its mask,
+    /// and so cannot be read back.
     #[serde(skip_deserializing)]
     Mask {
         #[serde(skip)]
         mask: Arc<Mask>,
+        combine: Combine,
     },
 }
 
@@ -44,13 +46,13 @@ impl Step {
             Step::Invert => before.inverted(),
             Step::Grow { by, corners } => before.grown_within(*by, *corners, bounds)?,
             Step::Feather { width, side, falloff } => before.feathered_within(*width, *side, *falloff, bounds)?,
-            Step::Mask { mask } => (**mask).clone(),
+            Step::Mask { mask, combine } => before.combined(mask, *combine),
         })
     }
 
     /// Whether the step makes a selection of its own, the steps before it no longer counting.
     fn starts_over(&self) -> bool {
-        matches!(self, Step::Shape { combine: Combine::Replace, .. } | Step::Mask { .. })
+        matches!(self, Step::Shape { combine: Combine::Replace, .. } | Step::Mask { combine: Combine::Replace, .. })
     }
 
     /// The step `m` carries this one to, if there is one: shapes as [`Shape::transformed`]
@@ -74,7 +76,7 @@ impl Step {
             Step::Feather { width, side, falloff } => {
                 Step::Feather { width: distance(*width, false)?, side: *side, falloff: *falloff }
             }
-            Step::Mask { mask } => Step::Mask { mask: Arc::new(mask.transformed(m)) },
+            Step::Mask { mask, combine } => Step::Mask { mask: Arc::new(mask.transformed(m)), combine: *combine },
         })
     }
 
@@ -140,7 +142,7 @@ impl Selection {
         for s in &steps {
             // A mask step's mask is shared, not copied.
             let next = match s {
-                Step::Mask { mask } => mask.clone(),
+                Step::Mask { mask, combine: Combine::Replace } => mask.clone(),
                 _ => Arc::new(s.apply(&mask, bounds)?),
             };
             before = Some(std::mem::replace(&mut mask, next));
@@ -189,7 +191,7 @@ impl Selection {
     /// kept), and those its mask steps keep.
     pub fn masks(&self) -> impl Iterator<Item = &Arc<Mask>> {
         std::iter::once(&self.mask).chain(&self.before).chain(self.steps.iter().filter_map(|s| match s {
-            Step::Mask { mask } => Some(mask),
+            Step::Mask { mask, .. } => Some(mask),
             _ => None,
         }))
     }
@@ -239,7 +241,8 @@ impl Selection {
                     (Some(before), 2) => before.clone(),
                     _ => Selection::of_within(self.steps[..=last].to_vec(), bounds)?.mask,
                 };
-                (vec![Step::Mask { mask: Arc::new(up_to.transformed(m)) }], &self.steps[last + 1..])
+                let carried = Step::Mask { mask: Arc::new(up_to.transformed(m)), combine: Combine::Replace };
+                (vec![carried], &self.steps[last + 1..])
             }
         };
         steps.extend(rest.iter().map(|s| s.transformed(m).expect("every step after the last stuck is carried")));
@@ -376,11 +379,16 @@ mod tests {
     #[test]
     fn a_mask_step_alone_is_the_selection_s_mask_and_is_not_read_back() {
         let m = Arc::new(Mask::of(&rect(0.0, 0.0, 300.0, 100.0)));
-        let s = Selection::of(vec![Step::Mask { mask: m.clone() }]);
+        let s = Selection::of(vec![Step::Mask { mask: m.clone(), combine: Combine::Replace }]);
         assert!(Arc::ptr_eq(s.mask(), &m), "the mask was copied");
         let told = serde_json::to_string(&s.steps()[0]).unwrap();
-        assert_eq!(told, r#"{"step":"mask"}"#);
+        assert_eq!(told, r#"{"step":"mask","combine":"replace"}"#);
         assert!(serde_json::from_str::<Step>(&told).is_err(), "read back as no mask at all");
+        // Combined, as a shape is: added to a rectangle beside it, both selected.
+        let beside = Selection::new(Step::Shape { shape: rect(400.0, 0.0, 500.0, 100.0), combine: Combine::Replace });
+        let both = beside.then(Step::Mask { mask: m, combine: Combine::Add });
+        assert_eq!(both.steps().len(), 2);
+        assert_eq!([both.mask().level_at(50, 50), both.mask().level_at(450, 50)], [FULL, FULL]);
     }
 
     #[test]

@@ -9,6 +9,7 @@ use crate::widgets::{icon_command, shortcut_text};
 use eframe::egui::{self, Color32, CursorIcon, Rect, RichText, Sense, Stroke, Vec2};
 use opal_core::document::{Document, Layer, LayerId, Position};
 use opal_core::history::NodeId;
+use opal_core::mask::Combine;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -28,6 +29,8 @@ enum Action {
     FinishRename(LayerId, Option<String>),
     Move(LayerId, Position),
     Command(Cmd),
+    /// A Ctrl+click on a layer's thumbnail: its pixels selected, combined so.
+    SelectPixels(LayerId, Combine),
 }
 
 const ROW_HEIGHT: f32 = 26.0;
@@ -230,7 +233,27 @@ fn layer_row(ui: &mut egui::Ui, cx: &mut RowCtx<'_>, layer: &Arc<Layer>, pos: Po
         let ppp = row.ctx().pixels_per_point();
         let size = (cx.thumb * ppp).round() as u32;
         let texture = cx.thumbs.layer(row.ctx(), layer, cx.doc.canvas.rect(), size);
-        let (r, _) = row.allocate_exact_size(Vec2::splat(cx.thumb), Sense::hover());
+        let (r, clicked) = row.allocate_exact_size(Vec2::splat(cx.thumb), Sense::click());
+        // Ctrl+click selects its pixels (Shift adding them, Alt taking them away, both keeping
+        // what is in both); a click as on the row.
+        let clicked = clicked.on_hover_text(
+            "Ctrl+click: select its pixels. With Shift, add them to what is selected; with Alt, take them \
+             away; with both, keep only what is in both.",
+        );
+        if clicked.clicked() {
+            let m = row.input(|i| i.modifiers);
+            cx.actions.push(if m.command {
+                let combine = match (m.shift, m.alt) {
+                    (false, false) => Combine::Replace,
+                    (true, false) => Combine::Add,
+                    (false, true) => Combine::Subtract,
+                    (true, true) => Combine::Intersect,
+                };
+                Action::SelectPixels(layer.id, combine)
+            } else {
+                Action::Click(layer.id, m)
+            });
+        }
         let fit = texture.size_vec2() / ppp;
         let shown = Rect::from_center_size(r.center(), fit);
         checkerboard(row.painter(), shown);
@@ -450,6 +473,13 @@ fn apply(st: &mut AppState, actions: Vec<Action>, order: &[LayerId]) {
                 st.finish_rename(keep);
             }
             Action::Move(id, pos) => st.move_layer_to(id, pos),
+            Action::SelectPixels(id, combine) => {
+                if let Err(why) = crate::commands::availability(st, Cmd::SelectLayerPixels) {
+                    st.message(crate::state::MessageKind::Info, "Select Layer's Pixels", why);
+                } else {
+                    st.select_layer_pixels(id, combine);
+                }
+            }
             Action::Command(cmd) => st.queue.push(cmd),
         }
     }

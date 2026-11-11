@@ -707,6 +707,26 @@ impl Mask {
         Mask::shared(rows, self.outside)
     }
 
+    /// The mask selecting each pixel of `image` (in document coordinates, its tiles on the
+    /// grid) as much as it is opaque: what a layer's opacity selects.
+    pub fn of_opacity(image: &crate::raster::RasterImage) -> Mask {
+        let mut at: Vec<TileCoord> = image.tiles().map(|(c, _)| c).collect();
+        at.sort_unstable_by_key(|c| (c.y, c.x));
+        let tiles: Vec<(TileCoord, MaskTile)> = at
+            .into_par_iter()
+            .map(|c| {
+                let mut px = vec![[0.0f32; 4]; TILE_PIXELS];
+                image.tile(c).expect("listed").to_f32(&mut px);
+                (c, MaskTile::from_levels(px.iter().map(|p| level(p[3])).collect()))
+            })
+            .collect();
+        let mut rows: BTreeMap<i32, Vec<Run>> = BTreeMap::new();
+        for (c, t) in tiles {
+            push(rows.entry(c.y).or_default(), c.x, c.x + 1, t, 0);
+        }
+        Mask::shared(rows.into_iter().filter(|(_, r)| !r.is_empty()).collect(), 0)
+    }
+
     /// The levels of the pixels of `area`, row by row.
     pub fn levels_in(&self, area: &IRect) -> Vec<u16> {
         let (w, h) = (area.width().max(0) as usize, area.height().max(0) as usize);
@@ -1410,6 +1430,20 @@ mod tests {
         // The turned square's corners reach 15,000·(cos 10° + sin 10°) from its middle.
         let reach = 15_000.0 * (10f64.to_radians().cos() + 10f64.to_radians().sin());
         assert!((r.x1 as f64 - (15_000.0 + reach) * 0.01).abs() < 2.0, "{r:?}");
+    }
+
+    #[test]
+    fn an_image_s_opacity_makes_a_mask_as_selected_as_each_pixel_is_opaque() {
+        use crate::tile::{Tile, TileCoord};
+        use half::f16;
+        let mut img = crate::raster::RasterImage::new();
+        let opaque = [f16::from_f32(1.0); 4];
+        let half = [f16::from_f32(0.5), f16::from_f32(0.5), f16::from_f32(0.5), f16::from_f32(0.5)];
+        img.set_tile(TileCoord::new(0, 0), Some(Arc::new(Tile::filled(opaque))));
+        img.set_tile(TileCoord::new(2, 1), Some(Arc::new(Tile::filled(half))));
+        let m = Mask::of_opacity(&img);
+        assert_eq!([m.level_at(10, 10), m.level_at(300, 10), m.level_at(600, 300)], [FULL, 0, level(0.5)]);
+        assert_eq!(m.extent(), Extent::Within(IRect::new(0, 0, 768, 512)));
     }
 
     #[test]

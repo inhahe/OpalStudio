@@ -611,6 +611,11 @@ impl AppState {
             Cmd::CropToContent => self.crop_to_content(),
             Cmd::SelectAll => self.select_all(),
             Cmd::Deselect => self.deselect(),
+            Cmd::Reselect => self.reselect(),
+            Cmd::SelectLayerPixels => {
+                let layer = self.active().and_then(|d| d.active_layer()).expect("available");
+                self.select_layer_pixels(layer, opal_core::mask::Combine::Replace);
+            }
             Cmd::InvertSelection => self.invert_selection(),
             Cmd::GrowSelection => self.modify_selection(true, ctx),
             Cmd::FeatherSelection => self.modify_selection(false, ctx),
