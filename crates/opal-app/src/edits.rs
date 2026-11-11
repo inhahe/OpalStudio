@@ -135,8 +135,13 @@ impl AppState {
         then: impl FnOnce(&mut AppState, DocId, R) + Send + 'static,
     ) {
         let repaint = self.repaint.clone();
+        // The user's own, not part of the script's call that may be carrying the edit out.
         if self.renaming.as_ref().is_some_and(|r| r.0 == doc) {
+            let groups = self.doc_mut(doc).map(|d| std::mem::take(&mut d.groups)).unwrap_or_default();
             self.finish_rename(true);
+            if let Some(d) = self.doc_mut(doc) {
+                d.groups = groups;
+            }
         }
         let Some(d) = self.doc_mut(doc) else { return };
         assert!(d.busy.is_none(), "an edit begun on an image busy with another");
@@ -419,10 +424,11 @@ mod tests {
         // taken back, nor undone.
         let d = st.active_mut().unwrap();
         let states = d.history.nodes().count();
-        let _ = d.apply::<()>("Anything", |doc, _| {
+        let refused = d.apply::<()>("Anything", |doc, _| {
             doc.canvas.width = 1;
             Ok(())
         });
+        assert_eq!(refused, Err(crate::doc::NotMade::Busy));
         assert_eq!(d.history.nodes().count(), states, "a change was made");
         assert!(d.notice.as_ref().is_some_and(|n| n.contains("under way")), "{:?}", d.notice);
         let current = d.history.current();
@@ -433,6 +439,28 @@ mod tests {
         go.send(()).unwrap();
         st.finish_edits();
         assert_eq!(st.active().unwrap().doc().layers[0].name, "Renamed");
+    }
+
+    #[test]
+    fn a_rename_finished_as_a_script_s_edit_begins_is_not_the_script_s() {
+        let mut st = app();
+        let doc = st.active_doc.unwrap();
+        let layer = st.active().unwrap().doc().layers[0].id;
+        st.renaming = Some((doc, layer, "Named first".into()));
+        // The script's call (group 7) carries out an edit, which finishes the rename first.
+        st.active_mut().unwrap().groups = vec![7];
+        let (go, wait) = mpsc::channel();
+        let (told, _heard) = mpsc::channel();
+        go.send(()).unwrap();
+        waiting_edit(&mut st, "Renamed", wait, told);
+        st.finish_edits();
+        let d = st.active_mut().unwrap();
+        d.groups.clear();
+        d.group_ended(7, "Script: go.py", false);
+        // Undone, the script's state goes; the user's rename stays.
+        assert_eq!(d.history.undo_label(), Some("Script: go.py"));
+        d.undo();
+        assert_eq!(d.doc().layers[0].name, "Named first");
     }
 
     #[test]

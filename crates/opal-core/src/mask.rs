@@ -709,27 +709,47 @@ impl Mask {
 
     /// The mask selecting each pixel of `image` (in document coordinates, its tiles on the
     /// grid) as much as it is opaque: what a layer's opacity selects.
-    pub fn of_opacity(image: &crate::raster::RasterImage) -> Mask {
+    pub fn of_opacity(image: &RasterImage) -> Mask {
+        Mask::of_opacity_within(image, crate::modify::UNBOUNDED).expect("unbounded")
+    }
+
+    /// [`of_opacity`](Self::of_opacity), unless `bounds` hold it back: asked first for the most
+    /// it may take (each tile's levels, and a buffer of working pixels for each thread), stopped
+    /// between tiles if they say; once made, what it holds stays taken (see `modify::Bounds`).
+    pub fn of_opacity_within(image: &RasterImage, bounds: crate::modify::Bounds) -> Result<Mask, crate::modify::Halt> {
+        use crate::modify::Halt;
         // Each tile's levels once, however many places share it (a filled layer's all do).
-        let mut shared: HashMap<usize, (&Arc<crate::tile::Tile>, Vec<TileCoord>)> = HashMap::new();
+        let mut shared: HashMap<usize, (&Arc<Tile>, Vec<TileCoord>)> = HashMap::new();
         for (c, t) in image.tiles() {
             shared.entry(Arc::as_ptr(t) as usize).or_insert((t, Vec::new())).1.push(c);
         }
-        let made: Vec<(MaskTile, Vec<TileCoord>)> = shared
+        let most = (shared.len() * TILE_PIXELS * std::mem::size_of::<u16>()) as u64;
+        let buffers = (rayon::current_num_threads() * TILE_PIXELS * std::mem::size_of::<[f32; 4]>()) as u64;
+        if !(bounds.admit)(most + buffers) {
+            return Err(Halt::NoMemory);
+        }
+        let made: Vec<Option<(MaskTile, Vec<TileCoord>)>> = shared
             .into_values()
             .collect::<Vec<_>>()
             .into_par_iter()
             .map_init(
                 || vec![[0.0f32; 4]; TILE_PIXELS],
                 |px, (t, at)| {
+                    if (bounds.stop)() {
+                        return None;
+                    }
                     if t.is_transparent() {
-                        return (MaskTile::Level(0), at);
+                        return Some((MaskTile::Level(0), at));
                     }
                     t.to_f32(px);
-                    (MaskTile::from_levels(px.iter().map(|p| level(p[3])).collect()), at)
+                    Some((MaskTile::from_levels(px.iter().map(|p| level(p[3])).collect()), at))
                 },
             )
             .collect();
+        (bounds.give_back)(buffers);
+        let Some(made) = made.into_iter().collect::<Option<Vec<_>>>() else {
+            return Err(Halt::Stopped);
+        };
         let mut tiles: Vec<(TileCoord, MaskTile)> =
             made.into_iter().flat_map(|(t, at)| at.into_iter().map(move |c| (c, t.clone()))).collect();
         tiles.sort_unstable_by_key(|(c, _)| (c.y, c.x));
@@ -737,7 +757,14 @@ impl Mask {
         for (c, t) in tiles {
             push(rows.entry(c.y).or_default(), c.x, c.x + 1, t, 0);
         }
-        Mask::shared(rows.into_iter().filter(|(_, r)| !r.is_empty()).collect(), 0)
+        let mask = Mask::shared(rows.into_iter().filter(|(_, r)| !r.is_empty()).collect(), 0);
+        let holds = mask.bytes();
+        if holds <= most {
+            (bounds.give_back)(most - holds);
+        } else if !(bounds.admit)(holds - most) {
+            return Err(Halt::NoMemory);
+        }
+        Ok(mask)
     }
 
     /// The levels of the pixels of `area`, row by row.
@@ -1340,6 +1367,30 @@ fn ellipse_distance(x: f64, y: f64, a: f64, b: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_layer_s_opacity_asks_for_its_mask_s_memory_and_keeps_taken_what_it_holds() {
+        use std::sync::atomic::{AtomicI64, Ordering::SeqCst};
+        // Opacity rising across two tiles by two: each tile's levels its own.
+        let px: Vec<_> = (0..512 * 512).map(|i| pixel_from_f32([1.0, 1.0, 1.0, (i % 512) as f32 / 511.0])).collect();
+        let image = RasterImage::from_pixels(512, 512, &px);
+        let held = AtomicI64::new(0);
+        let admit = |n: u64| {
+            held.fetch_add(n as i64, SeqCst);
+            true
+        };
+        let give_back = |n: u64| {
+            held.fetch_sub(n as i64, SeqCst);
+        };
+        let bounds = crate::modify::Bounds { admit: &admit, give_back: &give_back, ..crate::modify::UNBOUNDED };
+        let mask = Mask::of_opacity_within(&image, bounds).unwrap();
+        assert!(mask.bytes() > 0);
+        assert_eq!(held.load(SeqCst) as u64, mask.bytes());
+        assert_eq!(mask, Mask::of_opacity(&image));
+        // Refused, nothing is made.
+        let refuse = crate::modify::Bounds { admit: &|_| false, ..crate::modify::UNBOUNDED };
+        assert_eq!(Mask::of_opacity_within(&image, refuse).unwrap_err(), crate::modify::Halt::NoMemory);
+    }
 
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Shape {
         Shape {

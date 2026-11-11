@@ -469,9 +469,18 @@ pub struct Document {
     /// What is selected, if anything: operations limited to it act through its mask.
     pub selection: Option<Arc<crate::selection::Selection>>,
     /// What was selected when the selection was last taken away (Deselect), for Reselect to
-    /// bring back: carried as the selection is when the image is turned, flipped, resized or
-    /// cropped. Not saved.
-    pub deselected: Option<Arc<crate::selection::Selection>>,
+    /// bring back. Not saved.
+    pub deselected: Option<Deselected>,
+}
+
+/// What Deselect took away, for Reselect to bring back, with how the image has been turned,
+/// flipped, resized or cropped since (`since`): Reselect carries it so, once
+/// ([`Selection::transformed`](crate::selection::Selection::transformed)), rather than each
+/// of those carrying a selection nobody may ask for again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Deselected {
+    pub selection: Arc<crate::selection::Selection>,
+    pub since: Affine,
 }
 
 impl Document {
@@ -493,6 +502,11 @@ impl Document {
             && self.resolution == other.resolution
             && self.layers.len() == other.layers.len()
             && self.layers.iter().zip(&other.layers).all(|(a, b)| Arc::ptr_eq(a, b) || a.same_as(b))
+    }
+
+    /// The selections it holds: what is selected, and what Reselect would bring back.
+    pub fn selections(&self) -> impl Iterator<Item = &Arc<crate::selection::Selection>> {
+        self.selection.iter().chain(self.deselected.as_ref().map(|d| &d.selection))
     }
 
     /// Whether it is `other` as far as an edit can tell: what saving it keeps, and what is

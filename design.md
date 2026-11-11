@@ -332,8 +332,10 @@ On the Select tab (and for scripts, by the same names):
 - **Select All** (Ctrl+A) selects the canvas, as Photoshop's does: what lies past it is
   not selected. **Deselect** (Ctrl+D), or a click with the Select tool. **Reselect**
   (Ctrl+Shift+D) brings back what either last took away in the image, steps and all
-  (`Document::deselected`: kept with each history state, carried as the selection is when the
-  image is turned, flipped, resized or cropped, not saved). **Invert Selection**
+  (`Document::deselected`: kept with each history state, its masks counted in history's
+  memory, not saved). It is not worked out again as the image is turned, flipped, resized or
+  cropped: it keeps how (`Deselected::since`), and Reselect carries it so once, off the
+  interface thread, memory measured as it goes. **Invert Selection**
   (Ctrl+Shift+I): a partly selected pixel becomes as selected as it was not, and what lies
   past the canvas becomes selected. Each is a history state.
 - **Select Layer's Pixels** selects the active layer's pixels, each as much as it is opaque
@@ -344,8 +346,11 @@ On the Select tab (and for scripts, by the same names):
   click and tells it apart, so that the thumbnail's other clicks are the row's: a
   right-click's menu, a double-click's rename). It is a step of the
   recipe, a mask step combined as a shape is (a mask step combines as its `combine` says;
-  one replacing is what a carried selection becomes); worked out off the interface thread
-  (*Edits that take long*).
+  one replacing is what a carried selection becomes; with nothing selected, as a shape's,
+  `selection::with_maker`); worked out off the interface thread (*Edits that take long*),
+  the memory of the mask's levels asked for as it is made (`Mask::of_opacity_within`, as the
+  modifiers ask: see *Feather*). One that would select nothing (an empty layer, or nothing left once
+  combined) is refused, saying so, and what was selected stays.
 - **Clear** (Delete) erases what is selected on the selected layers, as much of each pixel
   as it is selected; inside a selected group, on the layers shown (a hidden one is left as it
   is). It is refused, saying why, when a selected layer or group, or a group one is in, is
@@ -519,7 +524,8 @@ Distances go to 1000 pixels at most (`modify::MAX_DISTANCE`).
 Two more modifiers are built the same way. **Smooth** (a radius) closes the outline (grown,
 then shrunk back), so that pinholes and notches narrower than twice the radius fill and inward
 corners round, then opens it (shrunk, then grown back), so that specks and spurs as thin go
-and outward corners round: four passes of exact distances, round. **Border** (a width; inward,
+and outward corners round: three passes of exact distances, round (the closing's shrink and
+the opening's are one, twice as far, as round reaches add up). **Border** (a width; inward,
 outward or centered) selects the band of that width along the outline in place of what was
 selected, each pixel as much as it lies in the band, in one pass.
 They work from the outline, where pixels are half selected, so a soft selection grown or

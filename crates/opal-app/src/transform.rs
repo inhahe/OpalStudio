@@ -1125,12 +1125,9 @@ impl DocState {
     fn finish_selection_transform(&mut self) {
         let Some(s) = self.transform.take() else { return };
         let before = self.pending.as_ref().and_then(|p| p.doc.selection.clone()).filter(|_| s.current != s.start);
-        let made = before.map(|before| {
-            let memory = Allowance::now();
-            crate::memory::Admission::within(memory, &|| false, |b| before.transformed_within(&s.delta(), b))
-        });
+        let made = before.map(|before| crate::select::carried(&before, &s.delta(), Allowance::now(), &|| false));
         match (made, self.pending.as_mut()) {
-            (Some(Ok(made)), Some(p)) => p.doc.selection = (!made.is_empty()).then(|| Arc::new(made)),
+            (Some(Ok(made)), Some(p)) => p.doc.selection = made,
             (made, _) => {
                 if let Some(Err(why)) = made {
                     self.notice = Some(why);

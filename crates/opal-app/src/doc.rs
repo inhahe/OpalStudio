@@ -170,6 +170,25 @@ pub struct DocState {
     pub busy: Option<crate::edits::Busy>,
 }
 
+/// Why [`DocState::apply`] made no history state.
+#[derive(Debug, PartialEq)]
+pub enum NotMade<E> {
+    /// An edit is under way on the image (see `edits`): nothing may change it, and the status
+    /// bar says so.
+    Busy,
+    /// What the action does failed, saying why.
+    Failed(E),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for NotMade<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NotMade::Busy => write!(f, "An edit is under way on the image; this was not done."),
+            NotMade::Failed(why) => why.fmt(f),
+        }
+    }
+}
+
 impl DocState {
     pub fn new(id: DocId, title: String, doc: Document, ids: IdGen, label: &str) -> DocState {
         let active = doc.layers.last().map(|l| l.id);
@@ -359,20 +378,21 @@ impl DocState {
     }
 
     /// Records an action: `f` changes a copy of the current document, which becomes a new
-    /// history state labeled `label`. Nothing is recorded if `f` fails. A layer the action
+    /// history state labeled `label`. Nothing is recorded if `f` fails, nor (`f` not called) if
+    /// an edit is under way on the image, which the status bar then says. A layer the action
     /// adds becomes the active layer.
     pub fn apply<E>(
         &mut self,
         label: &str,
         f: impl FnOnce(&mut Document, &mut IdGen) -> Result<(), E>,
-    ) -> Result<(), E> {
+    ) -> Result<(), NotMade<E>> {
         if self.refused() {
-            return Ok(());
+            return Err(NotMade::Busy);
         }
         self.commit_pending();
         let mut d = self.history.doc().clone();
         let mut ids = self.ids.clone();
-        f(&mut d, &mut ids)?;
+        f(&mut d, &mut ids).map_err(NotMade::Failed)?;
         let groups = self.groups.clone();
         self.commit_made(d, ids, label, &groups);
         Ok(())

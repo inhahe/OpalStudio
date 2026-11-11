@@ -57,7 +57,6 @@ impl Step {
         })
     }
 
-    /// Whether the step makes a selection of its own, the steps before it no longer counting.
     /// Whether it is a modifier at work (grow, feather, smooth or border): one whose mask takes
     /// the memory `Bounds` admit as it is made.
     fn modifies(&self) -> bool {
@@ -65,6 +64,7 @@ impl Step {
             && !self.leaves_as_is()
     }
 
+    /// Whether the step makes a selection of its own, the steps before it no longer counting.
     fn starts_over(&self) -> bool {
         matches!(self, Step::Shape { combine: Combine::Replace, .. } | Step::Mask { combine: Combine::Replace, .. })
     }
@@ -96,7 +96,8 @@ impl Step {
         })
     }
 
-    /// Whether it leaves every selection as it is (growing by nothing, a feather of no width).
+    /// Whether it leaves every selection as it is (growing by nothing, a feather or a smooth of
+    /// no width).
     fn leaves_as_is(&self) -> bool {
         match self {
             Step::Grow { by, .. } => *by == 0.0,
@@ -301,16 +302,21 @@ fn give_back(mask: Arc<Mask>, bounds: Bounds) {
     }
 }
 
-/// The selection a shape step makes with the document's selection `before` (or with none).
-pub fn with_shape(before: Option<&Selection>, shape: Shape, combine: Combine) -> Selection {
-    let step = Step::Shape { shape, combine };
+/// The selection a maker `step` (a shape, or a mask) makes with the document's selection
+/// `before` (or with none).
+pub fn with_maker(before: Option<&Selection>, step: Step) -> Selection {
     match before {
         Some(s) => s.then(step),
         // With nothing selected, adding is making, and taking away or keeping only what is in
         // both leaves nothing.
-        None => match combine {
-            Combine::Replace | Combine::Add => Selection::new(Step::Shape { shape, combine: Combine::Replace }),
-            Combine::Subtract | Combine::Intersect => Selection::of(vec![step]),
+        None => match step {
+            Step::Shape { shape, combine: Combine::Replace | Combine::Add } => {
+                Selection::new(Step::Shape { shape, combine: Combine::Replace })
+            }
+            Step::Mask { mask, combine: Combine::Replace | Combine::Add } => {
+                Selection::new(Step::Mask { mask, combine: Combine::Replace })
+            }
+            step => Selection::of(vec![step]),
         },
     }
 }
@@ -502,10 +508,15 @@ mod tests {
     }
 
     #[test]
-    fn a_shape_with_nothing_selected_is_made_added_or_leaves_nothing() {
+    fn a_maker_with_nothing_selected_makes_it_when_added_or_leaves_nothing() {
         let s = rect(0.0, 0.0, 10.0, 10.0);
-        assert_eq!(with_shape(None, s, Combine::Add).steps()[0], Step::Shape { shape: s, combine: Combine::Replace });
-        assert!(with_shape(None, s, Combine::Subtract).is_empty());
-        assert!(with_shape(None, s, Combine::Intersect).is_empty());
+        let shape = |combine| with_maker(None, Step::Shape { shape: s, combine });
+        assert_eq!(shape(Combine::Add).steps()[0], Step::Shape { shape: s, combine: Combine::Replace });
+        assert!(shape(Combine::Subtract).is_empty());
+        assert!(shape(Combine::Intersect).is_empty());
+        let mask = Arc::new(Mask::of(&s));
+        let made = with_maker(None, Step::Mask { mask: mask.clone(), combine: Combine::Add });
+        assert!(matches!(made.steps(), [Step::Mask { combine: Combine::Replace, .. }]));
+        assert!(with_maker(None, Step::Mask { mask, combine: Combine::Intersect }).is_empty());
     }
 }

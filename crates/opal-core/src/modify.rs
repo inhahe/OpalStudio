@@ -166,14 +166,15 @@ impl Mask {
     /// The mask with its outline smoothed over `radius` pixels: closed (grown, then shrunk
     /// back), so that pinholes and notches narrower than twice the radius fill and inward
     /// corners round, then opened (shrunk, then grown back), so that specks and spurs as thin
-    /// go and outward corners round; unless `bounds` hold it back. Each pass's mask goes once
-    /// the next is made, and what it took is given back.
+    /// go and outward corners round; unless `bounds` hold it back. The closing's shrink and the
+    /// opening's are one, twice as far (round reaches add up). Each pass's mask goes once the
+    /// next is made, and what it took is given back.
     pub fn smoothed_within(&self, radius: f64, bounds: Bounds) -> Result<Mask, Halt> {
         if radius <= 0.0 {
             return Ok(self.clone());
         }
         let mut mask = self.grown_within(radius, Reach::Round, bounds)?;
-        for by in [-radius, -radius, radius] {
+        for by in [-2.0 * radius, radius] {
             let next = mask.grown_within(by, Reach::Round, bounds)?;
             (bounds.give_back)(std::mem::replace(&mut mask, next).bytes());
         }
@@ -394,12 +395,18 @@ fn by_distance(
     if let Some(why) = halted.into_inner().expect("not poisoned") {
         return Err(why);
     }
-    // Farther, each tile is as its side ends. Alike tiles side by side are kept as one: what
-    // that saves is given back, so that what it holds is what stays taken.
+    // Farther, each tile is as its side ends. What it holds stays taken, exactly (each mask a
+    // modifier made gives back its bytes once dropped): alike tiles side by side, kept as one,
+    // give back what they save; the runs that list the tiles are asked for.
     let worked = worked.into_inner().expect("not poisoned");
     let admitted: u64 = worked.iter().map(|(_, t)| t.bytes()).sum();
     let made = mask.rebuilt(worked, far, outside);
-    (bounds.give_back)(admitted.saturating_sub(made.bytes()));
+    let holds = made.bytes();
+    if holds <= admitted {
+        (bounds.give_back)(admitted - holds);
+    } else if !(bounds.admit)(holds - admitted) {
+        return Err(Halt::NoMemory);
+    }
     Ok(made)
 }
 
@@ -795,6 +802,24 @@ mod tests {
     }
 
     #[test]
+    fn smoothing_s_shrink_twice_as_far_is_its_two_shrinks() {
+        // A notched square with a speck beside it: closed then opened in four passes, and in
+        // three, the same, but for the levels of a few edge pixels.
+        let base = rect(100.0, 100.0, 300.0, 300.0)
+            .combined(&rect(195.0, 100.0, 205.0, 150.0), crate::mask::Combine::Subtract)
+            .combined(&rect(320.0, 200.0, 324.0, 204.0), crate::mask::Combine::Add);
+        let r = 8.0;
+        let four = base.grown(r, Reach::Round).grown(-r, Reach::Round).grown(-r, Reach::Round).grown(r, Reach::Round);
+        let three = base.smoothed_within(r, UNBOUNDED).unwrap();
+        assert_eq!(three.extent(), four.extent());
+        let differ = (90..340)
+            .flat_map(|y| (90..340).map(move |x| (x, y)))
+            .filter(|&(x, y)| three.level_at(x, y).abs_diff(four.level_at(x, y)) > FULL / 64)
+            .count();
+        assert!(differ < 40, "{differ} pixels differ");
+    }
+
+    #[test]
     fn what_each_smoothing_pass_took_is_given_back_once_the_next_is_made() {
         let held = std::sync::atomic::AtomicI64::new(0);
         let (admit, give_back) = counting(&held);
@@ -807,9 +832,9 @@ mod tests {
             smooth: true,
         });
         let smoothed = circle.smoothed_within(8.0, bounds).unwrap();
-        // Four passes made, the last kept: what is still taken is what it holds.
+        // Three passes made, the last kept: what is still taken is what it holds.
         let held = held.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(held > 0 && held as u64 <= smoothed.bytes(), "{held} taken for {}", smoothed.bytes());
+        assert_eq!(held as u64, smoothed.bytes());
     }
 
     #[test]

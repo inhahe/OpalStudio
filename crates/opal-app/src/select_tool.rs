@@ -180,7 +180,8 @@ pub fn label(draws: Draws) -> &'static str {
 fn select(d: &mut DocState, drag: &SelectDrag, options: Options) {
     let shape = drag.shape(options, &d.doc().canvas.rect());
     if shape.size[0] >= 1.0 && shape.size[1] >= 1.0 {
-        let made = opal_core::selection::with_shape(d.pixel_selection().map(|s| &**s), shape, drag.combine);
+        let step = Step::Shape { shape, combine: drag.combine };
+        let made = opal_core::selection::with_maker(d.pixel_selection().map(|s| &**s), step);
         d.set_pixel_selection(Some(made), label(options.draws));
     }
 }

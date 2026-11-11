@@ -89,6 +89,19 @@ impl Modifying {
     }
 }
 
+/// `before` carried by `m` (see `Selection::transformed`), within `memory`, unless `stop` says
+/// to stop; nothing selected, if it comes to nothing. What Transform Selection, Reselect and
+/// Rotate, Flip, Resize Image and Crop carry a selection with.
+pub(crate) fn carried(
+    before: &Selection,
+    m: &opal_core::geom::Affine,
+    memory: crate::memory::Allowance,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> Result<Option<Arc<Selection>>, String> {
+    let made = crate::memory::Admission::within(memory, stop, |b| before.transformed_within(m, b))?;
+    Ok((!made.is_empty()).then(|| Arc::new(made)))
+}
+
 /// The history state a step of the recipe changed (in the selection panel, or by a script) is.
 pub const STEP_CHANGED: &str = "Change selection step";
 
@@ -138,7 +151,11 @@ impl crate::doc::DocState {
             return;
         }
         let _ = self.apply("Deselect", |doc, _| {
-            doc.deselected = doc.selection.take();
+            // (A pending edit that left nothing selected, committed first, leaves nothing.)
+            if let Some(selection) = doc.selection.take() {
+                let since = opal_core::geom::Affine::IDENTITY;
+                doc.deselected = Some(opal_core::document::Deselected { selection, since });
+            }
             Ok::<(), ()>(())
         });
     }
@@ -192,16 +209,28 @@ impl AppState {
         self.active_mut().expect("available").deselect_pixels();
     }
 
-    /// Selects again what Deselect last took away in the active image.
+    /// Selects again what Deselect last took away in the active image; carried as the image has
+    /// been turned, flipped, resized or cropped since, if it has, off the interface thread (see
+    /// `edits`), memory measured as it goes.
     pub(crate) fn reselect(&mut self) {
         let d = self.active_mut().expect("available");
-        let again = d.doc().deselected.as_deref().cloned();
-        d.set_pixel_selection(again, "Reselect");
+        let Some(again) = d.doc().deselected.clone() else { return };
+        if again.since == opal_core::geom::Affine::IDENTITY {
+            return d.set_pixel_selection(Some((*again.selection).clone()), "Reselect");
+        }
+        let (id, measure) = (d.id, crate::memory::Measure::here());
+        let work = move |doc: &mut Document, _: &mut opal_core::document::IdGen, progress: &opal_io::Progress| {
+            doc.selection = carried(&again.selection, &again.since, measure.now(), &|| progress.is_cancelled())?;
+            Ok(())
+        };
+        self.edit_later(id, "Reselect", crate::memory::Allowance::unlimited(), work, |_, _, ()| {});
     }
 
     /// Selects layer `id` of the active image's pixels, each as much as it is opaque (as the
     /// layer holds them, whatever its opacity and visibility), combined with what is selected
-    /// as `combine` says, as a history state worked out off the interface thread (see `edits`).
+    /// as `combine` says, as a history state worked out off the interface thread (see `edits`),
+    /// the mask's memory measured as it is made. Refused, saying why, if it would select
+    /// nothing (what is selected stays).
     pub(crate) fn select_layer_pixels(&mut self, id: LayerId, combine: Combine) {
         let d = self.active().expect("available");
         let Some(layer) = d.doc().layer(id) else { return };
@@ -210,19 +239,23 @@ impl AppState {
             Ok(memory) => memory,
             Err(why) => return self.message(MessageKind::Info, "Select Layer's Pixels", why),
         };
+        let measure = crate::memory::Measure::here();
         let work = move |doc: &mut Document, _: &mut opal_core::document::IdGen, progress: &opal_io::Progress| {
             let image = crate::edits::composited(&[layer], None, progress)?;
-            let mask = Arc::new(Mask::of_opacity(&image));
-            let made = match (doc.selection.as_deref(), combine) {
-                (Some(s), _) => s.then(Step::Mask { mask, combine }),
-                // With nothing selected, adding is making, and taking away or keeping what is
-                // in both leaves nothing.
-                (None, Combine::Replace | Combine::Add) => {
-                    Selection::new(Step::Mask { mask, combine: Combine::Replace })
-                }
-                (None, _) => Selection::new(Step::Mask { mask, combine }),
-            };
-            doc.selection = (!made.is_empty()).then(|| Arc::new(made));
+            let stop = || progress.is_cancelled();
+            let mask = crate::memory::Admission::within(measure.now(), &stop, |b| Mask::of_opacity_within(&image, b))?;
+            if mask.is_none() {
+                return Err("The layer has no pixels to select.".to_owned());
+            }
+            let made = opal_core::selection::with_maker(
+                doc.selection.as_deref(),
+                Step::Mask { mask: Arc::new(mask), combine },
+            );
+            // What is selected stays, rather than taken away with no word.
+            if made.is_empty() {
+                return Err("Nothing would be left selected.".to_owned());
+            }
+            doc.selection = Some(Arc::new(made));
             Ok(())
         };
         self.edit_later(d.id, "Select layer's pixels", memory, work, |_, _, ()| {});
@@ -513,10 +546,7 @@ impl AppState {
         d.cancel_transform();
         let measure = crate::memory::Measure::here();
         let work = move |doc: &mut Document, _: &mut opal_core::document::IdGen, progress: &opal_io::Progress| {
-            let stop = || progress.is_cancelled();
-            let made =
-                crate::memory::Admission::within(measure.now(), &stop, |b| before.transformed_within(&delta, b))?;
-            doc.selection = (!made.is_empty()).then(|| Arc::new(made));
+            doc.selection = carried(&before, &delta, measure.now(), &|| progress.is_cancelled())?;
             Ok(())
         };
         let label = crate::transform::Kind::Selection.label();
@@ -544,7 +574,6 @@ impl AppState {
         let doc = d.doc();
         let selected = d.selected_layers();
         let top = *selected.last().expect("available");
-        let name = format!("{} copy", doc.layer(top).map_or("Layer", |l| l.name.as_str()));
         let layers = d.selected_as_shown();
         let erased: Vec<LayerId> =
             if cut { cleared(d).iter().filter(|l| !l.is_group()).map(|l| l.id).collect() } else { Vec::new() };
@@ -570,6 +599,8 @@ impl AppState {
             }
             let id = ids.layer();
             let pos = crate::layer_ops::above(doc, top).ok_or("The layer is gone.")?;
+            // Named as the edit finds it (a rename left open is finished as it begins).
+            let name = format!("{} copy", doc.layer(top).map_or("Layer", |l| l.name.as_str()));
             doc.insert(pos, Layer::new_raster(id, ids.object(), name, kept)).map_err(|e| e.to_string())?;
             Ok(id)
         };
@@ -602,7 +633,7 @@ impl AppState {
             changed = clear(doc, &layers, &mask);
             if changed { Ok(()) } else { Err(()) }
         });
-        if result.is_err() {
+        if result == Err(crate::doc::NotMade::Failed(())) {
             self.notify("Nothing selected on the selected layers had pixels to clear.");
         }
         changed
@@ -802,10 +833,11 @@ mod tests {
         let d = st.active().unwrap();
         assert_eq!(d.pixel_selection(), Some(&s));
         assert_eq!(d.history.undo_label(), Some("Reselect"));
-        // With nothing selected, taking pixels away leaves nothing.
+        // With nothing selected, taking pixels away leaves nothing: refused, saying so.
         st.run(Cmd::Deselect, &ctx);
         st.select_layer_pixels(id, Combine::Subtract);
         assert!(st.active().unwrap().pixel_selection().is_none());
+        assert!(st.messages.back().is_some_and(|m| m.body.contains("Nothing would be left selected")));
     }
 
     #[test]
@@ -918,6 +950,65 @@ mod tests {
         assert_eq!(selected(&st), Some(Extent::Within(IRect::new(190, 10, 270, 90))));
         st.remove_selection_step(0);
         assert_eq!(selected(&st), None);
+    }
+
+    #[test]
+    fn layer_via_copy_names_its_layer_after_a_rename_left_open() {
+        use crate::commands::Cmd;
+        use opal_core::mask::{Combine, Shape};
+        use opal_core::selection::{Selection, Step};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let doc = st.active_doc.unwrap();
+        let d = st.active_mut().unwrap();
+        let layer = d.doc().layers[0].id;
+        let shape = Shape::rectangle(&IRect::new(10, 10, 20, 20).to_f(), false);
+        d.set_pixel_selection(Some(Selection::new(Step::Shape { shape, combine: Combine::Replace })), "Select");
+        st.renaming = Some((doc, layer, "Sky".into()));
+        st.run(Cmd::LayerViaCopy, &eframe::egui::Context::default());
+        st.finish_edits();
+        let names: Vec<String> = st.active().unwrap().doc().layers.iter().map(|l| l.name.clone()).collect();
+        assert_eq!(names, ["Sky", "Sky copy"]);
+    }
+
+    #[test]
+    fn select_layer_pixels_selecting_nothing_is_refused_and_its_mask_measured() {
+        use opal_core::mask::{Combine, Shape};
+        use opal_core::selection::{Selection, Step};
+        use opal_core::tile::{Tile, TileCoord};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 600, height: 300, background: Background::White, resolution: 72.0 });
+        let shape = Shape::rectangle(&IRect::new(10, 10, 50, 50).to_f(), false);
+        let selected = Selection::new(Step::Shape { shape, combine: Combine::Replace });
+        let d = st.active_mut().unwrap();
+        d.set_pixel_selection(Some(selected.clone()), "Select");
+        // An empty layer, and one half transparent away from the rectangle.
+        let mut faint = RasterImage::new();
+        faint.set_tile(TileCoord::new(2, 0), Some(std::sync::Arc::new(Tile::filled([half::f16::from_f32(0.5); 4]))));
+        let mut ids = Vec::new();
+        for (name, image) in [("empty", RasterImage::new()), ("faint", faint)] {
+            let _ = d.apply("Add", |doc, made| {
+                let id = made.layer();
+                ids.push(id);
+                doc.insert(Position { parent: None, index: 1 }, Layer::new_raster(id, made.object(), name, image))
+                    .map_err(|_| ())
+            });
+        }
+        let said = |st: &mut AppState| st.messages.pop_back().map(|m| m.body).unwrap_or_default();
+        // Nothing to select: refused, what was selected kept.
+        st.select_layer_pixels(ids[0], Combine::Replace);
+        assert!(said(&mut st).contains("no pixels to select"));
+        assert_eq!(st.active().unwrap().pixel_selection().map(|s| &**s), Some(&selected));
+        // Nothing left: refused too.
+        st.select_layer_pixels(ids[1], Combine::Intersect);
+        let why = said(&mut st);
+        assert!(why.contains("Nothing would be left selected"), "{why}");
+        // Its levels' memory asked for: not enough, refused.
+        let _pretend = crate::memory::testing::pretend_free(Some(64 << 10));
+        st.select_layer_pixels(ids[1], Combine::Replace);
+        let why = said(&mut st);
+        assert!(why.contains("would need"), "{why}");
+        assert_eq!(st.active().unwrap().pixel_selection().map(|s| &**s), Some(&selected));
     }
 
     #[test]

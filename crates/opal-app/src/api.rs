@@ -2339,10 +2339,16 @@ impl AppState {
                 self.select_layer_pixels(layer, combine);
                 self.reply_when_done(|st, id| selection_json(st.doc(id).expect("open")))
             }
-            Cmd::SelectAll | Cmd::Deselect | Cmd::Reselect | Cmd::InvertSelection => {
+            Cmd::SelectAll | Cmd::Deselect | Cmd::InvertSelection => {
                 self.run(cmd, ctx);
                 // What is selected now, as the `selection` query tells it.
                 now(Ok(selection_json(self.active().expect("available"))))
+            }
+            // Carried as the image has changed since, which may be worked out off the interface
+            // thread.
+            Cmd::Reselect => {
+                self.run(cmd, ctx);
+                self.reply_when_done(|st, id| selection_json(st.doc(id).expect("open")))
             }
             _ => {
                 // The rest take no more than the image and layers set above.
@@ -2544,7 +2550,8 @@ impl AppState {
         let b = self.box_by_args(id, args, name, false)?;
         let like = Shape { kind, center: [0.0; 2], size: [0.0; 2], angle: 0.0, smooth };
         let d = self.doc_mut(id).expect("found");
-        let made = opal_core::selection::with_shape(d.pixel_selection().map(|s| &**s), b.shape(&like), combine);
+        let step = opal_core::selection::Step::Shape { shape: b.shape(&like), combine };
+        let made = opal_core::selection::with_maker(d.pixel_selection().map(|s| &**s), step);
         d.set_pixel_selection(Some(made), crate::select_tool::label(crate::select_tool::Draws::Shape(kind)));
         Ok(selection_json(d))
     }
@@ -3529,8 +3536,13 @@ mod tests {
         let rect = json!({ "x": 0, "y": 0, "width": 10, "height": 5, "smooth": false });
         now(&mut st, "select_rectangle", rect).unwrap();
         now(&mut st, "deselect", json!({})).unwrap();
+        let kept = st.active().unwrap().doc().deselected.clone().unwrap().selection;
         now(&mut st, "rotate_cw", json!({})).unwrap();
         now(&mut st, "resize_image", json!({ "width": 40, "height": 80 })).unwrap();
+        // Not worked out as the image turned and grew: kept as it was, with how.
+        let d = st.active().unwrap().doc().deselected.clone().unwrap();
+        assert!(Arc::ptr_eq(&d.selection, &kept), "carried as the image changed");
+        assert_ne!(d.since, opal_core::geom::Affine::IDENTITY);
         // A quarter turn clockwise: the top-left corner's 10 x 5 is the top-right's 5 x 10 of
         // the 20 x 40 canvas; twice the size, 10 x 20.
         let s = now(&mut st, "reselect", json!({})).unwrap();

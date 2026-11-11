@@ -1141,8 +1141,9 @@ impl AppState {
         self.docs.iter().filter(|d| d.is_dirty()).map(|d| d.id).collect()
     }
 
-    pub(crate) fn report<E: std::fmt::Display>(&mut self, r: Result<(), E>) {
-        if let Err(e) = r {
+    pub(crate) fn report<E: std::fmt::Display>(&mut self, r: Result<(), crate::doc::NotMade<E>>) {
+        // Refused for an edit under way, the status bar says so already.
+        if let Err(crate::doc::NotMade::Failed(e)) = r {
             self.message(MessageKind::Error, "That did not work", e.to_string());
         }
     }

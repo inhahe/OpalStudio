@@ -121,11 +121,10 @@ pub fn transform_all(
     progress: &Progress,
 ) -> Result<bool, String> {
     let mut to = Drawing::new(*keep, memory);
-    // An object at a time, and the selections carried (their modifiers worked out again) last.
+    // An object at a time, and the selection carried (its modifiers worked out again) last.
     let mut objects = 0;
     doc.for_each_layer(&mut |l, _| objects += l.objects().len());
-    let selections = u64::from(doc.selection.is_some()) + u64::from(doc.deselected.is_some());
-    progress.begin(objects as u64 + selections);
+    progress.begin(objects as u64 + u64::from(doc.selection.is_some()));
     fn walk(
         layer: &mut Layer,
         m: &Affine,
@@ -184,19 +183,14 @@ pub fn transform_all(
         walk(Arc::make_mut(l), m, resample, sampling, &mut to, progress)?;
     }
     // What is selected goes with what it was selected on (its modifiers worked out again,
-    // within what is left of the memory), and so does what Reselect would bring back.
-    let stop = || progress.is_cancelled();
-    let (selection, deselected) = (doc.selection.take(), doc.deselected.take());
-    (doc.selection, doc.deselected) = crate::memory::Admission::within(to.memory, &stop, |b| {
-        use opal_core::selection::Selection;
-        let carry = |s: Option<Arc<Selection>>| -> Result<Option<Arc<Selection>>, opal_core::modify::Halt> {
-            let Some(s) = s else { return Ok(None) };
-            let carried = s.transformed_within(m, b)?;
-            progress.advance(1);
-            Ok(Some(Arc::new(carried)).filter(|s| !s.is_empty()))
-        };
-        Ok((carry(selection)?, carry(deselected)?))
-    })?;
+    // within what is left of the memory); what Reselect would bring back, once it does.
+    if let Some(d) = &mut doc.deselected {
+        d.since = d.since.then(*m);
+    }
+    if let Some(s) = doc.selection.take() {
+        doc.selection = crate::select::carried(&s, m, to.memory, &|| progress.is_cancelled())?;
+        progress.advance(1);
+    }
     Ok(to.clipped)
 }
 
