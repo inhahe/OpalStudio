@@ -291,11 +291,16 @@ marching ants show where the mask crosses a threshold (default 0.5, adjustable);
 option shows the mask as a red overlay.
 
 - **Storage** (`opal_core::mask`). The mask covers the whole plane, as layers do: 16-bit
-  levels in 256×256 tiles on the images' grid, sparse. A tile not kept has the mask's
-  *outside* level (0, or 1 once inverted, so that a selection can be the plane but for a
-  hole), and a tile all of one level is kept as that level alone, so a selection across a
-  huge canvas costs its edges. Copies share tiles until one changes; history counts a
-  state's mask tiles with its layers' tiles.
+  levels in 256×256 tiles on the images' grid, sparse, so that a selection across a huge
+  canvas costs its edges, not its area. A tile not kept has the mask's *outside* level (0,
+  or 1 once inverted, so that a selection can be the plane but for a hole); tiles side by
+  side all of one level are kept as one run along their row of tiles; a tile whose levels
+  change from column to column alone, or from row to row (along a straight edge on the
+  pixel grid), keeps a level a column or a row; only the rest keep a level a pixel. A
+  Select All on a canvas 300,000 pixels a side takes about a megabyte. Copies share tiles
+  until one changes; history counts a state's mask with its layers' tiles. Operations
+  through the mask skip the tiles it leaves wholly alone, and Clear drops those it selects
+  wholly, without looking at their pixels.
 - **Shapes** (rectangles and ellipses, turned or not) give each pixel the part of it they
   cover, worked out from the exact distance to their edge (an ellipse's by bisection), or,
   with smoothing off, all or nothing by the pixel's middle. Tiles wholly inside or outside
@@ -306,7 +311,9 @@ option shows the mask as a red overlay.
   selection to itself changes nothing.
 - **The outline** (the marching ants' path) runs along the pixels' edges, round those at the
   threshold or above, as Photoshop's and GIMP's do: at high zoom, where pixels are sharp
-  squares, it follows them. Pixels meeting only at a corner have lines of their own.
+  squares, it follows them. Pixels meeting only at a corner have lines of their own. It is
+  worked out where tiles differ and within those with levels of their own, an edge along
+  tiles of one level taken whole, so it costs its length, not the area it goes round.
 - `.opal` files do not keep selections yet; a later version of the format keeps their
   recipes.
 

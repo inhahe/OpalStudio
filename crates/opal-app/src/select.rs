@@ -147,7 +147,7 @@ fn clear(doc: &mut Document, layers: &[LayerId], mask: &Mask) -> bool {
         let LayerContent::Objects(objects) = &mut layer.content else { continue };
         for o in objects.iter_mut() {
             let ObjectKind::Pixels(p) = &mut o.kind else { continue };
-            let cleared = opal_core::mask::blend(&p.image, p.offset, mask, |_| [0.0; 4]);
+            let cleared = opal_core::mask::clear_selected(&p.image, p.offset, mask);
             if !same_tiles(&cleared, &p.image) {
                 p.image = Arc::new(cleared);
                 changed = true;

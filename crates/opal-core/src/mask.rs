@@ -1,11 +1,18 @@
 //! A selection's mask (design.md, *Selections*, *The mask*): how selected each pixel of the
 //! plane is, from 0 (not at all) to 1 (fully), in 16-bit levels ([`FULL`] is 1).
 //!
-//! It is kept in tiles on the images' pixel grid ([`TILE_SIZE`]), sparsely: a tile not kept
-//! has the mask's level *outside* (0, or 1 once inverted, so that a mask can select the whole
-//! plane but for a hole), and a tile all of one level is kept as that level alone, so a
-//! selection across a huge canvas costs its edges. Copies share their tiles until one changes,
-//! as the history's states share images'.
+//! It is kept in tiles on the images' pixel grid ([`TILE_SIZE`]), so that a selection across a
+//! huge canvas costs its edges, not its area:
+//!
+//! - tiles of the mask's level *outside* (0, or 1 once inverted, so that a mask can select the
+//!   whole plane but for a hole) are not kept;
+//! - tiles side by side all of one level are kept as one run along their row of tiles (within
+//!   a rectangle's edges, one run a row);
+//! - a tile whose levels change from column to column alone (or from row to row), as along a
+//!   straight edge on the pixel grid, keeps one level a column (or a row); only the others
+//!   keep one a pixel.
+//!
+//! Copies share their tiles until one changes, as the history's states share images'.
 //!
 //! Every operation limited to a selection goes through one step, [`blend`]: the pixel it would
 //! make, weighed against the one there by the mask's level.
@@ -14,7 +21,8 @@ use crate::geom::{FRect, IRect};
 use crate::raster::RasterImage;
 use crate::tile::{PixelF32, TILE_PIXELS, TILE_SIZE, Tile, TileCoord, pixel_from_f32};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// The level of a pixel fully selected.
@@ -33,11 +41,28 @@ pub fn level(f: f32) -> u16 {
     (f.clamp(0.0, 1.0) * f32::from(FULL)).round() as u16
 }
 
-/// A tile of a mask: all one level, or a level a pixel, row by row.
+/// A tile's side, in pixels, as an index.
+const SIDE: usize = TILE_SIZE as usize;
+
+/// A tile of a mask: all one level; one level a column, or a row, where the levels change
+/// along one way only; or one level a pixel, row by row.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MaskTile {
     Level(u16),
+    /// The same down each column: a level a column, left to right.
+    Columns(Arc<[u16]>),
+    /// The same along each row: a level a row, top to bottom.
+    Rows(Arc<[u16]>),
     Levels(Arc<[u16]>),
+}
+
+/// Which way a tile's levels change, when they change along one way only.
+#[derive(Clone, Copy)]
+enum Line {
+    /// From column to column.
+    Columns,
+    /// From row to row.
+    Rows,
 }
 
 impl MaskTile {
@@ -45,38 +70,120 @@ impl MaskTile {
     pub fn get(&self, x: u32, y: u32) -> u16 {
         match self {
             MaskTile::Level(l) => *l,
+            MaskTile::Columns(l) => l[x as usize],
+            MaskTile::Rows(l) => l[y as usize],
             MaskTile::Levels(l) => l[(y * TILE_SIZE + x) as usize],
         }
     }
 
-    /// The tile `levels` (a tile's worth) make: one level alone where all are alike.
+    /// The tile `levels` (a tile's worth, row by row) make, kept as compactly as they allow.
     fn from_levels(levels: Vec<u16>) -> MaskTile {
         debug_assert_eq!(levels.len(), TILE_PIXELS);
-        let first = levels[0];
-        if levels.iter().all(|&l| l == first) { MaskTile::Level(first) } else { MaskTile::Levels(levels.into()) }
+        let first = &levels[..SIDE];
+        if levels.chunks_exact(SIDE).all(|row| row == first) {
+            return MaskTile::from_line(Line::Columns, first.to_vec());
+        }
+        if levels.chunks_exact(SIDE).all(|row| row.iter().all(|&l| l == row[0])) {
+            return MaskTile::from_line(Line::Rows, levels.chunks_exact(SIDE).map(|row| row[0]).collect());
+        }
+        MaskTile::Levels(levels.into())
+    }
+
+    /// The tile whose levels `line` gives, one a column or one a row as `along` says: one
+    /// level alone where all are alike.
+    fn from_line(along: Line, line: Vec<u16>) -> MaskTile {
+        debug_assert_eq!(line.len(), SIDE);
+        if line.iter().all(|&l| l == line[0]) {
+            return MaskTile::Level(line[0]);
+        }
+        match along {
+            Line::Columns => MaskTile::Columns(line.into()),
+            Line::Rows => MaskTile::Rows(line.into()),
+        }
+    }
+
+    /// Its levels, one a column or one a row as `along` says, if it can be kept so.
+    fn line(&self, along: Line) -> Option<Cow<'_, [u16]>> {
+        match (self, along) {
+            (MaskTile::Level(l), _) => Some(Cow::Owned(vec![*l; SIDE])),
+            (MaskTile::Columns(l), Line::Columns) | (MaskTile::Rows(l), Line::Rows) => Some(Cow::Borrowed(l)),
+            _ => None,
+        }
     }
 
     /// Its levels each made `f` of themselves.
     fn map(&self, f: impl Fn(u16) -> u16) -> MaskTile {
         match self {
             MaskTile::Level(l) => MaskTile::Level(f(*l)),
+            MaskTile::Columns(l) => MaskTile::from_line(Line::Columns, l.iter().map(|&v| f(v)).collect()),
+            MaskTile::Rows(l) => MaskTile::from_line(Line::Rows, l.iter().map(|&v| f(v)).collect()),
             MaskTile::Levels(l) => MaskTile::from_levels(l.iter().map(|&v| f(v)).collect()),
         }
+    }
+
+    /// `a` and `b` combined pixel by pixel, as `how` says.
+    fn combined(a: &MaskTile, b: &MaskTile, how: Combine) -> MaskTile {
+        if let (MaskTile::Level(x), MaskTile::Level(y)) = (a, b) {
+            return MaskTile::Level(how.level(*x, *y));
+        }
+        for along in [Line::Columns, Line::Rows] {
+            if let (Some(la), Some(lb)) = (a.line(along), b.line(along)) {
+                return MaskTile::from_line(along, la.iter().zip(lb.iter()).map(|(&x, &y)| how.level(x, y)).collect());
+            }
+        }
+        let (la, lb) = (a.levels(), b.levels());
+        MaskTile::from_levels(la.iter().zip(lb.iter()).map(|(&x, &y)| how.level(x, y)).collect())
     }
 
     /// The memory its levels take (none for a tile of one level).
     pub fn bytes(&self) -> u64 {
         match self {
             MaskTile::Level(_) => 0,
-            MaskTile::Levels(l) => (l.len() * std::mem::size_of::<u16>()) as u64,
+            MaskTile::Columns(l) | MaskTile::Rows(l) | MaskTile::Levels(l) => {
+                (l.len() * std::mem::size_of::<u16>()) as u64
+            }
         }
     }
 
-    /// Its levels, a tile's worth.
-    fn levels(&self) -> std::borrow::Cow<'_, [u16]> {
+    /// Where its levels are kept, if it keeps any (the same for its copies).
+    fn address(&self) -> Option<usize> {
         match self {
-            MaskTile::Level(l) => std::borrow::Cow::Owned(vec![*l; TILE_PIXELS]),
-            MaskTile::Levels(l) => std::borrow::Cow::Borrowed(l),
+            MaskTile::Level(_) => None,
+            MaskTile::Columns(l) | MaskTile::Rows(l) | MaskTile::Levels(l) => Some(Arc::as_ptr(l).cast::<u16>() as usize),
+        }
+    }
+
+    /// Its levels, a tile's worth, row by row.
+    fn levels(&self) -> Cow<'_, [u16]> {
+        match self {
+            MaskTile::Levels(l) => Cow::Borrowed(l),
+            _ => Cow::Owned((0..TILE_SIZE).flat_map(|y| (0..TILE_SIZE).map(move |x| (x, y))).map(|(x, y)| self.get(x, y)).collect()),
+        }
+    }
+
+    /// The smallest rectangle (from the tile's corner) holding all its pixels above 0, if any is.
+    fn selected_part(&self) -> Option<IRect> {
+        let span = |l: &[u16]| -> Option<(i64, i64)> {
+            let first = l.iter().position(|&v| v > 0)?;
+            let last = l.iter().rposition(|&v| v > 0).expect("one is above 0");
+            Some((first as i64, last as i64 + 1))
+        };
+        let side = i64::from(TILE_SIZE);
+        match self {
+            MaskTile::Level(0) => None,
+            MaskTile::Level(_) => Some(IRect::new(0, 0, side, side)),
+            MaskTile::Columns(l) => span(l).map(|(x0, x1)| IRect::new(x0, 0, x1, side)),
+            MaskTile::Rows(l) => span(l).map(|(y0, y1)| IRect::new(0, y0, side, y1)),
+            MaskTile::Levels(l) => {
+                let mut part: Option<IRect> = None;
+                for (y, row) in l.chunks_exact(SIDE).enumerate() {
+                    let Some((x0, x1)) = span(row) else { continue };
+                    let y = y as i64;
+                    let r = IRect::new(x0, y, x1, y + 1);
+                    part = Some(part.map_or(r, |p| p.union(&r)));
+                }
+                part
+            }
         }
     }
 }
@@ -126,22 +233,93 @@ pub trait Coverage: Sync {
     /// The pixels outside of which it covers nothing.
     fn bounds(&self) -> IRect;
 
-    /// The distance from `(x, y)` to its edge, less than 0 inside it: never more than the
-    /// true distance inside, nor less outside, so that a whole area can be told inside or
-    /// outside from its middle (a tile's from the middle of the tile).
+    /// The distance from `(x, y)` to its edge, less than 0 inside it: never farther from the
+    /// edge than `(x, y)` truly is, so that a whole area can be told inside or outside from its
+    /// middle.
     fn distance(&self, x: f64, y: f64) -> f64;
 
     /// How much of the pixel whose middle is `(x, y)` it covers, from 0 to 1.
     fn at(&self, x: f64, y: f64) -> f32;
+
+    /// Whether it is convex: along a row, it then covers every tile between two it covers
+    /// wholly, which spares looking at them.
+    fn convex(&self) -> bool {
+        false
+    }
+}
+
+/// Tiles side by side along a row of tiles, `x0..x1` (in tiles), all `tile`: only one tile,
+/// unless it is all one level.
+#[derive(Clone, Debug, PartialEq)]
+struct Run {
+    x0: i32,
+    x1: i32,
+    tile: MaskTile,
 }
 
 /// A selection's mask: see the module's description.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Mask {
-    /// The tiles of other levels than `outside` (never one of that level alone).
-    tiles: HashMap<TileCoord, MaskTile>,
+    /// The rows of tiles with tiles of other levels than `outside`, by their y (in tiles): each
+    /// one's runs, left to right, apart, none of the level `outside`, and no two of one level
+    /// touching (so that masks alike are kept alike).
+    rows: BTreeMap<i32, Vec<Run>>,
     outside: u16,
 }
+
+/// Puts `tile` at tiles `x0..x1` on the right of `row`, a row of a mask whose level outside is
+/// `outside`, keeping the order [`Mask::rows`] keeps.
+fn push(row: &mut Vec<Run>, x0: i32, x1: i32, tile: MaskTile, outside: u16) {
+    if x0 >= x1 || tile == MaskTile::Level(outside) {
+        return;
+    }
+    debug_assert!(x1 - x0 == 1 || matches!(tile, MaskTile::Level(_)), "a run of tiles with levels of their own");
+    debug_assert!(row.last().is_none_or(|r| r.x1 <= x0), "put out of order");
+    if let Some(last) = row.last_mut()
+        && last.x1 == x0
+        && matches!(tile, MaskTile::Level(_))
+        && last.tile == tile
+    {
+        last.x1 = x1;
+    } else {
+        row.push(Run { x0, x1, tile });
+    }
+}
+
+/// The pieces two rows of tiles, `a` and `b`, part each other into, left to right, where
+/// either keeps a tile: `(x0, x1, a's tile, b's tile)`, every tile of a piece alike in each
+/// (`a_out` or `b_out` where one keeps none), so a piece is one tile wide unless both are all
+/// one level there.
+fn pieces<'a>(
+    a: &'a [Run],
+    b: &'a [Run],
+    a_out: &'a MaskTile,
+    b_out: &'a MaskTile,
+) -> Vec<(i32, i32, &'a MaskTile, &'a MaskTile)> {
+    let mut cuts: Vec<i32> = a.iter().chain(b).flat_map(|r| [r.x0, r.x1]).collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let (mut i, mut j) = (0, 0);
+    let mut out = Vec::with_capacity(cuts.len());
+    for w in cuts.windows(2) {
+        let (x0, x1) = (w[0], w[1]);
+        while i < a.len() && a[i].x1 <= x0 {
+            i += 1;
+        }
+        while j < b.len() && b[j].x1 <= x0 {
+            j += 1;
+        }
+        let ta = a.get(i).filter(|r| r.x0 <= x0).map(|r| &r.tile);
+        let tb = b.get(j).filter(|r| r.x0 <= x0).map(|r| &r.tile);
+        if ta.is_some() || tb.is_some() {
+            out.push((x0, x1, ta.unwrap_or(a_out), tb.unwrap_or(b_out)));
+        }
+    }
+    out
+}
+
+/// A row of tiles of no runs.
+const NO_RUNS: &[Run] = &[];
 
 impl Mask {
     /// A mask that selects nothing.
@@ -151,7 +329,7 @@ impl Mask {
 
     /// A mask that selects the whole plane.
     pub fn all() -> Mask {
-        Mask { tiles: HashMap::new(), outside: FULL }
+        Mask { rows: BTreeMap::new(), outside: FULL }
     }
 
     /// The level of every pixel no tile is kept for.
@@ -159,29 +337,22 @@ impl Mask {
         self.outside
     }
 
-    /// The tiles kept (every one of another level than [`outside`](Self::outside) somewhere).
-    pub fn tiles(&self) -> impl Iterator<Item = (TileCoord, &MaskTile)> {
-        self.tiles.iter().map(|(c, t)| (*c, t))
+    /// The runs of row `y` of tiles (none, if it keeps no tile).
+    fn row(&self, y: i32) -> &[Run] {
+        self.rows.get(&y).map_or(NO_RUNS, Vec::as_slice)
     }
 
     /// The tile at `c`, if one is kept there.
     pub fn tile(&self, c: TileCoord) -> Option<&MaskTile> {
-        self.tiles.get(&c)
-    }
-
-    /// Keeps `tile` at `c`, or none there if it is all of the level outside.
-    fn put(&mut self, c: TileCoord, tile: MaskTile) {
-        if tile == MaskTile::Level(self.outside) {
-            self.tiles.remove(&c);
-        } else {
-            self.tiles.insert(c, tile);
-        }
+        let row = self.rows.get(&c.y)?;
+        let i = row.partition_point(|r| r.x1 <= c.x);
+        row.get(i).filter(|r| r.x0 <= c.x).map(|r| &r.tile)
     }
 
     /// The level of pixel `(x, y)`.
     pub fn level_at(&self, x: i64, y: i64) -> u16 {
         let c = TileCoord::containing(x, y);
-        match self.tiles.get(&c) {
+        match self.tile(c) {
             None => self.outside,
             Some(t) => {
                 let r = c.rect(0);
@@ -192,12 +363,21 @@ impl Mask {
 
     /// Whether it selects nothing at all.
     pub fn is_none(&self) -> bool {
-        self.outside == 0 && self.tiles.is_empty()
+        self.outside == 0 && self.rows.is_empty()
     }
 
-    /// The memory its tiles take.
+    /// The memory it takes.
     pub fn bytes(&self) -> u64 {
-        self.tiles.values().map(MaskTile::bytes).sum()
+        self.parts().map(|(_, b)| b).sum()
+    }
+
+    /// What it takes memory for, each part with where it is kept, so that what copies share
+    /// can be counted once: its runs (kept where the mask is), then each tile's levels.
+    pub fn parts(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
+        let runs: usize = self.rows.values().map(Vec::len).sum();
+        let own = self.rows.len() * std::mem::size_of::<(i32, Vec<Run>)>() + runs * std::mem::size_of::<Run>();
+        std::iter::once((std::ptr::from_ref(self) as usize, own as u64))
+            .chain(self.rows.values().flatten().filter_map(|r| Some((r.tile.address()?, r.tile.bytes()))))
     }
 
     /// How much of the plane it selects.
@@ -206,65 +386,48 @@ impl Mask {
             return Extent::Unbounded;
         }
         let mut within: Option<IRect> = None;
-        for (c, t) in &self.tiles {
-            let r = c.rect(0);
-            let part = match t {
-                MaskTile::Level(_) => r,
-                MaskTile::Levels(l) => {
-                    let (mut x0, mut y0, mut x1, mut y1) = (TILE_SIZE, TILE_SIZE, 0, 0);
-                    for y in 0..TILE_SIZE {
-                        let row = &l[(y * TILE_SIZE) as usize..((y + 1) * TILE_SIZE) as usize];
-                        let Some(first) = row.iter().position(|&v| v > 0) else { continue };
-                        let last = row.iter().rposition(|&v| v > 0).expect("one is above 0");
-                        (x0, x1, y0, y1) = (x0.min(first as u32), x1.max(last as u32 + 1), y0.min(y), y + 1);
-                    }
-                    IRect::new(r.x0 + i64::from(x0), r.y0 + i64::from(y0), r.x0 + i64::from(x1), r.y0 + i64::from(y1))
-                }
-            };
-            within = Some(within.map_or(part, |w| w.union(&part)));
+        for (&y, row) in &self.rows {
+            for r in row {
+                let corner = TileCoord::new(r.x0, y).rect(0);
+                let part = match &r.tile {
+                    MaskTile::Level(_) => IRect { x1: TileCoord::new(r.x1, y).rect(0).x0, ..corner },
+                    t => match t.selected_part() {
+                        Some(p) => p.translate(corner.x0, corner.y0),
+                        None => continue,
+                    },
+                };
+                within = Some(within.map_or(part, |w| w.union(&part)));
+            }
         }
         within.map_or(Extent::Nothing, Extent::Within)
     }
 
     /// The mask of `shape`: each pixel's level, how much of it the shape covers.
     pub fn of(shape: &impl Coverage) -> Mask {
-        let half_diagonal = f64::from(TILE_SIZE) * std::f64::consts::FRAC_1_SQRT_2;
-        let tiles: Vec<(TileCoord, MaskTile)> = TileCoord::covering(&shape.bounds(), 0)
-            .collect::<Vec<_>>()
-            .into_par_iter()
-            .filter_map(|c| {
-                let r = c.rect(0).to_f();
-                let [cx, cy] = r.center();
-                // Told from its middle: every pixel's middle is nearer it than the corners.
-                let d = shape.distance(cx, cy);
-                if d >= half_diagonal + 1.0 {
-                    return None;
-                }
-                if d <= -(half_diagonal + 1.0) {
-                    return Some((c, MaskTile::Level(FULL)));
-                }
-                let mut levels = vec![0u16; TILE_PIXELS];
-                for (i, l) in levels.iter_mut().enumerate() {
-                    let (x, y) = ((i as u32 % TILE_SIZE) as f64, (i as u32 / TILE_SIZE) as f64);
-                    *l = level(shape.at(r.x0 + x + 0.5, r.y0 + y + 0.5));
-                }
-                Some((c, MaskTile::from_levels(levels)))
-            })
-            .collect();
-        let mut mask = Mask::none();
-        for (c, t) in tiles {
-            mask.put(c, t);
+        let bounds = shape.bounds();
+        if bounds.is_empty() {
+            return Mask::none();
         }
-        mask
+        let first = TileCoord::containing(bounds.x0, bounds.y0);
+        let last = TileCoord::containing(bounds.x1 - 1, bounds.y1 - 1);
+        let rows: Vec<(i32, Vec<Run>)> = (first.y..=last.y)
+            .into_par_iter()
+            .map(|y| (y, row_of(shape, y, first.x, last.x + 1)))
+            .filter(|(_, r)| !r.is_empty())
+            .collect();
+        Mask { rows: rows.into_iter().collect(), outside: 0 }
     }
 
     /// The opposite: selected where it is not, and the other way round.
     pub fn inverted(&self) -> Mask {
-        let mut out = Mask { tiles: HashMap::with_capacity(self.tiles.len()), outside: FULL - self.outside };
-        for (c, t) in &self.tiles {
-            out.put(*c, t.map(|l| FULL - l));
-        }
-        out
+        let rows: Vec<(i32, Vec<Run>)> = self
+            .rows
+            .par_iter()
+            .map(|(&y, row)| {
+                (y, row.iter().map(|r| Run { x0: r.x0, x1: r.x1, tile: r.tile.map(|l| FULL - l) }).collect())
+            })
+            .collect();
+        Mask { rows: rows.into_iter().collect(), outside: FULL - self.outside }
     }
 
     /// `new` combined with this one, as `how` says.
@@ -272,29 +435,27 @@ impl Mask {
         if how == Combine::Replace {
             return new.clone();
         }
-        let mut out = Mask { tiles: HashMap::new(), outside: how.level(self.outside, new.outside) };
-        let mut coords: Vec<TileCoord> = self.tiles.keys().chain(new.tiles.keys()).copied().collect();
-        coords.sort_unstable();
-        coords.dedup();
-        let tiles: Vec<(TileCoord, MaskTile)> = coords
+        let outside = how.level(self.outside, new.outside);
+        let (a_out, b_out) = (MaskTile::Level(self.outside), MaskTile::Level(new.outside));
+        let mut ys: Vec<i32> = self.rows.keys().chain(new.rows.keys()).copied().collect();
+        ys.sort_unstable();
+        ys.dedup();
+        let rows: Vec<(i32, Vec<Run>)> = ys
             .into_par_iter()
-            .map(|c| {
-                let a = self.tiles.get(&c).cloned().unwrap_or(MaskTile::Level(self.outside));
-                let b = new.tiles.get(&c).cloned().unwrap_or(MaskTile::Level(new.outside));
-                let t = match (&a, &b) {
-                    (MaskTile::Level(x), MaskTile::Level(y)) => MaskTile::Level(how.level(*x, *y)),
-                    _ => {
-                        let (la, lb) = (a.levels(), b.levels());
-                        MaskTile::from_levels(la.iter().zip(lb.iter()).map(|(&x, &y)| how.level(x, y)).collect())
-                    }
-                };
-                (c, t)
+            .map(|y| {
+                let tiles: Vec<(i32, i32, MaskTile)> = pieces(self.row(y), new.row(y), &a_out, &b_out)
+                    .into_par_iter()
+                    .map(|(x0, x1, a, b)| (x0, x1, MaskTile::combined(a, b, how)))
+                    .collect();
+                let mut row = Vec::new();
+                for (x0, x1, t) in tiles {
+                    push(&mut row, x0, x1, t, outside);
+                }
+                (y, row)
             })
+            .filter(|(_, r)| !r.is_empty())
             .collect();
-        for (c, t) in tiles {
-            out.put(c, t);
-        }
-        out
+        Mask { rows: rows.into_iter().collect(), outside }
     }
 
     /// The levels of the pixels of `area`, row by row.
@@ -302,17 +463,40 @@ impl Mask {
         let (w, h) = (area.width().max(0) as usize, area.height().max(0) as usize);
         let mut out = vec![self.outside; w * h];
         for c in TileCoord::covering(area, 0) {
-            let Some(t) = self.tiles.get(&c) else { continue };
+            let Some(t) = self.tile(c) else { continue };
             let r = c.rect(0);
             let part = r.intersect(area);
             for y in part.y0..part.y1 {
                 let row = &mut out[(y - area.y0) as usize * w..][..w];
-                for x in part.x0..part.x1 {
-                    row[(x - area.x0) as usize] = t.get((x - r.x0) as u32, (y - r.y0) as u32);
+                let (x0, x1) = ((part.x0 - area.x0) as usize, (part.x1 - area.x0) as usize);
+                match t {
+                    MaskTile::Level(l) => row[x0..x1].fill(*l),
+                    t => {
+                        for x in part.x0..part.x1 {
+                            row[(x - area.x0) as usize] = t.get((x - r.x0) as u32, (y - r.y0) as u32);
+                        }
+                    }
                 }
             }
         }
         out
+    }
+
+    /// The level of every pixel of `area`, if they all have the same (told from the tiles
+    /// alone: `None` where a tile with levels of its own reaches into it).
+    pub fn uniform_in(&self, area: &IRect) -> Option<u16> {
+        let mut level = None;
+        for c in TileCoord::covering(area, 0) {
+            let l = match self.tile(c) {
+                None => self.outside,
+                Some(MaskTile::Level(l)) => *l,
+                Some(_) => return None,
+            };
+            if *level.get_or_insert(l) != l {
+                return None;
+            }
+        }
+        level
     }
 
     /// Where the mask crosses `threshold` (the marching ants): closed lines along the pixels'
@@ -322,6 +506,107 @@ impl Mask {
     pub fn outline(&self, threshold: u16) -> Vec<Vec<[f64; 2]>> {
         contours(self, threshold)
     }
+}
+
+/// How a tile lies against a shape.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Class {
+    Outside,
+    Inside,
+    /// Crossed by its edge (or near enough to it that it may be).
+    Edge,
+}
+
+/// How the square of side `side` about `(cx, cy)` lies against `shape`, told from its middle
+/// (every pixel's middle in it is nearer the square's middle than its corners are).
+fn class(shape: &impl Coverage, cx: f64, cy: f64, side: f64) -> Class {
+    let far = side * std::f64::consts::FRAC_1_SQRT_2 + 1.0;
+    let d = shape.distance(cx, cy);
+    if d >= far {
+        Class::Outside
+    } else if d <= -far {
+        Class::Inside
+    } else {
+        Class::Edge
+    }
+}
+
+/// Row `y` of tiles, those from `x0` to `x1`, of the mask of `shape`.
+fn row_of(shape: &impl Coverage, y: i32, x0: i32, x1: i32) -> Vec<Run> {
+    let side = f64::from(TILE_SIZE);
+    let class_of = |x: i32| {
+        let [cx, cy] = TileCoord::new(x, y).rect(0).to_f().center();
+        class(shape, cx, cy, side)
+    };
+    // The tiles told apart, left to right: of a convex shape, those up to the first wholly
+    // inside it and from the last, every one between those inside it too.
+    let mut told: Vec<(i32, i32, Class)> = Vec::new();
+    let mut x = x0;
+    while x < x1 {
+        let c = class_of(x);
+        if c == Class::Inside && shape.convex() {
+            break;
+        }
+        told.push((x, x + 1, c));
+        x += 1;
+    }
+    if x < x1 {
+        let mut right = Vec::new();
+        let mut r = x1 - 1;
+        // Tile `x` is inside: this stops there at the latest.
+        loop {
+            let c = class_of(r);
+            if c == Class::Inside {
+                break;
+            }
+            right.push((r, r + 1, c));
+            r -= 1;
+        }
+        told.push((x, r + 1, Class::Inside));
+        told.extend(right.into_iter().rev());
+    }
+    let tiles: Vec<(i32, i32, MaskTile)> = told
+        .into_par_iter()
+        .filter_map(|(a, b, c)| match c {
+            Class::Outside => None,
+            Class::Inside => Some((a, b, MaskTile::Level(FULL))),
+            Class::Edge => Some((a, b, edge_tile(shape, TileCoord::new(a, y)))),
+        })
+        .collect();
+    let mut row = Vec::new();
+    for (a, b, t) in tiles {
+        push(&mut row, a, b, t, 0);
+    }
+    row
+}
+
+/// The side of the blocks a tile its edge crosses is told apart by.
+const BLOCK: u32 = 16;
+
+/// The tile at `c` of the mask of `shape`, which its edge may cross: told apart block by
+/// block, the pixels of the blocks the edge may cross one by one.
+fn edge_tile(shape: &impl Coverage, c: TileCoord) -> MaskTile {
+    let r = c.rect(0);
+    let mut levels = vec![0u16; TILE_PIXELS];
+    for by in (0..TILE_SIZE).step_by(BLOCK as usize) {
+        for bx in (0..TILE_SIZE).step_by(BLOCK as usize) {
+            let (x0, y0) = (r.x0 as f64 + f64::from(bx), r.y0 as f64 + f64::from(by));
+            let half = f64::from(BLOCK) / 2.0;
+            let fill = match class(shape, x0 + half, y0 + half, f64::from(BLOCK)) {
+                Class::Outside => continue,
+                Class::Inside => Some(FULL),
+                Class::Edge => None,
+            };
+            for y in by..by + BLOCK {
+                let row = &mut levels[(y * TILE_SIZE) as usize..][..SIDE];
+                for x in bx..bx + BLOCK {
+                    row[x as usize] =
+                        fill.unwrap_or_else(|| level(shape.at(x0 + f64::from(x - bx) + 0.5, y0 + f64::from(y - by) + 0.5)));
+                }
+            }
+        }
+    }
+    MaskTile::from_levels(levels)
 }
 
 /// `before` with each pixel `p` made `p × (1 − m) + changed(p) × m`, `m` the level of `mask`
@@ -336,44 +621,59 @@ pub fn blend(
     mask: &Mask,
     changed: impl Fn(PixelF32) -> PixelF32 + Sync,
 ) -> RasterImage {
-    blend_by(before, offset, mask, fraction, changed)
+    blend_by(before, offset, mask, fraction, Some(&changed))
+}
+
+/// `before` (a pixel object's bitmap at `offset`, as for [`blend`]) with what `mask` selects
+/// erased, as much of each pixel as it selects it: what Clear does.
+pub fn clear_selected(before: &RasterImage, offset: [i64; 2], mask: &Mask) -> RasterImage {
+    blend_by(before, offset, mask, fraction, None)
 }
 
 /// `before` (a pixel object's bitmap at `offset`, as for [`blend`]) with only what `mask`
 /// selects kept, as much of each pixel as it selects it: what copying within a selection
 /// copies.
 pub fn keep_selected(before: &RasterImage, offset: [i64; 2], mask: &Mask) -> RasterImage {
-    blend_by(before, offset, mask, |l| 1.0 - fraction(l), |_| [0.0; 4])
+    blend_by(before, offset, mask, |l| 1.0 - fraction(l), None)
 }
 
-/// [`blend`], with `weight` giving `m` from each level (tiles where it is 0 throughout left
-/// alone).
+/// [`blend`], with `weight` giving `m` from each level, and `changed` making every pixel
+/// transparent where it is `None`. Tiles where `m` is 0 throughout are left alone, and where
+/// it is 1 throughout and `changed` is `None`, dropped, without looking at their pixels.
 fn blend_by(
     before: &RasterImage,
     offset: [i64; 2],
     mask: &Mask,
     weight: impl Fn(u16) -> f32 + Sync,
-    changed: impl Fn(PixelF32) -> PixelF32 + Sync,
+    changed: Option<&(dyn Fn(PixelF32) -> PixelF32 + Sync)>,
 ) -> RasterImage {
-    debug_assert_eq!(changed([0.0; 4]), [0.0; 4], "a transparent pixel changed");
+    debug_assert!(changed.is_none_or(|f| f([0.0; 4]) == [0.0; 4]), "a transparent pixel changed");
     let coords: Vec<TileCoord> = before.tiles().map(|(c, _)| c).collect();
     let done: Vec<(TileCoord, Option<Arc<Tile>>)> = coords
         .into_par_iter()
         .filter_map(|c| {
-            let tile = before.tile(c).expect("listed");
             let area = c.rect(0).translate(offset[0], offset[1]);
-            let weights: Vec<f32> = mask.levels_in(&area).into_iter().map(&weight).collect();
-            if weights.iter().all(|&m| m == 0.0) {
+            let uniform = mask.uniform_in(&area).map(&weight);
+            match uniform {
+                Some(0.0) => return None,
+                Some(m) if m == 1.0 && changed.is_none() => return Some((c, None)),
+                _ => {}
+            }
+            let weights: Option<Vec<f32>> =
+                uniform.is_none().then(|| mask.levels_in(&area).into_iter().map(&weight).collect());
+            if weights.as_ref().is_some_and(|w| w.iter().all(|&m| m == 0.0)) {
                 return None;
             }
+            let tile = before.tile(c).expect("listed");
             let mut px = vec![[0.0f32; 4]; TILE_PIXELS];
             tile.to_f32(&mut px);
             let mut same = true;
-            for (p, &m) in px.iter_mut().zip(&weights) {
+            for (i, p) in px.iter_mut().enumerate() {
+                let m = weights.as_ref().map_or_else(|| uniform.expect("one weight or a weight a pixel"), |w| w[i]);
                 if m == 0.0 {
                     continue;
                 }
-                let c = changed(*p);
+                let c = changed.map_or([0.0; 4], |f| f(*p));
                 let new = [0, 1, 2, 3].map(|i| p[i] * (1.0 - m) + c[i] * m);
                 if new != *p {
                     same = false;
@@ -395,65 +695,97 @@ fn blend_by(
 }
 
 /// What [`Mask::outline`] gives: the edges between a pixel in (at `threshold` or above) and a
-/// neighbour out, joined into closed lines.
+/// neighbour out, joined into closed lines. Only the edges of tiles that are not alike, and
+/// those within a tile with levels of its own, are looked at; the edges along a whole side
+/// of tiles of one level are taken as one.
 fn contours(mask: &Mask, threshold: u16) -> Vec<Vec<[f64; 2]>> {
-    // An edge between two pixels side by side is looked at from the tile of the right (or
-    // lower) one, or, where that tile is not kept, from the left (or upper) one's: only edges
-    // with a pixel in a kept tile can part in from out (every other pixel is of the level
-    // outside).
-    let kept = |x: i64, y: i64| mask.tiles.contains_key(&TileCoord::containing(x, y));
-    let mut coords: Vec<TileCoord> = mask.tiles.keys().copied().collect();
-    coords.sort_unstable();
-    let edges: Vec<Step> = coords
+    let inn = |l: u16| l >= threshold;
+    let outside = MaskTile::Level(mask.outside);
+    let side = i64::from(TILE_SIZE);
+    // Each kept row of tiles, and the line between it and the rows above and below it.
+    let mut ys: Vec<i32> = mask.rows.keys().flat_map(|&y| [y, y + 1]).collect();
+    ys.sort_unstable();
+    ys.dedup();
+    let edges: Vec<Step> = ys
         .into_par_iter()
-        .flat_map_iter(|c| {
-            let r = c.rect(0);
+        .flat_map_iter(|y| {
             let mut out = Vec::new();
-            let mut look = |x: i64, y: i64, across: bool, at: &dyn Fn(i64, i64) -> u16| {
-                // `across`: the edge on the left of pixel (x, y); else the one above it.
-                let (px, py) = if across { (x - 1, y) } else { (x, y - 1) };
-                let ours = if r.contains(x, y) { true } else { r.contains(px, py) && !kept(x, y) };
-                if !ours {
-                    return;
-                }
-                let (before, after) = (at(px, py) >= threshold, at(x, y) >= threshold);
-                if before == after {
-                    return;
-                }
-                // Clockwise round what is in (in on the right, y downward).
-                out.push(match (across, after) {
-                    (true, true) => Step { from: (x, y + 1), to: (x, y) },
-                    (true, false) => Step { from: (x, y), to: (x, y + 1) },
-                    (false, true) => Step { from: (x, y), to: (x + 1, y) },
-                    (false, false) => Step { from: (x + 1, y), to: (x, y) },
-                });
-            };
-            match &mask.tiles[&c] {
-                // All one level: only the edges on its border can part in from out.
-                MaskTile::Level(_) => {
-                    let at = |x: i64, y: i64| mask.level_at(x, y);
-                    for y in r.y0..r.y1 {
-                        look(r.x0, y, true, &at);
-                        look(r.x1, y, true, &at);
+            let top = i64::from(y) * side;
+            // Across the line between rows y − 1 and y.
+            for (x0, x1, above, below) in pieces(mask.row(y - 1), mask.row(y), &outside, &outside) {
+                let left = i64::from(x0) * side;
+                match (above, below) {
+                    (MaskTile::Level(a), MaskTile::Level(b)) => {
+                        if inn(*a) != inn(*b) {
+                            out.push(horizontal(left, i64::from(x1) * side, top, inn(*b)));
+                        }
                     }
-                    for x in r.x0..r.x1 {
-                        look(x, r.y0, false, &at);
-                        look(x, r.y1, false, &at);
-                    }
-                }
-                MaskTile::Levels(_) => {
-                    // Its pixels and a margin of one round it, read once.
-                    let area = r.expand(1);
-                    let w = area.width() as usize;
-                    let levels = mask.levels_in(&area);
-                    let at = |x: i64, y: i64| levels[(y - area.y0) as usize * w + (x - area.x0) as usize];
-                    for y in r.y0..=r.y1 {
-                        for x in r.x0..=r.x1 {
-                            if y < r.y1 {
-                                look(x, y, true, &at);
+                    _ => {
+                        for i in 0..TILE_SIZE {
+                            let (a, b) = (inn(above.get(i, TILE_SIZE - 1)), inn(below.get(i, 0)));
+                            if a != b {
+                                let x = left + i64::from(i);
+                                out.push(horizontal(x, x + 1, top, b));
                             }
-                            if x < r.x1 {
-                                look(x, y, false, &at);
+                        }
+                    }
+                }
+            }
+            // Within row y: between tiles side by side where they are not alike (where a run
+            // begins or ends), and within the tiles with levels of their own.
+            let row = mask.row(y);
+            let mut cuts: Vec<i32> = row.iter().flat_map(|r| [r.x0, r.x1]).collect();
+            cuts.dedup();
+            let tile_at = |x: i32| mask.tile(TileCoord::new(x, y)).unwrap_or(&outside);
+            for x in cuts {
+                let (l, r) = (tile_at(x - 1), tile_at(x));
+                let at = i64::from(x) * side;
+                match (l, r) {
+                    (MaskTile::Level(a), MaskTile::Level(b)) => {
+                        if inn(*a) != inn(*b) {
+                            out.push(vertical(at, top, top + side, inn(*b)));
+                        }
+                    }
+                    _ => {
+                        for i in 0..TILE_SIZE {
+                            let (a, b) = (inn(l.get(TILE_SIZE - 1, i)), inn(r.get(0, i)));
+                            if a != b {
+                                let y = top + i64::from(i);
+                                out.push(vertical(at, y, y + 1, b));
+                            }
+                        }
+                    }
+                }
+            }
+            for r in row {
+                let left = i64::from(r.x0) * side;
+                match &r.tile {
+                    MaskTile::Level(_) => {}
+                    MaskTile::Columns(l) => {
+                        for (i, w) in l.windows(2).enumerate() {
+                            if inn(w[0]) != inn(w[1]) {
+                                out.push(vertical(left + i as i64 + 1, top, top + side, inn(w[1])));
+                            }
+                        }
+                    }
+                    MaskTile::Rows(l) => {
+                        for (i, w) in l.windows(2).enumerate() {
+                            if inn(w[0]) != inn(w[1]) {
+                                out.push(horizontal(left, left + side, top + i as i64 + 1, inn(w[1])));
+                            }
+                        }
+                    }
+                    MaskTile::Levels(l) => {
+                        for py in 0..SIDE {
+                            for px in 0..SIDE {
+                                let here = inn(l[py * SIDE + px]);
+                                let (x, y) = (left + px as i64, top + py as i64);
+                                if px > 0 && inn(l[py * SIDE + px - 1]) != here {
+                                    out.push(vertical(x, y, y + 1, here));
+                                }
+                                if py > 0 && inn(l[(py - 1) * SIDE + px]) != here {
+                                    out.push(horizontal(x, x + 1, y, here));
+                                }
                             }
                         }
                     }
@@ -465,7 +797,20 @@ fn contours(mask: &Mask, threshold: u16) -> Vec<Vec<[f64; 2]>> {
     join(edges)
 }
 
-/// A pixel's edge, from one of its corners to the next, clockwise round what is in.
+/// The edge along the line `x` from `y0` down to `y1`, between pixels in and out, clockwise
+/// round those in (`right_in`: those on its right are in, y downward).
+fn vertical(x: i64, y0: i64, y1: i64, right_in: bool) -> Step {
+    if right_in { Step { from: (x, y1), to: (x, y0) } } else { Step { from: (x, y0), to: (x, y1) } }
+}
+
+/// The edge along the line `y` from `x0` to `x1`, between pixels in and out, clockwise round
+/// those in (`below_in`: those below it are in).
+fn horizontal(x0: i64, x1: i64, y: i64, below_in: bool) -> Step {
+    if below_in { Step { from: (x0, y), to: (x1, y) } } else { Step { from: (x1, y), to: (x0, y) } }
+}
+
+/// A straight piece of edge between pixels, from one pixel corner to another, clockwise round
+/// what is in. No other piece begins or ends between its ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Step {
     from: (i64, i64),
@@ -473,8 +818,9 @@ struct Step {
 }
 
 impl Step {
+    /// Which way it goes: one of the four, a step of 1.
     fn direction(self) -> (i64, i64) {
-        (self.to.0 - self.from.0, self.to.1 - self.from.1)
+        ((self.to.0 - self.from.0).signum(), (self.to.1 - self.from.1).signum())
     }
 }
 
@@ -563,6 +909,21 @@ impl Shape {
         let (dx, dy) = (x - self.center[0], y - self.center[1]);
         [dx * c + dy * s, -dx * s + dy * c]
     }
+
+    /// Of an ellipse: whether `(x, y)` is inside it, if it is surely more than `margin` from its
+    /// edge. A point on the ellipse `s` times as large (about the same middle) is at least
+    /// `|s - 1|` times the shorter semi-axis `b` from its edge: the ellipse holds the disc of
+    /// radius `b` about its middle, so, being convex, the disc of radius `(1 - s)·b` about each
+    /// point of the one `s` times as large (and the other way round where `s` is above 1).
+    fn ellipse_far(&self, x: f64, y: f64, margin: f64) -> Option<bool> {
+        let [lx, ly] = self.local(x, y);
+        let [a, b] = self.size.map(|v| v.abs() / 2.0);
+        if a.min(b) <= 0.0 {
+            return None;
+        }
+        let s = ((lx / a).powi(2) + (ly / b).powi(2)).sqrt();
+        ((s - 1.0).abs() * a.min(b) > margin).then_some(s < 1.0)
+    }
 }
 
 impl Coverage for Shape {
@@ -587,8 +948,18 @@ impl Coverage for Shape {
     }
 
     fn at(&self, x: f64, y: f64) -> f32 {
+        // Most of an ellipse's pixels are told without the distance's bisection.
+        if self.kind == ShapeKind::Ellipse
+            && let Some(inside) = self.ellipse_far(x, y, if self.smooth { 0.5 } else { 0.0 })
+        {
+            return f32::from(u8::from(inside));
+        }
         let d = self.distance(x, y);
         if self.smooth { (0.5 - d).clamp(0.0, 1.0) as f32 } else { f32::from(u8::from(d <= 0.0)) }
+    }
+
+    fn convex(&self) -> bool {
+        true
     }
 }
 
@@ -673,10 +1044,69 @@ mod tests {
         assert_eq!(m.level_at(9, 20), 0);
         assert_eq!(m.level_at(1010, 300), 0);
         assert_eq!(m.extent(), Extent::Within(IRect::new(10, 20, 1010, 620)));
-        // Tiles 0..=3 across, 0..=2 down; those wholly inside it, one level.
-        assert!(m.tiles().all(|(_, t)| matches!(t, MaskTile::Level(FULL)) || t.bytes() > 0));
-        assert_eq!(m.tile(TileCoord::new(1, 1)), Some(&MaskTile::Level(FULL)));
-        assert_eq!(m.bytes(), 10 * TILE_PIXELS as u64 * 2, "only the 10 tiles its edges cross keep levels");
+        // Tiles 0..=3 across, 0..=2 down: those wholly inside it one level, those along its
+        // sides a level a column or a row, and only its corners' a level a pixel.
+        let at = |x, y| m.tile(TileCoord::new(x, y)).cloned();
+        assert_eq!(at(1, 1), Some(MaskTile::Level(FULL)));
+        assert!(matches!(at(0, 1), Some(MaskTile::Columns(_))) && matches!(at(3, 1), Some(MaskTile::Columns(_))));
+        assert!(matches!(at(1, 0), Some(MaskTile::Rows(_))) && matches!(at(2, 2), Some(MaskTile::Rows(_))));
+        assert!([(0, 0), (3, 0), (0, 2), (3, 2)].iter().all(|&(x, y)| matches!(at(x, y), Some(MaskTile::Levels(_)))));
+        let corners = 4 * TILE_PIXELS as u64 * 2;
+        assert!(m.bytes() < corners + 8000, "{} bytes", m.bytes());
+    }
+
+    #[test]
+    fn a_rectangle_as_large_as_a_canvas_may_be_costs_its_edges() {
+        // 300,000 pixels a side (`dialogs::MAX_SIDE`): 1172 rows of 1172 tiles.
+        let side = 300_000.0;
+        let m = Mask::of(&Shape { smooth: false, ..rect(0.0, 0.0, side, side) });
+        assert_eq!(m.rows.len(), 1172);
+        // Within it, a run a row; along its right side, which ends within a column of tiles,
+        // and its bottom, a tile at a time.
+        assert!(m.rows.values().rev().skip(1).all(|r| r.len() == 2), "a run and a tile a row");
+        assert_eq!(m.row(1171).len(), 1172);
+        assert!(m.bytes() < 2_000_000, "{} bytes", m.bytes());
+        assert_eq!(m.extent(), Extent::Within(IRect::new(0, 0, 300_000, 300_000)));
+        assert_eq!(m.level_at(150_000, 150_000), FULL);
+        let mut lines = m.outline(HALF);
+        assert_eq!(lines.len(), 1);
+        lines[0].sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(lines[0], [[0.0, 0.0], [0.0, side], [side, 0.0], [side, side]]);
+        // Inverted, taken away from and added to, it keeps to its edges.
+        let hole = m.inverted();
+        assert_eq!(hole.outline(HALF).len(), 1);
+        let inner = Mask::of(&rect(1000.0, 1000.0, side - 1000.0, side - 1000.0));
+        let frame = m.combined(&inner, Combine::Subtract);
+        assert_eq!(frame.outline(HALF).len(), 2, "round the frame, and round its hole");
+        // About 7000 tiles along its four edges and its hole's, each a level a column or a row.
+        assert!(frame.bytes() < 8_000_000, "{} bytes", frame.bytes());
+        assert_eq!(frame.combined(&inner, Combine::Add), m);
+    }
+
+    #[test]
+    fn masks_alike_are_kept_alike_however_they_were_made() {
+        let whole = Mask::of(&rect(0.0, 0.0, 1024.0, 512.0));
+        let halves = Mask::of(&rect(0.0, 0.0, 512.0, 512.0)).combined(&Mask::of(&rect(512.0, 0.0, 1024.0, 512.0)), Combine::Add);
+        assert_eq!(halves, whole);
+        assert_eq!(whole.rows.values().map(Vec::len).collect::<Vec<_>>(), [1, 1], "one run a row");
+        // Taken away again, nothing, kept as nothing.
+        assert!(halves.combined(&whole, Combine::Subtract).is_none());
+    }
+
+    #[test]
+    fn an_ellipse_s_pixels_told_without_the_bisection_are_covered_as_much_as_with_it() {
+        for (size, angle, smooth) in [([40.0, 40.0], 0.0, true), ([300.0, 41.0], 30.0, true), ([90.0, 13.0], -70.0, false)]
+        {
+            let e = Shape { kind: ShapeKind::Ellipse, center: [3.25, -7.5], size, angle, smooth };
+            for y in -160..160 {
+                for x in -160..160 {
+                    let (px, py) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+                    let d = e.distance(px, py);
+                    let exact = if smooth { (0.5 - d).clamp(0.0, 1.0) as f32 } else { f32::from(u8::from(d <= 0.0)) };
+                    assert_eq!(level(e.at(px, py)), level(exact), "({x}, {y}) of {size:?} at {angle}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -809,7 +1239,8 @@ mod tests {
         let image = RasterImage::filled(&IRect::new(0, 0, 600, 100), red);
         // The left half selected, pixel 299 half; the image 1000 to the right of the origin.
         let mask = Mask::of(&rect(1000.0, 0.0, 1299.5, 100.0));
-        let cleared = blend(&image, [1000, 0], &mask, |_| [0.0; 4]);
+        let cleared = clear_selected(&image, [1000, 0], &mask);
+        assert_eq!(blend(&image, [1000, 0], &mask, |_| [0.0; 4]).pixel(299, 50), cleared.pixel(299, 50));
         assert_eq!(cleared.pixel(10, 50), crate::tile::pixel_from_f32([0.0; 4]));
         assert_eq!(cleared.pixel(400, 50), red);
         let half = crate::tile::pixel_to_f32(cleared.pixel(299, 50));

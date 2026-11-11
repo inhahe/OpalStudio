@@ -6,7 +6,6 @@
 //! (see [`History::set_budget`]), the oldest states are dropped.
 
 use crate::document::{Document, Layer, LayerContent, ObjectKind};
-use crate::mask::MaskTile;
 use crate::raster::RasterImage;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -708,17 +707,10 @@ fn images_of(l: &Layer) -> Vec<Arc<RasterImage>> {
     images
 }
 
-/// The tiles of a selection's mask with levels of their own (by address), with the memory
-/// each takes, each once.
+/// What a selection's mask takes memory for (by address), with the memory each part takes,
+/// each once (see `Mask::parts`).
 fn mask_tiles(s: &crate::selection::Selection) -> Vec<(usize, u64)> {
-    let mut out: Vec<(usize, u64)> = s
-        .mask()
-        .tiles()
-        .filter_map(|(_, t)| match t {
-            MaskTile::Levels(l) => Some((Arc::as_ptr(l).cast::<u16>() as usize, t.bytes())),
-            MaskTile::Level(_) => None,
-        })
-        .collect();
+    let mut out: Vec<(usize, u64)> = s.mask().parts().collect();
     out.sort_unstable();
     out.dedup();
     out
