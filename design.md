@@ -1014,6 +1014,42 @@ row i of M:    what output channel i is made of
   deficiency simulation (Viénot's matrices, which the colorpicker already uses), and the
   colorpicker's Channel Mix presets.
 
+### Expression layers
+
+An **expression layer** fills its pixels by expressions (*Expressions*), worked out for each
+pixel: one for each component of a color model the user picks (any opal-color has: sRGB and
+linear sRGB, HSL, HSB, Lab, LCh, OKLab, OKLCh), in that model's display units, and one for
+alpha. It keeps its expressions, not its pixels, so it stays editable: it is worked out again
+when they change, when the canvas changes, and when what it reads beneath it changes, as an
+adjustment layer is. Select › Fill with Expression makes one within the selection, through
+its mask (a soft edge blends), or over the canvas when nothing is selected; it can be
+rasterized as any layer can.
+
+- **What its expressions may use:**
+  - `x`, `y`: the pixel's middle, from the canvas's corner, a length (so `x < 2in` works);
+  - `u`, `v`: 0 to 1 across the selection's bounds (the canvas's, if nothing was selected);
+  - `r`, `a`: the distance and angle from the selection's center (radial and conic fills);
+  - `below`: the pixel of the layers beneath it, in the model chosen, as an adjustment layer
+    reads it (`below.L * 1.1`, `below.h + 30`, `below.alpha`), so that it is a custom
+    adjustment too;
+  - `noise(x, y)` (smooth, with a seed) and `random(seed)`, the same for a pixel each time it
+    is worked out;
+  - what other expressions may: the canvas's and layers' bounds (`Logo.right`), units.
+  - `let` bindings and `if … then … else`, added to the language for it, so that a value is
+    worked out once for every component, and stripes, rings and thresholds can be written.
+- **Fast enough for millions of pixels:** each expression is compiled once (its units and
+  names resolved, its kinds checked) into a flat program over plain numbers, worked out a
+  tile at a time on the background threads, with progress and Cancel (*Edits that take
+  long*); later on the GPU, for a live preview at full size. The dialog previews on the
+  screen's resolution first.
+- **Out of gamut:** clipped per component, or brought into gamut in OKLCh (hue and lightness
+  kept, chroma given up), the channel matrix's setting.
+- **Errors** are marked in the expression where they are, as the box's fields mark them; a
+  pixel an expression has no value for (a division by zero) is left transparent, and the
+  dialog says how many there were.
+- **Scripts:** `fill_expression` (the model, an expression per component, `alpha`), and the
+  layer's expressions read and set as its other settings are.
+
 ## Painting and retouching tools
 
 ### One engine; tools are presets of it

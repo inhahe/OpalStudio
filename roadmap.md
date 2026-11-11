@@ -163,6 +163,12 @@ right after the selection core it builds on.
 - Adjustments: levels, curves, hue/saturation, gradient map, channel matrix (3×3 weights
   plus offsets in a chosen color model, curves in place of weights, presets). Each as an
   adjustment layer or applied once to the selection.
+- Expression layers (`design.md`, *Expression layers*): each pixel filled by an expression
+  per component of a chosen color model, and one for alpha, of its place (`x`, `y`; `u`, `v`
+  across the selection; distance and angle from its center), noise, and the pixels beneath it
+  (`below.L`, `below.h`); editable, worked out a tile at a time off the interface thread,
+  compiled once. `let` and `if … then … else` added to expressions. Select › Fill with
+  Expression makes one within the selection; scripts too (`fill_expression`).
 - Layer masks; the blend modes from milestone 3 on layers.
 - Blend If: curves over channels of a chosen color model, for this layer and for the pixels
   beneath it.
