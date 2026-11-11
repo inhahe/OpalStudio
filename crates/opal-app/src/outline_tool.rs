@@ -15,10 +15,6 @@ use opal_core::selection::{MOST_POINTS, Step};
 use opal_core::symmetry::{MOST_ORDER, Symmetry};
 use std::sync::Arc;
 
-/// How near the first point (screen points) a click closes the loop, and how near the last
-/// one a drag pulls a curve from it.
-const NEAR: f32 = 7.0;
-
 /// How far the pointer moves (screen points) between the points a freehand stretch keeps.
 const STEP: f32 = 2.0;
 
@@ -33,6 +29,9 @@ pub struct Options {
     /// The symmetry an outline is drawn with: its order (1 for none) and whether it mirrors.
     pub order: u32,
     pub mirror: bool,
+    /// How near a press must be (screen points) to a point, a handle, a side or the symmetry's
+    /// handles to be on it.
+    pub near: f32,
 }
 
 impl Options {
@@ -40,7 +39,14 @@ impl Options {
     pub fn of(settings: &Settings) -> Options {
         let combine = Combine::named(&settings.choice("outline.combine")).unwrap_or_default();
         let order = settings.f64("outline.symmetry").round().clamp(1.0, f64::from(MOST_ORDER)) as u32;
-        Options { combine, smooth: settings.bool("outline.smooth"), order, mirror: settings.bool("outline.mirror") }
+        let near = settings.f64("outline.near") as f32;
+        Options {
+            combine,
+            smooth: settings.bool("outline.smooth"),
+            order,
+            mirror: settings.bool("outline.mirror"),
+            near,
+        }
     }
 }
 
@@ -237,6 +243,7 @@ fn guide(
     d: &mut DocState,
     response: &Response,
     shown: (Symmetry, Shown),
+    near: f32,
     to_doc: &dyn Fn(Pos2) -> [f64; 2],
     to_screen: &dyn Fn([f64; 2]) -> Pos2,
 ) -> bool {
@@ -279,14 +286,14 @@ fn guide(
     let Some(origin) = ctx.input(|i| i.pointer.press_origin()) else { return false };
     // A point of the outline edited, or a picked point's handle, under the press: the point's.
     if let Some((o, _)) = edited(d)
-        && part_at(o, &o.nodes(), &picked(d), false, origin, to_doc, to_screen).is_some()
+        && part_at(o, &o.nodes(), &picked(d), Reach { near, sides: false }, origin, to_doc, to_screen).is_some()
     {
         return false;
     }
     let (center, handle) = guide_handles(&s, to_screen);
-    let on = if origin.distance(handle) <= NEAR {
+    let on = if origin.distance(handle) <= near {
         false
-    } else if origin.distance(center) <= NEAR {
+    } else if origin.distance(center) <= near {
         true
     } else {
         return false;
@@ -349,6 +356,147 @@ pub fn draw_symmetry(
     );
 }
 
+/// The history state redrawing a stretch of the outline edited makes.
+pub const RESHAPE: &str = "Reshape outline";
+
+/// A right-drag (or one with R held, for touchpads) redrawing a stretch of the outline
+/// edited.
+#[derive(Clone, Debug)]
+pub struct Reshaping {
+    /// The outline as it was, how it combines, and what the steps before it select.
+    start: Outline,
+    combine: Combine,
+    before: opal_core::selection::Selection,
+    /// Where on it the drag began: a side, and how far along it.
+    from: (usize, f64),
+    /// The line drawn so far (document pixels), from where it began.
+    pub line: Vec<[f64; 2]>,
+    /// Whether the other stretch between its ends is the one redrawn (Tab).
+    pub other: bool,
+    /// The button it is drawn with.
+    button: PointerButton,
+    /// How near the outline (screen points) it must be let go to redraw it (the tool's reach as
+    /// it began).
+    near: f32,
+    /// The selection it began on (weakly, compared by address): once it is another (undone or
+    /// deselected meanwhile, say), the redrawing is given up.
+    of: std::sync::Weak<opal_core::selection::Selection>,
+}
+
+impl Reshaping {
+    /// Where its line ends on the outline, if its last point is near it (within its reach on
+    /// screen): a side, and how far along it.
+    fn landing(&self, to_screen: &dyn Fn([f64; 2]) -> Pos2) -> Option<(usize, f64)> {
+        let last = *self.line.last()?;
+        let (side, t, _) = self.start.nearest(last)?;
+        (to_screen(self.start.along(side, t)).distance(to_screen(last)) <= self.near).then_some((side, t))
+    }
+
+    /// The outline it would make let go now, and the stretch it would replace; none, if its
+    /// line does not end on the outline.
+    pub fn made(&self, to_screen: &dyn Fn([f64; 2]) -> Pos2) -> Option<(Outline, Vec<[f64; 2]>)> {
+        self.start.reshaping(self.from, self.landing(to_screen)?, &self.line, self.other)
+    }
+}
+
+/// What a frame's right-drags (and drags with R held) do to the outline edited on `d`: from a
+/// press on it, a line drawn freehand, which, let go on the outline, redraws the stretch
+/// between its ends (the one nearer it, or with Tab the other), as a history state; let go
+/// away from it, or given up with Esc or by the selection changing meanwhile, nothing (the
+/// status bar says why, let go away). Whether they were its.
+fn reshape(
+    ctx: &egui::Context,
+    d: &mut DocState,
+    response: &Response,
+    near: f32,
+    to_doc: &dyn Fn(Pos2) -> [f64; 2],
+    to_screen: &dyn Fn([f64; 2]) -> Pos2,
+) -> bool {
+    if let Some(mut r) = d.reshaping.clone() {
+        if !d.pixel_selection().is_some_and(|s| std::sync::Weak::ptr_eq(&r.of, &Arc::downgrade(s))) {
+            d.reshaping = None;
+            return true;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            d.reshaping = None;
+            return true;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
+            r.other = !r.other;
+        }
+        if ctx.input(|i| i.pointer.button_down(r.button)) {
+            if let Some(p) = response.interact_pointer_pos().or_else(|| response.hover_pos())
+                && r.line.last().is_none_or(|&l| to_screen(l).distance(p) >= STEP)
+            {
+                r.line.push(to_doc(p));
+            }
+            d.reshaping = Some(r);
+            return true;
+        }
+        // Let go: on the outline, the stretch redrawn.
+        d.reshaping = None;
+        match r.made(to_screen) {
+            Some((outline, _)) => {
+                let step = Step::Outline { outline, combine: r.combine };
+                match crate::select::within_memory(|b| r.before.then_within(step, b)) {
+                    Ok(made) => d.set_pixel_selection(Some(made), RESHAPE),
+                    Err(why) => d.notice = Some(why),
+                }
+            }
+            None => d.notice = Some(LET_GO_ON_IT.to_owned()),
+        }
+        return true;
+    }
+    let button = if response.drag_started_by(PointerButton::Secondary) {
+        PointerButton::Secondary
+    } else if response.drag_started_by(PointerButton::Primary) && ctx.input(|i| i.key_down(egui::Key::R)) {
+        PointerButton::Primary
+    } else {
+        return false;
+    };
+    let Some(origin) = ctx.input(|i| i.pointer.press_origin()) else { return false };
+    let Some((outline, combine)) = edited(d).map(|(o, c)| (o.clone(), c)) else { return false };
+    let Some((side, t, _)) = outline.nearest(to_doc(origin)) else { return false };
+    let on = outline.along(side, t);
+    if to_screen(on).distance(origin) > near {
+        return false;
+    }
+    let s = d.pixel_selection().expect("one with an outline");
+    let (before, of) = (s.before_last(), Arc::downgrade(s));
+    d.reshaping = Some(Reshaping {
+        start: outline,
+        combine,
+        before,
+        from: (side, t),
+        line: vec![on],
+        other: false,
+        button,
+        near,
+        of,
+    });
+    true
+}
+
+/// What the status bar says when a redrawing is let go away from the outline.
+pub const LET_GO_ON_IT: &str = "Let go on the outline to redraw the stretch between.";
+
+/// A redrawing under way, `r`, on `rect` (by `to_screen`): the stretch it would replace in
+/// red, and its line in `accent`.
+pub fn draw_reshaping(
+    ui: &egui::Ui,
+    r: &Reshaping,
+    accent: egui::Color32,
+    rect: Rect,
+    to_screen: &dyn Fn([f64; 2]) -> Pos2,
+) {
+    let painter = ui.painter().with_clip_rect(rect);
+    if let Some((_, gone)) = r.made(to_screen) {
+        let red = egui::Color32::from_rgba_unmultiplied(230, 40, 40, 200);
+        painter.add(egui::Shape::line(gone.iter().map(|&p| to_screen(p)).collect(), egui::Stroke::new(3.0, red)));
+    }
+    painter.add(egui::Shape::line(r.line.iter().map(|&p| to_screen(p)).collect(), egui::Stroke::new(2.0, accent)));
+}
+
 /// The history state a drag on the outline edited makes.
 pub const EDIT: &str = "Edit outline";
 
@@ -392,6 +540,14 @@ fn pick(d: &mut DocState, mut points: Vec<usize>, clicked: Option<usize>) {
     d.revision += 1;
 }
 
+/// What a press on the outline edited may be on: its points and its picked points' handles,
+/// and its sides too if `sides`, each within `near` screen points.
+#[derive(Clone, Copy, Debug)]
+struct Reach {
+    near: f32,
+    sides: bool,
+}
+
 /// What part of the outline edited a press is on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Part {
@@ -404,12 +560,12 @@ pub enum Part {
 
 /// The part of `o` (its points `nodes`, those `picked` in order) at `at` (screen points): the
 /// point or picked point's handle nearest it (the point, where a handle lies on it), else a
-/// side, unless `sides` is false; each within [`NEAR`].
+/// side, unless the `reach` leaves sides out; each within the reach.
 fn part_at(
     o: &Outline,
     nodes: &[Node],
     picked: &[usize],
-    sides: bool,
+    reach: Reach,
     at: Pos2,
     to_doc: &dyn Fn(Pos2) -> [f64; 2],
     to_screen: &dyn Fn([f64; 2]) -> Pos2,
@@ -423,12 +579,12 @@ fn part_at(
     });
     let points = nodes.iter().enumerate().map(|(i, n)| (far(n.at), Part::Point(i)));
     // Points first, so that one wins a tie with a handle lying on it.
-    let nearest = points.chain(handles).filter(|(d, _)| *d <= NEAR).min_by(|a, b| a.0.total_cmp(&b.0));
+    let nearest = points.chain(handles).filter(|(d, _)| *d <= reach.near).min_by(|a, b| a.0.total_cmp(&b.0));
     if let Some((_, part)) = nearest {
         return Some(part);
     }
     let (side, t, _) = o.nearest(to_doc(at))?;
-    (sides && far(o.along(side, t)) <= NEAR).then_some(Part::Side(side, t))
+    (reach.sides && far(o.along(side, t)) <= reach.near).then_some(Part::Side(side, t))
 }
 
 /// A drag on the outline edited.
@@ -570,7 +726,8 @@ fn edit(
         .filter(|p| d.pixel_selection().is_some_and(|s| std::sync::Weak::ptr_eq(&p.of, &Arc::downgrade(s))))
         .and_then(|p| p.clicked);
     let sides = !modifiers.shift && !modifiers.alt && options.combine == Combine::Replace;
-    let part = |at: Pos2| part_at(&outline, &nodes, &points, sides, at, to_doc, to_screen);
+    let part =
+        |at: Pos2| part_at(&outline, &nodes, &points, Reach { near: options.near, sides }, at, to_doc, to_screen);
     if response.drag_started_by(primary)
         && let Some(origin) = ctx.input(|i| i.pointer.press_origin())
         && let Some(part) = part(origin)
@@ -679,13 +836,17 @@ pub fn canvas(
     let modifiers = ctx.input(|i| i.modifiers);
     let held = ctx.input(|i| i.pointer.primary_down());
     let pointer = response.hover_pos().or_else(|| response.interact_pointer_pos());
-    let near = |a: [f64; 2], b: Pos2| to_screen(a).distance(b) <= NEAR;
+    let near = |a: [f64; 2], b: Pos2| to_screen(a).distance(b) <= options.near;
     // Ctrl+click picks a layer, as with every tool: it neither begins an outline nor adds to
     // one.
     let picking = modifiers.command;
+    // A stretch of the outline edited redrawn, by a right-drag (or with R held) from it.
+    if d.outlining.is_none() && reshape(ctx, d, response, options.near, to_doc, to_screen) {
+        return;
+    }
     // The symmetry's center and axis, by their handles, while no outline is drawn.
     if let Some(shown) = shown_symmetry(d, options)
-        && guide(ctx, d, response, shown, to_doc, to_screen)
+        && guide(ctx, d, response, shown, options.near, to_doc, to_screen)
     {
         return;
     }
@@ -839,8 +1000,9 @@ mod tests {
         );
         let (to_doc, to_screen) =
             (|p: Pos2| [f64::from(p.x), f64::from(p.y)], |p: [f64; 2]| Pos2::new(p[0] as f32, p[1] as f32));
-        let at =
-            |sides: bool, p: [f32; 2]| part_at(&o, &o.nodes(), &[1], sides, Pos2::new(p[0], p[1]), &to_doc, &to_screen);
+        let at = |sides: bool, p: [f32; 2]| {
+            part_at(&o, &o.nodes(), &[1], Reach { near: 7.0, sides }, Pos2::new(p[0], p[1]), &to_doc, &to_screen)
+        };
         assert_eq!(at(true, [100.0, 0.0]), Some(Part::Point(1)));
         // Its handle out of point 0 is not picked: no handle there; but the point's own is.
         assert_eq!(at(true, [30.0, -30.0]), None);
@@ -912,7 +1074,7 @@ mod tests {
         // since; else the outline edited's; else the one a new outline would have.
         let mut st = AppState::new();
         st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
-        let options = Options { combine: Combine::Replace, smooth: true, order: 6, mirror: false };
+        let options = Options { combine: Combine::Replace, smooth: true, order: 6, mirror: false, near: 7.0 };
         let d = st.active_mut().unwrap();
         assert_eq!(
             shown_symmetry(d, options).map(|(s, w)| (s.order, s.center, w)),

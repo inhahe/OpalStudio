@@ -146,6 +146,8 @@ pub struct DocState {
     pub picked: Option<crate::outline_tool::Picked>,
     /// A drag on the outline the outline tool edits.
     pub outline_drag: Option<crate::outline_tool::EditDrag>,
+    /// A stretch of that outline being drawn again.
+    pub reshaping: Option<crate::outline_tool::Reshaping>,
     /// Where the symmetry the outline tool draws with is centered, once moved (the canvas's
     /// middle until then), and its axis's angle (degrees clockwise from up); not part of the
     /// image's history, nor kept in its file.
@@ -235,6 +237,7 @@ impl DocState {
             outlining: None,
             picked: None,
             outline_drag: None,
+            reshaping: None,
             symmetry_center: None,
             symmetry_angle: 0.0,
             symmetry_drag: None,

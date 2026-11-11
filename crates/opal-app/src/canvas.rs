@@ -274,6 +274,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         if d.outline_drag.take().is_some() {
             d.discard_pending(crate::outline_tool::EDIT);
         }
+        d.reshaping = None;
         if d.symmetry_drag.take().is_some() {
             d.discard_pending(crate::outline_tool::MOVE_SYMMETRY);
         }
@@ -482,6 +483,9 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         && let Some((o, _)) = crate::outline_tool::edited(d)
     {
         crate::outline_tool::draw_edited(ui, o, &crate::outline_tool::picked(d), palette.accent, rect, &to_screen);
+    }
+    if let Some(r) = &d.reshaping {
+        crate::outline_tool::draw_reshaping(ui, r, palette.accent, rect, &to_screen);
     }
     if tool == ToolId::Outline
         && let Some((s, _)) = crate::outline_tool::shown_symmetry(d, outlining)

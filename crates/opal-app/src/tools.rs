@@ -186,6 +186,17 @@ pub static OUTLINE_SETTINGS: &[Def] = &[
         advanced: false,
     },
     Def {
+        key: "outline.near",
+        label: "Reach",
+        help: "How near a press must be (in screen points) to a point, a handle, a side or the \
+               symmetry's handles to be on it: to close an outline on its first point, pull a curve \
+               from its last, edit it, or redraw a stretch of it.",
+        section: "Outline",
+        kind: Kind::Float { min: 3.0, max: 20.0, decimals: 0, suffix: " pt", log: false },
+        default: Init::Float(7.0),
+        advanced: true,
+    },
+    Def {
         key: "outline.symmetry",
         label: "Symmetry",
         help: "How many copies of what is drawn are turned round the symmetry's center (1 for none): an \

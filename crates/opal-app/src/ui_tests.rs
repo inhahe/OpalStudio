@@ -3831,6 +3831,125 @@ fn the_outline_tool_draws_symmetric_outlines_about_a_center_moved_and_turned_on_
 }
 
 #[test]
+fn a_right_drag_redraws_a_stretch_of_the_outline_the_nearer_or_with_tab_the_other() {
+    use opal_core::geom::IRect;
+    use opal_core::mask::Extent;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Outline);
+    h.run();
+    let none = egui::Modifiers::NONE;
+    // A square drawn afresh (nothing selected first, so that its clicks are not on the last).
+    let square = |h: &mut Harness<'static, OpalApp>| {
+        h.state_mut().state_mut().active_mut().unwrap().deselect_pixels();
+        h.run();
+        for p in [[100.0, 100.0], [200.0, 100.0], [200.0, 200.0], [100.0, 200.0]] {
+            click_image(h, p, none);
+        }
+        h.key_press(egui::Key::Enter);
+        h.run();
+    };
+    let label = |h: &Harness<'static, OpalApp>| {
+        h.state().state().active().unwrap().history.undo_label().map(str::to_owned).unwrap_or_default()
+    };
+    // A drag with `button` along `path` (document pixels), `key` pressed once it has gone a number of
+    // points.
+    let drag = |h: &mut Harness<'static, OpalApp>,
+                button: egui::PointerButton,
+                path: &[[f32; 2]],
+                key: Option<(usize, egui::Modifiers, egui::Key)>| {
+        let v = h.state().state().active().unwrap().view;
+        let ppp = h.ctx.pixels_per_point();
+        let at = |[x, y]: [f32; 2]| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+        h.hover_at(at(path[0]));
+        h.run();
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at(path[0]),
+            button,
+            pressed: true,
+            modifiers: none,
+        });
+        h.run();
+        for (k, &p) in path[1..].iter().enumerate() {
+            h.hover_at(at(p));
+            h.run();
+            if let Some((after, modifiers, key)) = key
+                && after == k
+            {
+                h.key_press_modifiers(modifiers, key);
+                h.run();
+            }
+        }
+        let last = at(*path.last().unwrap());
+        h.input_mut().events.push(egui::Event::PointerButton { pos: last, button, pressed: false, modifiers: none });
+        h.run();
+    };
+    let bump: [[f32; 2]; 5] = [[125.0, 100.0], [135.0, 80.0], [150.0, 70.0], [165.0, 80.0], [175.0, 100.0]];
+    square(&mut h);
+    // A bump drawn up off the top side: the top between its ends redrawn.
+    drag(&mut h, egui::PointerButton::Secondary, &bump, None);
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 70, 200, 200))));
+    assert_eq!(label(&h), crate::outline_tool::RESHAPE);
+    // With Tab: the other stretch, the rest of the square, redrawn: the bump alone left.
+    square(&mut h);
+    drag(&mut h, egui::PointerButton::Secondary, &bump, Some((1, none, egui::Key::Tab)));
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(125, 70, 175, 100))));
+    // Let go away from it: nothing redrawn, and said why.
+    square(&mut h);
+    let was = selected(&h);
+    drag(&mut h, egui::PointerButton::Secondary, &[[125.0, 100.0], [140.0, 60.0], [160.0, 40.0]], None);
+    assert_eq!(selected(&h), was);
+    let said = h.state().state().notice.as_ref().map(|n| n.0.clone());
+    assert_eq!(said.as_deref(), Some(crate::outline_tool::LET_GO_ON_IT));
+    // Esc mid-drag gives it up, without a word; the points picked wait for it, and stay picked.
+    square(&mut h);
+    click_image(&mut h, [200.0, 100.0], none);
+    let was = selected(&h);
+    h.state_mut().state_mut().notice = None;
+    drag(&mut h, egui::PointerButton::Secondary, &bump, Some((2, none, egui::Key::Escape)));
+    assert_eq!(selected(&h), was);
+    assert_ne!(label(&h), crate::outline_tool::RESHAPE);
+    assert_eq!(crate::outline_tool::picked(h.state().state().active().unwrap()), vec![1]);
+    assert_eq!(h.state().state().notice, None);
+    // The selection undone mid-drag: given up, the undo kept.
+    square(&mut h);
+    drag(&mut h, egui::PointerButton::Secondary, &bump, Some((2, egui::Modifiers::COMMAND, egui::Key::Z)));
+    assert_eq!(selected(&h), None);
+    // How near it must be let go is the tool's Reach: 12 screen points off the outline is too far
+    // at 7, near enough at 20.
+    let v = h.state().state().active().unwrap().view;
+    let per_pixel =
+        (v.to_screen(egui::vec2(1.0, 0.0)) - v.to_screen(egui::vec2(0.0, 0.0))).x / h.ctx.pixels_per_point();
+    let short: [[f32; 2]; 5] = [bump[0], bump[1], bump[2], bump[3], [175.0, 100.0 - 12.0 / per_pixel]];
+    square(&mut h);
+    let was = selected(&h);
+    drag(&mut h, egui::PointerButton::Secondary, &short, None);
+    assert_eq!(selected(&h), was);
+    let reach = crate::settings::Value::Float(20.0);
+    h.state_mut().state_mut().tool_settings.get_mut(&crate::tools::ToolId::Outline).unwrap().set("outline.near", reach);
+    square(&mut h);
+    drag(&mut h, egui::PointerButton::Secondary, &short, None);
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 70, 200, 200))));
+    // R held, a left-drag does the same (for touchpads).
+    square(&mut h);
+    h.event(egui::Event::Key { key: egui::Key::R, physical_key: None, pressed: true, repeat: false, modifiers: none });
+    h.run();
+    drag(&mut h, egui::PointerButton::Primary, &bump, None);
+    h.event(egui::Event::Key { key: egui::Key::R, physical_key: None, pressed: false, repeat: false, modifiers: none });
+    h.run();
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 70, 200, 200))));
+    // Another tool chosen mid-drag: given up, nothing redrawn once the outline tool is back.
+    square(&mut h);
+    let was = selected(&h);
+    drag(&mut h, egui::PointerButton::Secondary, &bump, Some((2, none, egui::Key::M)));
+    assert_eq!(h.state().state().tool(), crate::tools::ToolId::Select);
+    h.key_press(egui::Key::L);
+    h.run();
+    assert_eq!(selected(&h), was);
+}
+
+#[test]
 fn the_selection_panel_lists_the_steps_and_takes_one_away() {
     let _gpu = gpu_lock();
     let mut h = harness();

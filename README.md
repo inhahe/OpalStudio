@@ -103,7 +103,9 @@ cargo test --workspace                     # all tests, interface tests included
   (a drag from the last point bending the side into a curve; Enter closes it, Backspace takes a
   point back), and the last outline edited with it: points dragged, added by a click on a side,
   taken away with Alt+click or Delete, made smooth or sharp with a double-click, their handles
-  and sides dragged to bend them, the whole outline moved with Alt+drag from a point; and
+  and sides dragged to bend them, the whole outline moved with Alt+drag from a point, a stretch
+  of it drawn again with a right-drag (or R + drag) from it back to it, the nearer stretch
+  between replaced, shown in red as you draw (Tab for the other); and
   symmetric outlines (Symmetry and Mirror in Tool settings): one slice drawn, completed by its
   copies turned round a center, mirrored across an axis, or both, the center and axis dragged
   on the image; Select All, Deselect, Reselect and Invert Selection; a layer's pixels

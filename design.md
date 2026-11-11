@@ -695,13 +695,27 @@ Edge snapping (live-wire) comes with milestone 8.
 
 ### Reshaping an outline
 
-- **Right-drag** starting on an existing outline redraws part of it. While dragging, the
-  stretch about to be replaced is shown in red with the new line drawn in.
+- **Right-drag** starting on the outline the outline tool edits redraws part of it, freehand.
+  While dragging, the stretch about to be replaced is shown in red with the new line drawn in.
 - The two ends of the new line split the closed outline into two stretches. The one nearer
-  the new line is replaced; **Tab**, pressed before releasing, flips to the other.
-- Releasing far from the outline, or Esc, cancels. How near counts as "on the outline" is
-  adjustable. A right-click without a drag still opens the context menu. **R + left-drag**
-  does the same as right-drag, for touchpads.
+  the new line is replaced (`Ring::nearness`: the mean distance of the line's points from
+  each stretch, sampled); **Tab**, pressed before releasing, flips to the other. On an
+  outline still open (a symmetric slice), what lies between the ends is replaced, the ends
+  kept.
+- The line's ends cut the outline where they land, exactly (curves split, `Ring::cut`); the
+  line replaces what lay between as straight sides, its points as the freehand outline's are
+  kept (one every 2 screen points), the points cut at made corners, the outline's other
+  joins, its smoothing and its symmetry kept (`Outline::reshaping`). The result is a history
+  state, *Reshape outline*, the selection worked out again within the memory free as an
+  edit's is.
+- Releasing far from the outline (the status bar says to let go on it), Esc, choosing another
+  tool, or the selection changing meanwhile (an undo, a Deselect: the redrawing keeps the
+  selection it began on weakly, compared by address, as the picked points do) cancels. How
+  near counts as "on the outline" is the tool's *Reach* setting (`outline.near`, 3 to 20
+  screen points, 7 by default), which is also how near a press must be to a point, handle,
+  side or the symmetry's handles. A right-click without a drag still opens the context menu.
+  **R + left-drag** does the same as right-drag, for touchpads. The picked points' keys wait
+  while a redrawing is under way.
 - Points of the outline can also be dragged directly.
 
 ### AI object and paint-the-area selection

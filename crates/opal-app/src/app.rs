@@ -383,6 +383,7 @@ impl OpalApp {
         if outline_tool
             && d.transform.is_none()
             && d.outline_drag.is_none()
+            && d.reshaping.is_none()
             && !crate::outline_tool::picked(d).is_empty()
         {
             let (delete, escape) = ctx.input_mut(|i| {

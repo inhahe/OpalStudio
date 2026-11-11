@@ -21,6 +21,9 @@ use std::collections::HashMap;
 /// How far a curve's flattening may stray from it, in pixels.
 const TOLERANCE: f64 = 0.05;
 
+/// How near the end of a side (as a share of it) a cut counts as that end.
+const CUT: f64 = 1e-9;
+
 /// The most pieces a curve is flattened to, however long it is.
 const MOST_PIECES: usize = 4096;
 
@@ -470,6 +473,57 @@ impl Ring {
         Some(if dir[0] * inward[0] + dir[1] * inward[1] < 0.0 { mul(dir, -1.0) } else { dir })
     }
 
+    /// Puts a point `t` (0 to 1) along the side from point `i`, which it splits exactly: a
+    /// curve into two (the point smooth), a straight side into two (sharp); it is point `i + 1`.
+    fn split(&mut self, i: usize, t: f64) {
+        let (a, b) = (self.points[i], self.points[self.next(i)]);
+        let (q, first, second, join) = match self.sides[i] {
+            Side::Line => (lerp(a, b, t), Side::Line, Side::Line, Join::Sharp),
+            Side::Curve { c1, c2 } => {
+                let (e1, e2, e3) = (lerp(a, c1, t), lerp(c1, c2, t), lerp(c2, b, t));
+                let (f1, f2) = (lerp(e1, e2, t), lerp(e2, e3, t));
+                let q = lerp(f1, f2, t);
+                (q, Side::Curve { c1: e1, c2: f1 }, Side::Curve { c1: f2, c2: e3 }, Join::Smooth)
+            }
+        };
+        self.sides[i] = first;
+        self.points.insert(i + 1, q);
+        self.sides.insert(i + 1, second);
+        self.joins.insert(i + 1, join);
+    }
+
+    /// Cuts the side from point `i` at `t` (0 to 1), as [`split`](Self::split) does, unless that
+    /// is at one of its ends (within [`CUT`]): the point there, and whether it was put in.
+    fn cut(&mut self, i: usize, t: f64) -> (usize, bool) {
+        if t <= CUT {
+            return (i, false);
+        }
+        if t >= 1.0 - CUT {
+            return (self.next(i), false);
+        }
+        self.split(i, t);
+        (i + 1, true)
+    }
+
+    /// The stretch of it through the points `stretch` (in order, two at least), as points
+    /// along it: nine along each side, its ends included.
+    fn sampled(&self, stretch: &[usize]) -> Vec<[f64; 2]> {
+        assert!(stretch.len() >= 2, "a stretch of one point");
+        stretch
+            .windows(2)
+            .flat_map(|w| (0..=8).map(move |k| (w[0], f64::from(k) / 8.0)))
+            .map(|(i, t)| self.along(i, t))
+            .collect()
+    }
+
+    /// How near the points `line` are, on average, to the stretch of it through the points
+    /// `stretch` (as [`sampled`](Self::sampled) takes them).
+    fn nearness(&self, stretch: &[usize], line: &[[f64; 2]]) -> f64 {
+        let samples = self.sampled(stretch);
+        let nearest = |p: [f64; 2]| samples.iter().map(|q| far(p, *q)).fold(f64::INFINITY, f64::min);
+        line.iter().map(|&p| nearest(p)).sum::<f64>() / line.len() as f64
+    }
+
     /// The point `t` (0 to 1) along the side from point `i`.
     fn along(&self, i: usize, t: f64) -> [f64; 2] {
         let (a, b) = (self.points[i], self.points[self.next(i)]);
@@ -651,21 +705,96 @@ impl Outline {
     /// The point added is point `i + 1`.
     pub fn split(&self, i: usize, t: f64) -> Outline {
         let mut ring = Ring::of(self);
-        let (a, b) = (ring.points[i], ring.points[ring.next(i)]);
-        let (q, first, second, join) = match ring.sides[i] {
-            Side::Line => (lerp(a, b, t), Side::Line, Side::Line, Join::Sharp),
-            Side::Curve { c1, c2 } => {
-                let (e1, e2, e3) = (lerp(a, c1, t), lerp(c1, c2, t), lerp(c2, b, t));
-                let (f1, f2) = (lerp(e1, e2, t), lerp(e2, e3, t));
-                let q = lerp(f1, f2, t);
-                (q, Side::Curve { c1: e1, c2: f1 }, Side::Curve { c1: f2, c2: e3 }, Join::Smooth)
+        ring.split(i, t);
+        ring.outline()
+    }
+
+    /// The outline with a stretch of it drawn again as `line` (points, joined by straight
+    /// sides), which runs from the place `from` on it (a side and how far along, as
+    /// [`nearest`](Self::nearest) gives them) to the place `to`, its ends put there: of a
+    /// closed outline, the stretch between them nearer the line, or, with `other`, the other;
+    /// of a slice, the stretch between them. The points it is cut at are corners. `None` if the
+    /// two places are one, or the line is not a line.
+    pub fn reshaped(&self, from: (usize, f64), to: (usize, f64), line: &[[f64; 2]], other: bool) -> Option<Outline> {
+        self.reshaping(from, to, line, other).map(|(o, _)| o)
+    }
+
+    /// [`reshaped`](Self::reshaped), with the stretch it replaces (its points, its curves
+    /// flattened): what is shown before it is done.
+    pub fn reshaping(
+        &self,
+        from: (usize, f64),
+        to: (usize, f64),
+        line: &[[f64; 2]],
+        other: bool,
+    ) -> Option<(Outline, Vec<[f64; 2]>)> {
+        if line.len() < 2 {
+            return None;
+        }
+        let mut ring = Ring::of(self);
+        // Cut the later place first, so that the earlier's side is still where it was; then
+        // the earlier (on the same side, its share of the part before the later cut).
+        let (lo_at, hi_at, back) = if (from.0, from.1) <= (to.0, to.1) { (from, to, false) } else { (to, from, true) };
+        let (mut hi, _) = ring.cut(hi_at.0, hi_at.1);
+        let lo_t = if lo_at.0 == hi_at.0 && hi_at.1 > CUT { lo_at.1 / hi_at.1 } else { lo_at.1 };
+        let (lo, put) = ring.cut(lo_at.0, lo_t);
+        if put && hi >= lo {
+            hi += 1;
+        }
+        if lo == hi {
+            return None;
+        }
+        // The line's points between its ends, from the earlier cut toward the later.
+        let mut inner: Vec<[f64; 2]> = line[1..line.len() - 1].to_vec();
+        if back {
+            inner.reverse();
+        }
+        let n = ring.points.len();
+        let walk = |from: usize, to: usize| -> Vec<usize> {
+            let mut v = vec![from];
+            while v[v.len() - 1] != to {
+                v.push((v[v.len() - 1] + 1) % n);
+            }
+            v
+        };
+        // What is kept: of a slice, its start to the earlier cut and the later cut to its end,
+        // the line between; of a closed outline, the stretch not replaced, the line going back
+        // from its end to its start.
+        let (runs, line_between, replaced): (Vec<Vec<usize>>, Vec<[f64; 2]>, Vec<usize>) = if !ring.closed() {
+            (vec![(0..=lo).collect(), (hi..n).collect()], inner, (lo..=hi).collect())
+        } else {
+            let (between, round) = (walk(lo, hi), walk(hi, lo));
+            let goes_between = (ring.nearness(&between, line) <= ring.nearness(&round, line)) != other;
+            if goes_between {
+                (vec![round], inner, between)
+            } else {
+                inner.reverse();
+                (vec![between], inner, round)
             }
         };
-        ring.sides[i] = first;
-        ring.points.insert(i + 1, q);
-        ring.sides.insert(i + 1, second);
-        ring.joins.insert(i + 1, join);
-        ring.outline()
+        let gone = ring.sampled(&replaced);
+        let mut new = Ring { points: Vec::new(), sides: Vec::new(), joins: Vec::new(), ..ring.clone() };
+        for (r, run) in runs.iter().enumerate() {
+            for (j, &k) in run.iter().enumerate() {
+                new.points.push(ring.points[k]);
+                new.joins.push(if k == lo || k == hi { Join::Sharp } else { ring.joins[k] });
+                // Its side as it was, but out of the run's last point, where the line goes.
+                if j + 1 < run.len() {
+                    new.sides.push(ring.sides[k]);
+                }
+            }
+            // The line, out of the run's last point: to the next run (a slice's), or round to
+            // its start (a closed outline's).
+            if r + 1 < runs.len() || ring.closed() {
+                new.sides.push(Side::Line);
+                for &p in &line_between {
+                    new.points.push(p);
+                    new.joins.push(Join::Sharp);
+                    new.sides.push(Side::Line);
+                }
+            }
+        }
+        Some((new.outline(), gone))
     }
 
     /// The outline without points `which`, the sides either side of each made one (a curve, if
@@ -1801,6 +1930,60 @@ mod tests {
             ..polygon(&[[0.0, 0.0], [1.0, 1.0]], true)
         };
         assert!(big.refused().is_some());
+    }
+
+    #[test]
+    fn a_stretch_of_an_outline_is_drawn_again_the_nearer_one_or_the_other() {
+        let area = |o: &Outline| {
+            let p = o.polygon();
+            (0..p.len())
+                .map(|i| p[i][0] * p[(i + 1) % p.len()][1] - p[(i + 1) % p.len()][0] * p[i][1])
+                .sum::<f64>()
+                .abs()
+                / 2.0
+        };
+        let square = polygon(&[[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]], true);
+        // A bump drawn up off the top side: the stretch of the top between its ends redrawn, or,
+        // the other way, the rest of the square.
+        let bump = [[25.0, 0.0], [50.0, -30.0], [75.0, 0.0]];
+        let bumped = square.reshaped((0, 0.25), (0, 0.75), &bump, false).expect("redrawn");
+        assert!((area(&bumped) - 10_750.0).abs() < 1e-6, "{}", area(&bumped));
+        let other = square.reshaped((0, 0.25), (0, 0.75), &bump, true).expect("redrawn");
+        assert!((area(&other) - 750.0).abs() < 1e-6, "{}", area(&other));
+        // Cut across from the top to the bottom, nearer the right: the right half redrawn, and
+        // drawn the other way round, the same.
+        let cut = [[50.0, 0.0], [75.0, 25.0], [75.0, 75.0], [50.0, 100.0]];
+        let right = square.reshaped((0, 0.5), (2, 0.5), &cut, false).expect("redrawn");
+        assert!((area(&right) - 6_875.0).abs() < 1e-6, "{}", area(&right));
+        let back: Vec<[f64; 2]> = cut.iter().rev().copied().collect();
+        let right_back = square.reshaped((2, 0.5), (0, 0.5), &back, false).expect("redrawn");
+        assert!((area(&right_back) - 6_875.0).abs() < 1e-6, "{}", area(&right_back));
+        let left = square.reshaped((0, 0.5), (2, 0.5), &cut, true).expect("redrawn");
+        assert!((area(&left) - 3_125.0).abs() < 1e-6, "{}", area(&left));
+        // Nearer the left: the left half redrawn, though it is the stretch round past the start.
+        let leftward: Vec<[f64; 2]> = cut.iter().map(|&[x, y]| [100.0 - x, y]).collect();
+        let left_cut = square.reshaped((0, 0.5), (2, 0.5), &leftward, false).expect("redrawn");
+        assert!((area(&left_cut) - 6_875.0).abs() < 1e-6, "{}", area(&left_cut));
+        // Where it was cut, corners; the corners kept, as they were.
+        assert_eq!(bumped.point_count(), 7);
+        // Cut on a curve, which splits smooth: corners there too.
+        let mut arch = polygon(&[[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]], true);
+        arch.segments[0] = Segment::Curve { c1: [30.0, -30.0], c2: [70.0, -30.0], to: [100.0, 0.0] };
+        let ends = [arch.along(0, 0.25), arch.along(0, 0.75)];
+        let arched = arch.reshaped((0, 0.25), (0, 0.75), &[ends[0], [50.0, -60.0], ends[1]], false).unwrap();
+        let nodes = arched.nodes();
+        let cut_at: Vec<usize> =
+            (0..nodes.len()).filter(|&i| ends.iter().any(|&e| far(nodes[i].at, e) < 1e-9)).collect();
+        assert_eq!(cut_at.len(), 2);
+        assert!(cut_at.iter().all(|&i| arched.join(i) == Join::Sharp));
+        // A slice: the stretch between redrawn, its symmetry kept.
+        let sym = Symmetry { order: 4, mirror: false, center: [0.0, 100.0], angle: 0.0 };
+        let slice = Outline { symmetry: Some(sym), ..polygon(&[[0.0, 0.0], [100.0, 0.0], [100.0, 100.0]], true) };
+        let redrawn = slice.reshaped((0, 0.5), (1, 0.5), &[[50.0, 0.0], [60.0, 40.0], [100.0, 50.0]], false).unwrap();
+        assert_eq!(redrawn.points(), vec![[0.0, 0.0], [50.0, 0.0], [60.0, 40.0], [100.0, 50.0], [100.0, 100.0]]);
+        assert_eq!(redrawn.symmetry, Some(sym));
+        // From and to one place: nothing redrawn.
+        assert!(square.reshaped((1, 0.5), (1, 0.5), &bump, false).is_none());
     }
 
     #[test]
