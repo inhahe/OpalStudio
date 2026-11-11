@@ -20,6 +20,13 @@ and `design.md` for how it is built. Known problems are listed in `known-issues.
 
 Free software under the GNU General Public License, version 3 or later (`LICENSE`).
 
+## Downloading
+
+Windows builds are on the [releases page](https://github.com/inhahe/OpalStudio/releases):
+unzip one anywhere and run `opal-studio.exe` (`opal-studio.com` is the same program for a
+command prompt, which waits for it). The `python` folder in it is the `opal` package for
+scripts (see *Scripting* below).
+
 ## Building and running
 
 Needs Rust 1.95 or later. On Windows, the Visual Studio C++ build tools as well: the
