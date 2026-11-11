@@ -3023,6 +3023,8 @@ fn the_select_tool_selects_a_rectangle_dragged_on_whole_pixels_and_combines_by_t
     // (Begun away from the square's box: on it, a drag edits the square.)
     select_drag(&mut h, [300.0, 200.0], [340.0, 220.0], none, Modifiers::ALT);
     assert_eq!(selected(&h), Some(Extent::Within(IRect::new(260, 180, 340, 220))), "not from its middle");
+    // Alt pressed during the drag, let go after it, was not Alt alone: no keytips.
+    assert_eq!(h.state().state().ribbon.keytips, crate::state::Keytips::Off, "the keytips came on");
     // A click selects nothing.
     let v = h.state().state().active().unwrap().view;
     let at = v.screen_rect.min + v.to_screen(egui::vec2(50.0, 50.0)) / h.ctx.pixels_per_point();

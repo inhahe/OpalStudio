@@ -237,16 +237,18 @@ impl OpalApp {
             self.cancel_paste_key(ctx);
             self.editing_keys(ctx);
         }
-        // Keytips: Alt pressed and released on its own toggles them.
+        // Keytips: Alt pressed and released on its own toggles them. Held with a button down
+        // (pressed in the middle of a drag, to draw from the middle, say), it is not alone.
         let (alt, other_input) = ctx.input(|i| {
-            let other = i.events.iter().any(|e| {
-                matches!(
-                    e,
-                    Event::Key { pressed: true, .. }
-                        | Event::PointerButton { pressed: true, .. }
-                        | Event::MouseWheel { .. }
-                )
-            });
+            let other = i.pointer.any_down()
+                || i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        Event::Key { pressed: true, .. }
+                            | Event::PointerButton { .. }
+                            | Event::MouseWheel { .. }
+                    )
+                });
             (i.modifiers.alt, other)
         });
         if alt && !self.alt_down {
