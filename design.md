@@ -983,6 +983,77 @@ used three ways:
 - **painted** with the Adjust brush (see *Painting and retouching tools*), optionally limited
   to matching colors by *Color match*.
 
+### The adjustments and their settings
+
+What each adjustment of milestone 5 offers. Throughout:
+
+- **Channels are a chosen color model's** where an adjustment works on channels (Levels and
+  Curves on RGB, on Lab's or OKLab's lightness, on any channel of any model), and colors are
+  judged in OKLCh by default (hue ranges, vibrance, saturation), where equal steps look
+  equal; the RGB-based way stays a choice.
+- **Samplers** (black, gray and white points) and **on-image adjustment** (dragging on the
+  image changes the setting for the color under the pointer) wherever they apply; the
+  histogram is shown beside settings that read it; every adjustment's settings can be saved
+  as named presets.
+- **No legacy algorithms** are carried (Photoshop's legacy Brightness/Contrast, its legacy
+  sharpening, Variations): one way each, done well.
+
+The adjustments, in the order milestone 5 builds them:
+
+- **Levels:** channel (composite or each); input black, white and midtone (gamma); output
+  black and white; the three samplers; Auto, with its options (the method: contrast per
+  channel, monochromatic contrast, finding dark and light colors, brightness and contrast;
+  clipping fractions for shadows and highlights; target colors for shadows, midtones and
+  highlights; neutral midtones snapped); clipping shown while a point is dragged with Alt.
+- **Curves** (the curve editor of milestone 0): channel; points added, moved, deleted and
+  typed (input and output); each point smooth or a corner; a curve drawn by hand, and
+  smoothed; on-image adjustment; the samplers; Auto with Levels' options; the display (grid
+  4×4 or 10×10, histogram, each channel's curve over the others, baseline, intersection
+  lines, values as light 0-255 or as ink 0-100%).
+- **Hue/Saturation:** range (all, or a hue family with its boundaries and fall-off widths
+  dragged on the hue bar); hue, saturation, lightness; colorize (one hue, its saturation and
+  lightness); on-image adjustment (a drag picks the range and changes saturation; with Ctrl,
+  hue).
+- **Gradient Map:** the gradient (color and opacity stops, midpoints), reversed, dithered;
+  the color model it interpolates in (OKLab by default, sRGB as Photoshop does, or smooth
+  through the stops).
+- **Channel Matrix** (the Channel Mixer, and more): see *Channel matrix*.
+- **Brightness/Contrast:** brightness and contrast, worked on perceptual lightness so that
+  extremes roll off rather than clip.
+- **Exposure:** exposure in stops, offset, gamma; in linear light.
+- **Black & White:** a weight for each of reds, yellows, greens, cyans, blues and magentas,
+  or finer, a curve over hue; tint (hue, saturation); on-image adjustment; Auto (weights
+  from the image's colors); presets.
+- **Vibrance:** vibrance (muted colors more, skin tones protected) and saturation.
+- **Color Balance:** the tonal range (shadows, midtones, highlights, where they split
+  adjustable); cyan-red, magenta-green and yellow-blue; preserve luminosity.
+- **Shadows/Highlights:** for shadows and for highlights each, amount, tonal width and
+  radius; color correction; midtone contrast; black and white clipping.
+- **Color Lookup:** 3D lookup tables (`.cube`, `.3dl`), abstract and device-link ICC
+  profiles (through the color management of milestone 5); the order of the table's data
+  where a format needs it; trilinear or tetrahedral interpolation; the files loaded kept in
+  the image, so that it looks the same on another computer.
+- **Photo Filter:** a preset (warming and cooling filters, and colors), or any color;
+  density; preserve luminosity.
+- **Invert** (all channels, or lightness only), **Threshold** (the level, on the histogram;
+  by luminance or a chosen channel; an edge width, so that the edge can be smooth),
+  **Posterize** (levels per channel; even steps in a perceptual space, or in RGB), and
+  **Desaturate** (to lightness, in linear light).
+- **Auto Tone, Auto Contrast and Auto Color:** Levels' Auto, each with its method, as
+  commands.
+- **Clarity:** local contrast at a chosen scale (amount, radius), with halos held back.
+- **Equalize:** brightness spread evenly; from the selection's histogram, applied to the
+  selection or to all.
+- **Solarize:** a threshold above which tones are inverted, and how softly.
+- **Selective Color:** the range (reds, yellows, greens, cyans, blues, magentas, whites,
+  neutrals, blacks); cyan, magenta, yellow and black; relative or absolute.
+- **Develop:** see milestone 5 in `roadmap.md`; its settings are the raw developer's.
+- **Replace Color** comes with color-range selection (milestone 8), whose sampling it uses:
+  the sampled colors (added to and taken from), fuzziness, localized clusters and their
+  range, the replacement (hue, saturation and lightness, or a color), and the mask shown.
+- Not carried: Variations (live previews make it pointless); HDR Toning and Match Color come
+  later (*Later* in `roadmap.md`).
+
 ### Channel matrix
 
 Each pixel's color, in a color model the user picks, is multiplied by a 3×3 matrix of
@@ -1049,6 +1120,107 @@ rasterized as any layer can.
   dialog says how many there were.
 - **Scripts:** `fill_expression` (the model, an expression per component, `alpha`), and the
   layer's expressions read and set as its other settings are.
+
+## Filters
+
+Filters (milestone F) are layers acting on what lies beneath them, or attached to one layer,
+editable as adjustment layers are; or applied once to the selection. Several stacked make a
+chain (the Filter Gallery's: chosen, stacked, reordered, turned off, deleted, previewed,
+zoomed, saved as presets). Throughout:
+
+- Radii and distances are lengths, in any unit and as expressions; centers and points are
+  dragged on the canvas, not only typed.
+- What a filter does where it reads past the image is a setting where it matters: wrap
+  round, repeat the edge's pixels, or transparent.
+- A randomized filter has a seed, so that it comes out the same each time it is worked out
+  again, and a button for another.
+- Previews at screen resolution first; the full render off the interface thread (*Edits that
+  take long*). Repeat Last Filter applies it again with its settings (Ctrl+F), or showing
+  them.
+- Fixed versions of others (Blur, Blur More, Sharpen, Sharpen More, Sharpen Edges) are not
+  carried: their adjustable forms do their work.
+
+**Blur:**
+- Gaussian: radius. Box: radius (across and down apart, if wanted). Average (no settings).
+- Shape: a kernel of any shape from the shape library (milestone 4), its radius.
+- Motion: angle and distance. Radial: amount, spin or zoom, the center.
+- Surface: radius and threshold (edges kept). Smart: radius, threshold, and its mode
+  (normal, edges only, edges over the image).
+- Lens: the depth source (none, a layer's transparency or mask, a layer as a depth map; a
+  depth estimated from the photograph later), the focal distance (clicked on the image),
+  inverted; the iris (shape by its blades, radius, blade curvature, rotation); specular
+  highlights (brightness, threshold); noise (amount, uniform or Gaussian, monochromatic).
+- The blur gallery's, each placed on the canvas: field blur (pins, each with an amount,
+  between them interpolated); iris blur (the focus's center, shape and roundness, the inner
+  boundary that stays sharp, the outer where full blur begins); tilt-shift (the focus band,
+  its transitions, rotation, distortion, symmetric or not); spin blur (center, ellipse,
+  angle, feather; several); path blur (paths from milestone 4, speed, taper, centered, the
+  ends' speed and shape; several). Shared: bokeh (amount, color, the range of light that
+  makes it) and grain (uniform, Gaussian or grain; amount, size, roughness, color, kept out
+  of highlights).
+
+**Sharpen:**
+- Unsharp Mask: amount, radius, threshold; on lightness only, or every channel.
+- Smart Sharpen: amount, radius, noise held back; what it removes (Gaussian blur, lens
+  blur, or motion blur at an angle); fading in shadows and in highlights (amount, tonal
+  width, radius each).
+- High Pass: radius (under Other in Photoshop).
+
+**Noise:**
+- Add Noise: amount, uniform or Gaussian, monochromatic; film grain (size, roughness, color).
+- Reduce Noise: strength, details kept, color noise, details sharpened again, JPEG
+  artifacts; per channel (strength and details kept for each).
+- Dust & Scratches: radius, threshold. Median: radius. Despeckle (no settings).
+
+**Distort** (centers dragged on the canvas):
+- Twirl: angle. Pinch: amount. Spherize: amount; both ways, across or down. Zigzag: amount,
+  ridges, style (around the center, out from it, pond ripples).
+- Ripple: amount, size. Ocean Ripple: size, magnitude. Wave: generators, wavelength and
+  amplitude (least and most), scale across and down, sine, triangle or square, randomized.
+- Polar Coordinates: rectangular to polar, or back. Shear: a curve (the curve editor) the
+  rows follow. Displace: scale across and down, the map (a layer or a file) stretched or
+  tiled. Glass: distortion, smoothness, texture (frosted, blocks, canvas, tiny lens, or an
+  image), scaling, inverted. Diffuse Glow: graininess, glow, clear amount (with the secondary
+  color).
+- Lens correction (geometric distortion, chromatic aberration, vignetting) is under
+  *Photographic*, below.
+
+**Pixelate:** Mosaic (cell size); Crystallize (cell size); Pointillize (cell size, the
+secondary color behind); Color Halftone (largest dot, a screen angle for each channel);
+Facet and Fragment (no settings); Mezzotint (dots, lines or strokes, fine to coarse).
+
+**Stylize:** Emboss (angle, height, amount); Find Edges and Glowing Edges (edge width,
+brightness, smoothness); Oil Paint (stylization, cleanliness, scale, bristle detail;
+lighting on or off, its angle and shine); Diffuse (normal, darken only, lighten only,
+anisotropic); Wind (wind, blast or stagger; left or right); Tiles (how many, how far they
+shift, what fills the gaps: the secondary color, the primary, the image inverted, or as it
+was); Trace Contour (level, the edge above or below it); Solarize (see Adjustments).
+
+**Render:** Clouds and Difference Clouds (the primary and secondary colors; scale, detail
+and seed added); Fibers (variance, strength, seed). Lighting Effects and Lens Flare come
+later; flames, trees and picture frames are not planned.
+
+**Photographic:** Vignette (amount, midpoint, roundness, feather, highlights kept); Lens
+Correction (barrel and pincushion, chromatic aberration, vignetting; by hand, or from lens
+profiles later).
+
+**Other:** Custom (a convolution matrix, 5×5 or larger, its scale and offset, saved and
+loaded); Minimum and Maximum (radius, keeping squareness or roundness); Offset (across,
+down, and what fills: wrapped round, the edge repeated, or transparent).
+
+**The artistic gallery** (later, `roadmap.md`): the chosen few, each with its settings as
+Photoshop has them: Watercolor (brush detail, shadow intensity, texture), Colored Pencil
+(width, pressure, paper brightness), Charcoal (thickness, detail, balance), Ink Outlines
+(stroke length, dark and light intensity), Sumi-e (stroke width, pressure, contrast), Cutout
+(levels, edge simplicity and fidelity), Poster Edges (thickness, intensity, posterization),
+Graphic Pen (stroke length, balance, direction), Halftone Pattern (size, contrast; dots,
+lines or circles), Bas Relief (detail, smoothness, light direction), Stained Glass (cell
+size, border, light), Mosaic Tiles (tile size, grout width and lightness), Craquelure
+(spacing, depth, brightness), Grain (intensity, contrast, and its kinds), Texturizer
+(texture, scaling, relief, light direction, inverted). The others (Chrome, Plastic Wrap,
+Note Paper, Plaster, Reticulation, Stamp, Torn Edges, Water Paper, Conte Crayon, Chalk &
+Charcoal, the remaining Brush Strokes and Artistic ones, Patchwork, Extrude) are not
+carried, nor the video filters (de-interlacing, NTSC colors).
 
 ## Painting and retouching tools
 

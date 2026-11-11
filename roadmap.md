@@ -1,8 +1,9 @@
 # Opal Studio — roadmap
 
-What each milestone delivers is specified in `design.md`; the milestones and items added from
-the tool and command lists (N, F, T and L, and the items marked *(new)*) get their sections
-there as each begins. Status: milestones 0, 1, S and E are done; everything after them is
+What each milestone delivers is specified in `design.md`: for milestone 5's adjustments and
+F's filters, down to each one's settings (*The adjustments and their settings*, *Filters*);
+the rest added from the tool and command lists (N, T and L, and the items marked *(new)*)
+get their sections there as each begins. Status: milestones 0, 1, S and E are done; everything after them is
 planned.
 
 **Order:** 0, 1, S, E, 2, N, A, 3, 4, 5, F, 6, T, 7, L, 8, 9, 10, 11, then *Later*. Within a
@@ -271,7 +272,8 @@ which they are most used on.
   displace (by a grayscale image), glass, shear.
 - Then stylizing: emboss, find edges and glowing edges, pixelate (mosaic, crystallize,
   pointillize, facet, fragment, mezzotint), color halftone, oil paint, diffuse glow, wind,
-  trace contour, tiles.
+  trace contour, tiles, diffuse; fibers.
+- Then the blur gallery's spin and path blurs (paths from milestone 4).
 
 ## 6. Retouching
 - *Sample from*: current, below, all visible, chosen and named sets.
@@ -367,8 +369,10 @@ In this order:
 - Lighting effects and lens flare.
 - Artboards; notes on the image; customizing which tools the tool strip shows.
 - Importing from a scanner or camera (WIA); frame animation, with GIF and APNG export.
-- The artistic gallery's chosen few: watercolor, colored pencil, charcoal, ink outlines,
-  cutout, stained glass, texturizer; and Photoshop-compatible filter plug-ins (8BF).
+- The artistic gallery's chosen few (`design.md`, *Filters*): watercolor, colored pencil,
+  charcoal, ink outlines, sumi-e, cutout, poster edges, graphic pen, halftone pattern, bas
+  relief, stained glass, mosaic tiles, craquelure, grain, texturizer; and
+  Photoshop-compatible filter plug-ins (8BF).
 - Auto-stroke brush (like Photoshop's Art History Brush).
 - Non-square pixels (separate horizontal and vertical resolutions, then showing pixels at
   their shape), as `todo.txt` describes.
