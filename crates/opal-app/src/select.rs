@@ -3,7 +3,7 @@
 //! (`paste.rs`); the canvas shows its outline (`canvas.rs`).
 
 use crate::state::{AppState, MessageKind};
-use opal_core::document::{Canvas, Document, Layer, LayerContent, LayerId, ObjectKind};
+use opal_core::document::{Document, Layer, LayerContent, LayerId, ObjectKind};
 use opal_core::geom::IRect;
 use opal_core::mask::{Combine, Extent, Mask, Shape, ShapeKind};
 use opal_core::selection::{Selection, Step};
@@ -130,7 +130,7 @@ impl AppState {
 
     /// Makes the canvas the rectangle round what is selected.
     pub(crate) fn crop_to_selection(&mut self) {
-        let d = self.active_mut().expect("available");
+        let d = self.active().expect("available");
         let Extent::Within(b) = d.pixel_selection().expect("available").mask().extent() else {
             return self.message(
                 MessageKind::Info,
@@ -138,16 +138,7 @@ impl AppState {
                 "The selection reaches past every edge: there is no rectangle round it.",
             );
         };
-        let max = i64::from(crate::dialogs::MAX_SIDE);
-        let canvas = Canvas { x: b.x0, y: b.y0, width: b.width().min(max) as u32, height: b.height().min(max) as u32 };
-        if canvas == d.doc().canvas {
-            return self.notify("The canvas is already the selection's rectangle.");
-        }
-        let result = d.apply("Crop to selection", |doc, _| {
-            doc.canvas = canvas;
-            Ok::<(), String>(())
-        });
-        self.report(result);
+        self.crop_canvas_to(&b, "Crop to selection", "The canvas is already the selection's rectangle.");
     }
 }
 

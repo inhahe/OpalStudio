@@ -341,16 +341,23 @@ impl AppState {
 
     /// Shrinks (or grows) the canvas to what the visible layers hold.
     pub(crate) fn crop_to_content(&mut self) {
-        let d = self.active_mut().expect("available");
+        let d = self.active().expect("available");
         let Some(b) = visible_bounds(d.doc()) else {
             return self.message(MessageKind::Info, "Crop to Content", "The visible layers are empty.");
         };
+        self.crop_canvas_to(&b, "Crop to content", "The canvas already fits the content.");
+    }
+
+    /// Makes the active image's canvas the rectangle `b` (each side at most [`MAX_SIDE`]), as a
+    /// history state labeled `label`; if it is that already, says `same` instead.
+    pub(crate) fn crop_canvas_to(&mut self, b: &IRect, label: &str, same: &str) {
+        let d = self.active_mut().expect("available");
         let (w, h) = (b.width().min(i64::from(MAX_SIDE)) as u32, b.height().min(i64::from(MAX_SIDE)) as u32);
         let canvas = Canvas { x: b.x0, y: b.y0, width: w, height: h };
         if canvas == d.doc().canvas {
-            return self.notify("The canvas already fits the content.");
+            return self.notify(same);
         }
-        let result = d.apply("Crop to content", |doc, _| {
+        let result = d.apply(label, |doc, _| {
             doc.canvas = canvas;
             Ok::<(), String>(())
         });
