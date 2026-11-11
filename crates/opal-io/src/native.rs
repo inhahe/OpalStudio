@@ -8,6 +8,10 @@
 //!   the frame, the transform as `[a, b, c, d, e, f]`, and the sampling).
 //! - `tiles/<n>.bin`: one tile each, numbered from 0. A tile shared by several layers or
 //!   objects (after duplicating a layer, say) is stored once and referenced from each.
+//! - `masks/<n>.bin`: the masks of the selections saved in the image (`selections` in
+//!   `document.json`: each one's name, its steps as the API's `selection` query tells them, a
+//!   mask step naming its mask's number, the mask they come to, and how the image has been
+//!   turned, flipped, resized or cropped since, if it has), each as `Mask::to_bytes` makes it.
 //!
 //! Version 0 had only pixel objects, called `raster`, without offsets, and a canvas
 //! without a position; it is still read.
@@ -20,12 +24,14 @@
 use crate::memory::{Free, Need};
 use crate::{IoError, Progress, write_all, write_atomically};
 use opal_core::document::{
-    Canvas, Document, IdGen, ImageObject, Layer, LayerContent, LayerId, Object, ObjectId, ObjectKind, PixelObject,
-    Placement,
+    Canvas, Document, IdGen, ImageObject, KeptSelection, Layer, LayerContent, LayerId, Object, ObjectId, ObjectKind,
+    PixelObject, Placement, SavedSelection,
 };
 use opal_core::geom::{Affine, IRect};
+use opal_core::mask::Mask;
 use opal_core::raster::RasterImage;
 use opal_core::resample::Sampling;
+use opal_core::selection::{Selection, Step};
 use opal_core::tile::{Pixel, TILE_PIXELS, Tile, TileCoord};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -38,8 +44,9 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 pub const MIME_TYPE: &str = "application/x-opal-studio";
-/// Version 2 adds tiles kept at 8 bits (`tiles/<n>.srgb8`).
-pub const FORMAT_VERSION: u32 = 2;
+/// Version 2 adds tiles kept at 8 bits (`tiles/<n>.srgb8`); version 3, selections saved in
+/// the image (`selections`, `masks/<n>.bin`).
+pub const FORMAT_VERSION: u32 = 3;
 const TILE_BYTES: usize = TILE_PIXELS * 4 * 2;
 /// The bytes of a tile kept at 8 bits.
 const SRGB8_BYTES: usize = TILE_PIXELS * 4;
@@ -73,6 +80,21 @@ struct FileDoc {
     resolution: f64,
     next_id: u64,
     layers: Vec<FileLayer>,
+    /// The selections saved in the image. Older files have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    selections: Vec<FileSelection>,
+}
+
+/// A selection saved in the image: its name; its steps, as the API's `selection` query tells
+/// them (a mask step's mask by its number, `mask`); the number of the mask they come to; and
+/// how the image has changed since (`[a, b, c, d, e, f]`), if it has.
+#[derive(Serialize, Deserialize)]
+struct FileSelection {
+    name: String,
+    steps: Vec<serde_json::Value>,
+    mask: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    since: Option<[f64; 6]>,
 }
 
 fn default_resolution() -> f64 {
@@ -212,6 +234,9 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path, progress: &Progress) -> Re
     let mut numbers: HashMap<*const Tile, usize> = HashMap::new();
     let mut tiles: Vec<Arc<Tile>> = Vec::new();
     let layers = doc.layers.iter().map(|l| file_layer(l, &mut numbers, &mut tiles)).collect();
+    // The saved selections' masks, each once, numbered as they first appear.
+    let mut masks: Vec<Arc<Mask>> = Vec::new();
+    let selections = doc.saved.iter().map(|s| file_selection(s, &mut masks)).collect();
     let file = FileDoc {
         format: "opal-studio".into(),
         version: FORMAT_VERSION,
@@ -219,6 +244,7 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path, progress: &Progress) -> Re
         resolution: doc.resolution,
         next_id: ids.peek(),
         layers,
+        selections,
     };
     // Compact: pretty, each number of a million tile places would take a line of its own.
     let json = serde_json::to_vec(&file).expect("the document serializes");
@@ -235,6 +261,10 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path, progress: &Progress) -> Re
         zip.start_file("document.json", deflated).map_err(zip_err)?;
         write_all(&mut zip, &json, path)?;
         write_tiles(&mut zip, &tiles, deflated, TILES_AT_ONCE, progress).map_err(zip_err)?;
+        for (n, m) in masks.iter().enumerate() {
+            zip.start_file(format!("masks/{n}.bin"), deflated).map_err(zip_err)?;
+            write_all(&mut zip, &m.to_bytes(), path)?;
+        }
         zip.finish().map_err(zip_err)?;
         Ok(())
     })
@@ -280,6 +310,90 @@ fn write_tiles<W: Write + Seek>(
         progress.advance(batch.len() as u64);
     }
     Ok(())
+}
+
+/// `saved` as the file keeps it, its masks (and its mask steps') numbered among `masks`.
+fn file_selection(saved: &SavedSelection, masks: &mut Vec<Arc<Mask>>) -> FileSelection {
+    let mut number = |m: &Arc<Mask>| match masks.iter().position(|k| Arc::ptr_eq(k, m)) {
+        Some(n) => n,
+        None => {
+            masks.push(m.clone());
+            masks.len() - 1
+        }
+    };
+    let s = &saved.kept.selection;
+    let steps = s
+        .steps()
+        .iter()
+        .map(|step| {
+            let mut v = serde_json::to_value(step).expect("a step serializes");
+            if let Step::Mask { mask, .. } = step {
+                v["mask"] = number(mask).into();
+            }
+            v
+        })
+        .collect();
+    let m = saved.kept.since;
+    let since = (m != Affine::IDENTITY).then_some([m.a, m.b, m.c, m.d, m.e, m.f]);
+    FileSelection { name: saved.name.clone(), steps, mask: number(s.mask()), since }
+}
+
+/// The selections a file saved, their masks read from `zip`; or why they are not: a name
+/// empty or given twice, a step the editor does not know, a mask missing or damaged, a
+/// change since the image would have no size.
+fn read_selections<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    file: Vec<FileSelection>,
+    limit: usize,
+    path: &Path,
+) -> Result<Vec<SavedSelection>, IoError> {
+    let bad = |message: String| IoError::Format { path: path.to_owned(), message };
+    let mut masks: HashMap<usize, Arc<Mask>> = HashMap::new();
+    let mut mask = |zip: &mut ZipArchive<R>, n: usize| -> Result<Arc<Mask>, IoError> {
+        if let Some(m) = masks.get(&n) {
+            return Ok(m.clone());
+        }
+        let name = format!("masks/{n}.bin");
+        let bytes = read_entry(zip, &name, limit, path)?;
+        let m = Arc::new(Mask::from_bytes(&bytes).map_err(|why| bad(format!("{name}: {why}")))?);
+        masks.insert(n, m.clone());
+        Ok(m)
+    };
+    let mut out: Vec<SavedSelection> = Vec::with_capacity(file.len());
+    for s in file {
+        let lower = s.name.to_lowercase();
+        if s.name.trim().is_empty() || out.iter().any(|o| o.name.to_lowercase() == lower) {
+            return Err(bad(format!("a saved selection's name, {:?}, is empty or given twice", s.name)));
+        }
+        let mut steps = Vec::with_capacity(s.steps.len());
+        for v in s.steps {
+            let step = if v.get("step").and_then(|k| k.as_str()) == Some("mask") {
+                let of = |key: &str| {
+                    v.get(key).cloned().ok_or_else(|| bad(format!("a mask step of {:?} has no {key}", s.name)))
+                };
+                let combine = serde_json::from_value(of("combine")?).map_err(|e| bad(format!("{:?}: {e}", s.name)))?;
+                let made_of = serde_json::from_value(of("of")?).map_err(|e| bad(format!("{:?}: {e}", s.name)))?;
+                let n = of("mask")?.as_u64().ok_or_else(|| bad(format!("{:?}: a mask's number", s.name)))? as usize;
+                Step::Mask { mask: mask(zip, n)?, combine, of: made_of }
+            } else {
+                serde_json::from_value(v).map_err(|e| bad(format!("a step of {:?}: {e}", s.name)))?
+            };
+            steps.push(step);
+        }
+        let since = match s.since {
+            None => Affine::IDENTITY,
+            Some([a, b, c, d, e, f]) => {
+                let m = Affine { a, b, c, d, e, f };
+                if m.inverse().is_none() {
+                    return Err(bad(format!("{:?}: what has changed since would leave it no size", s.name)));
+                }
+                m
+            }
+        };
+        let selection = Arc::new(Selection::kept(steps, mask(zip, s.mask)?));
+        out.push(SavedSelection { name: s.name, kept: KeptSelection { selection, since } });
+    }
+    Ok(out)
 }
 
 fn file_layer(layer: &Layer, numbers: &mut HashMap<*const Tile, usize>, tiles: &mut Vec<Arc<Tile>>) -> FileLayer {
@@ -429,8 +543,10 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
     for l in file.layers {
         layers.push(Arc::new(build_layer(l, &tiles, path)?));
     }
-    // Selections are not kept in the file (a later version of it will keep their recipes).
-    let doc = Document { canvas: file.canvas, resolution: file.resolution, layers, selection: None, deselected: None };
+    // The selections saved in it; what was selected is not kept.
+    let saved = read_selections(&mut zip, file.selections, json_limit(free), path)?;
+    let doc =
+        Document { canvas: file.canvas, resolution: file.resolution, layers, selection: None, deselected: None, saved };
     let mut ids = IdGen::starting_at(file.next_id);
     ids.reserve_above(&doc);
     Ok(Loaded { doc, ids })
@@ -625,6 +741,70 @@ mod tests {
         copy.locked = true;
         d.insert(Position { parent: Some(g), index: 0 }, copy).unwrap();
         (d, ids)
+    }
+
+    #[test]
+    fn selections_saved_in_the_image_are_kept_in_its_file_and_a_damaged_one_refused() {
+        use opal_core::mask::{Combine, Shape, ShapeKind};
+        use opal_core::modify::Reach;
+        use opal_core::selection::MaskOf;
+        let (mut doc, ids) = sample();
+        let ellipse =
+            Shape { kind: ShapeKind::Ellipse, center: [100.0, 80.0], size: [90.0, 60.0], angle: 15.0, smooth: true };
+        let shapes = Selection::new(Step::Shape { shape: ellipse, combine: Combine::Replace })
+            .then(Step::Grow { by: 6.0, corners: Reach::Square });
+        // A mask step (a layer's opacity), its mask shared with the selection it comes to.
+        let layer = Arc::new(Mask::of(&Shape { kind: ShapeKind::Rectangle, ..ellipse }));
+        let masked =
+            Selection::new(Step::Mask { mask: layer.clone(), combine: Combine::Replace, of: MaskOf::LayerPixels })
+                .then(Step::Invert);
+        let turned = Affine::rotate(std::f64::consts::FRAC_PI_2).then(Affine::translate(200.0, 0.0));
+        doc.saved = vec![
+            SavedSelection { name: "Shapes".into(), kept: KeptSelection::new(Arc::new(shapes.clone())) },
+            SavedSelection {
+                name: "Masked".into(),
+                kept: KeptSelection { selection: Arc::new(masked.clone()), since: turned },
+            },
+        ];
+        let path = std::env::temp_dir().join(format!("opal-native-saved-{}.opal", std::process::id()));
+        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        let loaded = load(&path, None).unwrap().doc;
+        assert_eq!(loaded.saved.len(), 2);
+        let [a, b] = [&loaded.saved[0], &loaded.saved[1]];
+        assert_eq!((a.name.as_str(), a.kept.since), ("Shapes", Affine::IDENTITY));
+        assert_eq!(*a.kept.selection, shapes);
+        assert_eq!((b.name.as_str(), b.kept.since), ("Masked", turned));
+        assert_eq!(*b.kept.selection, masked);
+        assert!(matches!(b.kept.selection.steps()[0], Step::Mask { of: MaskOf::LayerPixels, .. }));
+        // Damaged: a name given twice, a mask missing.
+        let rewrite = |change: &dyn Fn(&mut serde_json::Value)| {
+            let mut zip = ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+            let mut json = String::new();
+            zip.by_name("document.json").unwrap().read_to_string(&mut json).unwrap();
+            let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+            change(&mut v);
+            let out = std::env::temp_dir().join(format!("opal-native-saved-bad-{}.opal", std::process::id()));
+            let mut w = ZipWriter::new(std::fs::File::create(&out).unwrap());
+            for i in 0..zip.len() {
+                let mut e = zip.by_index(i).unwrap();
+                let name = e.name().unwrap().into_owned();
+                w.start_file(name.clone(), SimpleFileOptions::default()).unwrap();
+                if name == "document.json" {
+                    w.write_all(v.to_string().as_bytes()).unwrap();
+                } else {
+                    std::io::copy(&mut e, &mut w).unwrap();
+                }
+            }
+            w.finish().unwrap();
+            let r = load(&out, None).map(|_| ());
+            std::fs::remove_file(&out).unwrap();
+            r
+        };
+        let twice = rewrite(&|v| v["selections"][1]["name"] = "SHAPES".into()).unwrap_err().to_string();
+        assert!(twice.contains("given twice"), "{twice}");
+        let missing = rewrite(&|v| v["selections"][0]["mask"] = 99.into()).unwrap_err().to_string();
+        assert!(missing.contains("masks/99.bin"), "{missing}");
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

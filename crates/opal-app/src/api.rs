@@ -574,6 +574,27 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             INTO_ACTIVE,
             UNIT,
         ],
+        SaveSelection => &[
+            DOCUMENT,
+            Param {
+                name: "name",
+                kind: Kind::Text,
+                help: "The name it is saved under: a selection saved under it already (whatever the case of its \
+                       letters) is replaced.",
+                otherwise: Otherwise::Required,
+            },
+        ],
+        LoadSelection => &[
+            DOCUMENT,
+            SAVED_NAME,
+            COMBINE,
+            Param {
+                name: "invert",
+                kind: Kind::Bool,
+                help: "Invert it first: what it does not select, before it combines.",
+                otherwise: Otherwise::Value("false"),
+            },
+        ],
         TransformSelection => &[
             DOCUMENT,
             BOX_X,
@@ -652,6 +673,14 @@ const QUERIES: &[(&str, &str, &[Param])] = &[
          pixel by pixel by Rotate, Flip or Resize Image, which could not carry them exactly; it gives no numbers, \
          only how it combines). \
          select_all, deselect, reselect, invert_selection and select_layer_pixels answer with it too.",
+        &[DOCUMENT],
+    ),
+    (
+        "saved_selections",
+        "The selections saved in an image (save_selection), in the order they were first saved: each one's \
+         name, the rectangle round what it selects (as the selection query tells it, carried as the image has \
+         been turned, flipped, resized or cropped since it was saved), its steps as they were when it was \
+         saved, and whether the image has changed since (load_selection carries it so).",
         &[DOCUMENT],
     ),
     (
@@ -839,6 +868,14 @@ const SHAPE_PARAMS: &[Param] = &[
     UNIT,
 ];
 
+/// A selection saved in the image, by its name.
+const SAVED_NAME: Param = Param {
+    name: "name",
+    kind: Kind::Text,
+    help: "The selection saved in the image under this name (whatever the case of its letters).",
+    otherwise: Otherwise::Required,
+};
+
 /// Which step of the selection's recipe: its number among the selection query's steps.
 const STEP_INDEX: Param = Param {
     name: "index",
@@ -898,6 +935,12 @@ const STEP_SETTINGS: &[Param] = &[
 /// The changes the API alone makes (no command of the interface makes them): their names,
 /// what they do, and their parameters.
 const CHANGES: &[(&str, &str, &[Param])] = &[
+    (
+        "delete_saved_selection",
+        "Deletes a selection saved in the image (as the Selection panel does), by its name. Answers with the \
+         selections saved then, as saved_selections tells them.",
+        &[DOCUMENT, SAVED_NAME],
+    ),
     (
         "remove_selection_step",
         "Takes a step away from the recipe of what is selected, by its number among the selection query's \
@@ -1903,6 +1946,7 @@ impl AppState {
             }
             None if method.name == "remove_selection_step" => self.selection_step_by_args(true, &args),
             None if method.name == "edit_selection_step" => self.selection_step_by_args(false, &args),
+            None if method.name == "delete_saved_selection" => Reply::Now(self.delete_saved_by_args(&args)),
             None if method.name == "set_preference" => Reply::Now(self.set_preference(&args, ctx)),
             None => Reply::Now(self.answer(&method.name, &args)),
         };
@@ -2039,6 +2083,10 @@ impl AppState {
             "selection" => {
                 let d = self.doc(self.which(args)?).expect("found");
                 Ok(selection_json(d))
+            }
+            "saved_selections" => {
+                let d = self.doc(self.which(args)?).expect("found");
+                Ok(saved_json(d.doc()))
             }
             "methods" => Ok(describe()),
             "preferences" => Ok(self.preferences_json()),
@@ -2287,6 +2335,20 @@ impl AppState {
                     return now(Ok(json!({})));
                 }
                 now(self.apply_box(&place, false))
+            }
+            Cmd::SaveSelection => {
+                let name = args.text("name").expect("required");
+                if let Some(why) = crate::select::save_name_refused(name) {
+                    return now(Err(format!("save_selection: {why}")));
+                }
+                self.save_selection(name);
+                now(Ok(saved_json(self.active().expect("available").doc())))
+            }
+            Cmd::LoadSelection => {
+                let name = args.text("name").expect("required");
+                let combine = args.text("combine").and_then(opal_core::mask::Combine::named).unwrap_or_default();
+                self.load_selection(name, combine, args.flag("invert").unwrap_or(false));
+                self.reply_when_done(|st, id| selection_json(st.doc(id).expect("open")))
             }
             Cmd::TransformSelection => {
                 let place = match BoxArgs::of(args, params, self.active().map(|d| d.history.doc())) {
@@ -2555,6 +2617,19 @@ impl AppState {
         let made = opal_core::selection::with_maker(d.pixel_selection().map(|s| &**s), step);
         d.set_pixel_selection(Some(made), crate::select_tool::label(crate::select_tool::Draws::Shape(kind)));
         Ok(selection_json(d))
+    }
+
+    /// Deletes the saved selection `args` name (`delete_saved_selection`): the selections saved
+    /// then, as `saved_selections` tells them; or why not.
+    fn delete_saved_by_args(&mut self, args: &Args) -> Result<Value, String> {
+        let id = self.which(args)?;
+        self.show_doc(id);
+        let name = args.text("name").expect("required");
+        if self.doc(id).and_then(|d| d.doc().saved_selection(name)).is_none() {
+            return Err(format!("delete_saved_selection: No selection is saved as \"{name}\"."));
+        }
+        self.delete_saved_selection(name);
+        Ok(saved_json(self.doc(id).expect("open").doc()))
     }
 
     /// Takes away (`remove`), or changes as `args` say, the step of the selection they name
@@ -2993,12 +3068,42 @@ fn changed_step(step: opal_core::selection::Step, args: &Args) -> Result<opal_co
 /// the steps that made it, positions counted from the canvas's corner, as everywhere in the
 /// API.
 fn selection_json(d: &crate::doc::DocState) -> Value {
+    match d.pixel_selection() {
+        Some(s) => selection_value(s, &d.doc().canvas, &opal_core::geom::Affine::IDENTITY),
+        None => json!({ "bounds": Value::Null, "steps": [] }),
+    }
+}
+
+/// The selections saved in `doc`, as the `saved_selections` query gives them.
+fn saved_json(doc: &opal_core::document::Document) -> Value {
+    let saved: Vec<Value> = doc
+        .saved
+        .iter()
+        .map(|s| {
+            let mut v = selection_value(&s.kept.selection, &doc.canvas, &s.kept.since);
+            v["name"] = s.name.clone().into();
+            v["changed_since"] = (s.kept.since != opal_core::geom::Affine::IDENTITY).into();
+            v
+        })
+        .collect();
+    json!(saved)
+}
+
+/// Selection `s` as the `selection` query tells it: the rectangle round what it selects,
+/// carried by `since` (the box round its corners so carried), from the corner of `c`; and its
+/// steps, shapes by their middles from that corner.
+fn selection_value(
+    s: &opal_core::selection::Selection,
+    c: &opal_core::document::Canvas,
+    since: &opal_core::geom::Affine,
+) -> Value {
     use opal_core::selection::Step;
-    let Some(s) = d.pixel_selection() else { return json!({ "bounds": Value::Null, "steps": [] }) };
-    let c = d.doc().canvas;
     let bounds = match s.mask().extent() {
         opal_core::mask::Extent::Nothing => Value::Null,
-        opal_core::mask::Extent::Within(r) => json!([r.x0 - c.x, r.y0 - c.y, r.width(), r.height()]),
+        opal_core::mask::Extent::Within(r) => {
+            let r = opal_core::geom::IRect::covering(&since.bounds(&r.to_f()));
+            json!([r.x0 - c.x, r.y0 - c.y, r.width(), r.height()])
+        }
         opal_core::mask::Extent::Unbounded => json!("unbounded"),
     };
     let steps: Vec<Step> = s
@@ -3548,6 +3653,50 @@ mod tests {
         // the 20 x 40 canvas; twice the size, 10 x 20.
         let s = now(&mut st, "reselect", json!({})).unwrap();
         assert_eq!(s["bounds"], json!([30, 0, 10, 20]), "{s}");
+    }
+
+    #[test]
+    fn a_script_saves_lists_loads_and_deletes_selections() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 40, "height": 20 })).unwrap();
+        let rect = json!({ "x": 1, "y": 1, "width": 10, "height": 5, "smooth": false });
+        now(&mut st, "select_rectangle", rect).unwrap();
+        now(&mut st, "grow_selection", json!({ "by": 1, "corners": "square" })).unwrap();
+        let before = st.active().unwrap().doc().clone();
+        let listed = now(&mut st, "save_selection", json!({ "name": "Corner" })).unwrap();
+        assert_eq!(listed[0]["name"], json!("Corner"));
+        assert_eq!(listed[0]["bounds"], json!([0, 0, 12, 7]), "{listed}");
+        assert!(!st.active().unwrap().doc().saves_as(&before), "a saved selection is no change to save");
+        // Saved again under the same name, whatever its case: replaced.
+        now(&mut st, "select_rectangle", json!({ "x": 30, "y": 10, "width": 5, "height": 5 })).unwrap();
+        now(&mut st, "save_selection", json!({ "name": "Other" })).unwrap();
+        now(&mut st, "deselect", json!({})).unwrap();
+        // Loaded in place of nothing: its steps come back.
+        let s = now(&mut st, "load_selection", json!({ "name": "corner" })).unwrap();
+        assert_eq!((s["bounds"].clone(), s["steps"].as_array().unwrap().len()), (json!([0, 0, 12, 7]), 2), "{s}");
+        // Added to it, inverted: everything but the other, so the rectangle round it is unbounded.
+        let s = now(&mut st, "load_selection", json!({ "name": "Other", "combine": "add", "invert": true })).unwrap();
+        assert_eq!(s["bounds"], json!("unbounded"), "{s}");
+        assert_eq!(s["steps"][2]["of"], json!("saved"), "{s}");
+        // The image turned a quarter: loaded, carried so; listed, said so.
+        now(&mut st, "deselect", json!({})).unwrap();
+        now(&mut st, "rotate_cw", json!({})).unwrap();
+        let listed = now(&mut st, "saved_selections", json!({})).unwrap();
+        assert_eq!(
+            (listed[0]["changed_since"].clone(), listed[0]["bounds"].clone()),
+            (json!(true), json!([13, 0, 7, 12])),
+            "{listed}"
+        );
+        let s = now(&mut st, "load_selection", json!({ "name": "Corner" })).unwrap();
+        assert_eq!(s["bounds"], json!([13, 0, 7, 12]), "{s}");
+        // Refused: a name not saved, an empty one; deleted, gone.
+        let why = now(&mut st, "load_selection", json!({ "name": "Nowhere" })).unwrap_err();
+        assert!(why.contains("No selection is saved as \"Nowhere\""), "{why}");
+        let why = now(&mut st, "save_selection", json!({ "name": "  " })).unwrap_err();
+        assert!(why.contains("not blank"), "{why}");
+        let left = now(&mut st, "delete_saved_selection", json!({ "name": "CORNER" })).unwrap();
+        assert_eq!(left.as_array().unwrap().len(), 1);
+        assert_eq!(left[0]["name"], json!("Other"));
     }
 
     #[test]

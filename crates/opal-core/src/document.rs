@@ -469,18 +469,35 @@ pub struct Document {
     /// What is selected, if anything: operations limited to it act through its mask.
     pub selection: Option<Arc<crate::selection::Selection>>,
     /// What was selected when the selection was last taken away (Deselect), for Reselect to
-    /// bring back. Not saved.
-    pub deselected: Option<Deselected>,
+    /// bring back. Not saved in the file.
+    pub deselected: Option<KeptSelection>,
+    /// Selections saved by name (Save Selection), to load back: saved in the file, in the
+    /// order they were first saved.
+    pub saved: Vec<SavedSelection>,
 }
 
-/// What Deselect took away, for Reselect to bring back, with how the image has been turned,
-/// flipped, resized or cropped since (`since`): Reselect carries it so, once
-/// ([`Selection::transformed`](crate::selection::Selection::transformed)), rather than each
-/// of those carrying a selection nobody may ask for again.
+/// A selection kept aside (what Deselect took away; one saved by name), with how the image
+/// has been turned, flipped, resized or cropped since (`since`): it is carried so once, when
+/// it is brought back ([`Selection::transformed`](crate::selection::Selection::transformed)),
+/// rather than each of those carrying a selection nobody may ask for again.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Deselected {
+pub struct KeptSelection {
     pub selection: Arc<crate::selection::Selection>,
     pub since: Affine,
+}
+
+impl KeptSelection {
+    /// `selection`, kept as it is now.
+    pub fn new(selection: Arc<crate::selection::Selection>) -> KeptSelection {
+        KeptSelection { selection, since: Affine::IDENTITY }
+    }
+}
+
+/// A selection saved by name in the image (Save Selection).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavedSelection {
+    pub name: String,
+    pub kept: KeptSelection,
 }
 
 impl Document {
@@ -491,22 +508,34 @@ impl Document {
             layers: Vec::new(),
             selection: None,
             deselected: None,
+            saved: Vec::new(),
         }
     }
 
     /// Whether saving it would write what saving `other` would: all it keeps in a file the same
-    /// (its layers alike: see [`Layer::same_as`]), whatever either has selected, which files do
-    /// not keep.
+    /// (its layers alike: see [`Layer::same_as`]; its saved selections the same ones, each made
+    /// anew when saved), whatever either has selected, which files do not keep.
     pub fn saves_as(&self, other: &Document) -> bool {
         self.canvas == other.canvas
             && self.resolution == other.resolution
             && self.layers.len() == other.layers.len()
             && self.layers.iter().zip(&other.layers).all(|(a, b)| Arc::ptr_eq(a, b) || a.same_as(b))
+            && self.saved.len() == other.saved.len()
+            && self.saved.iter().zip(&other.saved).all(|(a, b)| {
+                a.name == b.name && Arc::ptr_eq(&a.kept.selection, &b.kept.selection) && a.kept.since == b.kept.since
+            })
     }
 
-    /// The selections it holds: what is selected, and what Reselect would bring back.
+    /// The saved selection named `name` (names are told apart without regard to case).
+    pub fn saved_selection(&self, name: &str) -> Option<&SavedSelection> {
+        self.saved.iter().find(|s| s.name.to_lowercase() == name.to_lowercase())
+    }
+
+    /// The selections it holds: what is selected, what Reselect would bring back, and those
+    /// saved.
     pub fn selections(&self) -> impl Iterator<Item = &Arc<crate::selection::Selection>> {
-        self.selection.iter().chain(self.deselected.as_ref().map(|d| &d.selection))
+        let kept = self.deselected.iter().chain(self.saved.iter().map(|s| &s.kept));
+        self.selection.iter().chain(kept.map(|k| &k.selection))
     }
 
     /// Whether it is `other` as far as an edit can tell: what saving it keeps, and what is

@@ -59,6 +59,8 @@ pub enum Cmd {
     SmoothSelection,
     BorderSelection,
     TransformSelection,
+    SaveSelection,
+    LoadSelection,
     CropToContent,
     ResizeImage,
     ResizeCanvas,
@@ -123,7 +125,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 78] = [
+    pub const ALL: [Cmd; 80] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -173,6 +175,8 @@ impl Cmd {
         Cmd::SmoothSelection,
         Cmd::BorderSelection,
         Cmd::TransformSelection,
+        Cmd::SaveSelection,
+        Cmd::LoadSelection,
         Cmd::CropToContent,
         Cmd::ResizeImage,
         Cmd::ResizeCanvas,
@@ -568,6 +572,24 @@ impl Cmd {
                  applies, Esc cancels. Only the selection changes, not the pixels. Its shapes are \
                  carried exactly, and its modifiers (grow, feather, smooth, border) are worked out \
                  again where they are carried to.",
+                &[],
+            ),
+            Cmd::SaveSelection => i(
+                "Save Selection",
+                icons::SAVE_SELECTION,
+                "Keep what is selected under a name, to load back.",
+                "Kept in the image, and in its file, steps and all; a name taken already replaces the \
+                 selection saved under it. The Selection panel lists the selections saved.",
+                &[],
+            ),
+            Cmd::LoadSelection => i(
+                "Load Selection",
+                icons::LOAD_SELECTION,
+                "Select a saved selection again, or combine it with what is selected.",
+                "In place of what is selected (its steps come back, to change in the Selection panel), \
+                 added to it, taken away from it, or keeping only what is in both; inverted first, if \
+                 you ask. Carried as the image has been turned, flipped, resized or cropped since it \
+                 was saved.",
                 &[],
             ),
             Cmd::FeatherSelection => i(
@@ -973,6 +995,12 @@ pub static RIBBON: &[Tab] = &[
                 ],
             },
             Group {
+                name: "Saved",
+                description: "Selections kept by name in the image, and its file, to load back.",
+                large: 0,
+                cmds: &[Cmd::SaveSelection, Cmd::LoadSelection],
+            },
+            Group {
                 name: "Selected",
                 description: "Acting on what is selected, as much of each pixel as it is selected.",
                 large: 1,
@@ -1129,8 +1157,15 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         | WidgetGallery => Ok(()),
         Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup | CopyMerged
         | StampVisible | ResizeCanvas | CropToContent | Place | SelectAll => needs_doc(),
+        LoadSelection => {
+            let d = st.active().ok_or("Open or create an image first.")?;
+            if d.doc().saved.is_empty() {
+                return Err("No selection is saved in this image: Save Selection keeps one.".into());
+            }
+            Ok(())
+        }
         Deselect | InvertSelection | CropToSelection | GrowSelection | FeatherSelection | SmoothSelection
-        | BorderSelection | TransformSelection => {
+        | BorderSelection | TransformSelection | SaveSelection => {
             let d = st.active().ok_or("Open or create an image first.")?;
             if cmd == TransformSelection
                 && d.pixel_selection().is_some_and(|s| s.mask().extent() == opal_core::mask::Extent::Unbounded)

@@ -3394,6 +3394,51 @@ fn a_layer_s_thumbnail_takes_ctrl_click_and_leaves_its_row_the_other_clicks() {
 }
 
 #[test]
+fn save_selection_names_it_and_the_panel_lists_and_loads_it_back() {
+    use opal_core::geom::IRect;
+    use opal_core::mask::Extent;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    select_drag(&mut h, [100.0, 50.0], [200.0, 120.0], egui::Modifiers::NONE, egui::Modifiers::NONE);
+    let ctx = h.ctx.clone();
+    h.state_mut().state_mut().run(crate::commands::Cmd::SaveSelection, &ctx);
+    h.run();
+    // Named for the first free number; Enter saves it.
+    let field = h.get_by_label("Name");
+    assert_eq!(field.value().as_deref(), Some("Selection 1"));
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let d = h.state().state().active().unwrap();
+    assert_eq!(d.doc().saved.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Selection 1"]);
+    assert_eq!(d.history.undo_label(), Some("Save selection"));
+    // Deselected, then loaded back from the panel's list.
+    h.state_mut().state_mut().run(crate::commands::Cmd::Deselect, &ctx);
+    h.get_by_label(&format!("{}  Selection", crate::icons::SELECT_ALL)).click();
+    h.run();
+    let row = h.get_by_label("Selection 1").rect();
+    let load = h
+        .query_all_by_label(&crate::icons::LOAD_SELECTION.to_string())
+        .map(|n| n.rect())
+        .find(|r| (r.center().y - row.center().y).abs() < 4.0)
+        .expect("no button to load it");
+    h.hover_at(load.center());
+    h.run();
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: load.center(),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    h.step();
+    h.run();
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 50, 200, 120))));
+    assert_eq!(h.state().state().active().unwrap().history.undo_label(), Some("Load selection"));
+}
+
+#[test]
 fn the_selection_panel_lists_the_steps_and_takes_one_away() {
     let _gpu = gpu_lock();
     let mut h = harness();

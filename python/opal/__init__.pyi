@@ -356,6 +356,20 @@ class Editor:
         from_anchor: Which point of the canvas (or of from_layer) x and y count from. Default: "top-left".
         unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
+    def save_selection(self, *, document: int | None = None, name: str) -> Any:
+        """Keep what is selected under a name, to load back.
+
+        document: The image, by id. Default: the active image.
+        name: The name it is saved under: a selection saved under it already (whatever the case of its letters) is replaced.
+        """
+    def load_selection(self, *, document: int | None = None, name: str, combine: Literal["replace", "add", "subtract", "intersect"] = "replace", invert: bool = False) -> Any:
+        """Select a saved selection again, or combine it with what is selected.
+
+        document: The image, by id. Default: the active image.
+        name: The selection saved in the image under this name (whatever the case of its letters).
+        combine: How it combines with what is selected: in its place, added to it, taken away from it, or keeping only what is in both. Default: "replace".
+        invert: Invert it first: what it does not select, before it combines. Default: false.
+        """
     def crop_to_content(self, *, document: int | None = None) -> Any:
         """Shrink (or grow) the canvas to fit what the visible layers hold.
 
@@ -442,6 +456,11 @@ class Editor:
 
         document: The image, by id. Default: the active image.
         """
+    def saved_selections(self, *, document: int | None = None) -> Any:
+        """The selections saved in an image (save_selection), in the order they were first saved: each one's name, the rectangle round what it selects (as the selection query tells it, carried as the image has been turned, flipped, resized or cropped since it was saved), its steps as they were when it was saved, and whether the image has changed since (load_selection carries it so).
+
+        document: The image, by id. Default: the active image.
+        """
     def documents(self) -> Any:
         """The images open: for each, its id, title, file, canvas size and whether it has unsaved changes."""
     def layers(self, *, document: int | None = None) -> Any:
@@ -463,6 +482,12 @@ class Editor:
         """
     def preferences(self) -> Any:
         """Every preference: for each, its key, label, section, help, value and default, and what it takes (its range or choices). set_preference changes them."""
+    def delete_saved_selection(self, *, document: int | None = None, name: str) -> Any:
+        """Deletes a selection saved in the image (as the Selection panel does), by its name. Answers with the selections saved then, as saved_selections tells them.
+
+        document: The image, by id. Default: the active image.
+        name: The selection saved in the image under this name (whatever the case of its letters).
+        """
     def remove_selection_step(self, *, document: int | None = None, index: int | str | Expr) -> Any:
         """Takes a step away from the recipe of what is selected, by its number among the selection query's steps; the selection is worked out again from the rest (as the selection panel does). Answers with what is selected then.
 

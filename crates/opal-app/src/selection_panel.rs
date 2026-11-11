@@ -18,6 +18,9 @@ enum Action {
     Edit(usize),
     Combine(usize, Combine),
     Remove(usize),
+    /// A saved selection's: selected again in place of what is, or deleted.
+    Load(String),
+    Delete(String),
 }
 
 /// `name` (one of an option's `NAMES`) as a menu shows it: its first letter a capital.
@@ -32,6 +35,14 @@ pub fn selection_panel(ui: &mut egui::Ui, st: &mut AppState) {
         ui.label(RichText::new("No image is open.").color(weak));
         return;
     };
+    let saved: Vec<String> = d.doc().saved.iter().map(|s| s.name.clone()).collect();
+    ui.horizontal(|ui| {
+        crate::widgets::icon_command(ui, st, crate::commands::Cmd::SaveSelection);
+        crate::widgets::icon_command(ui, st, crate::commands::Cmd::LoadSelection);
+    });
+    ui.separator();
+    let mut action = saved_list(ui, &saved, weak);
+    let Some(d) = st.active() else { return };
     let Some(selection) = d.pixel_selection().cloned() else {
         ui.label(
             RichText::new(
@@ -39,7 +50,7 @@ pub fn selection_panel(ui: &mut egui::Ui, st: &mut AppState) {
             )
             .color(weak),
         );
-        return;
+        return act(ui, st, action);
     };
     let (unit, ppi) = (st.unit(), d.doc().resolution);
     let canvas = d.doc().canvas;
@@ -48,7 +59,6 @@ pub fn selection_panel(ui: &mut egui::Ui, st: &mut AppState) {
     if let Some(why) = refused {
         ui.label(RichText::new(why).color(weak));
     }
-    let mut action = None;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.add_enabled_ui(refused.is_none(), |ui| {
             for (i, step) in selection.steps().iter().enumerate() {
@@ -88,11 +98,47 @@ pub fn selection_panel(ui: &mut egui::Ui, st: &mut AppState) {
             }
         });
     });
+    act(ui, st, action);
+}
+
+/// The selections saved in the image (`names`), each with a button to load it in place of what
+/// is selected, and one to delete it; what a click on one asked for.
+fn saved_list(ui: &mut egui::Ui, names: &[String], weak: egui::Color32) -> Option<Action> {
+    let mut action = None;
+    if names.is_empty() {
+        return None;
+    }
+    ui.label(RichText::new("Saved").strong());
+    for name in names {
+        ui.horizontal(|ui| {
+            ui.label(icon(icons::SAVED_SELECTIONS, 15.0));
+            ui.label(name);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let delete = ui.add(egui::Button::new(icon(icons::DELETE, 14.0)).frame(false));
+                if delete.on_hover_text("Delete this saved selection").clicked() {
+                    action = Some(Action::Delete(name.clone()));
+                }
+                let load = ui.add(egui::Button::new(icon(icons::LOAD_SELECTION, 14.0)).frame(false));
+                if load.on_hover_text("Select it again, in place of what is selected").clicked() {
+                    action = Some(Action::Load(name.clone()));
+                }
+            });
+        });
+    }
+    ui.label(RichText::new("Load Selection adds one to what is selected, or takes it away.").small().color(weak));
+    ui.separator();
+    action
+}
+
+/// Does what a click in the panel asked for.
+fn act(ui: &egui::Ui, st: &mut AppState, action: Option<Action>) {
     let ctx = ui.ctx().clone();
     match action {
         Some(Action::Edit(i)) => st.edit_selection_step(i, &ctx),
         Some(Action::Combine(i, combine)) => st.combine_selection_step(i, combine),
         Some(Action::Remove(i)) => st.remove_selection_step(i),
+        Some(Action::Load(name)) => st.load_selection(&name, Combine::Replace, false),
+        Some(Action::Delete(name)) => st.delete_saved_selection(&name),
         None => {}
     }
 }
@@ -157,6 +203,7 @@ fn describe(step: &Step, origin: [f64; 2], unit: Unit, ppi: f64) -> String {
         Step::Border { width, side: s } => format!("Border {} wide, {}", len(*width), side(s)),
         Step::Mask { of: MaskOf::LayerPixels, .. } => "A layer's pixels".to_owned(),
         Step::Mask { of: MaskOf::Carried, .. } => "The steps before, carried pixel by pixel".to_owned(),
+        Step::Mask { of: MaskOf::Saved, .. } => "A saved selection".to_owned(),
     }
 }
 

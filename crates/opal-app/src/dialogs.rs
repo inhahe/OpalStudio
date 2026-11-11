@@ -34,6 +34,10 @@ pub fn show_all(ctx: &egui::Context, st: &mut AppState) {
         resize_canvas(ctx, st);
     } else if st.rotate_by.is_some() {
         rotate_by(ctx, st);
+    } else if st.save_selection.is_some() {
+        save_selection(ctx, st);
+    } else if st.load_selection.is_some() {
+        load_selection(ctx, st);
     } else if st.modifying.is_some() {
         modifying(ctx, st);
     }
@@ -643,6 +647,98 @@ fn rotate_by(ctx: &egui::Context, st: &mut AppState) {
         }
         Some(false) => st.rotate_by = None,
         None => st.rotate_by = Some(spec),
+    }
+}
+
+/// Save Selection: the name to save what is selected under, a name taken already saying the
+/// one saved under it is replaced.
+fn save_selection(ctx: &egui::Context, st: &mut AppState) {
+    let Some(mut spec) = st.save_selection.clone() else { return };
+    let palette = st.palette;
+    let taken = st.active().is_some_and(|d| d.doc().saved_selection(spec.name.trim()).is_some());
+    let refused = crate::select::save_name_refused(&spec.name);
+    let mut done = None;
+    egui::Modal::new(egui::Id::unique("save-selection")).show(ctx, |ui| {
+        ui.heading("Save selection");
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let label = ui.label("Name");
+            let field = ui.add(egui::TextEdit::singleline(&mut spec.name).desired_width(220.0)).labelled_by(label.id);
+            if !field.has_focus() && !field.lost_focus() && ui.memory(|m| m.focused().is_none()) {
+                field.request_focus();
+            }
+        });
+        let note = match (refused, taken) {
+            (Some(why), _) => Some(why.to_owned()),
+            (None, true) => Some(format!("The selection saved as \"{}\" is replaced.", spec.name.trim())),
+            (None, false) => None,
+        };
+        if let Some(note) = note {
+            ui.label(RichText::new(note).small().color(palette.weak_text));
+        }
+        ui.label(
+            RichText::new("Kept in the image, and in its file; Load Selection brings it back.")
+                .small()
+                .color(palette.weak_text),
+        );
+        done = ok_cancel(ui, "Save");
+    });
+    match done {
+        Some(true) if refused.is_none() => {
+            st.save_selection = None;
+            st.save_selection(&spec.name);
+        }
+        Some(false) => st.save_selection = None,
+        _ => st.save_selection = Some(spec),
+    }
+}
+
+/// Load Selection: which saved selection, how it combines with what is selected, and whether
+/// it is inverted first.
+fn load_selection(ctx: &egui::Context, st: &mut AppState) {
+    use opal_core::mask::Combine;
+    let Some(mut spec) = st.load_selection.clone() else { return };
+    let names: Vec<String> =
+        st.active().map(|d| d.doc().saved.iter().map(|s| s.name.clone()).collect()).unwrap_or_default();
+    let anything = st.active().is_some_and(|d| d.pixel_selection().is_some());
+    let mut done = None;
+    egui::Modal::new(egui::Id::unique("load-selection")).show(ctx, |ui| {
+        ui.heading("Load selection");
+        ui.add_space(4.0);
+        egui::Grid::new("load-selection-grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+            ui.label("Selection");
+            egui::ComboBox::from_id_salt("load-selection-name").selected_text(spec.name.clone()).show_ui(ui, |ui| {
+                for n in &names {
+                    ui.selectable_value(&mut spec.name, n.clone(), n);
+                }
+            });
+            ui.end_row();
+            ui.label("With what is selected");
+            ui.add_enabled_ui(anything, |ui| {
+                ui.horizontal(|ui| {
+                    for (c, name) in [
+                        (Combine::Replace, "Replace"),
+                        (Combine::Add, "Add"),
+                        (Combine::Subtract, "Subtract"),
+                        (Combine::Intersect, "Intersect"),
+                    ] {
+                        ui.radio_value(&mut spec.combine, c, name);
+                    }
+                });
+            });
+            ui.end_row();
+        });
+        ui.checkbox(&mut spec.invert, "Invert it");
+        done = ok_cancel(ui, "Load");
+    });
+    match done {
+        Some(true) => {
+            st.load_selection = None;
+            let combine = if anything { spec.combine } else { Combine::Replace };
+            st.load_selection(&spec.name, combine, spec.invert);
+        }
+        Some(false) => st.load_selection = None,
+        None => st.load_selection = Some(spec),
     }
 }
 

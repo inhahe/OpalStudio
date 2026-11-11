@@ -26,6 +26,9 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+/// What [`Mask::to_bytes`] begins with, and the version of its form.
+pub const MASK_MAGIC: &[u8] = b"OPALMASK1";
+
 /// The level of a pixel fully selected.
 pub const FULL: u16 = u16::MAX;
 
@@ -773,6 +776,108 @@ impl Mask {
         Ok(mask)
     }
 
+    /// The mask as bytes, to keep in a file: [`MASK_MAGIC`], then the level outside its rows,
+    /// how many rows, and each row (its y, in tiles; how many runs; and each run: where it
+    /// begins and ends, in tiles, what kind of tile it holds, and that tile's levels), all
+    /// little-endian. [`from_bytes`](Self::from_bytes) reads them back.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = MASK_MAGIC.to_vec();
+        out.extend(self.outside.to_le_bytes());
+        out.extend((self.rows.len() as u32).to_le_bytes());
+        for (y, row) in &self.rows {
+            out.extend(y.to_le_bytes());
+            out.extend((row.len() as u32).to_le_bytes());
+            for r in row {
+                out.extend(r.x0.to_le_bytes());
+                out.extend(r.x1.to_le_bytes());
+                let (kind, levels): (u8, &[u16]) = match &r.tile {
+                    MaskTile::Level(l) => (0, std::slice::from_ref(l)),
+                    MaskTile::Columns(l) => (1, &l[..]),
+                    MaskTile::Rows(l) => (2, &l[..]),
+                    MaskTile::Levels(l) => (3, &l[..]),
+                };
+                out.push(kind);
+                out.extend(levels.iter().flat_map(|l| l.to_le_bytes()));
+            }
+        }
+        out
+    }
+
+    /// The mask [`to_bytes`](Self::to_bytes) made `bytes` of, or why they are not one: a mask
+    /// from a damaged or hostile file is refused, not trusted (rows and runs out of order or
+    /// past [`MAX_COORD`](crate::document::MAX_COORD), a tile of levels in a run of more than
+    /// one, or more than the bytes hold).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Mask, String> {
+        struct Reader<'a>(&'a [u8]);
+        impl Reader<'_> {
+            fn take(&mut self, n: usize) -> Result<&[u8], String> {
+                if self.0.len() < n {
+                    return Err("it ends too soon".into());
+                }
+                let (now, rest) = self.0.split_at(n);
+                self.0 = rest;
+                Ok(now)
+            }
+            fn u16(&mut self) -> Result<u16, String> {
+                Ok(u16::from_le_bytes(self.take(2)?.try_into().expect("two bytes")))
+            }
+            fn u32(&mut self) -> Result<u32, String> {
+                Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("four bytes")))
+            }
+            fn i32(&mut self) -> Result<i32, String> {
+                Ok(i32::from_le_bytes(self.take(4)?.try_into().expect("four bytes")))
+            }
+            fn levels(&mut self, n: usize) -> Result<Arc<[u16]>, String> {
+                let b = self.take(n * 2)?;
+                Ok(b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect())
+            }
+        }
+        // How far a tile may be from the origin: as far as anything in an image may (wider than
+        // an i32 holds, so compared as i64).
+        let far = crate::document::MAX_COORD / i64::from(TILE_SIZE);
+        let too_far = |t: i32| i64::from(t).abs() > far;
+        let mut r = Reader(bytes);
+        if r.take(MASK_MAGIC.len())? != MASK_MAGIC {
+            return Err("it is not a mask".into());
+        }
+        let outside = r.u16()?;
+        let n = r.u32()?;
+        let mut rows: BTreeMap<i32, Vec<Run>> = BTreeMap::new();
+        let mut last_y = None;
+        for _ in 0..n {
+            let y = r.i32()?;
+            if last_y.is_some_and(|l| l >= y) || too_far(y) {
+                return Err("its rows are out of order, or too far".into());
+            }
+            last_y = Some(y);
+            let runs = r.u32()?;
+            let row = rows.entry(y).or_default();
+            let mut end = None;
+            for _ in 0..runs {
+                let (x0, x1) = (r.i32()?, r.i32()?);
+                if x0 >= x1 || end.is_some_and(|e| e > x0) || too_far(x0) || too_far(x1 - 1) {
+                    return Err("its runs are out of order, or too far".into());
+                }
+                end = Some(x1);
+                let tile = match r.take(1)?[0] {
+                    0 => MaskTile::Level(r.u16()?),
+                    1 => MaskTile::Columns(r.levels(SIDE)?),
+                    2 => MaskTile::Rows(r.levels(SIDE)?),
+                    3 => MaskTile::Levels(r.levels(TILE_PIXELS)?),
+                    _ => return Err("a tile is of no kind it knows".into()),
+                };
+                if x1 - x0 != 1 && !matches!(tile, MaskTile::Level(_)) {
+                    return Err("a tile of levels stands for more than one".into());
+                }
+                push(row, x0, x1, tile, outside);
+            }
+        }
+        if !r.0.is_empty() {
+            return Err("there is more after it".into());
+        }
+        Ok(Mask::shared(rows.into_iter().filter(|(_, r)| !r.is_empty()).collect(), outside))
+    }
+
     /// The levels of the pixels of `area`, row by row.
     pub fn levels_in(&self, area: &IRect) -> Vec<u16> {
         let (w, h) = (area.width().max(0) as usize, area.height().max(0) as usize);
@@ -1373,6 +1478,36 @@ fn ellipse_distance(x: f64, y: f64, a: f64, b: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mask_kept_as_bytes_is_read_back_the_same_and_a_damaged_one_refused() {
+        // Every kind of tile: a soft ellipse, inverted (its outside selected), and a layer's
+        // opacity rising across.
+        let soft = Mask::of(&Shape {
+            kind: ShapeKind::Ellipse,
+            center: [300.0, 200.0],
+            size: [500.0, 300.0],
+            angle: 20.0,
+            smooth: true,
+        })
+        .inverted();
+        let px: Vec<_> = (0..512 * 256).map(|i| pixel_from_f32([1.0, 1.0, 1.0, (i % 512) as f32 / 511.0])).collect();
+        let rising = Mask::of_opacity(&RasterImage::from_pixels(512, 256, &px));
+        for m in [soft, rising, Mask::none()] {
+            assert_eq!(Mask::from_bytes(&m.to_bytes()).unwrap(), m);
+        }
+        let bytes = Mask::of(&rect(0.0, 0.0, 300.0, 300.0)).to_bytes();
+        assert!(Mask::from_bytes(&bytes[..bytes.len() - 1]).is_err(), "cut short");
+        assert!(Mask::from_bytes(&[bytes.as_slice(), &[0]].concat()).is_err(), "more after it");
+        assert!(Mask::from_bytes(b"NOTAMASK1").is_err());
+        // A run claiming a row of a million tiles' levels, in a few bytes: refused, not made.
+        let mut huge = MASK_MAGIC.to_vec();
+        huge.extend(0u16.to_le_bytes());
+        huge.extend(1u32.to_le_bytes());
+        huge.extend(0i32.to_le_bytes());
+        huge.extend(u32::MAX.to_le_bytes());
+        assert!(Mask::from_bytes(&huge).is_err());
+    }
 
     #[test]
     fn a_layer_s_opacity_asks_for_its_mask_s_memory_and_keeps_taken_what_it_holds() {

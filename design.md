@@ -322,8 +322,8 @@ red, a preference.
   squares, it follows them. Pixels meeting only at a corner have lines of their own. It is
   worked out where tiles differ and within those with levels of their own, an edge along
   tiles of one level taken whole, so it costs its length, not the area it goes round.
-- `.opal` files do not keep selections yet; a later version of the format keeps their
-  recipes.
+- `.opal` files keep the selections saved in the image (*Saved selections*), not what is
+  selected.
 
 ### Commands
 
@@ -438,6 +438,28 @@ transform and crop boxes' do; what is typed edits the step at once, as one pendi
 `select_rectangle` and `select_ellipse`, the canvas's box unless told otherwise, with
 `combine` and `smooth`, and the box's `x`, `y`, `width`, `height`, `angle`, `anchor`,
 `from_layer` and `from_anchor`, which take expressions.
+
+### Saved selections
+
+**Save Selection** (Select › Saved) keeps what is selected under a name in the image
+(`Document::saved`, in the order first saved), steps and all, as a history state; a name
+taken already (whatever the case of its letters) replaces the selection saved under it, the
+dialog saying so; an empty one is refused. The name offered is the first free "Selection N".
+**Load Selection** selects one again: in place of what is selected (its steps come back, to
+change in the selection panel), added to it, taken away from it, or keeping what is in both
+(a mask step of its own, `MaskOf::Saved`); inverted first, if asked; as a history state,
+worked out off the interface thread, memory measured as it goes; refused, saying why, if it
+would leave nothing selected. A saved selection is a `KeptSelection`, as what Deselect took
+away is: turning, flipping, resizing or cropping the image adds to how it has changed since
+(`since`), and loading it carries it so, once. The selection panel lists the saved ones above
+the steps, each with buttons to load it (in place of what is selected) and to delete it
+(*Delete saved selection*). History counts their masks; they are part of what a file saves,
+so saving or deleting one makes the image unsaved. Files keep them (*Native file format*,
+version 3): each one's recipe, the mask it comes to (not worked out again on opening) and
+how the image has changed since. Scripts: `save_selection(name)`, `load_selection(name,
+combine, invert)`, `delete_saved_selection(name)`, and the `saved_selections` query (each
+one's name, the rectangle round what it selects, carried as the image has changed since, its
+steps as saved, and `changed_since`).
 
 ### Transform Selection
 
@@ -2062,17 +2084,27 @@ server. Both rest on one language-neutral API.
 
 ## Native file format
 
-`.opal`, version 2: a zip archive holding `mimetype` (stored first, uncompressed:
+`.opal`, version 3: a zip archive holding `mimetype` (stored first, uncompressed:
 `application/x-opal-studio`), `document.json` (the canvas rectangle, the resolution, the
 layer tree and the next free identifier; a file without a resolution, as files before it
 are, has 72 ppi, and versions before it ignore it, so it needed no new version; a layer's
 `placed`, its placement, is read the same way, and refused if it could not have been made:
-a point past the nine, a number given twice, or an expression that does not read) and `tiles/<n>.bin` or `tiles/<n>.srgb8`, one tile each. Objects are
+a point past the nine, a number given twice, or an expression that does not read; and,
+version 3, `selections`, the selections saved in the image: each one's name, its steps as the
+API's `selection` query tells them, a mask step naming its mask's number, the number of the
+mask its steps come to, and how the image has changed since, if it has, `[a, b, c, d, e, f]`),
+`tiles/<n>.bin` or `tiles/<n>.srgb8`, one tile each, and `masks/<n>.bin`, the saved
+selections' masks, each once (`Mask::to_bytes`: a magic, the level outside its rows, and its
+rows of runs, each tile one level, a level a column or a row, or a level a pixel; read back
+checking order, reach and length, so a damaged or hostile file is refused, not trusted; a
+name empty or given twice, a step unknown, a mask missing, or a change since that would leave
+no size is refused too). Objects are
 pixel objects (their tiles and whole-pixel offset) or image objects (their tiles, frame,
 transform and sampling). A tile shared by several layers is stored once. A `.bin` tile is
 the tile's half floats byte-shuffled (all low bytes, then all high bytes), which lets
 deflate compress photos far better; a `.srgb8` tile (version 2) one kept at 8 bits, its
-reds, then greens, blues and alphas. Version 1 (no `.srgb8` tiles) is read as well. Saving compresses the tiles in parallel, a batch at a time, so it holds
+reds, then greens, blues and alphas. Versions 1 (no `.srgb8` tiles) and 2 (no saved
+selections) are read as well. Saving compresses the tiles in parallel, a batch at a time, so it holds
 a batch of them beyond the document rather than a copy of every tile. Numbers are written
 so they read back exactly. `document.json` is written compactly (about 12 bytes a tile
 place) and read without serde's buffering of tagged enums (`LayerRead`, `ObjectRead`), as
@@ -2081,7 +2113,7 @@ Version 0 (pixel objects
 only, a canvas at the origin) is still read; a newer version is refused with a message
 rather than misread, and so are values out of range (a transform that cannot be inverted,
 say). The editor never makes a transform a file could not hold: the transform box stops
-at those limits, and a resize that would pass them draws the image into pixels. Later versions add text, selection recipes and optionally the history tree.
+at those limits, and a resize that would pass them draws the image into pixels. Later versions add text and optionally the history tree.
 
 Every write, `.opal` and exports alike, goes to a temporary file beside the target that
 replaces it only when complete, so a failed save never damages the existing file. Writes

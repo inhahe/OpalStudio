@@ -1074,8 +1074,7 @@ mod tests {
         d.selection = Some(s.clone());
         h.commit(d.clone(), "Select");
         // Deselected, then the image changed: the state before it, and the one now, hold it.
-        d.deselected =
-            Some(crate::document::Deselected { selection: d.selection.take().unwrap(), since: Affine::IDENTITY });
+        d.deselected = Some(crate::document::KeptSelection::new(d.selection.take().unwrap()));
         h.commit(d.clone(), "Deselect");
         d.deselected.as_mut().unwrap().since = Affine::rotate(std::f64::consts::FRAC_PI_2);
         d.canvas = crate::document::Canvas::sized(1000, 1000);
@@ -1084,8 +1083,14 @@ mod tests {
         assert!(counted_right(&h));
         // Forgotten by the current state: the earlier ones' count.
         d.deselected = None;
-        h.commit(d, "Something else");
+        h.commit(d.clone(), "Something else");
         assert_eq!(h.memory(), s.mask().bytes());
+        assert!(counted_right(&h));
+        // Saved under a name: the current state holds it again.
+        let kept = crate::document::KeptSelection::new(s.clone());
+        d.saved = vec![crate::document::SavedSelection { name: "Kept".into(), kept }];
+        h.commit(d, "Save selection");
+        assert_eq!(h.memory(), 0, "the saved selection was not counted");
         assert!(counted_right(&h));
     }
 

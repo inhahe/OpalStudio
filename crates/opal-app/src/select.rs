@@ -118,6 +118,32 @@ pub(crate) fn carried(
     Ok((!made.is_empty()).then(|| Arc::new(made)))
 }
 
+/// The Save Selection dialog's field: the name it is saved under.
+#[derive(Clone, Debug)]
+pub struct SaveSelection {
+    pub name: String,
+}
+
+/// The Load Selection dialog's settings: which saved selection, how it combines with what is
+/// selected, and whether it is inverted first.
+#[derive(Clone, Debug)]
+pub struct LoadSelection {
+    pub name: String,
+    pub combine: Combine,
+    pub invert: bool,
+}
+
+/// A name to save a selection in `doc` under that none has: "Selection 1", "Selection 2"...
+pub fn next_selection_name(doc: &Document) -> String {
+    (1..).map(|n| format!("Selection {n}")).find(|name| doc.saved_selection(name).is_none()).expect("one is free")
+}
+
+/// Why a selection may not be saved under `name` in `doc`, if it may not: it is empty. (One
+/// saved under it already is replaced.)
+pub fn save_name_refused(name: &str) -> Option<&'static str> {
+    name.trim().is_empty().then_some("Give it a name.")
+}
+
 /// The history state a step of the recipe changed (in the selection panel, or by a script) is.
 pub const STEP_CHANGED: &str = "Change selection step";
 
@@ -126,9 +152,6 @@ type Preview = (Step, Result<Arc<Selection>, String>);
 
 /// A modifier dialog's job, ended: its number, and what it made, if anything.
 type Ended = (u64, Option<Preview>);
-
-/// The thread the modifier dialogs' previews are worked out on.
-static PREVIEWS: crate::background::LatestJob = crate::background::LatestJob::new("selection previews");
 
 /// The history state adding `step`, a modifier, makes.
 pub fn modifier_label(step: &Step) -> &'static str {
@@ -169,8 +192,7 @@ impl crate::doc::DocState {
         let _ = self.apply("Deselect", |doc, _| {
             // (A pending edit that left nothing selected, committed first, leaves nothing.)
             if let Some(selection) = doc.selection.take() {
-                let since = opal_core::geom::Affine::IDENTITY;
-                doc.deselected = Some(opal_core::document::Deselected { selection, since });
+                doc.deselected = Some(opal_core::document::KeptSelection::new(selection));
             }
             Ok::<(), ()>(())
         });
@@ -223,6 +245,79 @@ impl AppState {
 
     pub(crate) fn deselect(&mut self) {
         self.active_mut().expect("available").deselect_pixels();
+    }
+
+    /// Saves what the active image has selected under `name` (in place of a selection saved
+    /// under it, without regard to case, if there is one), as a history state: kept in the
+    /// image, and in its file.
+    pub(crate) fn save_selection(&mut self, name: &str) {
+        let d = self.active_mut().expect("available");
+        let Some(selection) = d.pixel_selection().cloned() else { return };
+        let name = name.trim().to_owned();
+        let _ = d.apply("Save selection", |doc, _| {
+            let kept = opal_core::document::KeptSelection::new(selection);
+            let lower = name.to_lowercase();
+            match doc.saved.iter_mut().find(|s| s.name.to_lowercase() == lower) {
+                Some(s) => *s = opal_core::document::SavedSelection { name, kept },
+                None => doc.saved.push(opal_core::document::SavedSelection { name, kept }),
+            }
+            Ok::<(), ()>(())
+        });
+    }
+
+    /// Selects the selection saved in the active image as `name`, inverted if `invert`,
+    /// combined with what is selected as `combine` says (replacing it, its steps come back, to
+    /// change in the selection panel; else it is a step of its own); carried as the image has
+    /// changed since it was saved, if it has. Worked out off the interface thread (see
+    /// `edits`), memory measured as it goes; refused, saying why, if it would leave nothing
+    /// selected.
+    pub(crate) fn load_selection(&mut self, name: &str, combine: Combine, invert: bool) {
+        let d = self.active().expect("available");
+        let Some(saved) = d.doc().saved_selection(name).cloned() else {
+            let why = format!("No selection is saved as \"{name}\" in this image.");
+            return self.message(MessageKind::Info, "Load Selection", why);
+        };
+        let (id, measure) = (d.id, crate::memory::Measure::here());
+        let work = move |doc: &mut Document, _: &mut opal_core::document::IdGen, progress: &opal_io::Progress| {
+            let stop = || progress.is_cancelled();
+            let kept = saved.kept;
+            let mut loaded = match kept.since == opal_core::geom::Affine::IDENTITY {
+                true => Some(kept.selection),
+                false => carried(&kept.selection, &kept.since, measure.now(), &stop)?,
+            };
+            if invert {
+                let s = loaded.map_or_else(|| Selection::of(Vec::new()), |s| (*s).clone()).then(Step::Invert);
+                loaded = (!s.is_empty()).then(|| Arc::new(s));
+            }
+            let made = match (combine, loaded) {
+                (Combine::Replace, loaded) => loaded,
+                (_, Some(s)) => {
+                    let step = Step::Mask { mask: s.mask().clone(), combine, of: opal_core::selection::MaskOf::Saved };
+                    let made = opal_core::selection::with_maker(doc.selection.as_deref(), step);
+                    (!made.is_empty()).then(|| Arc::new(made))
+                }
+                // Nothing to add, take away or keep what is in both with.
+                (Combine::Add, None) => doc.selection.clone(),
+                (Combine::Subtract, None) => doc.selection.clone(),
+                (Combine::Intersect, None) => None,
+            };
+            if made.is_none() {
+                return Err("Nothing would be selected.".to_owned());
+            }
+            doc.selection = made;
+            Ok(())
+        };
+        self.edit_later(id, "Load selection", crate::memory::Allowance::unlimited(), work, |_, _, ()| {});
+    }
+
+    /// Deletes the selection saved in the active image as `name`, as a history state.
+    pub(crate) fn delete_saved_selection(&mut self, name: &str) {
+        let d = self.active_mut().expect("available");
+        let lower = name.to_lowercase();
+        let _ = d.apply("Delete saved selection", |doc, _| {
+            doc.saved.retain(|s| s.name.to_lowercase() != lower);
+            Ok::<(), ()>(())
+        });
     }
 
     /// Selects again what Deselect last took away in the active image; carried as the image has
@@ -392,8 +487,7 @@ impl AppState {
             if !made.is_empty() {
                 doc.selection = Some(Arc::new(made));
             } else if let Some(selection) = doc.selection.take() {
-                let since = opal_core::geom::Affine::IDENTITY;
-                doc.deselected = Some(opal_core::document::Deselected { selection, since });
+                doc.deselected = Some(opal_core::document::KeptSelection::new(selection));
             }
             Ok(())
         };
@@ -430,7 +524,7 @@ impl AppState {
         let prefix = m.prefix.clone();
         let (ends, asked) = (m.ends.0.clone(), m.step.clone());
         let measure = crate::memory::Measure::here();
-        PREVIEWS.run(
+        self.previews.run(
             move || {
                 let stop = || generation.load(Ordering::SeqCst) != ours;
                 // Asked for after another, it may not be wanted by the time it begins.

@@ -236,6 +236,9 @@ pub struct AppState {
     pub resize_image: Option<ResizeImage>,
     pub resize_canvas: Option<ResizeCanvas>,
     pub rotate_by: Option<RotateBy>,
+    /// The Save Selection and Load Selection dialogs, while open.
+    pub save_selection: Option<crate::select::SaveSelection>,
+    pub load_selection: Option<crate::select::LoadSelection>,
     /// The Grow or Shrink, or Feather, dialog, while open.
     pub modifying: Option<crate::select::Modifying>,
     /// Files dropped on the window and not yet opened, first dropped first (see
@@ -248,6 +251,9 @@ pub struct AppState {
     pub screen: ScreenMode,
     /// The script's call being carried out, while one is.
     pub calling: Option<crate::api::Calling>,
+    /// The thread the modifier dialogs' previews are worked out on, the latest only: the
+    /// editor's own, as its dialogs are (a job given replaces one waiting).
+    pub previews: crate::background::LatestJob,
     /// How long an edit is waited for as it begins (see `edits::WAITED_FOR`).
     pub edit_wait: std::time::Duration,
     pub thumbs: crate::thumbs::Thumbnails,
@@ -385,11 +391,14 @@ impl AppState {
             resize_image: None,
             resize_canvas: None,
             rotate_by: None,
+            save_selection: None,
+            load_selection: None,
             modifying: None,
             dropped: VecDeque::new(),
             repaint: egui::Context::default(),
             screen: ScreenMode::Standard,
             calling: None,
+            previews: crate::background::LatestJob::new("selection previews"),
             edit_wait: crate::edits::WAITED_FOR,
             thumbs: Default::default(),
             reading: None,
@@ -433,6 +442,8 @@ impl AppState {
                 || self.resize_image.is_some()
                 || self.resize_canvas.is_some()
                 || self.rotate_by.is_some()
+                || self.save_selection.is_some()
+                || self.load_selection.is_some()
                 || self.modifying.is_some())
     }
 
@@ -652,6 +663,19 @@ impl AppState {
                 });
             }
             Cmd::RotateBy => self.rotate_by = Some(RotateBy { degrees: 0.0, grow: true }),
+            Cmd::SaveSelection => {
+                let name = crate::select::next_selection_name(self.active().expect("available").doc());
+                self.save_selection = Some(crate::select::SaveSelection { name });
+            }
+            Cmd::LoadSelection => {
+                let saved = &self.active().expect("available").doc().saved;
+                let name = saved.first().expect("available").name.clone();
+                self.load_selection = Some(crate::select::LoadSelection {
+                    name,
+                    combine: opal_core::mask::Combine::Replace,
+                    invert: false,
+                });
+            }
             Cmd::RotateCw => self.turn(Turn::Clockwise),
             Cmd::RotateCcw => self.turn(Turn::Counterclockwise),
             Cmd::Rotate180 => self.turn(Turn::Half),

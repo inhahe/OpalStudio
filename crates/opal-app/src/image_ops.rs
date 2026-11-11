@@ -183,9 +183,10 @@ pub fn transform_all(
         walk(Arc::make_mut(l), m, resample, sampling, &mut to, progress)?;
     }
     // What is selected goes with what it was selected on (its modifiers worked out again,
-    // within what is left of the memory); what Reselect would bring back, once it does.
-    if let Some(d) = &mut doc.deselected {
-        d.since = d.since.then(*m);
+    // within what is left of the memory); what Reselect would bring back, and the selections
+    // saved, once they are brought back.
+    for kept in doc.deselected.iter_mut().chain(doc.saved.iter_mut().map(|s| &mut s.kept)) {
+        kept.since = kept.since.then(*m);
     }
     if let Some(s) = doc.selection.take() {
         doc.selection = crate::select::carried(&s, m, to.memory, &|| progress.is_cancelled())?;

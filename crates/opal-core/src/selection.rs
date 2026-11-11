@@ -47,6 +47,8 @@ pub enum MaskOf {
     /// The steps before it, which a transform their shapes could not follow carried pixel by
     /// pixel (see [`Selection::transformed`]); it replaces what was before it.
     Carried,
+    /// A selection saved in the image (Load Selection combining it with what is selected).
+    Saved,
 }
 
 impl Step {
@@ -202,6 +204,12 @@ impl Selection {
             give_back(before, bounds);
         }
         self.mask
+    }
+
+    /// The selection `steps` make, its mask `mask`, which they came to (as a file kept it), not
+    /// worked out again.
+    pub fn kept(steps: Vec<Step>, mask: Arc<Mask>) -> Selection {
+        Selection { steps, mask, before: None }
     }
 
     /// This selection with `step` after its steps (worked out from its mask, not again from
@@ -484,7 +492,7 @@ mod tests {
         let s = Selection::of(vec![Step::Mask { mask: m.clone(), combine: Combine::Replace, of: MaskOf::LayerPixels }]);
         assert!(Arc::ptr_eq(s.mask(), &m), "the mask was copied");
         let told = serde_json::to_string(&s.steps()[0]).unwrap();
-        assert_eq!(told, r#"{"step":"mask","combine":"replace"}"#);
+        assert_eq!(told, r#"{"step":"mask","combine":"replace","of":"layer_pixels"}"#);
         assert!(serde_json::from_str::<Step>(&told).is_err(), "read back as no mask at all");
         // Combined, as a shape is: added to a rectangle beside it, both selected.
         let beside = Selection::new(Step::Shape { shape: rect(400.0, 0.0, 500.0, 100.0), combine: Combine::Replace });

@@ -497,6 +497,26 @@ Move, size or turn the selection itself in a box.
 | `from_anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the canvas (or of from_layer) x and y count from. Default: "top-left". |
 | `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
 
+### `save_selection`
+
+Keep what is selected under a name, to load back.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `name` (required) | text | The name it is saved under: a selection saved under it already (whatever the case of its letters) is replaced. |
+
+### `load_selection`
+
+Select a saved selection again, or combine it with what is selected.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `name` (required) | text | The selection saved in the image under this name (whatever the case of its letters). |
+| `combine` | `replace`, `add`, `subtract`, `intersect` | How it combines with what is selected: in its place, added to it, taken away from it, or keeping only what is in both. Default: "replace". |
+| `invert` | bool | Invert it first: what it does not select, before it combines. Default: false. |
+
 ### `crop_to_content`
 
 Shrink (or grow) the canvas to fit what the visible layers hold.
@@ -614,6 +634,15 @@ Give the active layer a new name.
 | `layer` | layer | The layer, by id. Default: the active layer. |
 | `name` (required) | text | Its new name. |
 
+### `delete_saved_selection`
+
+Deletes a selection saved in the image (as the Selection panel does), by its name. Answers with the selections saved then, as saved_selections tells them.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `name` (required) | text | The selection saved in the image under this name (whatever the case of its letters). |
+
 ### `remove_selection_step`
 
 Takes a step away from the recipe of what is selected, by its number among the selection query's steps; the selection is worked out again from the rest (as the selection panel does). Answers with what is selected then.
@@ -727,6 +756,14 @@ Puts pixels into an image, at a place on its canvas: as a new layer above the ac
 ### `selection`
 
 What is selected in an image: the rectangle round it, as [x, y, width, height] from the canvas's corner (null if nothing is; "unbounded" where it reaches past every edge, inverted), and the steps that made it, in order: shapes (rectangles and ellipses, by their middle, size and angle, and how each combines), inversions, grow steps (by, corners), feather steps (width, side, falloff), smooth steps (radius) and border steps (width, side), as grow_selection, feather_selection, smooth_selection and border_selection take them, and masks (a "mask" step is, as its of says, a layer's pixels, from select_layer_pixels, or what the steps before it came to, carried pixel by pixel by Rotate, Flip or Resize Image, which could not carry them exactly; it gives no numbers, only how it combines). select_all, deselect, reselect, invert_selection and select_layer_pixels answer with it too.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+
+### `saved_selections`
+
+The selections saved in an image (save_selection), in the order they were first saved: each one's name, the rectangle round what it selects (as the selection query tells it, carried as the image has been turned, flipped, resized or cropped since it was saved), its steps as they were when it was saved, and whether the image has changed since (load_selection carries it so).
 
 | Parameter | Kind | |
 |---|---|---|

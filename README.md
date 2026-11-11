@@ -41,7 +41,7 @@ cargo test --workspace                     # all tests, interface tests included
 ## What works so far
 
 - **Files.** Open PNG and JPEG (8 and 16 bits; EXIF orientation honored) and Opal
-  Studio's own `.opal` files, which keep every layer. An 8-bit image takes half the
+  Studio's own `.opal` files, which keep every layer and the selections saved. An 8-bit image takes half the
   memory until it is changed: its pixels are kept as they were read. Images larger than
   memory can be worked on, saved and opened again: past a share of it (a preference), or
   past what is free while something needing memory is done, the parts not looked at
@@ -109,7 +109,9 @@ cargo test --workspace                     # all tests, interface tests included
   Gaussian or straight), Smooth (pinholes, specks and jagged corners gone) and Border (a band
   along the outline) change its edge, shown as you set them. The Selection panel lists the
   steps that made the selection: change a modifier's settings, how a shape combines, or take a
-  step away, and the selection is worked out again from them.
+  step away, and the selection is worked out again from them. Save Selection keeps one under
+  a name in the image and its file; Load Selection brings it back, or adds it to what is
+  selected, takes it away, or keeps what is in both, inverted if you like.
   Selections are part of history, and turn, flip and resize with the image.
 - **Layers and groups.** Add, duplicate, delete, group, reorder (buttons or dragging,
   into and out of groups), rename, hide, lock, change opacity; select several with Ctrl
