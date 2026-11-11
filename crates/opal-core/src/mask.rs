@@ -393,6 +393,12 @@ impl Mask {
         self.rows.get(&y).map_or(NO_RUNS, Vec::as_slice)
     }
 
+    /// The tiles kept along row `y` of tiles, left to right: each run's tiles (`x0..x1`, in
+    /// tiles) and its tile, one tile wide unless all one level.
+    pub fn row_runs(&self, y: i32) -> impl Iterator<Item = (i32, i32, &MaskTile)> {
+        self.row(y).iter().map(|r| (r.x0, r.x1, &r.tile))
+    }
+
     /// The tile at `c`, if one is kept there.
     pub fn tile(&self, c: TileCoord) -> Option<&MaskTile> {
         let row = self.rows.get(&c.y)?;

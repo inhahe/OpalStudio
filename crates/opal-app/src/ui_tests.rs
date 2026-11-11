@@ -2841,6 +2841,38 @@ fn crop_to_selection_makes_the_canvas_the_rectangle_round_it() {
 }
 
 #[test]
+fn the_selection_overlay_shows_what_is_not_selected_under_red() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    select_rect(&mut h, [100.0, 50.0, 200.0, 150.0]);
+    let colors = |h: &mut Harness<'static, OpalApp>, name: &str| {
+        let img = render(h, name);
+        let v = h.state().state().active().unwrap().view;
+        let ppp = h.ctx.pixels_per_point();
+        let at = |x: f32, y: f32| {
+            let p = (v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp) * ppp;
+            img.get_pixel(p.x as u32, p.y as u32).0
+        };
+        (at(30.0, 30.0), at(150.0, 100.0))
+    };
+    let (outside, inside) = colors(&mut h, "selection-no-overlay");
+    assert_eq!((outside, inside), ([255, 255, 255, 255], [255, 255, 255, 255]), "red without the overlay");
+    command(&mut h, Cmd::ToggleSelectionOverlay);
+    assert_eq!(crate::commands::checked(h.state().state(), Cmd::ToggleSelectionOverlay), Some(true));
+    let (outside, inside) = colors(&mut h, "selection-overlay");
+    // White under half red outside it, white within it.
+    assert!(outside[0] > 245 && (110..150).contains(&outside[1]) && (110..150).contains(&outside[2]), "{outside:?}");
+    assert_eq!(inside, [255, 255, 255, 255], "red where it is selected");
+    // Past the canvas, nothing is drawn, and nothing is covered.
+    let img = render(&mut h, "selection-overlay");
+    let v = h.state().state().active().unwrap().view;
+    let p = (v.screen_rect.min + v.to_screen(egui::vec2(350.0, 100.0)) / h.ctx.pixels_per_point()) * h.ctx.pixels_per_point();
+    let past = img.get_pixel(p.x as u32, p.y as u32).0;
+    assert!(past[0] < 100, "red past the canvas: {past:?}");
+}
+
+#[test]
 fn the_ants_run_where_the_preference_says() {
     let _gpu = gpu_lock();
     let mut h = harness();

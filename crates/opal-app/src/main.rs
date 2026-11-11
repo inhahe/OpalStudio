@@ -25,6 +25,7 @@ mod help;
 mod icons;
 mod image_ops;
 mod layer_ops;
+mod mask_view;
 mod lengths;
 mod mcp;
 mod mcp_http;

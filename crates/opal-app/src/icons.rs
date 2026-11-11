@@ -75,6 +75,8 @@ pub const FILL: char = '\u{ea4f}';
 pub const LINK: char = '\u{f4e4}';
 pub const SNAP: char = '\u{e6c4}';
 pub const RULER: char = '\u{f67c}';
+/// ic_fluent_highlight_20_regular.
+pub const OVERLAY: char = '\u{f47c}';
 pub const NUMBERS: char = '\u{e748}';
 pub const PRINT_SIZE: char = '\u{f62a}';
 pub const PLACE: char = '\u{e97d}';

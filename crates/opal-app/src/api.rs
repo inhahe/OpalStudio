@@ -515,7 +515,7 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             UNIT,
         ],
         Preferences | Exit | RunScript | ConnectAssistant | ZoomIn | ZoomOut | ZoomFit | Zoom100 | ToggleOffCanvas
-        | ToggleRulers | ToggleTheme | ToggleRibbon | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts
+        | ToggleRulers | ToggleSelectionOverlay | ToggleTheme | ToggleRibbon | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts
         | About | WidgetGallery => return None,
     })
 }

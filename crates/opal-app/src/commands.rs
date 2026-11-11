@@ -68,6 +68,7 @@ pub enum Cmd {
     Zoom100,
     ToggleOffCanvas,
     ToggleRulers,
+    ToggleSelectionOverlay,
     ToggleTheme,
     ToggleRibbon,
     CycleToolsPlace,
@@ -112,7 +113,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 67] = [
+    pub const ALL: [Cmd; 68] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -171,6 +172,7 @@ impl Cmd {
         Cmd::Zoom100,
         Cmd::ToggleOffCanvas,
         Cmd::ToggleRulers,
+        Cmd::ToggleSelectionOverlay,
         Cmd::ToggleTheme,
         Cmd::ToggleRibbon,
         Cmd::CycleToolsPlace,
@@ -660,6 +662,15 @@ impl Cmd {
                  top-left corner at the image's resolution, with the pointer's place marked on both.",
                 const { &[ctrl(Key::R)] },
             ),
+            Cmd::ToggleSelectionOverlay => i(
+                "Selection Overlay",
+                icons::OVERLAY,
+                "Show what is not selected under red.",
+                "Red covers what is not selected, and fades out as pixels are more selected, so a \
+                 soft selection's falloff shows; what is fully selected stays clear. How red it is \
+                 is set in Preferences › Selection.",
+                &[],
+            ),
             Cmd::ToggleTheme => i(
                 "Dark/Light",
                 icons::MOON,
@@ -900,9 +911,9 @@ pub static RIBBON: &[Tab] = &[
             },
             Group {
                 name: "Canvas",
-                description: "What is shown around the canvas.",
+                description: "What is shown on and around the canvas.",
                 large: 1,
-                cmds: &[Cmd::ToggleOffCanvas, Cmd::ToggleRulers],
+                cmds: &[Cmd::ToggleOffCanvas, Cmd::ToggleRulers, Cmd::ToggleSelectionOverlay],
             },
             Group {
                 name: "Interface",
@@ -936,8 +947,8 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
     use Cmd::*;
     let needs_doc = || st.active().map(|_| ()).ok_or_else(|| "Open or create an image first.".to_owned());
     match cmd {
-        New | Open | Preferences | Exit | ConnectAssistant | ToggleOffCanvas | ToggleRulers | ToggleTheme
-        | ToggleRibbon | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts | About | WidgetGallery => Ok(()),
+        New | Open | Preferences | Exit | ConnectAssistant | ToggleOffCanvas | ToggleRulers | ToggleSelectionOverlay
+        | ToggleTheme | ToggleRibbon | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts | About | WidgetGallery => Ok(()),
         Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup | CopyMerged
         | StampVisible | ResizeCanvas | CropToContent | Place | SelectAll => needs_doc(),
         Deselect | InvertSelection | CropToSelection => {
@@ -1154,6 +1165,7 @@ pub fn checked(st: &AppState, cmd: Cmd) -> Option<bool> {
     match cmd {
         Cmd::ToggleOffCanvas => Some(st.prefs.bool("canvas.off_canvas_shown")),
         Cmd::ToggleRulers => Some(st.prefs.bool("canvas.rulers")),
+        Cmd::ToggleSelectionOverlay => Some(st.prefs.bool("selection.overlay")),
         Cmd::ToggleTheme => Some(!st.palette.dark),
         Cmd::ToggleRibbon => Some(st.prefs.choice("ui.ribbon") == "single"),
         Cmd::ToggleVisible => active_layer(st).ok().map(|l| !l.visible),

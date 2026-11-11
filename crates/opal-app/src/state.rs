@@ -676,6 +676,11 @@ impl AppState {
                 self.prefs.set("canvas.rulers", Value::Bool(!shown));
                 self.settings_touched();
             }
+            Cmd::ToggleSelectionOverlay => {
+                let shown = self.prefs.bool("selection.overlay");
+                self.prefs.set("selection.overlay", Value::Bool(!shown));
+                self.settings_touched();
+            }
             Cmd::ToggleTheme => {
                 let next = if self.scheme(ctx) == Scheme::Dark { "light" } else { "dark" };
                 self.prefs.set("ui.theme", Value::Choice(next.into()));

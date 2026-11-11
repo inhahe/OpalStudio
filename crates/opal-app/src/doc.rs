@@ -152,6 +152,8 @@ pub struct DocState {
     /// it keeps alive no mask that history has let go (and no other mask takes that one's
     /// place while it is held so).
     pub outline: Option<(std::sync::Weak<opal_core::mask::Mask>, u16, crate::select::Outline)>,
+    /// What the selection overlay keeps of the mask's tiles (see `mask_view`).
+    pub overlay: crate::mask_view::Textures,
     /// Whether the user has been told that history states are being dropped.
     told_dropped: bool,
     /// The groups (by number) a call being carried out is in: the script run its
@@ -189,6 +191,7 @@ impl DocState {
             crop_drag: None,
             notice: None,
             outline: None,
+            overlay: Default::default(),
             select_drag: None,
             shape_drag: None,
             told_dropped: false,

@@ -94,7 +94,8 @@ cargo test --workspace                     # all tests, interface tests included
   and Alt taking away; Select All, Deselect and Invert Selection; Clear, Cut and Copy within
   it; Crop to Selection; marching ants round it. The last shape keeps a box whose handles
   move, size and turn it, and whose numbers button gives its exact position, size and angle,
-  in any unit; scripts select shapes so too (`select_rectangle`, `select_ellipse`).
+  in any unit; scripts select shapes so too (`select_rectangle`, `select_ellipse`). View ›
+  Selection Overlay shows what is not selected under red, fading with a soft selection.
   Selections are part of history, and turn, flip and resize with the image.
 - **Layers and groups.** Add, duplicate, delete, group, reorder (buttons or dragging,
   into and out of groups), rename, hide, lock, change opacity; select several with Ctrl

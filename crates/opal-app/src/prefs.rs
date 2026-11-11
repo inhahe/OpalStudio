@@ -338,6 +338,25 @@ pub static PREFS: &[Def] = &[
         default: Init::Float(50.0),
         advanced: true,
     },
+    Def {
+        key: "selection.overlay",
+        label: "Selection overlay",
+        help: "Red over what is not selected, fading out as pixels are more selected (View › \
+               Selection Overlay).",
+        section: "Selection",
+        kind: Kind::Bool,
+        default: Init::Bool(false),
+        advanced: false,
+    },
+    Def {
+        key: "selection.overlay_opacity",
+        label: "Overlay's red",
+        help: "How much the selection overlay's red covers what is not selected at all.",
+        section: "Selection",
+        kind: Kind::Float { min: 10.0, max: 90.0, decimals: 0, suffix: "%", log: false },
+        default: Init::Float(50.0),
+        advanced: true,
+    },
     // Navigation
     Def {
         key: "nav.wheel",
