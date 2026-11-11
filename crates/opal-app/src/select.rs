@@ -4,6 +4,7 @@
 
 use crate::state::{AppState, MessageKind};
 use opal_core::document::{Canvas, Document, LayerContent, LayerId, ObjectKind};
+use opal_core::geom::IRect;
 use opal_core::mask::{Combine, Extent, Mask, Shape, ShapeKind};
 use opal_core::selection::{Selection, Step};
 use std::sync::Arc;
@@ -73,16 +74,23 @@ impl AppState {
     }
 
     /// Erases what is selected on the selected layers (as much of each pixel as it is
-    /// selected).
+    /// selected), past the canvas too.
     pub(crate) fn clear_selected(&mut self) {
-        self.clear_within("Clear");
+        self.clear_within("Clear", None);
     }
 
-    /// Erases what is selected on the selected layers, as a history state labeled `label`;
-    /// whether anything was erased (if not, the user is told why).
-    fn clear_within(&mut self, label: &str) -> bool {
+    /// Erases what is selected on the selected layers, as a history state labeled `label`
+    /// (only within `area`, if given); whether anything was erased (if not, the user is told
+    /// why).
+    fn clear_within(&mut self, label: &str, area: Option<&IRect>) -> bool {
         let d = self.active_mut().expect("available");
-        let mask = d.pixel_selection().expect("available").mask().clone();
+        let mut mask = d.pixel_selection().expect("available").mask().clone();
+        if let Some(r) = area {
+            let r = r.to_f();
+            let shape =
+                Shape { kind: ShapeKind::Rectangle, center: r.center(), size: [r.width(), r.height()], angle: 0.0, smooth: false };
+            mask = Arc::new(mask.combined(&Mask::of(&shape), Combine::Intersect));
+        }
         let layers = d.selected_layers_and_inside();
         let mut changed = false;
         let result = d.apply(label, |doc, _| {
@@ -95,24 +103,24 @@ impl AppState {
         changed
     }
 
-    /// Copies what the selected layers show within the selection, then erases it from them.
-    pub(crate) fn cut(&mut self, ctx: &eframe::egui::Context) {
-        let before = self.copies_answered.len();
-        self.copy(false, ctx);
-        // Erased only once copied (a copy refused has said why).
-        if self.copies_answered.len() > before {
-            self.clear_within("Cut");
+    /// Copies what the selected layers show within the selection and the canvas, then erases
+    /// that from them (what lies past the canvas, which Copy leaves out, stays). The copy
+    /// reaches the clipboard off the interface thread; should it not, the erasing is taken
+    /// back (see [`AppState::poll_copies`]). `answer`: the API call to answer once the copy is
+    /// on the clipboard. Whether the copy was started (if not, it was refused, and said why).
+    pub(crate) fn cut(&mut self, answer: Option<u64>, ctx: &eframe::egui::Context) -> bool {
+        let before = self.copying.len();
+        self.copy_within(false, crate::memory::Allowance::now(), answer, ctx);
+        if self.copying.len() == before {
+            return false;
         }
-    }
-
-    /// [`cut`](Self::cut), answering API call `n` once the copy is on the clipboard; whether
-    /// it was started.
-    pub(crate) fn cut_answering(&mut self, n: u64, ctx: &eframe::egui::Context) -> bool {
-        let started = self.copy_answering(false, n, ctx);
-        if started {
-            self.clear_within("Cut");
+        let canvas = self.active().expect("available").doc().canvas.rect();
+        if self.clear_within("Cut", Some(&canvas)) {
+            let d = self.active().expect("available");
+            let made = (d.id, d.history.current());
+            self.copying.back_mut().expect("the copy just started").cut = Some(made);
         }
-        started
+        true
     }
 
     /// Makes the canvas the rectangle round what is selected.

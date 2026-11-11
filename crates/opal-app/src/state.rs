@@ -194,8 +194,8 @@ pub struct AppState {
     /// be; and whether to try again.
     pub mcp_http_trouble: Option<String>,
     pub retry_mcp_http: bool,
-    /// For each copy on its way to the clipboard, in order, the call it answers, if any.
-    pub copies_answered: VecDeque<Option<u64>>,
+    /// The copies on their way to the clipboard, in the order they were started.
+    pub copying: VecDeque<crate::paste::Copying>,
     pub confirm: Option<Confirm>,
     pub new_image: Option<NewImage>,
     pub last_new: NewImage,
@@ -330,7 +330,7 @@ impl AppState {
             renew_mcp_token: false,
             mcp_http_trouble: None,
             retry_mcp_http: false,
-            copies_answered: VecDeque::new(),
+            copying: VecDeque::new(),
             confirm: None,
             box_numbers: false,
             windowless: false,
@@ -394,7 +394,7 @@ impl AppState {
         !self.answered.is_empty()
             || self.writer.busy()
             || self.reading.is_some()
-            || !self.copies_answered.is_empty()
+            || !self.copying.is_empty()
             || !self.made.is_empty()
             || !self.finishing.is_empty()
     }
@@ -591,7 +591,9 @@ impl AppState {
             Cmd::Deselect => self.deselect(),
             Cmd::InvertSelection => self.invert_selection(),
             Cmd::Clear => self.clear_selected(),
-            Cmd::Cut => self.cut(ctx),
+            Cmd::Cut => {
+                self.cut(None, ctx);
+            }
             Cmd::CropToSelection => self.crop_to_selection(),
             Cmd::ResizeImage => {
                 let doc = self.active().expect("available").doc();

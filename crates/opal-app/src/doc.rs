@@ -415,6 +415,21 @@ impl DocState {
         }
     }
 
+    /// Takes back history state `id` if it is still the current one, with nothing made from it
+    /// and nothing in progress on it (see [`History::take_back`]); whether it did.
+    pub fn take_back(&mut self, id: NodeId) -> bool {
+        if self.pending.is_some() || self.transform.is_some() {
+            return false;
+        }
+        let before = self.history.doc().clone();
+        let done = self.history.take_back(id);
+        if done {
+            self.revision += 1;
+            self.fix_active_layer(Some(&before));
+        }
+        done
+    }
+
     pub fn undo(&mut self) -> bool {
         self.commit_pending();
         let before = self.history.doc().clone();

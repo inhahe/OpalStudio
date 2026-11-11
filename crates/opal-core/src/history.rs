@@ -178,6 +178,18 @@ impl History {
         }
     }
 
+    /// Takes back state `id` if it is the current one and nothing was made from it: moves to
+    /// its parent and drops it, as though it had never been made, so that no redo brings it
+    /// back. Whether it did.
+    pub fn take_back(&mut self, id: NodeId) -> bool {
+        if self.current != id || !self.node(id).children.is_empty() || !self.undo() {
+            return false;
+        }
+        // Undone first, so that its document is no longer the current one when it goes.
+        self.drop_branch(id);
+        true
+    }
+
     /// The state [`redo`](Self::redo) would move to.
     pub fn redo_target(&self) -> Option<NodeId> {
         self.redo_target_of(self.current)

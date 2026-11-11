@@ -12,6 +12,16 @@ use opal_core::geom::Affine;
 use serde_json::json;
 use std::sync::Arc;
 
+/// A copy on its way to the clipboard.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Copying {
+    /// The API call it answers, if any.
+    pub answer: Option<u64>,
+    /// The history state of the cut it is part of, if it is (in the document by that
+    /// number): what is taken back should the copy not reach the clipboard.
+    pub cut: Option<(DocId, opal_core::history::NodeId)>,
+}
+
 impl AppState {
     /// Copies the selected layers (or, `merged`, everything visible) within the canvas,
     /// trimmed to their content. It is put on the clipboard off the interface thread (see
@@ -23,9 +33,9 @@ impl AppState {
     /// [`copy`](Self::copy), answering API call `n` once the copy is on the clipboard;
     /// whether a copy was started (if not, it was refused, and said so).
     pub(crate) fn copy_answering(&mut self, merged: bool, n: u64, ctx: &egui::Context) -> bool {
-        let before = self.copies_answered.len();
+        let before = self.copying.len();
         self.copy_within(merged, crate::memory::Allowance::now(), Some(n), ctx);
-        self.copies_answered.len() > before
+        self.copying.len() > before
     }
 
     /// [`copy`](Self::copy), or why not if it would need more than `memory` (or more than
@@ -81,26 +91,39 @@ impl AppState {
         let from = bounds.translate(-canvas.x0, -canvas.y0);
         let resolution = doc.resolution;
         // Each copy's result comes back in the order they were started.
-        self.copies_answered.push_back(answer);
+        self.copying.push_back(Copying { answer, cut: None });
         // The cap on tiles is kept until the copy is on the clipboard.
         self.clipboard.write_image(Copied { from, pixels, resolution, _hold: memory.into_hold() }, ctx);
     }
 
     /// Says how the copies put on the clipboard since the last frame went: to the API call
-    /// a copy answers, if it does (see [`AppState::answers`]).
+    /// a copy answers, if it does (see [`AppState::answers`]). A cut whose copy did not reach
+    /// the clipboard is taken back, if nothing has been done since.
     pub(crate) fn poll_copies(&mut self) {
         for result in self.clipboard.written() {
-            let answer = self.copies_answered.pop_front().flatten();
-            match (result, answer) {
-                (Ok(from), answer) => {
+            let Copying { answer, cut } = self.copying.pop_front().unwrap_or_default();
+            match result {
+                Ok(from) => {
                     self.notify(format!("Copied {} × {} pixels.", from.width(), from.height()));
                     if let Some(n) = answer {
                         self.answered
                             .push((n, Ok(serde_json::json!({ "width": from.width(), "height": from.height() }))));
                     }
                 }
-                (Err(e), Some(n)) => self.answered.push((n, Err(format!("Could not copy: {e}")))),
-                (Err(e), None) => self.message(MessageKind::Error, "Could not copy", e),
+                Err(e) => {
+                    let e = e.trim_end_matches('.');
+                    let said = match cut {
+                        None => format!("{e}."),
+                        Some((doc, state)) if self.doc_mut(doc).is_some_and(|d| d.take_back(state)) => {
+                            format!("{e}, so nothing was cut.")
+                        }
+                        Some(_) => format!("{e}. What was cut stays erased: undo the cut to get it back."),
+                    };
+                    match answer {
+                        Some(n) => self.answered.push((n, Err(format!("Could not copy: {said}")))),
+                        None => self.message(MessageKind::Error, "Could not copy", said),
+                    }
+                }
             }
         }
     }

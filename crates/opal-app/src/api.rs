@@ -1816,7 +1816,7 @@ impl AppState {
             Cmd::Cut => {
                 self.next_answer += 1;
                 let n = self.next_answer;
-                if self.cut_answering(n, ctx) { Reply::Later(n) } else { now(Ok(json!({}))) }
+                if self.cut(Some(n), ctx) { Reply::Later(n) } else { now(Ok(json!({}))) }
             }
             Cmd::Close => {
                 let id = doc.expect("available");
@@ -2866,6 +2866,65 @@ mod tests {
         assert!(flat.content_bounds().is_none(), "the canvas was not cleared");
         now(&mut st, "deselect", json!({})).unwrap();
         assert_eq!(selection(&mut st)["bounds"], Value::Null);
+    }
+
+    #[test]
+    fn a_cut_erases_what_it_copied_and_nothing_once_the_copy_fails() {
+        use crate::clipboard::TestClipboard;
+        use opal_core::document::{LayerContent, ObjectKind};
+        use opal_core::mask::{Combine, Shape, ShapeKind};
+        use opal_core::selection::{Selection, Step};
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        st.clipboard = Box::new(TestClipboard::default());
+        // A white background reaching 100 pixels past the canvas's right edge.
+        now(&mut st, "new", json!({ "width": 400, "height": 200 })).unwrap();
+        let narrow = |doc: &mut opal_core::document::Document, _: &mut _| {
+            doc.canvas.width = 300;
+            Ok::<(), ()>(())
+        };
+        st.active_mut().unwrap().apply("Narrow the canvas", narrow).unwrap();
+        let select = |st: &mut AppState, [x0, y0, x1, y1]: [f64; 4]| {
+            let shape = Shape {
+                kind: ShapeKind::Rectangle,
+                center: [(x0 + x1) / 2.0, (y0 + y1) / 2.0],
+                size: [x1 - x0, y1 - y0],
+                angle: 0.0,
+                smooth: false,
+            };
+            let s = Selection::new(Step::Shape { shape, combine: Combine::Replace });
+            st.active_mut().unwrap().set_pixel_selection(Some(s), "Select");
+        };
+        let alpha = |st: &AppState, x: i64, y: i64| {
+            let LayerContent::Objects(o) = &st.active().unwrap().doc().layers[0].content else { panic!("a group") };
+            let ObjectKind::Pixels(p) = &o[0].kind else { panic!("not pixels") };
+            opal_core::tile::pixel_to_f32(p.image.pixel(x - p.offset[0], y - p.offset[1]))[3]
+        };
+        let cut = |st: &mut AppState| match st.call("cut", &args(json!({})), &egui::Context::default()) {
+            Reply::Later(n) => later(st, n),
+            Reply::Now(r) => panic!("answered at once: {r:?}"),
+        };
+        // Selected across the canvas's edge: copied, and erased, only within the canvas.
+        select(&mut st, [250.0, 50.0, 400.0, 150.0]);
+        assert_eq!(cut(&mut st).unwrap(), json!({ "width": 50, "height": 100 }));
+        assert_eq!([alpha(&st, 275, 100), alpha(&st, 350, 100)], [0.0, 1.0], "erased what it did not copy");
+        // A copy the clipboard refuses: the cut is taken back, and cannot be redone.
+        st.clipboard = Box::new(TestClipboard { refuses: Some("The clipboard is in use.".into()), ..Default::default() });
+        select(&mut st, [0.0, 0.0, 100.0, 100.0]);
+        let said = cut(&mut st).unwrap_err();
+        assert!(said.contains("in use, so nothing was cut"), "{said}");
+        assert_eq!(alpha(&st, 50, 50), 1.0, "erased what was not copied");
+        let d = st.active().unwrap();
+        assert_eq!((d.history.undo_label(), d.history.can_redo()), (Some("Select"), false));
+        // Something done since, it stays (in history), and the user is told how to get it back.
+        let n = match st.call("cut", &args(json!({})), &egui::Context::default()) {
+            Reply::Later(n) => n,
+            Reply::Now(r) => panic!("answered at once: {r:?}"),
+        };
+        now(&mut st, "deselect", json!({})).unwrap();
+        let said = later(&mut st, n).unwrap_err();
+        assert!(said.contains("undo the cut"), "{said}");
+        assert_eq!(alpha(&st, 50, 50), 0.0);
     }
 
     #[test]

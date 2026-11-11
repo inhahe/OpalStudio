@@ -554,6 +554,8 @@ pub struct TestClipboard {
     pub text: bool,
     pub slow: bool,
     pub done: Vec<WriteResult>,
+    /// Why writing to it fails, if it does.
+    pub refuses: Option<String>,
 }
 
 #[cfg(test)]
@@ -564,8 +566,13 @@ impl Clipboard for TestClipboard {
     }
 
     fn write_image(&mut self, copy: Copied, _ctx: &egui::Context) {
-        self.image = Some(copy.pasted());
-        self.done.push(Ok(copy.from));
+        match &self.refuses {
+            Some(why) => self.done.push(Err(why.clone())),
+            None => {
+                self.image = Some(copy.pasted());
+                self.done.push(Ok(copy.from));
+            }
+        }
     }
 
     fn written(&mut self) -> Vec<WriteResult> {
