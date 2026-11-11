@@ -766,7 +766,7 @@ Puts pixels into an image, at a place on its canvas: as a new layer above the ac
 
 ### `selection`
 
-What is selected in an image: the rectangle round it, as [x, y, width, height] from the canvas's corner (null if nothing is; "unbounded" where it reaches past every edge, inverted), and the steps that made it, in order: shapes (rectangles and ellipses, by their middle, size and angle, and how each combines), inversions, grow steps (by, corners), feather steps (width, side, falloff), smooth steps (radius) and border steps (width, side), as grow_selection, feather_selection, smooth_selection and border_selection take them, and masks (a "mask" step is, as its of says, a layer's pixels, from select_layer_pixels, or what the steps before it came to, carried pixel by pixel by Rotate, Flip or Resize Image, which could not carry them exactly; it gives no numbers, only how it combines). select_all, deselect, reselect, invert_selection and select_layer_pixels answer with it too.
+What is selected in an image: the rectangle round it, as [x, y, width, height] from the canvas's corner (null if nothing is; "unbounded" where it reaches past every edge, inverted), and the steps that made it, in order: shapes (rectangles and ellipses, by their middle, size and angle, and how each combines), inversions, grow steps (by, corners), feather steps (width, side, falloff), smooth steps (radius) and border steps (width, side), as grow_selection, feather_selection, smooth_selection and border_selection take them, and masks (a "mask" step is, as its of says, a layer's pixels, from select_layer_pixels; what the steps before it came to, carried pixel by pixel by Rotate, Flip or Resize Image, which could not carry them exactly; or a saved selection, combined by load_selection; it gives no numbers, only how it combines), and outlines (their start and segments, lines and curves, from select_outline or the outline tool). select_all, deselect, reselect, invert_selection and select_layer_pixels answer with it too.
 
 | Parameter | Kind | |
 |---|---|---|
@@ -774,7 +774,7 @@ What is selected in an image: the rectangle round it, as [x, y, width, height] f
 
 ### `saved_selections`
 
-The selections saved in an image (save_selection), in the order they were first saved: each one's name, the rectangle round what it selects (as the selection query tells it, carried as the image has been turned, flipped, resized or cropped since it was saved), its steps as they were when it was saved, and whether the image has changed since (load_selection carries it so).
+The selections saved in an image (save_selection), in the order they were first saved: each one's name, the rectangle round what it selects (as the selection query tells it; if the image has been turned, flipped, resized or cropped since it was saved, the rectangle round that rectangle carried so, which may be larger than what load_selection then selects), its steps as they were when it was saved, and whether the image has changed since (load_selection carries it so).
 
 | Parameter | Kind | |
 |---|---|---|

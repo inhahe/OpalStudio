@@ -138,10 +138,18 @@ pub fn next_selection_name(doc: &Document) -> String {
     (1..).map(|n| format!("Selection {n}")).find(|name| doc.saved_selection(name).is_none()).expect("one is free")
 }
 
-/// Why a selection may not be saved under `name` in `doc`, if it may not: it is empty. (One
-/// saved under it already is replaced.)
-pub fn save_name_refused(name: &str) -> Option<&'static str> {
-    name.trim().is_empty().then_some("Give it a name.")
+/// The selection `kept` is, brought back: carried as the image has changed since, if it has
+/// (within the memory `measure` finds, unless `stop` says to stop); nothing, if it selects
+/// nothing. What Load Selection and Reselect bring back.
+pub(crate) fn brought_back(
+    kept: &opal_core::document::KeptSelection,
+    measure: crate::memory::Measure,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> Result<Option<Arc<Selection>>, String> {
+    if kept.since == opal_core::geom::Affine::IDENTITY {
+        return Ok(Some(kept.selection.clone()).filter(|s| !s.is_empty()));
+    }
+    carried(&kept.selection, &kept.since, measure.now(), stop)
 }
 
 /// The history state a step of the recipe changed (in the selection panel, or by a script) is.
@@ -252,18 +260,24 @@ impl AppState {
     /// under it, without regard to case, if there is one), as a history state: kept in the
     /// image, and in its file.
     pub(crate) fn save_selection(&mut self, name: &str) {
+        use opal_core::document::{KeptSelection, SavedSelection};
+        let Some(name) = SavedSelection::name_of(name).map(str::to_owned) else {
+            return self.message(MessageKind::Info, "Save Selection", "Give it a name.");
+        };
         let d = self.active_mut().expect("available");
-        let Some(selection) = d.pixel_selection().cloned() else { return };
-        let name = name.trim().to_owned();
-        let _ = d.apply("Save selection", |doc, _| {
-            let kept = opal_core::document::KeptSelection::new(selection);
-            let lower = name.to_lowercase();
-            match doc.saved.iter_mut().find(|s| s.name.to_lowercase() == lower) {
-                Some(s) => *s = opal_core::document::SavedSelection { name, kept },
-                None => doc.saved.push(opal_core::document::SavedSelection { name, kept }),
+        // What is selected once an edit in progress (a box) is applied: read as the state is made.
+        let saved = d.apply("Save selection", |doc, _| {
+            let Some(selection) = doc.selection.clone().filter(|s| !s.is_empty()) else { return Err(()) };
+            let kept = KeptSelection::new(selection);
+            match doc.saved.iter_mut().find(|s| s.named(&name)) {
+                Some(s) => *s = SavedSelection { name, kept },
+                None => doc.saved.push(SavedSelection { name, kept }),
             }
-            Ok::<(), ()>(())
+            Ok(())
         });
+        if saved == Err(crate::doc::NotMade::Failed(())) {
+            self.message(MessageKind::Info, "Save Selection", "Nothing is selected.");
+        }
     }
 
     /// Selects the selection saved in the active image as `name`, inverted if `invert`,
@@ -280,12 +294,7 @@ impl AppState {
         };
         let (id, measure) = (d.id, crate::memory::Measure::here());
         let work = move |doc: &mut Document, _: &mut opal_core::document::IdGen, progress: &opal_io::Progress| {
-            let stop = || progress.is_cancelled();
-            let kept = saved.kept;
-            let mut loaded = match kept.since == opal_core::geom::Affine::IDENTITY {
-                true => Some(kept.selection),
-                false => carried(&kept.selection, &kept.since, measure.now(), &stop)?,
-            };
+            let mut loaded = brought_back(&saved.kept, measure, &|| progress.is_cancelled())?;
             if invert {
                 let s = loaded.map_or_else(|| Selection::of(Vec::new()), |s| (*s).clone()).then(Step::Invert);
                 loaded = (!s.is_empty()).then(|| Arc::new(s));
@@ -302,7 +311,7 @@ impl AppState {
                 (Combine::Subtract, None) => doc.selection.clone(),
                 (Combine::Intersect, None) => None,
             };
-            if made.is_none() {
+            if made.as_ref().is_none_or(|s| s.is_empty()) {
                 return Err("Nothing would be selected.".to_owned());
             }
             doc.selection = made;
@@ -314,9 +323,8 @@ impl AppState {
     /// Deletes the selection saved in the active image as `name`, as a history state.
     pub(crate) fn delete_saved_selection(&mut self, name: &str) {
         let d = self.active_mut().expect("available");
-        let lower = name.to_lowercase();
         let _ = d.apply("Delete saved selection", |doc, _| {
-            doc.saved.retain(|s| s.name.to_lowercase() != lower);
+            doc.saved.retain(|s| !s.named(name));
             Ok::<(), ()>(())
         });
     }
@@ -332,7 +340,7 @@ impl AppState {
         }
         let (id, measure) = (d.id, crate::memory::Measure::here());
         let work = move |doc: &mut Document, _: &mut opal_core::document::IdGen, progress: &opal_io::Progress| {
-            doc.selection = carried(&again.selection, &again.since, measure.now(), &|| progress.is_cancelled())?;
+            doc.selection = brought_back(&again, measure, &|| progress.is_cancelled())?;
             Ok(())
         };
         self.edit_later(id, "Reselect", crate::memory::Allowance::unlimited(), work, |_, _, ()| {});
@@ -1202,6 +1210,34 @@ mod tests {
         assert!(d.transform.is_some(), "the box was applied");
         assert_eq!(d.pixel_selection().unwrap(), &before);
         assert!(st.messages.back().is_some_and(|m| m.body.contains("Apply or cancel the box first")));
+    }
+
+    #[test]
+    fn save_selection_saves_what_a_box_open_leaves_selected_and_wants_a_name() {
+        use crate::commands::Cmd;
+        use opal_core::geom::Affine;
+        use opal_core::mask::{Combine, Extent, Shape};
+        use opal_core::selection::{Selection, Step};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let ctx = eframe::egui::Context::default();
+        let shape = Shape::rectangle(&IRect::new(20, 20, 60, 50).to_f(), false);
+        let s = Selection::new(Step::Shape { shape, combine: Combine::Replace });
+        st.active_mut().unwrap().set_pixel_selection(Some(s), "Select");
+        // A box moving it 100 across, open as it is saved: what the box makes is saved.
+        st.run(Cmd::TransformSelection, &ctx);
+        st.active_mut().unwrap().set_box(Affine::translate(100.0, 0.0), None);
+        st.save_selection("Moved");
+        let d = st.active().unwrap();
+        let saved = d.doc().saved_selection("moved").expect("not saved");
+        assert_eq!(saved.kept.selection.mask().extent(), Extent::Within(IRect::new(120, 20, 160, 50)));
+        // A blank name, whatever asked: refused, nothing saved.
+        st.save_selection("   ");
+        assert!(st.messages.back().is_some_and(|m| m.body.contains("Give it a name")));
+        assert_eq!(st.active().unwrap().doc().saved.len(), 1);
+        // Told apart without the spaces round them.
+        st.save_selection("  Moved ");
+        assert_eq!(st.active().unwrap().doc().saved.len(), 1, "saved twice under one name");
     }
 
     #[test]

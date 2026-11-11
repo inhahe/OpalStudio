@@ -161,6 +161,7 @@ fn step_icon(step: &Step) -> char {
         Step::Feather { .. } => icons::FEATHER,
         Step::Smooth { .. } => icons::SMOOTH,
         Step::Border { .. } => icons::BORDER_SELECTION,
+        Step::Mask { of: MaskOf::Saved, .. } => icons::SAVED_SELECTIONS,
         Step::Mask { .. } => icons::LAYER_PIXELS,
     }
 }

@@ -655,8 +655,8 @@ fn rotate_by(ctx: &egui::Context, st: &mut AppState) {
 fn save_selection(ctx: &egui::Context, st: &mut AppState) {
     let Some(mut spec) = st.save_selection.clone() else { return };
     let palette = st.palette;
-    let taken = st.active().is_some_and(|d| d.doc().saved_selection(spec.name.trim()).is_some());
-    let refused = crate::select::save_name_refused(&spec.name);
+    let taken = st.active().is_some_and(|d| d.doc().saved_selection(&spec.name).is_some());
+    let named = opal_core::document::SavedSelection::name_of(&spec.name).is_some();
     let mut done = None;
     egui::Modal::new(egui::Id::unique("save-selection")).show(ctx, |ui| {
         ui.heading("Save selection");
@@ -668,10 +668,10 @@ fn save_selection(ctx: &egui::Context, st: &mut AppState) {
                 field.request_focus();
             }
         });
-        let note = match (refused, taken) {
-            (Some(why), _) => Some(why.to_owned()),
-            (None, true) => Some(format!("The selection saved as \"{}\" is replaced.", spec.name.trim())),
-            (None, false) => None,
+        let note = match (named, taken) {
+            (false, _) => Some("Give it a name.".to_owned()),
+            (true, true) => Some(format!("The selection saved as \"{}\" is replaced.", spec.name.trim())),
+            (true, false) => None,
         };
         if let Some(note) = note {
             ui.label(RichText::new(note).small().color(palette.weak_text));
@@ -684,7 +684,7 @@ fn save_selection(ctx: &egui::Context, st: &mut AppState) {
         done = ok_cancel(ui, "Save");
     });
     match done {
-        Some(true) if refused.is_none() => {
+        Some(true) if named => {
             st.save_selection = None;
             st.save_selection(&spec.name);
         }

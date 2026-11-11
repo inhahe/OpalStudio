@@ -26,6 +26,11 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+/// How far from the origin (tiles) a mask read from bytes may reach: past any selection the
+/// editor makes (each shape within `selection::REACH` pixels), and near enough that working
+/// along a row of it stays cheap.
+pub const MASK_REACH: i32 = 1 << 17;
+
 /// What [`Mask::to_bytes`] begins with, and the version of its form.
 pub const MASK_MAGIC: &[u8] = b"OPALMASK1";
 
@@ -788,32 +793,41 @@ impl Mask {
     /// begins and ends, in tiles, what kind of tile it holds, and that tile's levels), all
     /// little-endian. [`from_bytes`](Self::from_bytes) reads them back.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = MASK_MAGIC.to_vec();
-        out.extend(self.outside.to_le_bytes());
-        out.extend((self.rows.len() as u32).to_le_bytes());
+        let mut out = Vec::new();
+        self.write_to(&mut out).expect("writing to memory");
+        out
+    }
+
+    /// Writes [`to_bytes`](Self::to_bytes)' bytes to `out` as they are made, a tile's levels at
+    /// a time, rather than all of them at once.
+    pub fn write_to(&self, out: &mut impl std::io::Write) -> std::io::Result<()> {
+        out.write_all(MASK_MAGIC)?;
+        out.write_all(&self.outside.to_le_bytes())?;
+        out.write_all(&(self.rows.len() as u32).to_le_bytes())?;
         for (y, row) in &self.rows {
-            out.extend(y.to_le_bytes());
-            out.extend((row.len() as u32).to_le_bytes());
+            out.write_all(&y.to_le_bytes())?;
+            out.write_all(&(row.len() as u32).to_le_bytes())?;
             for r in row {
-                out.extend(r.x0.to_le_bytes());
-                out.extend(r.x1.to_le_bytes());
+                out.write_all(&r.x0.to_le_bytes())?;
+                out.write_all(&r.x1.to_le_bytes())?;
                 let (kind, levels): (u8, &[u16]) = match &r.tile {
                     MaskTile::Level(l) => (0, std::slice::from_ref(l)),
                     MaskTile::Columns(l) => (1, &l[..]),
                     MaskTile::Rows(l) => (2, &l[..]),
                     MaskTile::Levels(l) => (3, &l[..]),
                 };
-                out.push(kind);
-                out.extend(levels.iter().flat_map(|l| l.to_le_bytes()));
+                out.write_all(&[kind])?;
+                let bytes: Vec<u8> = levels.iter().flat_map(|l| l.to_le_bytes()).collect();
+                out.write_all(&bytes)?;
             }
         }
-        out
+        Ok(())
     }
 
     /// The mask [`to_bytes`](Self::to_bytes) made `bytes` of, or why they are not one: a mask
     /// from a damaged or hostile file is refused, not trusted (rows and runs out of order or
-    /// past [`MAX_COORD`](crate::document::MAX_COORD), a tile of levels in a run of more than
-    /// one, or more than the bytes hold).
+    /// past [`MASK_REACH`] tiles, a tile of levels in a run of more than one, or more than the
+    /// bytes hold).
     pub fn from_bytes(bytes: &[u8]) -> Result<Mask, String> {
         struct Reader<'a>(&'a [u8]);
         impl Reader<'_> {
@@ -839,10 +853,7 @@ impl Mask {
                 Ok(b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect())
             }
         }
-        // How far a tile may be from the origin: as far as anything in an image may (wider than
-        // an i32 holds, so compared as i64).
-        let far = crate::document::MAX_COORD / i64::from(TILE_SIZE);
-        let too_far = |t: i32| i64::from(t).abs() > far;
+        let too_far = |t: i32| t.unsigned_abs() > MASK_REACH as u32;
         let mut r = Reader(bytes);
         if r.take(MASK_MAGIC.len())? != MASK_MAGIC {
             return Err("it is not a mask".into());
@@ -1510,6 +1521,17 @@ mod tests {
         assert!(Mask::from_bytes(&bytes[..bytes.len() - 1]).is_err(), "cut short");
         assert!(Mask::from_bytes(&[bytes.as_slice(), &[0]].concat()).is_err(), "more after it");
         assert!(Mask::from_bytes(b"NOTAMASK1").is_err());
+        // A run reaching two billion tiles out: refused.
+        let mut far = MASK_MAGIC.to_vec();
+        far.extend(0u16.to_le_bytes());
+        far.extend(1u32.to_le_bytes());
+        far.extend(0i32.to_le_bytes());
+        far.extend(1u32.to_le_bytes());
+        far.extend((-2_000_000_000i32).to_le_bytes());
+        far.extend(2_000_000_000i32.to_le_bytes());
+        far.push(0);
+        far.extend(FULL.to_le_bytes());
+        assert!(Mask::from_bytes(&far).is_err(), "a run two billion tiles out was read");
         // A run claiming a row of a million tiles' levels, in a few bytes: refused, not made.
         let mut huge = MASK_MAGIC.to_vec();
         huge.extend(0u16.to_le_bytes());

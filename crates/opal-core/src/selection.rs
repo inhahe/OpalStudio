@@ -7,6 +7,13 @@ use crate::mask::{Combine, Mask, Shape};
 use crate::modify::{Bounds, Falloff, Halt, Reach, Side, UNBOUNDED};
 use std::sync::Arc;
 
+/// How far from the document's origin a shape or an outline may reach (pixels): as far as
+/// the editor lets one be given.
+pub const REACH: f64 = 1e7;
+
+/// The most points an outline may have.
+pub const MOST_POINTS: usize = 1_000_000;
+
 /// A step of a selection's recipe: a maker, which makes a mask and combines it with the
 /// selection so far, or a modifier, which changes the selection so far.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -70,6 +77,33 @@ impl Step {
             Step::Border { width, side } => before.bordered_within(*width, *side, bounds)?,
             Step::Mask { mask, combine, .. } => before.combined(mask, *combine),
         })
+    }
+
+    /// Why the step could not have been made in the editor, if it could not (as a step read from
+    /// a file may be): a shape or an outline reaching past [`REACH`] pixels, or with more points
+    /// than [`MOST_POINTS`]; a modifier's distance past
+    /// [`MAX_DISTANCE`](crate::modify::MAX_DISTANCE), or not a number.
+    pub fn refused(&self) -> Option<&'static str> {
+        let within = |v: f64| v.is_finite() && v.abs() <= REACH;
+        let distance = |v: f64| v.is_finite() && v.abs() <= crate::modify::MAX_DISTANCE;
+        let ok = match self {
+            Step::Shape { shape, .. } => {
+                shape.center.iter().chain(&shape.size).all(|&v| within(v)) && shape.angle.is_finite()
+            }
+            Step::Outline { outline, .. } => {
+                let points = std::iter::once(&outline.start).chain(outline.segments.iter().flat_map(|s| match s {
+                    crate::outline::Segment::Line { to } => vec![to],
+                    crate::outline::Segment::Curve { c1, c2, to } => vec![c1, c2, to],
+                }));
+                outline.segments.len() < MOST_POINTS && points.flatten().all(|&v| within(v))
+            }
+            Step::Grow { by, .. } => distance(*by),
+            Step::Feather { width, .. } | Step::Smooth { radius: width } | Step::Border { width, .. } => {
+                distance(*width)
+            }
+            Step::Invert | Step::Mask { .. } => true,
+        };
+        (!ok).then_some("a step reaches farther, or has more points, than the editor makes")
     }
 
     /// Whether it is a modifier (grow, feather, smooth or border): one with settings, which
@@ -215,10 +249,15 @@ impl Selection {
         self.mask
     }
 
-    /// The selection `steps` make, its mask `mask`, which they came to (as a file kept it), not
-    /// worked out again.
-    pub fn kept(steps: Vec<Step>, mask: Arc<Mask>) -> Selection {
-        Selection { steps, mask, before: None }
+    /// The selection `steps` make, its mask `mask`, which they came to, and `before`, the mask
+    /// the steps but the last came to, if kept (as a file kept them): not worked out again.
+    pub fn kept(steps: Vec<Step>, mask: Arc<Mask>, before: Option<Arc<Mask>>) -> Selection {
+        Selection { steps, mask, before }
+    }
+
+    /// The mask its steps but the last came to, if it keeps it (see [`before_last`](Self::before_last)).
+    pub fn kept_before(&self) -> Option<&Arc<Mask>> {
+        self.before.as_ref()
     }
 
     /// This selection with `step` after its steps (worked out from its mask, not again from

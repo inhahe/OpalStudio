@@ -9,9 +9,12 @@
 //! - `tiles/<n>.bin`: one tile each, numbered from 0. A tile shared by several layers or
 //!   objects (after duplicating a layer, say) is stored once and referenced from each.
 //! - `masks/<n>.bin`: the masks of the selections saved in the image (`selections` in
-//!   `document.json`: each one's name, its steps as the API's `selection` query tells them, a
-//!   mask step naming its mask's number, the mask they come to, and how the image has been
-//!   turned, flipped, resized or cropped since, if it has), each as `Mask::to_bytes` makes it.
+//!   `document.json`: each one's name; its steps in the form the API's `selection` query tells
+//!   them, but in document coordinates, not from the canvas's corner, a mask step naming its
+//!   mask's number; the number of the mask they come to, and of the one the steps but the last
+//!   come to, if kept; and how the image has been turned, flipped, resized or cropped since, if
+//!   it has), each as `Mask::to_bytes` makes it. A file holding none is written as version 2,
+//!   which versions before saved selections read.
 //!
 //! Version 0 had only pixel objects, called `raster`, without offsets, and a canvas
 //! without a position; it is still read.
@@ -85,16 +88,28 @@ struct FileDoc {
     selections: Vec<FileSelection>,
 }
 
-/// A selection saved in the image: its name; its steps, as the API's `selection` query tells
-/// them (a mask step's mask by its number, `mask`); the number of the mask they come to; and
-/// how the image has changed since (`[a, b, c, d, e, f]`), if it has.
+/// A selection saved in the image: its name; its steps, in the form the API's `selection`
+/// query tells them but in document coordinates (a mask step's mask by its number, `mask`);
+/// the number of the mask they come to, and of the one the steps but the last come to, if it
+/// is kept (`before`); and how the image has changed since (`[a, b, c, d, e, f]`), if it has.
 #[derive(Serialize, Deserialize)]
 struct FileSelection {
     name: String,
     steps: Vec<serde_json::Value>,
     mask: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    before: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     since: Option<[f64; 6]>,
+}
+
+impl FileSelection {
+    /// The numbers of the masks it names: its own, the one before its last step, and its mask
+    /// steps'.
+    fn masks(&self) -> impl Iterator<Item = u64> + '_ {
+        let steps = self.steps.iter().filter_map(|v| v.get("mask").and_then(serde_json::Value::as_u64));
+        [self.mask as u64].into_iter().chain(self.before.map(|b| b as u64)).chain(steps)
+    }
 }
 
 fn default_resolution() -> f64 {
@@ -236,10 +251,14 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path, progress: &Progress) -> Re
     let layers = doc.layers.iter().map(|l| file_layer(l, &mut numbers, &mut tiles)).collect();
     // The saved selections' masks, each once, numbered as they first appear.
     let mut masks: Vec<Arc<Mask>> = Vec::new();
-    let selections = doc.saved.iter().map(|s| file_selection(s, &mut masks)).collect();
+    let mut mask_numbers: HashMap<*const Mask, usize> = HashMap::new();
+    let selections: Vec<FileSelection> =
+        doc.saved.iter().map(|s| file_selection(s, &mut mask_numbers, &mut masks)).collect();
     let file = FileDoc {
         format: "opal-studio".into(),
-        version: FORMAT_VERSION,
+        // A file without saved selections holds nothing version 2 did not, and is written so:
+        // the versions before them open it.
+        version: if selections.is_empty() { 2 } else { FORMAT_VERSION },
         canvas: doc.canvas,
         resolution: doc.resolution,
         next_id: ids.peek(),
@@ -263,7 +282,7 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path, progress: &Progress) -> Re
         write_tiles(&mut zip, &tiles, deflated, TILES_AT_ONCE, progress).map_err(zip_err)?;
         for (n, m) in masks.iter().enumerate() {
             zip.start_file(format!("masks/{n}.bin"), deflated).map_err(zip_err)?;
-            write_all(&mut zip, &m.to_bytes(), path)?;
+            m.write_to(&mut zip).map_err(|e| IoError::io(path, e))?;
         }
         zip.finish().map_err(zip_err)?;
         Ok(())
@@ -312,14 +331,18 @@ fn write_tiles<W: Write + Seek>(
     Ok(())
 }
 
-/// `saved` as the file keeps it, its masks (and its mask steps') numbered among `masks`.
-fn file_selection(saved: &SavedSelection, masks: &mut Vec<Arc<Mask>>) -> FileSelection {
-    let mut number = |m: &Arc<Mask>| match masks.iter().position(|k| Arc::ptr_eq(k, m)) {
-        Some(n) => n,
-        None => {
+/// `saved` as the file keeps it, its masks (and its mask steps') numbered among `masks` by
+/// where each is (`numbers`).
+fn file_selection(
+    saved: &SavedSelection,
+    numbers: &mut HashMap<*const Mask, usize>,
+    masks: &mut Vec<Arc<Mask>>,
+) -> FileSelection {
+    let mut number = |m: &Arc<Mask>| {
+        *numbers.entry(Arc::as_ptr(m)).or_insert_with(|| {
             masks.push(m.clone());
             masks.len() - 1
-        }
+        })
     };
     let s = &saved.kept.selection;
     let steps = s
@@ -335,16 +358,40 @@ fn file_selection(saved: &SavedSelection, masks: &mut Vec<Arc<Mask>>) -> FileSel
         .collect();
     let m = saved.kept.since;
     let since = (m != Affine::IDENTITY).then_some([m.a, m.b, m.c, m.d, m.e, m.f]);
-    FileSelection { name: saved.name.clone(), steps, mask: number(s.mask()), since }
+    let (mask, before) = (number(s.mask()), s.kept_before().map(&mut number));
+    FileSelection { name: saved.name.clone(), steps, mask, before, since }
 }
 
-/// The selections a file saved, their masks read from `zip`; or why they are not: a name
-/// empty or given twice, a step the editor does not know, a mask missing or damaged, a
-/// change since the image would have no size.
+/// The bytes each mask the selections in `file` name takes, as `zip` says (each once): what
+/// opening counts before reading them, and the most each may be read as.
+fn mask_sizes<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    file: &[FileSelection],
+    path: &Path,
+) -> Result<HashMap<u64, usize>, IoError> {
+    let mut sizes = HashMap::new();
+    for n in file.iter().flat_map(FileSelection::masks) {
+        if sizes.contains_key(&n) {
+            continue;
+        }
+        let name = format!("masks/{n}.bin");
+        let size = zip
+            .by_name(&name)
+            .map_err(|_| IoError::Format { path: path.to_owned(), message: format!("{name} is missing") })?
+            .size();
+        sizes.insert(n, usize::try_from(size).unwrap_or(usize::MAX));
+    }
+    Ok(sizes)
+}
+
+/// The selections a file saved, their masks read from `zip`, each no larger than `sizes` says
+/// (counted before); or why they are not: a name empty or given twice, a step the editor does
+/// not know or would not make, a mask missing or damaged, a change since the image that the
+/// editor would not make.
 fn read_selections<R: Read + Seek>(
     zip: &mut ZipArchive<R>,
     file: Vec<FileSelection>,
-    limit: usize,
+    sizes: &HashMap<u64, usize>,
     path: &Path,
 ) -> Result<Vec<SavedSelection>, IoError> {
     let bad = |message: String| IoError::Format { path: path.to_owned(), message };
@@ -354,6 +401,7 @@ fn read_selections<R: Read + Seek>(
             return Ok(m.clone());
         }
         let name = format!("masks/{n}.bin");
+        let limit = sizes.get(&(n as u64)).copied().unwrap_or(0);
         let bytes = read_entry(zip, &name, limit, path)?;
         let m = Arc::new(Mask::from_bytes(&bytes).map_err(|why| bad(format!("{name}: {why}")))?);
         masks.insert(n, m.clone());
@@ -361,8 +409,7 @@ fn read_selections<R: Read + Seek>(
     };
     let mut out: Vec<SavedSelection> = Vec::with_capacity(file.len());
     for s in file {
-        let lower = s.name.to_lowercase();
-        if s.name.trim().is_empty() || out.iter().any(|o| o.name.to_lowercase() == lower) {
+        if SavedSelection::name_of(&s.name).is_none() || out.iter().any(|o| o.named(&s.name)) {
             return Err(bad(format!("a saved selection's name, {:?}, is empty or given twice", s.name)));
         }
         let mut steps = Vec::with_capacity(s.steps.len());
@@ -378,19 +425,24 @@ fn read_selections<R: Read + Seek>(
             } else {
                 serde_json::from_value(v).map_err(|e| bad(format!("a step of {:?}: {e}", s.name)))?
             };
+            if let Some(why) = step.refused() {
+                return Err(bad(format!("{:?}: {why}", s.name)));
+            }
             steps.push(step);
         }
         let since = match s.since {
             None => Affine::IDENTITY,
             Some([a, b, c, d, e, f]) => {
                 let m = Affine { a, b, c, d, e, f };
-                if m.inverse().is_none() {
-                    return Err(bad(format!("{:?}: what has changed since would leave it no size", s.name)));
+                // As far as an image's placing may go: what the editor's changes stay within.
+                if !ImageObject::transform_ok(&m) {
+                    return Err(bad(format!("{:?}: what has changed since is past what the editor makes", s.name)));
                 }
                 m
             }
         };
-        let selection = Arc::new(Selection::kept(steps, mask(zip, s.mask)?));
+        let before = s.before.map(|b| mask(zip, b)).transpose()?;
+        let selection = Arc::new(Selection::kept(steps, mask(zip, s.mask)?, before));
         out.push(SavedSelection { name: s.name, kept: KeptSelection { selection, since } });
     }
     Ok(out)
@@ -515,7 +567,13 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
     // entry in its image) and the batch being read.
     let tiles: u64 = stored.iter().map(|s| s.2 as u64).sum();
     let batch = stored.chunks(BATCH).map(|b| b.iter().map(|s| s.2 as u64).sum()).max().unwrap_or(0);
-    let need = Need { at_once: places.saturating_mul(24 + 64).saturating_add(batch), tiles };
+    // The saved selections' masks: as read, and as made of what is read, at once.
+    let mask_sizes = mask_sizes(&mut zip, &file.selections, path)?;
+    let masks: u64 = mask_sizes.values().map(|&b| b as u64).sum();
+    let need = Need {
+        at_once: places.saturating_mul(24 + 64).saturating_add(batch).saturating_add(masks.saturating_mul(2)),
+        tiles,
+    };
     if let Some(free) = free {
         free.check(need).map_err(|short| IoError::TooLarge { path: path.to_owned(), short })?;
     }
@@ -544,7 +602,7 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
         layers.push(Arc::new(build_layer(l, &tiles, path)?));
     }
     // The selections saved in it; what was selected is not kept.
-    let saved = read_selections(&mut zip, file.selections, json_limit(free), path)?;
+    let saved = read_selections(&mut zip, file.selections, &mask_sizes, path)?;
     let doc =
         Document { canvas: file.canvas, resolution: file.resolution, layers, selection: None, deselected: None, saved };
     let mut ids = IdGen::starting_at(file.next_id);
@@ -800,10 +858,56 @@ mod tests {
             std::fs::remove_file(&out).unwrap();
             r
         };
-        let twice = rewrite(&|v| v["selections"][1]["name"] = "SHAPES".into()).unwrap_err().to_string();
+        let twice = rewrite(&|v| v["selections"][1]["name"] = " shapes ".into()).unwrap_err().to_string();
         assert!(twice.contains("given twice"), "{twice}");
         let missing = rewrite(&|v| v["selections"][0]["mask"] = 99.into()).unwrap_err().to_string();
         assert!(missing.contains("masks/99.bin"), "{missing}");
+        // Past what the editor makes: a shape too large, a change since scaling it ten-millionfold.
+        let large = rewrite(&|v| v["selections"][0]["steps"][0]["shape"]["size"] = serde_json::json!([1e15, 10.0]))
+            .unwrap_err()
+            .to_string();
+        assert!(large.contains("reaches farther"), "{large}");
+        let scaled = rewrite(&|v| v["selections"][1]["since"] = serde_json::json!([1e7, 0.0, 0.0, 1e7, 0.0, 0.0]))
+            .unwrap_err()
+            .to_string();
+        assert!(scaled.contains("past what the editor makes"), "{scaled}");
+        // The mask the steps but the last come to, kept: not worked out again.
+        assert!(b.kept.selection.kept_before().is_some(), "the mask before the last step was not kept");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_file_without_saved_selections_is_version_2_and_masks_count_against_memory() {
+        // None saved: version 2, which the versions before saved selections open.
+        let (mut doc, ids) = sample();
+        let path = std::env::temp_dir().join(format!("opal-native-v2-{}.opal", std::process::id()));
+        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        let version = |path: &Path| {
+            let mut zip = ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+            let mut json = String::new();
+            zip.by_name("document.json").unwrap().read_to_string(&mut json).unwrap();
+            serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"].clone()
+        };
+        assert_eq!(version(&path), serde_json::json!(2));
+        // A saved selection of a layer's opacity: about 8 MB of levels, counted (as
+        // read, and as made) against what memory is free, as the tiles are.
+        // (Rising along both ways, each tile keeps a level a pixel: 64 tiles of 128 KB.)
+        let px: Vec<_> = (0..2048 * 2048)
+            .map(|i| pixel_from_f32([1.0, 1.0, 1.0, ((i % 2048 + i / 2048) % 1024) as f32 / 1023.0]))
+            .collect();
+        let mask = Arc::new(Mask::of_opacity(&RasterImage::from_pixels(2048, 2048, &px)));
+        doc.saved = vec![SavedSelection {
+            name: "Rising".into(),
+            kept: KeptSelection::new(Arc::new(Selection::new(Step::Mask {
+                mask,
+                combine: opal_core::mask::Combine::Replace,
+                of: opal_core::selection::MaskOf::LayerPixels,
+            }))),
+        }];
+        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        assert_eq!(version(&path), serde_json::json!(3));
+        assert!(matches!(load(&path, Some(Free::memory(12 << 20))), Err(IoError::TooLarge { .. })));
+        assert!(load(&path, Some(Free::memory(1 << 30))).is_ok());
         std::fs::remove_file(&path).unwrap();
     }
 

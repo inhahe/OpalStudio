@@ -673,18 +673,20 @@ const QUERIES: &[(&str, &str, &[Param])] = &[
          and how each combines), inversions, grow steps (by, corners), feather steps (width, side, \
          falloff), smooth steps (radius) and border steps (width, side), as grow_selection, \
          feather_selection, smooth_selection and border_selection take them, and masks (a \"mask\" step is, as \
-         its of says, a layer's pixels, from select_layer_pixels, or what the steps before it came to, carried \
-         pixel by pixel by Rotate, Flip or Resize Image, which could not carry them exactly; it gives no numbers, \
-         only how it combines). \
+         its of says, a layer's pixels, from select_layer_pixels; what the steps before it came to, carried \
+         pixel by pixel by Rotate, Flip or Resize Image, which could not carry them exactly; or a saved \
+         selection, combined by load_selection; it gives no numbers, only how it combines), and outlines (their \
+         start and segments, lines and curves, from select_outline or the outline tool). \
          select_all, deselect, reselect, invert_selection and select_layer_pixels answer with it too.",
         &[DOCUMENT],
     ),
     (
         "saved_selections",
         "The selections saved in an image (save_selection), in the order they were first saved: each one's \
-         name, the rectangle round what it selects (as the selection query tells it, carried as the image has \
-         been turned, flipped, resized or cropped since it was saved), its steps as they were when it was \
-         saved, and whether the image has changed since (load_selection carries it so).",
+         name, the rectangle round what it selects (as the selection query tells it; if the image has been \
+         turned, flipped, resized or cropped since it was saved, the rectangle round that rectangle carried so, \
+         which may be larger than what load_selection then selects), its steps as they were when it was saved, \
+         and whether the image has changed since (load_selection carries it so).",
         &[DOCUMENT],
     ),
     (
@@ -2373,11 +2375,8 @@ impl AppState {
                 now(self.apply_box(&place, false))
             }
             Cmd::SaveSelection => {
-                let name = args.text("name").expect("required");
-                if let Some(why) = crate::select::save_name_refused(name) {
-                    return now(Err(format!("save_selection: {why}")));
-                }
-                self.save_selection(name);
+                // (Blank text is refused as the call is checked.)
+                self.save_selection(args.text("name").expect("required"));
                 now(Ok(saved_json(self.active().expect("available").doc())))
             }
             Cmd::LoadSelection => {
@@ -3770,7 +3769,9 @@ mod tests {
         assert!(why.contains("No selection is saved as \"Nowhere\""), "{why}");
         let why = now(&mut st, "save_selection", json!({ "name": "  " })).unwrap_err();
         assert!(why.contains("not blank"), "{why}");
-        let left = now(&mut st, "delete_saved_selection", json!({ "name": "CORNER" })).unwrap();
+        let s = now(&mut st, "load_selection", json!({ "name": " corner " })).unwrap();
+        assert_eq!(s["bounds"], json!([13, 0, 7, 12]), "{s}");
+        let left = now(&mut st, "delete_saved_selection", json!({ "name": " CORNER " })).unwrap();
         assert_eq!(left.as_array().unwrap().len(), 1);
         assert_eq!(left[0]["name"], json!("Other"));
     }

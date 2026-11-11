@@ -442,9 +442,12 @@ transform and crop boxes' do; what is typed edits the step at once, as one pendi
 ### Saved selections
 
 **Save Selection** (Select › Saved) keeps what is selected under a name in the image
-(`Document::saved`, in the order first saved), steps and all, as a history state; a name
-taken already (whatever the case of its letters) replaces the selection saved under it, the
-dialog saying so; an empty one is refused. The name offered is the first free "Selection N".
+(`Document::saved`, in the order first saved), steps and all, as a history state: what is
+selected once an edit in progress (a transform box) is applied, read as the state is made. A
+name taken already replaces the selection saved under it, the dialog saying so; names are
+told apart without the spaces round them and without regard to case
+(`SavedSelection::named`), and one that is empty is refused where it would be kept, whatever
+asked. The name offered is the first free "Selection N".
 **Load Selection** selects one again: in place of what is selected (its steps come back, to
 change in the selection panel), added to it, taken away from it, or keeping what is in both
 (a mask step of its own, `MaskOf::Saved`); inverted first, if asked; as a history state,
@@ -455,8 +458,10 @@ away is: turning, flipping, resizing or cropping the image adds to how it has ch
 the steps, each with buttons to load it (in place of what is selected) and to delete it
 (*Delete saved selection*). History counts their masks; they are part of what a file saves,
 so saving or deleting one makes the image unsaved. Files keep them (*Native file format*,
-version 3): each one's recipe, the mask it comes to (not worked out again on opening) and
-how the image has changed since. Scripts: `save_selection(name)`, `load_selection(name,
+version 3): each one's recipe, the mask it comes to and the one its steps but the last come
+to (neither worked out again on opening, nor when its last shape's box is first touched) and
+how the image has changed since. Load Selection and Reselect bring a kept selection back the
+same way (`select::brought_back`), refused if it selects nothing. Scripts: `save_selection(name)`, `load_selection(name,
 combine, invert)`, `delete_saved_selection(name)`, and the `saved_selections` query (each
 one's name, the rectangle round what it selects, carried as the image has changed since, its
 steps as saved, and `changed_since`).
@@ -2121,11 +2126,18 @@ version 3, `selections`, the selections saved in the image: each one's name, its
 API's `selection` query tells them, a mask step naming its mask's number, the number of the
 mask its steps come to, and how the image has changed since, if it has, `[a, b, c, d, e, f]`),
 `tiles/<n>.bin` or `tiles/<n>.srgb8`, one tile each, and `masks/<n>.bin`, the saved
-selections' masks, each once (`Mask::to_bytes`: a magic, the level outside its rows, and its
-rows of runs, each tile one level, a level a column or a row, or a level a pixel; read back
-checking order, reach and length, so a damaged or hostile file is refused, not trusted; a
-name empty or given twice, a step unknown, a mask missing, or a change since that would leave
-no size is refused too). Objects are
+selections' masks, each once (`Mask::write_to`, written as made: a magic, the level outside
+its rows, and its rows of runs, each tile one level, a level a column or a row, or a level a
+pixel). The steps are kept in the form the `selection` query tells them but in document
+coordinates, and the mask the steps but the last come to is kept too. Opening counts the
+masks (as read, and as made) with the tiles against what memory is free, and reads each no
+larger than the archive says it is; it refuses a damaged or hostile file rather than trust
+it: a mask whose rows and runs are out of order, reach past `MASK_REACH` tiles, or hold more
+or less than its bytes; a name empty or given twice; a step unknown, or one the editor would
+not make (a shape or outline reaching past `selection::REACH` pixels, an outline of more than
+a million points, a modifier's distance past `MAX_DISTANCE`); a mask missing; a change since
+that the editor's own changes would not reach (`ImageObject::transform_ok`). A file holding
+no saved selections is written as version 2, which the versions before them read. Objects are
 pixel objects (their tiles and whole-pixel offset) or image objects (their tiles, frame,
 transform and sampling). A tile shared by several layers is stored once. A `.bin` tile is
 the tile's half floats byte-shuffled (all low bytes, then all high bytes), which lets

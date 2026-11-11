@@ -500,6 +500,20 @@ pub struct SavedSelection {
     pub kept: KeptSelection,
 }
 
+impl SavedSelection {
+    /// The name `name` comes to as a saved selection's: without the spaces round it, `None` if
+    /// nothing is left.
+    pub fn name_of(name: &str) -> Option<&str> {
+        Some(name.trim()).filter(|n| !n.is_empty())
+    }
+
+    /// Whether it is the one `name` names: names are told apart without the spaces round them
+    /// and without regard to case.
+    pub fn named(&self, name: &str) -> bool {
+        self.name.trim().to_lowercase() == name.trim().to_lowercase()
+    }
+}
+
 impl Document {
     pub fn new(width: u32, height: u32) -> Document {
         Document {
@@ -526,9 +540,9 @@ impl Document {
             })
     }
 
-    /// The saved selection named `name` (names are told apart without regard to case).
+    /// The saved selection named `name` (see [`SavedSelection::named`]).
     pub fn saved_selection(&self, name: &str) -> Option<&SavedSelection> {
-        self.saved.iter().find(|s| s.name.to_lowercase() == name.to_lowercase())
+        self.saved.iter().find(|s| s.named(name))
     }
 
     /// The selections it holds: what is selected, what Reselect would bring back, and those
