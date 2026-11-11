@@ -962,7 +962,15 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             (_, Some(name)) => Err(format!("{name} is running: stop it in the Console panel first.")),
             _ => Ok(()),
         },
-        Copy | GroupLayers => selected_layers(st).map(|_| ()),
+        Copy => selected_layers(st).map(|_| ()),
+        GroupLayers => {
+            // The new group goes where the layers are, and they move into it.
+            let (d, sel) = selected_layers(st)?;
+            match sel.iter().find_map(|&l| groups_above(d.doc(), l).into_iter().find(|g| g.locked)) {
+                Some(g) => Err(format!("\"{}\" is locked: what it holds stays as it is. Unlock it first.", g.name)),
+                None => Ok(()),
+            }
+        }
         ReapplyPlacement => {
             let d = st.active().ok_or("Open or create an image first.")?;
             if d.transform.is_some() {
@@ -1081,6 +1089,9 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         MoveUp | MoveDown => {
             let d = st.active().ok_or("Open or create an image first.")?;
             let l = active_layer(st)?;
+            if let Some(g) = groups_above(d.doc(), l.id).into_iter().find(|g| g.locked) {
+                return Err(format!("\"{}\" is locked: what it holds stays as it is. Unlock it first.", g.name));
+            }
             let pos = d.doc().position(l.id).expect("the active layer exists");
             let n = d.doc().siblings(pos.parent).map_or(0, <[_]>::len);
             match cmd {

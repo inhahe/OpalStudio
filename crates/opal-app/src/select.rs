@@ -54,6 +54,19 @@ impl crate::doc::DocState {
 }
 
 impl AppState {
+    /// Leaves the images not drawn in the pass before `pass` (shown in no pane): a Select tool
+    /// drag on one is given up, as on Esc (its button may have been let go over another, and a
+    /// call acting on it would commit its edit), and the textures of its selection overlay go.
+    pub(crate) fn leave_undrawn(&mut self, pass: u64) {
+        for d in self.docs.iter_mut().filter(|d| d.drawn + 1 < pass) {
+            d.select_drag = None;
+            if let Some(s) = d.shape_drag.take() {
+                d.discard_pending(crate::select_tool::ShapeDrag::label(s.drag.part));
+            }
+            d.overlay = Default::default();
+        }
+    }
+
     /// Selects the canvas, as Photoshop's does: what lies past it (layers have no edge) is not
     /// selected.
     pub(crate) fn select_all(&mut self) {
@@ -246,6 +259,34 @@ mod tests {
         let now = d.pixel_selection().expect("the selection was dropped");
         assert!(now.is_empty() && now.steps().len() == 2);
         assert_eq!(crate::select_tool::editable(d), Some((away, Combine::Intersect)));
+        // Once the edit is done, nothing is selected: one way of having nothing.
+        d.commit_pending();
+        assert!(d.pixel_selection().is_none());
+    }
+
+    #[test]
+    fn an_image_not_drawn_has_its_drag_given_up_and_its_overlay_s_textures_dropped() {
+        use opal_core::mask::{Combine, Shape};
+        use opal_core::selection::{Selection, Step};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let a = Shape::rectangle(&IRect::new(0, 0, 100, 100).to_f(), true);
+        let d = st.active_mut().unwrap();
+        d.set_pixel_selection(Some(Selection::new(Step::Shape { shape: a, combine: Combine::Replace })), "Select");
+        // A box drag under way, its edit pending, the image drawn in pass 10.
+        let before = d.pixel_selection().unwrap().before_last();
+        let moved = Shape::rectangle(&IRect::new(20, 0, 120, 100).to_f(), true);
+        crate::select_tool::reshape(d, &before, moved, Combine::Replace, "Move selection");
+        d.shape_drag = Some(crate::select_tool::ShapeDrag::testing(a));
+        d.drawn = 10;
+        // Drawn in the pass before: kept.
+        st.leave_undrawn(11);
+        assert!(st.active().unwrap().shape_drag.is_some());
+        // Not: given up, its edit with it.
+        st.leave_undrawn(12);
+        let d = st.active().unwrap();
+        assert!(d.shape_drag.is_none() && d.pending_label().is_none(), "the drag was left");
+        assert_eq!(crate::select_tool::editable(d), Some((a, Combine::Replace)));
     }
 
     #[test]
@@ -275,9 +316,48 @@ mod tests {
         st.active_mut().unwrap().select_only(a);
         st.duplicate_layers();
         assert_eq!(st.active().unwrap().doc().layer(g).unwrap().children().unwrap().len(), 1, "copied into it");
-        // Pixels cannot go into A, though it is not locked itself.
+        // Pixels cannot go into A, though it is not locked itself; into G, it is said to be a
+        // group first.
         let refused = crate::api::pixels_go_into(st.active().unwrap().doc(), a).unwrap_err();
         assert!(refused.contains("\"G\" is locked"), "{refused}");
+        let refused = crate::api::pixels_go_into(st.active().unwrap().doc(), g).unwrap_err();
+        assert!(refused.contains("is a group"), "{refused}");
+        // A is not grouped, moved up or down, or dragged out of it.
+        st.active_mut().unwrap().select_only(a);
+        for cmd in [crate::commands::Cmd::GroupLayers, crate::commands::Cmd::MoveUp] {
+            let why = crate::commands::availability(&st, cmd).unwrap_err();
+            assert!(why.contains("\"G\" is locked"), "{cmd:?}: {why}");
+        }
+        st.move_layer_to(a, Position { parent: None, index: 0 });
+        assert_eq!(st.active().unwrap().doc().position(a).unwrap().parent, Some(g), "dragged out of it");
+    }
+
+    #[test]
+    fn copies_put_above_a_locked_group_keep_their_order() {
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let mut ids: [Option<LayerId>; 3] = [None; 3];
+        let d = st.active_mut().unwrap();
+        d.apply("Group", |doc: &mut Document, made: &mut IdGen| {
+            let g = made.layer();
+            let mut group = Layer::new_group(g, "G");
+            group.locked = true;
+            doc.insert(Position { parent: None, index: 1 }, group)?;
+            for (i, name) in ["A", "B"].into_iter().enumerate() {
+                let id = made.layer();
+                doc.insert(Position { parent: Some(g), index: i }, Layer::new_empty(id, name))?;
+                ids[i + 1] = Some(id);
+            }
+            ids[0] = Some(g);
+            Ok::<(), opal_core::document::TreeError>(())
+        })
+        .unwrap();
+        let [_, a, b] = ids.map(Option::unwrap);
+        d.select_only(a);
+        d.toggle_selected(b);
+        st.duplicate_layers();
+        let names: Vec<String> = st.active().unwrap().doc().layers.iter().map(|l| l.name.clone()).collect();
+        assert_eq!(names, ["Background", "G", "A copy", "B copy"]);
     }
 
     #[test]

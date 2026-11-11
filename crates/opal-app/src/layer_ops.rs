@@ -93,12 +93,17 @@ impl AppState {
         let sel = d.selected_layers();
         let label = if sel.len() > 1 { "Duplicate layers" } else { "Duplicate layer" };
         let result = d.apply(label, |doc, ids| {
+            // Copies put above the same locked group go each above the one before, keeping
+            // their order.
+            let mut above_same: std::collections::HashMap<(Option<LayerId>, usize), usize> = Default::default();
             for src in sel {
                 let layer = doc.layer(src).ok_or(TreeError::NoSuchLayer(src))?;
                 let mut copy = copy_with_new_ids(layer, ids);
                 copy.name = format!("{} copy", layer.name);
                 let pos = above(doc, src).ok_or(TreeError::NoSuchLayer(src))?;
-                doc.insert(pos, copy)?;
+                let before = above_same.entry((pos.parent, pos.index)).or_default();
+                doc.insert(Position { index: pos.index + *before, ..pos }, copy)?;
+                *before += 1;
             }
             Ok::<(), TreeError>(())
         });
@@ -158,6 +163,13 @@ impl AppState {
         let Some(d) = self.active_mut() else { return };
         if d.doc().position(id) == Some(to) {
             return;
+        }
+        // Out of a locked group, into one, or within one, it would change what the group holds.
+        let doc = d.doc();
+        let into = to.parent.and_then(|g| doc.layer(g)).into_iter().chain(to.parent.map(|g| crate::commands::groups_above(doc, g)).unwrap_or_default());
+        if let Some(g) = crate::commands::groups_above(doc, id).into_iter().chain(into).find(|g| g.locked) {
+            let why = format!("\"{}\" is locked: what it holds stays as it is. Unlock it first.", g.name);
+            return self.message(MessageKind::Info, "Move layer", why);
         }
         let result = d.apply("Move layer", |doc, _| doc.move_layer(id, to));
         self.report(result);

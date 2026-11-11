@@ -347,7 +347,7 @@ fn opacity_row(ui: &mut egui::Ui, st: &mut AppState) {
     let Some(d) = st.active_mut() else { return };
     let Some(id) = d.active_layer() else { return };
     let Some(layer) = d.doc().layer(id) else { return };
-    let locked = layer.locked;
+    let locked = crate::commands::locked_for(d.doc(), layer).is_some();
     let mut pct = f64::from(layer.opacity) * 100.0;
     ui.horizontal(|ui| {
         let label = ui.label("Opacity");

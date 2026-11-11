@@ -115,6 +115,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let tool = if space { ToolId::Hand } else { chosen };
     let mut notice = None;
     let Some(d) = st.doc_mut(id) else { return };
+    d.drawn = ctx.cumulative_pass_nr();
     // While the transform box is open, it takes the pointer (Space and the middle button
     // still scroll the view, and the box stays, waiting).
     let boxed = d.transform.is_some();
@@ -431,11 +432,13 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         draw_outlines(ui, d, rect, &to_screen, palette.accent);
     }
     // What is not selected, under red, if asked for.
-    if let Some(opacity) = overlay
-        && let Some(s) = d.pixel_selection().cloned()
-    {
-        let (view, canvas) = (d.view, d.doc().canvas.rect());
-        crate::mask_view::draw(ui, s.mask(), &canvas, rect, view, ppp, opacity, &mut d.overlay);
+    match overlay.zip(d.pixel_selection().cloned()) {
+        Some((opacity, s)) => {
+            let (view, canvas) = (d.view, d.doc().canvas.rect());
+            crate::mask_view::draw(ui, s.mask(), &canvas, rect, view, ppp, opacity, &mut d.overlay);
+        }
+        // Its textures go with it.
+        None => d.overlay = Default::default(),
     }
     // What is selected: its outline, the marching ants. They march while they are seen and
     // the window has the focus: each step is a frame of the whole window.

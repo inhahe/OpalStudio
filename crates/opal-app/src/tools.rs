@@ -386,6 +386,14 @@ pub fn next_preset(zoom: f32, up: bool) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_select_tool_s_ways_of_combining_are_the_core_s() {
+        let def = super::SELECT_SETTINGS.iter().find(|d| d.key == "select.combine").expect("the setting");
+        let crate::settings::Kind::Choice(options) = def.kind else { panic!("a choice") };
+        let ids: Vec<&str> = options.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, opal_core::mask::Combine::NAMES);
+    }
+
     use super::*;
 
     #[test]

@@ -947,6 +947,7 @@ impl eframe::App for OpalApp {
         // The scheme can change under us when following the system's.
         self.st.palette = theme::palette(self.st.scheme(&ctx));
         self.st.cursor_shown = self.st.cursor_canvas.take();
+        self.st.leave_undrawn(ctx.cumulative_pass_nr());
         // A rename left open when another document became active is finished, in its own
         // document, as clicking elsewhere would finish it.
         if self.st.renaming.as_ref().is_some_and(|r| Some(r.0) != self.st.active_doc) {

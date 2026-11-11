@@ -108,6 +108,25 @@ pub enum ObjectKind {
     Image(ImageObject),
 }
 
+impl Object {
+    /// Whether it is `other` as an edit can tell: the same bitmap, placed alike.
+    pub fn same_as(&self, other: &Object) -> bool {
+        let Object { id, kind } = self;
+        *id == other.id
+            && match (kind, &other.kind) {
+                (ObjectKind::Pixels(a), ObjectKind::Pixels(b)) => {
+                    let PixelObject { image, offset } = a;
+                    Arc::ptr_eq(image, &b.image) && *offset == b.offset
+                }
+                (ObjectKind::Image(a), ObjectKind::Image(b)) => {
+                    let ImageObject { image, frame, transform, sampling } = a;
+                    Arc::ptr_eq(image, &b.image) && *frame == b.frame && *transform == b.transform && *sampling == b.sampling
+                }
+                _ => false,
+            }
+    }
+}
+
 /// A bitmap on the document's pixel grid. It moves only by whole pixels, so moving it never
 /// resamples it.
 #[derive(Clone, Debug)]
@@ -336,6 +355,29 @@ impl Layer {
         l
     }
 
+    /// Whether it is `other` as an edit can tell: every setting alike, and what it holds the
+    /// very same (its bitmaps the same ones, not compared pixel by pixel), so that a layer
+    /// copied, changed and changed back is still it.
+    pub fn same_as(&self, other: &Layer) -> bool {
+        // Each field named, so that one added is compared too.
+        let Layer { id, name, visible, locked, opacity, content, placed } = self;
+        *id == other.id
+            && *name == other.name
+            && *visible == other.visible
+            && *locked == other.locked
+            && opacity.to_bits() == other.opacity.to_bits()
+            && *placed == other.placed
+            && match (content, &other.content) {
+                (LayerContent::Objects(a), LayerContent::Objects(b)) => {
+                    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.same_as(y))
+                }
+                (LayerContent::Group(a), LayerContent::Group(b)) => {
+                    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| Arc::ptr_eq(x, y) || x.same_as(y))
+                }
+                _ => false,
+            }
+    }
+
     pub fn is_group(&self) -> bool {
         matches!(self.content, LayerContent::Group(_))
     }
@@ -436,12 +478,13 @@ impl Document {
     }
 
     /// Whether saving it would write what saving `other` would: all it keeps in a file the same
-    /// (its layers the very same), whatever either has selected, which files do not keep.
+    /// (its layers alike: see [`Layer::same_as`]), whatever either has selected, which files do
+    /// not keep.
     pub fn saves_as(&self, other: &Document) -> bool {
         self.canvas == other.canvas
             && self.resolution == other.resolution
             && self.layers.len() == other.layers.len()
-            && self.layers.iter().zip(&other.layers).all(|(a, b)| Arc::ptr_eq(a, b))
+            && self.layers.iter().zip(&other.layers).all(|(a, b)| Arc::ptr_eq(a, b) || a.same_as(b))
     }
 
     /// Whether it is `other` as far as an edit can tell: what saving it keeps, and what is

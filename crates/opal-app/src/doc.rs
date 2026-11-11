@@ -154,6 +154,8 @@ pub struct DocState {
     pub outline: Option<(std::sync::Weak<opal_core::mask::Mask>, u16, crate::select::Outline)>,
     /// What the selection overlay keeps of the mask's tiles (see `mask_view`).
     pub overlay: crate::mask_view::Textures,
+    /// The egui pass the image was last drawn in (see `AppState::leave_undrawn`).
+    pub drawn: u64,
     /// Whether the user has been told that history states are being dropped.
     told_dropped: bool,
     /// The groups (by number) a call being carried out is in: the script run its
@@ -192,6 +194,7 @@ impl DocState {
             notice: None,
             outline: None,
             overlay: Default::default(),
+            drawn: 0,
             select_drag: None,
             shape_drag: None,
             told_dropped: false,
@@ -427,7 +430,12 @@ impl DocState {
     /// progress is applied first.
     pub fn commit_pending(&mut self) {
         self.finish_transform();
-        if let Some(p) = self.pending.take() {
+        if let Some(mut p) = self.pending.take() {
+            // A selection edited to nothing (kept while the edit went on, so that its box
+            // stayed to be put right) is no selection once done.
+            if p.doc.selection.as_ref().is_some_and(|s| s.is_empty()) {
+                p.doc.selection = None;
+            }
             // An edit that came back to where it began is no state of its own.
             if p.doc.same_as(self.history.doc()) {
                 self.revision += 1;
@@ -619,6 +627,22 @@ mod tests {
         assert!(!s.is_dirty(), "a selection alone asks to be saved");
         add_layer(&mut s, "y");
         assert!(s.is_dirty());
+    }
+
+    #[test]
+    fn a_layer_edit_brought_back_where_it_began_makes_no_state() {
+        let mut s = state();
+        let id = s.active_layer().unwrap();
+        let states = s.history.nodes().count();
+        let opacity = |s: &mut DocState, v: f32| s.edit_pending("Change opacity", |doc| doc.layer_mut(id).unwrap().opacity = v);
+        opacity(&mut s, 0.4);
+        opacity(&mut s, 1.0);
+        s.commit_pending();
+        assert_eq!(s.history.nodes().count(), states, "a state that changed nothing");
+        assert!(!s.is_dirty());
+        opacity(&mut s, 0.4);
+        s.commit_pending();
+        assert_eq!(s.history.nodes().count(), states + 1);
     }
 
     #[test]

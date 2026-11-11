@@ -52,47 +52,38 @@ impl EditBox {
         Shape { center: self.center, size: self.size, angle: self.angle.to_degrees(), ..*like }
     }
 
-    /// The box, after a drag of `part`, with what was dragged on the pixels' edges, if it is
-    /// upright (turned, it is left as it is): a side (or a corner's two) dragged, moved to the
-    /// nearest, the others left where they are; moved, the box put where its top-left corner
-    /// is on a pixel's corner, its size kept as it is. A side dragged stays a pixel from the
-    /// one across.
-    pub fn on_pixels(self, part: Part) -> EditBox {
+    /// The box, after a drag (of `part`) on the box `from`, with what moved on the pixels'
+    /// edges, if it is upright (turned, it is left as it is). Moved whole, the box goes where
+    /// its top-left corner is on a pixel's corner, its size kept as it is; else each side not
+    /// where one of `from`'s was (a side dragged, wherever it went, past the one across or not,
+    /// and a side Shift moved to keep the proportions) goes to the nearest, the others staying,
+    /// a pixel apart at least.
+    pub fn on_pixels(self, from: &EditBox, part: Part) -> EditBox {
         if self.angle != 0.0 {
             return self;
         }
-        let [w, h] = self.size;
-        let (mut x0, mut y0) = (self.center[0] - w / 2.0, self.center[1] - h / 2.0);
-        let (mut x1, mut y1) = (x0 + w, y0 + h);
-        // Which sides it moved: left, top, right, bottom (corners clockwise from the
-        // top-left, sides from the top).
-        let [left, top, right, bottom] = match part {
-            Part::Move => {
-                let (dx, dy) = (x0.round() - x0, y0.round() - y0);
-                return EditBox { center: [self.center[0] + dx, self.center[1] + dy], ..self };
-            }
-            Part::Corner(0) => [true, true, false, false],
-            Part::Corner(1) => [false, true, true, false],
-            Part::Corner(2) => [false, false, true, true],
-            Part::Corner(_) => [true, false, false, true],
-            Part::Edge(0) => [false, true, false, false],
-            Part::Edge(1) => [false, false, true, false],
-            Part::Edge(2) => [false, false, false, true],
-            Part::Edge(_) => [true, false, false, false],
-            Part::New | Part::Rotate => [true; 4],
+        let sides = |b: &EditBox| {
+            let [w, h] = b.size.map(|v| v / 2.0);
+            [b.center[0] - w, b.center[1] - h, b.center[0] + w, b.center[1] + h]
         };
-        if left {
-            x0 = x0.round().min(x1 - 1.0);
+        let [x0, y0, x1, y1] = sides(&self);
+        if part == Part::Move {
+            let (dx, dy) = (x0.round() - x0, y0.round() - y0);
+            return EditBox { center: [self.center[0] + dx, self.center[1] + dy], ..self };
         }
-        if right {
-            x1 = x1.round().max(x0 + 1.0);
-        }
-        if top {
-            y0 = y0.round().min(y1 - 1.0);
-        }
-        if bottom {
-            y1 = y1.round().max(y0 + 1.0);
-        }
+        let was = sides(from);
+        // A side stays if it is where one of the same way's was (and the box was upright).
+        let stays = |v: f64, a: f64, b: f64| from.angle == 0.0 && ((v - a).abs() < 1e-9 || (v - b).abs() < 1e-9);
+        let put = |lo: f64, hi: f64, a: f64, b: f64| {
+            let (keep_lo, keep_hi) = (stays(lo, a, b), stays(hi, a, b));
+            let (mut lo2, mut hi2) = (if keep_lo { lo } else { lo.round() }, if keep_hi { hi } else { hi.round() });
+            if hi2 - lo2 < 1.0 {
+                if keep_hi { lo2 = hi2 - 1.0 } else { hi2 = lo2 + 1.0 }
+            }
+            (lo2, hi2)
+        };
+        let (x0, x1) = put(x0, x1, was[0], was[2]);
+        let (y0, y1) = put(y0, y1, was[1], was[3]);
         EditBox { center: [(x0 + x1) / 2.0, (y0 + y1) / 2.0], size: [x1 - x0, y1 - y0], angle: 0.0 }
     }
 
@@ -322,23 +313,35 @@ mod tests {
 
     #[test]
     fn an_upright_box_is_put_on_the_pixels_edges_and_a_shape_drawn_in_it() {
-        // 39.75..60.25 across, 36.25..45.25 down.
-        let b = EditBox { center: [50.0, 40.75], size: [20.5, 9.0], angle: 0.0 };
         let sides = |b: EditBox| {
             let [w, h] = b.size.map(|v| v / 2.0);
             [b.center[0] - w, b.center[1] - h, b.center[0] + w, b.center[1] + h]
         };
-        // Its bottom-right corner dragged: that corner on the nearest, the top-left held.
-        assert_eq!(sides(b.on_pixels(Part::Corner(2))), [39.75, 36.25, 60.0, 45.0]);
-        // Its left side dragged: that side alone.
-        assert_eq!(sides(b.on_pixels(Part::Edge(3))), [40.0, 36.25, 60.25, 45.25]);
+        let of = |[x0, y0, x1, y1]: [f64; 4]| EditBox { center: [(x0 + x1) / 2.0, (y0 + y1) / 2.0], size: [x1 - x0, y1 - y0], angle: 0.0 };
+        // 39.75..60.25 across, 36.25..45.25 down.
+        let from = of([39.75, 36.25, 60.25, 45.25]);
+        // Its bottom-right corner dragged to (60.4, 44.6): that corner on the nearest, the
+        // top-left held where it was.
+        let dragged = of([39.75, 36.25, 60.4, 44.6]);
+        assert_eq!(sides(dragged.on_pixels(&from, Part::Corner(2))), [39.75, 36.25, 60.0, 45.0]);
+        // Dragged past the top-left corner, to (30.3, 20.7): the sides dragged, now the left and
+        // top, on the nearest, the held ones (now the right and bottom) where they were.
+        let past = of([30.3, 20.7, 39.75, 36.25]);
+        assert_eq!(sides(past.on_pixels(&from, Part::Corner(2))), [30.0, 21.0, 39.75, 36.25]);
+        // Its top dragged with Shift, the sides across moved to keep its proportions: they go
+        // to the nearest too; the bottom stays.
+        let shifted = of([34.4, 30.4, 65.6, 45.25]);
+        assert_eq!(sides(shifted.on_pixels(&from, Part::Edge(0))), [34.0, 30.0, 66.0, 45.25]);
         // Moved: its corner on a pixel's corner, its size kept as it is.
-        let moved = b.on_pixels(Part::Move);
-        assert_eq!((sides(moved), moved.size), ([40.0, 36.0, 60.5, 45.0], b.size));
-        let small = EditBox { center: [5.0, 5.0], size: [0.2, 0.2], angle: 0.0 }.on_pixels(Part::Corner(2));
+        let moved = of([39.6, 36.1, 60.1, 45.1]).on_pixels(&from, Part::Move);
+        assert_eq!((sides(moved), moved.size), ([40.0, 36.0, 60.5, 45.0], from.size));
+        // Turned back upright from a turned box: every side to the nearest, a pixel apart.
+        let turned = EditBox { angle: 0.2, ..from };
+        let narrow = of([5.6, 5.0, 6.6, 9.0]).on_pixels(&turned, Part::Rotate);
+        assert_eq!(sides(narrow), [6.0, 5.0, 7.0, 9.0]);
+        let small = of([5.0, 5.0, 5.2, 5.2]).on_pixels(&from, Part::Corner(2));
         assert!(small.size[0] >= 1.0 && small.size[1] >= 1.0, "less than a pixel: {small:?}");
-        let turned = EditBox { angle: 0.3, ..b };
-        assert_eq!(turned.on_pixels(Part::Corner(2)), turned, "a turned box was moved");
+        assert_eq!(turned.on_pixels(&from, Part::Corner(2)), turned, "a turned box was moved");
         // A shape drawn in its box and back is the same shape, its kind and edge kept.
         let s = Shape {
             kind: opal_core::mask::ShapeKind::Ellipse,

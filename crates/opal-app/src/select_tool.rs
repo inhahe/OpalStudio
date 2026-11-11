@@ -46,8 +46,6 @@ pub struct SelectDrag {
     /// yet squaring or centering it).
     shift_held: bool,
     alt_held: bool,
-    /// The egui pass its image was last drawn in (see [`canvas`]).
-    seen: u64,
 }
 
 impl SelectDrag {
@@ -77,11 +75,21 @@ pub struct ShapeDrag {
     combine: Combine,
     /// What the steps before it select.
     before: Selection,
-    /// The egui pass its image was last drawn in (see [`canvas`]).
-    seen: u64,
 }
 
 impl ShapeDrag {
+    /// A drag of the box round `shape`, moving it, for tests.
+    #[cfg(test)]
+    pub(crate) fn testing(shape: Shape) -> ShapeDrag {
+        let start = EditBox::of_shape(&shape);
+        ShapeDrag {
+            drag: BoxDrag { part: Part::Move, from: shape.center, start },
+            shape,
+            combine: Combine::Replace,
+            before: Selection::of(Vec::new()),
+        }
+    }
+
     /// The history state a drag of `part` makes.
     pub(crate) fn label(part: Part) -> &'static str {
         match part {
@@ -94,7 +102,8 @@ impl ShapeDrag {
 
 /// Makes `shape` the selection's last step in place of the one there, which combined as
 /// `combine` with what `before` selects, as the pending edit labeled `label`. A selection
-/// that comes to nothing so keeps its steps, so that the box stays to be put right.
+/// that comes to nothing so keeps its steps while the edit goes on, so that the box stays to
+/// be put right (once done, nothing is selected: `DocState::commit_pending`).
 pub fn reshape(d: &mut DocState, before: &Selection, shape: Shape, combine: Combine, label: &str) {
     let made = Arc::new(before.then(Step::Shape { shape, combine }));
     d.edit_pending(label, |doc| doc.selection = Some(made));
@@ -135,17 +144,13 @@ pub fn canvas(
     options: Options,
 ) {
     let modifiers = ctx.input(|i| i.modifiers);
-    // A drag whose image was not drawn in the pass before (another was shown in its place)
-    // is given up, as on Esc: its button may have been let go over that other one, and the
-    // drag would be finished on coming back.
-    let pass = ctx.cumulative_pass_nr();
-    let stale = |seen: u64| seen + 1 < pass;
+    // (A drag on an image no longer drawn is given up by `AppState::leave_undrawn`.)
     let escape = ctx.input(|i| i.key_pressed(Key::Escape));
-    if d.select_drag.is_some_and(|s| escape || stale(s.seen)) {
+    if d.select_drag.is_some() && escape {
         d.select_drag = None;
         return;
     }
-    if d.shape_drag.as_ref().is_some_and(|s| escape || stale(s.seen)) {
+    if d.shape_drag.is_some() && escape {
         let s = d.shape_drag.take().expect("checked");
         d.discard_pending(ShapeDrag::label(s.drag.part));
         return;
@@ -162,11 +167,8 @@ pub fn canvas(
         if part != Part::New {
             let before = d.pixel_selection().expect("one with a shape").before_last();
             let drag = BoxDrag { part, from: to_doc(origin), start };
-            d.shape_drag = Some(ShapeDrag { drag, shape, combine, before, seen: pass });
+            d.shape_drag = Some(ShapeDrag { drag, shape, combine, before });
         }
-    }
-    if let Some(s) = d.shape_drag.as_mut() {
-        s.seen = pass;
     }
     if let Some(s) = d.shape_drag.clone() {
         if !ctx.input(|i| i.pointer.primary_down()) {
@@ -178,7 +180,7 @@ pub fn canvas(
         } else if let Some(p) = response.interact_pointer_pos() {
             // Shift keeps its proportions; upright, its sides stay on the pixels' edges.
             let keep = modifiers.shift.then(|| s.drag.start.size[0] / s.drag.start.size[1]);
-            let b = EditBox::dragged(&s.drag, to_doc(p), keep).on_pixels(s.drag.part);
+            let b = EditBox::dragged(&s.drag, to_doc(p), keep).on_pixels(&s.drag.start, s.drag.part);
             let shape = b.shape(&s.shape);
             if editable(d).map(|(now, _)| now) != Some(shape) {
                 reshape(d, &s.before, shape, s.combine, ShapeDrag::label(s.drag.part));
@@ -206,11 +208,9 @@ pub fn canvas(
             centered: false,
             shift_held: modifiers.shift,
             alt_held: modifiers.alt,
-            seen: pass,
         });
     }
     if let Some(drag) = &mut d.select_drag {
-        drag.seen = pass;
         drag.shift_held &= modifiers.shift;
         drag.alt_held &= modifiers.alt;
         drag.square = modifiers.shift && !drag.shift_held;

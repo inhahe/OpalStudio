@@ -140,6 +140,15 @@ impl MaskTile {
         MaskTile::from_levels(la.iter().zip(lb.iter()).map(|(&x, &y)| how.level(x, y)).collect())
     }
 
+    /// Its levels, held weakly, if it keeps any: so long as one is held, no other levels are
+    /// kept where they are (see [`address`](Self::address)).
+    pub fn levels_weakly(&self) -> Option<std::sync::Weak<[u16]>> {
+        match self {
+            MaskTile::Level(_) => None,
+            MaskTile::Columns(l) | MaskTile::Rows(l) | MaskTile::Levels(l) => Some(Arc::downgrade(l)),
+        }
+    }
+
     /// The memory its levels take (none for a tile of one level).
     pub fn bytes(&self) -> u64 {
         match self {
@@ -151,7 +160,7 @@ impl MaskTile {
     }
 
     /// Where its levels are kept, if it keeps any (the same for its copies).
-    fn address(&self) -> Option<usize> {
+    pub fn address(&self) -> Option<usize> {
         match self {
             MaskTile::Level(_) => None,
             MaskTile::Columns(l) | MaskTile::Rows(l) | MaskTile::Levels(l) => Some(Arc::as_ptr(l).cast::<u16>() as usize),
@@ -222,16 +231,14 @@ pub enum Combine {
 }
 
 impl Combine {
-    /// The way of combining named `name`, as the Select tool's setting and scripts name them
-    /// (replace, add, subtract, intersect).
+    /// Every way of combining, and its name, in that order: as the Select tool's setting,
+    /// scripts and the recipe (serde) name them.
+    pub const ALL: [Combine; 4] = [Combine::Replace, Combine::Add, Combine::Subtract, Combine::Intersect];
+    pub const NAMES: [&'static str; 4] = ["replace", "add", "subtract", "intersect"];
+
+    /// The way of combining named `name` (see [`NAMES`](Self::NAMES)).
     pub fn named(name: &str) -> Option<Combine> {
-        match name {
-            "replace" => Some(Combine::Replace),
-            "add" => Some(Combine::Add),
-            "subtract" => Some(Combine::Subtract),
-            "intersect" => Some(Combine::Intersect),
-            _ => None,
-        }
+        Combine::NAMES.iter().position(|n| *n == name).map(|i| Combine::ALL[i])
     }
 
     /// Whether a new mask's level `new` leaves every level before as it is.
@@ -1373,6 +1380,14 @@ mod tests {
         assert_eq!(m.level_at(65, 0), FULL);
         assert_eq!(m.level_at(75, 0), 0);
         assert_eq!(m.level_at(45, 45), 0, "the square's corner was not turned away");
+    }
+
+    #[test]
+    fn the_ways_of_combining_are_named_as_the_recipe_names_them() {
+        for (how, name) in Combine::ALL.into_iter().zip(Combine::NAMES) {
+            assert_eq!(serde_json::to_value(how).unwrap(), serde_json::json!(name));
+            assert_eq!(Combine::named(name), Some(how));
+        }
     }
 
     #[test]

@@ -291,8 +291,9 @@ marching ants show where the mask crosses a threshold (default 0.5, adjustable:
 Preferences › Selection, *Marching ants at*). **View › Selection Overlay** shows the mask as
 red over what is not selected, fading out as pixels are more selected (`mask_view`): over the
 canvas only, uniform stretches as rectangles, tiles with levels of their own as textures (one
-for alike tiles, which share their levels), or as their mean level once smaller on screen
-than a few points; how red, a preference.
+for alike tiles, which share their levels, held weakly; a tile of a level a column or a row,
+one line of texture), or as their mean level once smaller on screen than a few points; how
+red, a preference.
 
 - **Storage** (`opal_core::mask`). The mask covers the whole plane, as layers do: 16-bit
   levels in 256×256 tiles on the images' grid, sparse, so that a selection across a huge
@@ -390,8 +391,10 @@ corner, keeping its size as it is. Elsewhere, or where a drag would combine a ne
 what is selected, a drag draws one as above, and the pointer says so. A drag edits that step in place, the steps
 before it kept (worked out once, as it begins), as one history state: *Move selection*,
 *Resize selection* or *Rotate selection* (none, if it comes back to where it began); Esc
-gives it up, as does its image not being drawn (shown in no pane) before it is let go. An
-edit that leaves nothing selected keeps its steps, so that the box stays to be put right. The numbers button under the box
+gives it up, as does its image not being drawn (shown in no pane) before it is let go
+(`AppState::leave_undrawn`, which also drops that image's overlay textures). An edit that
+leaves nothing selected keeps its steps while it goes on, so that the box stays to be put
+right; once done, nothing is selected. The numbers button under the box
 shows its exact position, size and angle beside it (`box_fields::selection`), as the
 transform and crop boxes' do; what is typed edits the step at once, as one pending edit,
 *Edit selection*, until something else is done. Scripts select shapes by the same numbers:
@@ -658,9 +661,10 @@ curve editors.
 - **Merge Down** and **Flatten Image** bake layers into one pixel layer (built).
 - **Locks:** a locked layer cannot be changed, merged or deleted, and neither can a group
   with a locked layer inside, nor a layer inside a locked group (what a group holds is part
-  of it: `commands::locked_for`); new layers, pastes and copies of a layer in one go above
-  it, not into it (`layer_ops::above`). Locked layers can still be moved up and down the
-  stack.
+  of it: `commands::locked_for`). What a locked group holds is not grouped, faded, moved in
+  or out, or moved up and down in it; new layers, pastes and copies of a layer in one go above
+  it, not into it, in their order (`layer_ops::above`). A locked layer itself can still be
+  moved up and down the stack.
 - **Merge Selected** merges the selected layers into one, where the topmost of them was.
   Selected layers that do not show (hidden, at 0% opacity, or in a hidden group) are left
   as they are, and hidden layers inside a selected group stay, just below the result.
@@ -1196,8 +1200,8 @@ qualities of ink, 浓淡干湿 (dense, light, dry, wet), are each part of the br
   thumbnail on hover.
 - Selections are part of history; zoom and pan are not. A slider drag is one entry: while
   it lasts the change is *pending* (shown live, not yet in the history) and it is committed
-  as one state on release, or as none if it came back to where it began
-  (`Document::same_as`).
+  as one state on release, or as none if it came back to where it began (`Document::same_as`:
+  its layers each the same layer, or alike in every setting with the very same bitmaps).
 - Which layer is active is not part of history. After an action or a move through history,
   a layer that appeared (one the action added, or one undo restored) becomes active; if the
   active layer disappeared, the layer now in its place does.

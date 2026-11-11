@@ -7,10 +7,12 @@ use opal_core::mask::{Mask, MaskTile, fraction};
 use opal_core::tile::{TILE_SIZE, TileCoord};
 use std::collections::HashMap;
 
-/// What the overlay keeps of a tile with levels of its own: its mean level, and, once drawn
-/// large enough to need one, its texture.
+/// What the overlay keeps of a tile with levels of its own: its levels, weakly (so that, while
+/// they are kept, no other tile's are kept where they are, under the same key), and, once
+/// needed, its mean level and its texture.
 struct Kept {
-    mean: u16,
+    _levels: std::sync::Weak<[u16]>,
+    mean: Option<u16>,
     texture: Option<TextureHandle>,
 }
 
@@ -79,19 +81,21 @@ pub fn draw(
             }
             fill(at, x0, y, tint(mask.outside(), opacity));
             at = x1;
-            let levels = match tile {
-                MaskTile::Level(l) => {
-                    fill(x0, x1, y, tint(*l, opacity));
-                    continue;
-                }
-                MaskTile::Columns(l) | MaskTile::Rows(l) | MaskTile::Levels(l) => l,
-            };
-            let key = std::sync::Arc::as_ptr(levels).cast::<u16>() as usize;
+            if let MaskTile::Level(l) = tile {
+                fill(x0, x1, y, tint(*l, opacity));
+                continue;
+            }
+            let key = tile.address().expect("a tile with levels of its own");
             let kept = drawn.entry(key).or_insert_with(|| {
-                textures.kept.remove(&key).unwrap_or_else(|| Kept { mean: mean(tile), texture: None })
+                textures.kept.remove(&key).unwrap_or_else(|| Kept {
+                    _levels: tile.levels_weakly().expect("a tile with levels of its own"),
+                    mean: None,
+                    texture: None,
+                })
             });
             if across < SMALL {
-                fill(x0, x1, y, tint(kept.mean, opacity));
+                let mean = *kept.mean.get_or_insert_with(|| mean(tile));
+                fill(x0, x1, y, tint(mean, opacity));
                 continue;
             }
             let texture = kept.texture.get_or_insert_with(|| {
@@ -119,21 +123,45 @@ pub fn draw(
 
 /// The mean level of `tile`.
 fn mean(tile: &MaskTile) -> u16 {
-    let side = TILE_SIZE as usize;
-    let sum: u64 = (0..TILE_SIZE).flat_map(|y| (0..TILE_SIZE).map(move |x| u64::from(tile.get(x, y)))).sum();
-    (sum / (side * side) as u64) as u16
+    let levels: &[u16] = match tile {
+        MaskTile::Level(l) => return *l,
+        MaskTile::Columns(l) | MaskTile::Rows(l) | MaskTile::Levels(l) => l,
+    };
+    (levels.iter().map(|&l| u64::from(l)).sum::<u64>() / levels.len() as u64) as u16
 }
 
-/// `tile` as an image the overlay draws, red with no selection, clear with all, before its
-/// opacity is applied.
+/// `tile` as an image the overlay draws (stretched over the tile), red with no selection,
+/// clear with all, before its opacity is applied: a tile of a level a column or a row, one
+/// line of them.
 fn image_of(tile: &MaskTile) -> ColorImage {
     let side = TILE_SIZE as usize;
-    let pixels = (0..TILE_SIZE)
-        .flat_map(|y| (0..TILE_SIZE).map(move |x| tile.get(x, y)))
-        .map(|l| {
+    let (size, levels): ([usize; 2], &[u16]) = match tile {
+        MaskTile::Columns(l) => ([side, 1], l),
+        MaskTile::Rows(l) => ([1, side], l),
+        MaskTile::Levels(l) => ([side, side], l),
+        MaskTile::Level(_) => unreachable!("a tile of one level is drawn as a rectangle"),
+    };
+    let pixels = levels
+        .iter()
+        .map(|&l| {
             let a = ((1.0 - fraction(l)) * 255.0).round() as u8;
             Color32::from_rgba_premultiplied(a, 0, 0, a)
         })
         .collect();
-    ColorImage::new([side, side], pixels)
+    ColorImage::new(size, pixels)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tile_of_one_line_of_levels_is_one_line_of_texture_and_its_mean_that_line_s() {
+        let line: std::sync::Arc<[u16]> = (0..256u32).map(|i| (i * 256) as u16).collect();
+        let columns = MaskTile::Columns(line.clone());
+        assert_eq!(image_of(&columns).size, [256, 1]);
+        assert_eq!(image_of(&MaskTile::Rows(line)).size, [1, 256]);
+        let mean_of_line = ((0..256u64).map(|i| i * 256).sum::<u64>() / 256) as u16;
+        assert_eq!(mean(&columns), mean_of_line);
+    }
 }

@@ -699,7 +699,7 @@ const SHAPE_PARAMS: &[Param] = &[
     },
     Param {
         name: "combine",
-        kind: Kind::Choice(&["replace", "add", "subtract", "intersect"]),
+        kind: Kind::Choice(&opal_core::mask::Combine::NAMES),
         help: "How it combines with what is selected: in its place, added to it, taken away from it, or \
                keeping only what is in both.",
         otherwise: Otherwise::Value("\"replace\""),
@@ -1000,16 +1000,17 @@ enum Content {
 /// group) that holds nothing yet or pixels alone, in one object.
 pub(crate) fn pixels_go_into(doc: &opal_core::document::Document, target: LayerId) -> Result<(), String> {
     let layer = doc.layer(target).ok_or_else(|| format!("There is no layer {} in the image.", target.0))?;
+    // A group is said to be one first: what is locked inside it is beside the point.
+    let LayerContent::Objects(objects) = &layer.content else {
+        return Err(format!("\"{}\" is a group: put them in a layer of it.", layer.name));
+    };
     if let Some(locked) = crate::commands::locked_for(doc, layer) {
         return Err(format!("\"{}\" is locked. Unlock it first.", locked.name));
     }
-    match &layer.content {
-        LayerContent::Objects(objects) if objects.is_empty() => Ok(()),
-        LayerContent::Objects(objects) if objects.len() == 1 && matches!(objects[0].kind, ObjectKind::Pixels(_)) => {
-            Ok(())
-        }
-        LayerContent::Group(_) => Err(format!("\"{}\" is a group: put them in a layer of it.", layer.name)),
-        LayerContent::Objects(_) => Err(format!(
+    match &objects[..] {
+        [] => Ok(()),
+        [only] if matches!(only.kind, ObjectKind::Pixels(_)) => Ok(()),
+        _ => Err(format!(
             "\"{}\" holds an image or several objects, which pixels do not go into: put them in a new layer.",
             layer.name
         )),
