@@ -17,9 +17,10 @@ use std::sync::Arc;
 pub(crate) struct Copying {
     /// The API call it answers, if any.
     pub answer: Option<u64>,
-    /// The history state of the cut it is part of, if it is (in the document by that
-    /// number): what is taken back should the copy not reach the clipboard.
-    pub cut: Option<(DocId, opal_core::history::NodeId)>,
+    /// The cut it is part of, if it is: the document by its number, the history state of
+    /// the cut, and the one it was made from. Taken back should the copy not reach the
+    /// clipboard.
+    pub cut: Option<(DocId, opal_core::history::NodeId, opal_core::history::NodeId)>,
 }
 
 impl AppState {
@@ -30,23 +31,16 @@ impl AppState {
         self.copy_within(merged, crate::memory::Allowance::now(), None, ctx);
     }
 
-    /// [`copy`](Self::copy), answering API call `n` once the copy is on the clipboard;
-    /// whether a copy was started (if not, it was refused, and said so).
-    pub(crate) fn copy_answering(&mut self, merged: bool, n: u64, ctx: &egui::Context) -> bool {
-        let before = self.copying.len();
-        self.copy_within(merged, crate::memory::Allowance::now(), Some(n), ctx);
-        self.copying.len() > before
-    }
-
     /// [`copy`](Self::copy), or why not if it would need more than `memory` (or more than
-    /// the clipboard holds).
+    /// the clipboard holds), answering API call `answer`, if given, once the copy is on the
+    /// clipboard. Whether a copy was started (if not, it was refused, and said so).
     pub(crate) fn copy_within(
         &mut self,
         merged: bool,
         mut memory: crate::memory::Allowance,
         answer: Option<u64>,
         ctx: &egui::Context,
-    ) {
+    ) -> bool {
         let d = self.active().expect("available");
         let doc = d.doc();
         let canvas = doc.canvas.rect();
@@ -61,7 +55,8 @@ impl AppState {
                 .collect()
         };
         if let Err(why) = memory.take_tiles(opal_core::composite::composite_cost(&layers, Some(&canvas))) {
-            return self.message(MessageKind::Info, "Copy", why);
+            self.message(MessageKind::Info, "Copy", why);
+            return false;
         }
         let flat = composite_within(&layers, &canvas);
         // Within the selection, as much of each pixel as it is selected.
@@ -76,16 +71,14 @@ impl AppState {
                 (false, false) => "The selected layers show nothing",
                 (false, true) => "The selected layers show nothing selected",
             };
-            return self.message(
-                MessageKind::Info,
-                "Copy",
-                format!("{what} within the canvas, so there is nothing to copy."),
-            );
+            self.message(MessageKind::Info, "Copy", format!("{what} within the canvas, so there is nothing to copy."));
+            return false;
         };
         let (w, h) = (bounds.width() as u64, bounds.height() as u64);
         let copies = crate::memory::Need::at_once(w * h * crate::clipboard::COPY_BYTES);
         if let Err(why) = crate::clipboard::check_copy(w, h).and_then(|()| memory.take(copies)) {
-            return self.message(MessageKind::Info, "Copy", why);
+            self.message(MessageKind::Info, "Copy", why);
+            return false;
         }
         let pixels = flat.read_rect(&bounds);
         let from = bounds.translate(-canvas.x0, -canvas.y0);
@@ -94,6 +87,7 @@ impl AppState {
         self.copying.push_back(Copying { answer, cut: None });
         // The cap on tiles is kept until the copy is on the clipboard.
         self.clipboard.write_image(Copied { from, pixels, resolution, _hold: memory.into_hold() }, ctx);
+        true
     }
 
     /// Says how the copies put on the clipboard since the last frame went: to the API call
@@ -112,12 +106,12 @@ impl AppState {
                 }
                 Err(e) => {
                     let e = e.trim_end_matches('.');
-                    let said = match cut {
-                        None => format!("{e}."),
-                        Some((doc, state)) if self.doc_mut(doc).is_some_and(|d| d.take_back(state)) => {
-                            format!("{e}, so nothing was cut.")
-                        }
-                        Some(_) => format!("{e}. What was cut stays erased: undo the cut to get it back."),
+                    let said = match cut.map(|(doc, state, from)| self.doc_mut(doc).map(|d| d.take_back(state, from))) {
+                        // Not a cut, or one on an image closed since.
+                        None | Some(None) => format!("{e}."),
+                        // Taken back: undone already, or now.
+                        Some(Some(true)) => format!("{e}, so nothing was cut."),
+                        Some(Some(false)) => format!("{e}. What was cut stays erased: undo it to get it back."),
                     };
                     match answer {
                         Some(n) => self.answered.push((n, Err(format!("Could not copy: {said}")))),

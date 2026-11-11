@@ -337,8 +337,10 @@ On the Select tab (and for scripts, by the same names):
   too) copies, then clears what it copied: within the canvas, so that what lies past it,
   which a copy leaves out, stays. The copy reaches the clipboard off the interface thread,
   after the clearing; should it not get there, the clearing is taken back, gone from history
-  as though never made (`History::take_back`), or, if something was done since, the user is
-  told to undo it.
+  as though never made (`History::take_back`: undone first if it is the current state, and
+  dropped if it was undone meanwhile, so that no redo cuts without the copy), or, if
+  something was made from it since (or a script's run it was part of was joined into one
+  state), the user is told to undo it.
 - **Crop to Selection** makes the canvas the rectangle round the selection (refused for one
   that reaches past every edge).
 - **Rotate**, **Flip**, **Resize Image** and the Crop tool's straightening carry what is

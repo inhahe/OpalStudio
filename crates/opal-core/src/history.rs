@@ -178,14 +178,19 @@ impl History {
         }
     }
 
-    /// Takes back state `id` if it is the current one and nothing was made from it: moves to
-    /// its parent and drops it, as though it had never been made, so that no redo brings it
-    /// back. Whether it did.
-    pub fn take_back(&mut self, id: NodeId) -> bool {
-        if self.current != id || !self.node(id).children.is_empty() || !self.undo() {
+    /// Takes back state `id`, made from state `from`, if it still is (it has not been joined
+    /// into another made from elsewhere) and nothing has been made from it: drops it, as though
+    /// it had never been made, so that no redo brings it back, moving to `from` first if it is
+    /// the current one. Whether it did.
+    pub fn take_back(&mut self, id: NodeId, from: NodeId) -> bool {
+        if !self.contains(id) || self.node(id).parent != Some(from) || !self.node(id).children.is_empty() {
             return false;
         }
-        // Undone first, so that its document is no longer the current one when it goes.
+        // Undone first, so that its document is no longer the current one when it goes; any
+        // other state with nothing made from it is on no way to the current one.
+        if self.current == id {
+            self.undo();
+        }
         self.drop_branch(id);
         true
     }
@@ -1042,6 +1047,28 @@ mod tests {
         h.undo();
         assert!(counted_right(&h));
         assert_eq!(h.memory(), h.node(h.redo_target().unwrap()).doc.selection.as_ref().unwrap().mask().bytes());
+    }
+
+    #[test]
+    fn a_state_is_taken_back_only_as_it_was_made_and_with_nothing_made_from_it() {
+        let mut h = History::new(Document::new(10, 10), "new");
+        let root = h.current();
+        let a = h.commit(Document::new(20, 20), "a");
+        let b = h.commit(Document::new(30, 30), "b");
+        assert!(!h.take_back(b, root), "taken back though made from another");
+        assert!(!h.take_back(a, root), "taken back with something made from it");
+        // Undone, it is dropped from the redo branch.
+        h.undo();
+        assert!(h.take_back(b, a) && !h.contains(b) && !h.can_redo());
+        // Current, it is undone and dropped.
+        let c = h.commit(Document::new(40, 40), "c");
+        assert!(h.take_back(c, a) && h.current() == a && !h.contains(c));
+        // Joined into a run made from elsewhere, it is that run now: not taken back.
+        let d = h.commit(Document::new(50, 50), "d");
+        let e = h.commit(Document::new(60, 60), "e");
+        h.join(&[d, e].into_iter().collect(), "run", &HashSet::new());
+        assert!(h.contains(e) && !h.take_back(e, d), "a joined run was taken back");
+        assert!(h.take_back(e, a), "the run itself, made from a");
     }
 
     #[test]

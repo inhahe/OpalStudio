@@ -104,16 +104,15 @@ impl AppState {
     /// back (see [`AppState::poll_copies`]). `answer`: the API call to answer once the copy is
     /// on the clipboard. Whether the copy was started (if not, it was refused, and said why).
     pub(crate) fn cut(&mut self, answer: Option<u64>, ctx: &eframe::egui::Context) -> bool {
-        let before = self.copying.len();
-        self.copy_within(false, crate::memory::Allowance::now(), answer, ctx);
-        if self.copying.len() == before {
+        if !self.copy_within(false, crate::memory::Allowance::now(), answer, ctx) {
             return false;
         }
         let canvas = self.active().expect("available").doc().canvas.rect();
         if self.clear_within("Cut", Some(&canvas)) {
             let d = self.active().expect("available");
-            let made = (d.id, d.history.current());
-            self.copying.back_mut().expect("the copy just started").cut = Some(made);
+            let made = d.history.current();
+            let from = d.history.node(made).parent.expect("a state made has one");
+            self.copying.back_mut().expect("the copy just started").cut = Some((d.id, made, from));
         }
         true
     }

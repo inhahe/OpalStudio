@@ -432,14 +432,14 @@ impl DocState {
         }
     }
 
-    /// Takes back history state `id` if it is still the current one, with nothing made from it
-    /// and nothing in progress on it (see [`History::take_back`]); whether it did.
-    pub fn take_back(&mut self, id: NodeId) -> bool {
-        if self.pending.is_some() || self.transform.is_some() {
+    /// Takes back history state `id`, made from `from` (see [`History::take_back`]), unless it
+    /// is the current one with an edit in progress on it; whether it did.
+    pub fn take_back(&mut self, id: NodeId, from: NodeId) -> bool {
+        if self.history.current() == id && (self.pending.is_some() || self.transform.is_some()) {
             return false;
         }
         let before = self.history.doc().clone();
-        let done = self.history.take_back(id);
+        let done = self.history.take_back(id, from);
         if done {
             self.revision += 1;
             self.fix_active_layer(Some(&before));

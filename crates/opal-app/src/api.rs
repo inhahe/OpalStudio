@@ -1893,7 +1893,8 @@ impl AppState {
                 // Answered once on the clipboard (a failure there is the call's).
                 self.next_answer += 1;
                 let n = self.next_answer;
-                if self.copy_answering(cmd == Cmd::CopyMerged, n, ctx) { Reply::Later(n) } else { now(Ok(json!({}))) }
+                let all = crate::memory::Allowance::now();
+                if self.copy_within(cmd == Cmd::CopyMerged, all, Some(n), ctx) { Reply::Later(n) } else { now(Ok(json!({}))) }
             }
             Cmd::Cut => {
                 self.next_answer += 1;
@@ -3132,8 +3133,26 @@ mod tests {
         };
         now(&mut st, "deselect", json!({})).unwrap();
         let said = later(&mut st, n).unwrap_err();
-        assert!(said.contains("undo the cut"), "{said}");
+        assert!(said.contains("undo it to get it back"), "{said}");
         assert_eq!(alpha(&st, 50, 50), 0.0);
+        // Undone before the copy fails: nothing is cut, and no redo cuts it without the copy.
+        select(&mut st, [100.0, 100.0, 150.0, 150.0]);
+        let n = match st.call("cut", &args(json!({})), &egui::Context::default()) {
+            Reply::Later(n) => n,
+            Reply::Now(r) => panic!("answered at once: {r:?}"),
+        };
+        st.active_mut().unwrap().undo();
+        let said = later(&mut st, n).unwrap_err();
+        assert!(said.contains("so nothing was cut"), "{said}");
+        let d = st.active().unwrap();
+        assert!(!d.history.can_redo(), "the cut is still there to redo: {:?}", d.history.redo_label());
+        // Its image closed meanwhile: nothing is said of the cut.
+        let n = match st.call("cut", &args(json!({})), &egui::Context::default()) {
+            Reply::Later(n) => n,
+            Reply::Now(r) => panic!("answered at once: {r:?}"),
+        };
+        now(&mut st, "close", json!({ "discard": true })).unwrap();
+        assert_eq!(later(&mut st, n).unwrap_err(), "Could not copy: The clipboard is in use.");
     }
 
     #[test]
