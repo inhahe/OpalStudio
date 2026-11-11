@@ -5,7 +5,6 @@ use opal_core::document::{Canvas, Document, IdGen, LayerId};
 use opal_core::history::{History, NodeId};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 /// Identifies an open document for the life of the application.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -147,8 +146,9 @@ pub struct DocState {
     /// Something an operation on the document wants said in the status bar.
     pub notice: Option<String>,
     /// The outline of the selection's mask (the marching ants' path), with the mask it is of
-    /// (see `DocState::selection_outline`).
-    pub outline: Option<(Arc<opal_core::mask::Mask>, crate::select::Outline)>,
+    /// (see `DocState::selection_outline`): weakly, so that it keeps alive no mask that history
+    /// has let go (and no other mask takes that one's place while it is held so).
+    pub outline: Option<(std::sync::Weak<opal_core::mask::Mask>, crate::select::Outline)>,
     /// Whether the user has been told that history states are being dropped.
     told_dropped: bool,
     /// The groups (by number) a call being carried out is in: the script run its

@@ -350,7 +350,10 @@ On the Select tab (and for scripts, by the same names):
   with the same.
 - The canvas shows the outline as marching ants: white, with black dashes moving along it a
   step every 100 ms, drawn through the middles of the screen's pixels so that they stay
-  sharp.
+  sharp. They march only while some of the outline is in view and the window has the focus,
+  as each step is a frame of the whole window. The outline is worked out once a selection,
+  and kept with a weak reference to its mask, so that it keeps alive no mask history has let
+  go; it goes once nothing is selected.
 
 ### The Select tool
 

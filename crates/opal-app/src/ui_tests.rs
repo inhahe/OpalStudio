@@ -2841,6 +2841,35 @@ fn crop_to_selection_makes_the_canvas_the_rectangle_round_it() {
 }
 
 #[test]
+fn the_ants_march_while_seen_and_focused_and_keep_no_selection_gone() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    select_rect(&mut h, [10.0, 20.0, 110.0, 70.0]);
+    let next = |h: &Harness<'static, OpalApp>| h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+    let step = std::time::Duration::from_millis(crate::canvas::ANTS_STEP_MS);
+    assert!(next(&h) <= step, "the ants did not march: {:?}", next(&h));
+    // Scrolled far from the outline, they stop.
+    let offset = h.state().state().active().unwrap().view.offset;
+    h.state_mut().state_mut().active_mut().unwrap().view.offset = offset + egui::vec2(100_000.0, 0.0);
+    h.run();
+    assert_eq!(next(&h), std::time::Duration::MAX, "they marched unseen");
+    // Back, but the window without the focus: stopped too, until it has it again.
+    h.state_mut().state_mut().active_mut().unwrap().view.offset = offset;
+    h.input_mut().focused = false;
+    h.run();
+    assert_eq!(next(&h), std::time::Duration::MAX, "they marched in a window not in use");
+    h.input_mut().focused = true;
+    h.run();
+    assert!(next(&h) <= step);
+    // The outline keeps its mask weakly, and nothing once nothing is selected.
+    let d = h.state().state().active().unwrap();
+    assert_eq!(std::sync::Arc::strong_count(d.pixel_selection().unwrap().mask()), 1, "the outline holds its mask");
+    command(&mut h, Cmd::Deselect);
+    assert!(h.state().state().active().unwrap().outline.is_none(), "the outline of a selection gone was kept");
+}
+
+#[test]
 fn the_selection_s_outline_shows_as_marching_ants_on_the_canvas() {
     let _gpu = gpu_lock();
     let mut h = harness();

@@ -422,10 +422,13 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     if !boxed && !cropping {
         draw_outlines(ui, d, rect, &to_screen, palette.accent);
     }
-    // What is selected: its outline, the marching ants, which march.
+    // What is selected: its outline, the marching ants. They march while they are seen and
+    // the window has the focus: each step is a frame of the whole window.
     if let Some(lines) = d.selection_outline() {
-        draw_ants(ui, &lines, rect, &to_screen, ctx.input(|i| i.time));
-        ctx.request_repaint_after(std::time::Duration::from_millis(ANTS_STEP_MS));
+        let seen = draw_ants(ui, &lines, rect, &to_screen, ctx.input(|i| i.time));
+        if seen && ctx.input(|i| i.focused) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(ANTS_STEP_MS));
+        }
     }
     if let Some(drag) = &d.select_drag {
         crate::select_tool::draw(ui, drag, select, rect, &to_screen);
@@ -486,18 +489,19 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
 }
 
 /// How often the marching ants move on, in milliseconds.
-const ANTS_STEP_MS: u64 = 100;
+pub(crate) const ANTS_STEP_MS: u64 = 100;
 
 /// The selection's outline (`lines`, closed, in document coordinates), as marching ants:
 /// black dashes on white, moving along it as `time` (seconds) goes on. Each line is drawn
-/// through the middles of the screen's pixels, so that it stays one sharp pixel wide.
+/// through the middles of the screen's pixels, so that it stays one sharp pixel wide; those
+/// wholly outside `rect` are not drawn. Whether any of it is within `rect`.
 pub(crate) fn draw_ants(
     ui: &egui::Ui,
     lines: &[Vec<[f64; 2]>],
     rect: Rect,
     to_screen: &dyn Fn([f64; 2]) -> Pos2,
     time: f64,
-) {
+) -> bool {
     const DASH: f32 = 4.0;
     let painter = ui.painter().with_clip_rect(rect);
     let ppp = ui.ctx().pixels_per_point();
@@ -505,12 +509,18 @@ pub(crate) fn draw_ants(
     // A dash and a gap a step.
     let steps = (time * 1000.0 / ANTS_STEP_MS as f64) as u64;
     let offset = (steps % (2 * DASH as u64)) as f32;
+    let mut seen = false;
     for line in lines {
         let mut pts: Vec<Pos2> = line.iter().map(|&p| sharp(to_screen(p))).collect();
         if pts.len() < 2 {
             continue;
         }
         pts.push(pts[0]);
+        // Its pieces run along the pixels' edges, across or down: each one's rectangle is it.
+        if !pts.windows(2).any(|w| Rect::from_two_pos(w[0], w[1]).intersects(rect)) {
+            continue;
+        }
+        seen = true;
         painter.add(Shape::line(pts.clone(), Stroke::new(1.0, Color32::WHITE)));
         painter.extend(Shape::dashed_line_with_offset(
             &pts,
@@ -520,6 +530,7 @@ pub(crate) fn draw_ants(
             offset,
         ));
     }
+    seen
 }
 
 /// A faint outline around what each selected layer holds (stronger for the active layer).
