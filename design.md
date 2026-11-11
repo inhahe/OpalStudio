@@ -666,6 +666,13 @@ sizes and can delete them. The licenses were checked (November 2026): SAM 2.1 Ap
 BiRefNet MIT, ViTMatte MIT, LaMa Apache-2.0; the training data of ViTMatte and LaMa carries
 its own terms, which the model manager shows.
 
+Models whose terms allow only non-commercial use are offered too where they do better (BRIA's
+RMBG-2.0 for Select subject, say), marked so before they are downloaded and in the model
+manager. Their terms bind whoever uses them, not only the project, so a model that allows
+commercial use stays the default for each task, and someone editing a client's photographs is
+never caught out. A preference (Preferences › AI models, *My use is non-commercial*) makes
+the better model the default wherever one is non-commercial.
+
 ### Extracting objects
 
 Because an AI selection is an ordinary selection (a soft mask), everything works on what it
@@ -1477,12 +1484,17 @@ versions, Upright, the Browse panel). Decided so far; the rest is settled when P
 - **Demosaicing** methods are ported from darktable and RawTherapee (GPL-3.0, as Opal Studio
   is); rawler (LGPL-2.1) reads the files.
 - **Models**, downloaded and shown as milestone A's are (*AI object and paint-the-area
-  selection*): Depth Anything V2 Small (Apache-2.0; its base and large sizes are CC-BY-NC, so
-  not used); MediaPipe's multiclass selfie segmenter (background, hair, body skin, face skin,
-  clothes, accessories) and Face Landmarker (478 points, the irises included), Apache-2.0 by
-  their model cards, converted from TFLite to ONNX; a person detector (RT-DETR and D-FINE are
-  candidates); SAM 3, optional, for a landscape's parts. Each license, and its training
-  data's terms, checked when P begins.
+  selection*): Depth Anything V2 Small (Apache-2.0); MediaPipe's multiclass selfie segmenter
+  (background, hair, body skin, face skin, clothes, accessories) and Face Landmarker (478
+  points, the irises included), Apache-2.0 by their model cards, converted from TFLite to
+  ONNX; a person detector (RT-DETR and D-FINE are candidates); SAM 3, optional, for a
+  landscape's parts. Better ones offered beside them under non-commercial terms (as that
+  paragraph says): Depth Anything V2 Base and Large (CC-BY-NC-4.0); a face parser trained on
+  CelebAMask-HQ (19 parts at 512 pixels: skin, brows, eyes, lips, the mouth's inside, hair,
+  ears, neck, clothes), finer than the landmarks' outlines; SegFormer trained on ADE20K
+  (NVIDIA's non-commercial license), which finds water, mountains, trees, grass, ground and
+  buildings without SAM 3. Each license, and its training data's terms, checked when P
+  begins.
 
 ## Painting and retouching tools
 

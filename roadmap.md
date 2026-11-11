@@ -167,7 +167,10 @@ comes first.
 
 ## A. AI selection and extraction (right after milestones 2 and N)
 - ONNX Runtime with DirectML; the model manager (download on first use, license shown,
-  delete from Preferences).
+  delete from Preferences). *(new)* Models under non-commercial terms offered beside the
+  default where they do better (RMBG-2.0 for Select subject), marked so; *My use is
+  non-commercial* makes them the default (`design.md`, *AI object and paint-the-area
+  selection*).
 - Select subject (BiRefNet); the AI object and paint-the-area tool (SAM 2.1); matting
   (ViTMatte) and color decontamination. *(new)* Refining an edge as one step of the recipe:
   smooth, feather, contrast and shifting it in or out, beside matting and decontamination;
@@ -366,16 +369,16 @@ comes first.
 - Lens profiles: the lensfun database (CC-BY-SA 3.0), read by code of our own, correcting the
   distortion, chromatic aberration and vignetting of the camera and lens the metadata names;
   in Lens Correction and in raw objects.
-- Depth from a photograph (moved from *Later*): Depth Anything V2 Small (Apache-2.0; its larger
-  sizes are non-commercial), making a depth layer for Lens Blur, refined by painting on it;
-  Select by Depth, a range from near to far, feathered.
+- Depth from a photograph (moved from *Later*): Depth Anything V2 (Small, Apache-2.0, by
+  default; Base and Large, non-commercial, offered beside it), making a depth layer for Lens
+  Blur, refined by painting on it; Select by Depth, a range from near to far, feathered.
 - People and their parts: each person found (a detector whose license allows it, each box
   refined by SAM 2.1), one or all; for each, face skin, body skin, hair and clothes
   (MediaPipe's multiclass segmenter, Apache-2.0), and eyes, irises, eye whites, eyebrows,
   lips and teeth (from the points of MediaPipe's Face Landmarker, as outline steps; the teeth
-  by their color within the lips): Select › People. Then a landscape's parts beside the sky
-  (water, plants, mountains, ground, buildings), by SAM 3's words or a model whose terms
-  allow it.
+  by their color within the lips; or, offered under non-commercial terms, a face parser
+  trained on CelebAMask-HQ): Select › People. Then a landscape's parts beside the sky (water,
+  plants, mountains, ground, buildings), by SAM 3's words or SegFormer (non-commercial).
 - The Photo tab: one-click commands made of ordinary layers, each a Develop or filter layer
   named for what it does, masked by a recipe that finds what it acts on, its settings the
   command's defaults; all editable afterwards, and found again in another image. In order:
