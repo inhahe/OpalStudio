@@ -1657,6 +1657,9 @@ tile rows; and the rename is skipped. Any failure after a cancel counts as the c
 image takes the file chosen at once (so a save asked for before the first is written goes
 there too; a failure or cancel gives it back the file it had), and once written it is
 marked saved at the history state written, so an edit made meanwhile leaves it unsaved.
+It has unsaved changes while what it would save differs from that state's (its layers not
+the very same, its canvas or resolution changed): a selection alone, which files do not keep,
+is none (`Document::saves_as`).
 "Save" in the close and quit questions closes or quits once the writes are done, asking
 again about an image changed meanwhile; quitting otherwise waits for writes still under
 way; any failed or cancelled write stops quitting (and a close waiting for it), so that it

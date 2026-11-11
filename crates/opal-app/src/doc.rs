@@ -334,9 +334,14 @@ impl DocState {
         }
     }
 
-    /// Whether there are changes that would be lost on closing.
+    /// Whether there are changes that would be lost on closing: what the image shows (a
+    /// pending edit included) would be saved otherwise than the state with nothing to save
+    /// was. What is selected is no such change: files do not keep it.
     pub fn is_dirty(&self) -> bool {
-        self.pending.is_some() || self.saved_at != Some(self.history.current())
+        match self.saved_at {
+            Some(s) if self.history.contains(s) => !self.doc().saves_as(self.history.node(s).doc()),
+            _ => true,
+        }
     }
 
     /// Records an action: `f` changes a copy of the current document, which becomes a new
@@ -587,6 +592,12 @@ mod tests {
         assert!(s.is_dirty());
         s.undo();
         assert!(!s.is_dirty(), "back at the saved state");
+        // Selecting changes nothing a file keeps.
+        let all = opal_core::selection::Selection::new(opal_core::selection::Step::Invert);
+        s.set_pixel_selection(Some(all), "Select all");
+        assert!(!s.is_dirty(), "a selection alone asks to be saved");
+        add_layer(&mut s, "y");
+        assert!(s.is_dirty());
     }
 
     #[test]

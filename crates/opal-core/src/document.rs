@@ -435,6 +435,15 @@ impl Document {
         }
     }
 
+    /// Whether saving it would write what saving `other` would: all it keeps in a file the same
+    /// (its layers the very same), whatever either has selected, which files do not keep.
+    pub fn saves_as(&self, other: &Document) -> bool {
+        self.canvas == other.canvas
+            && self.resolution == other.resolution
+            && self.layers.len() == other.layers.len()
+            && self.layers.iter().zip(&other.layers).all(|(a, b)| Arc::ptr_eq(a, b))
+    }
+
     /// Visits every layer depth first, bottom to top, with its depth (0 for top level).
     pub fn for_each_layer(&self, f: &mut dyn FnMut(&Layer, usize)) {
         fn walk(layers: &[Arc<Layer>], depth: usize, f: &mut dyn FnMut(&Layer, usize)) {
