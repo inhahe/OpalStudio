@@ -222,6 +222,18 @@ pub enum Combine {
 }
 
 impl Combine {
+    /// The way of combining named `name`, as the Select tool's setting and scripts name them
+    /// (replace, add, subtract, intersect).
+    pub fn named(name: &str) -> Option<Combine> {
+        match name {
+            "replace" => Some(Combine::Replace),
+            "add" => Some(Combine::Add),
+            "subtract" => Some(Combine::Subtract),
+            "intersect" => Some(Combine::Intersect),
+            _ => None,
+        }
+    }
+
     /// Whether a new mask's level `new` leaves every level before as it is.
     fn keeps_before(self, new: u16) -> bool {
         match self {

@@ -52,22 +52,47 @@ impl EditBox {
         Shape { center: self.center, size: self.size, angle: self.angle.to_degrees(), ..*like }
     }
 
-    /// The box with its sides on the pixels' edges, if it is upright (turned, it is left as
-    /// it is): each side moved to the nearest, or, if `moved`, the box moved to the nearest
-    /// place where they are, keeping its size. Never less than a pixel either way.
-    pub fn on_pixels(self, moved: bool) -> EditBox {
+    /// The box, after a drag of `part`, with what was dragged on the pixels' edges, if it is
+    /// upright (turned, it is left as it is): a side (or a corner's two) dragged, moved to the
+    /// nearest, the others left where they are; moved, the box put where its top-left corner
+    /// is on a pixel's corner, its size kept as it is. A side dragged stays a pixel from the
+    /// one across.
+    pub fn on_pixels(self, part: Part) -> EditBox {
         if self.angle != 0.0 {
             return self;
         }
         let [w, h] = self.size;
-        let (x0, y0) = (self.center[0] - w / 2.0, self.center[1] - h / 2.0);
-        let (x0, y0, x1, y1) = if moved {
-            let (x0, y0) = (x0.round(), y0.round());
-            (x0, y0, x0 + w.round(), y0 + h.round())
-        } else {
-            (x0.round(), y0.round(), (x0 + w).round(), (y0 + h).round())
+        let (mut x0, mut y0) = (self.center[0] - w / 2.0, self.center[1] - h / 2.0);
+        let (mut x1, mut y1) = (x0 + w, y0 + h);
+        // Which sides it moved: left, top, right, bottom (corners clockwise from the
+        // top-left, sides from the top).
+        let [left, top, right, bottom] = match part {
+            Part::Move => {
+                let (dx, dy) = (x0.round() - x0, y0.round() - y0);
+                return EditBox { center: [self.center[0] + dx, self.center[1] + dy], ..self };
+            }
+            Part::Corner(0) => [true, true, false, false],
+            Part::Corner(1) => [false, true, true, false],
+            Part::Corner(2) => [false, false, true, true],
+            Part::Corner(_) => [true, false, false, true],
+            Part::Edge(0) => [false, true, false, false],
+            Part::Edge(1) => [false, false, true, false],
+            Part::Edge(2) => [false, false, false, true],
+            Part::Edge(_) => [true, false, false, false],
+            Part::New | Part::Rotate => [true; 4],
         };
-        let (x1, y1) = (x1.max(x0 + 1.0), y1.max(y0 + 1.0));
+        if left {
+            x0 = x0.round().min(x1 - 1.0);
+        }
+        if right {
+            x1 = x1.round().max(x0 + 1.0);
+        }
+        if top {
+            y0 = y0.round().min(y1 - 1.0);
+        }
+        if bottom {
+            y1 = y1.round().max(y0 + 1.0);
+        }
         EditBox { center: [(x0 + x1) / 2.0, (y0 + y1) / 2.0], size: [x1 - x0, y1 - y0], angle: 0.0 }
     }
 
@@ -210,6 +235,18 @@ impl OnScreen {
     }
 }
 
+/// Where a box's toolbar goes, on screen: under the box (`corners`, and below them anything
+/// else of it in `also`), centred on it, inside `view`, as wide as it was drawn last (the area
+/// `bar`; `guess` until it has been). In a view too short for it, at its top.
+pub fn toolbar_at(ctx: &egui::Context, view: Rect, corners: &[Pos2; 4], also: &[Pos2], bar: egui::Id, guess: f32) -> Pos2 {
+    let lowest = corners.iter().chain(also).fold(f32::NEG_INFINITY, |m, p| m.max(p.y));
+    let middle = corners.iter().map(|p| p.x).sum::<f32>() / 4.0;
+    let width = ctx.memory(|m| m.area_rect(bar)).map_or(guess, |r| r.width());
+    let x = (middle - width * 0.5).clamp(view.left() + 4.0, (view.right() - width - 4.0).max(view.left() + 4.0));
+    let y = (lowest + 12.0).clamp(view.top() + 4.0, (view.bottom() - 40.0).max(view.top() + 4.0));
+    Pos2::new(x, y)
+}
+
 /// The pointer for dragging `part` of a box.
 pub fn cursor(part: Part) -> CursorIcon {
     match part {
@@ -275,18 +312,33 @@ mod tests {
     }
 
     #[test]
+    fn a_toolbar_in_a_view_too_short_for_it_goes_at_its_top() {
+        let ctx = egui::Context::default();
+        let view = Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(400.0, 20.0));
+        let corners = [Pos2::new(10.0, 105.0), Pos2::new(50.0, 105.0), Pos2::new(50.0, 115.0), Pos2::new(10.0, 115.0)];
+        let at = toolbar_at(&ctx, view, &corners, &[], egui::Id::unique("bar"), 100.0);
+        assert_eq!(at, Pos2::new(4.0, 104.0));
+    }
+
+    #[test]
     fn an_upright_box_is_put_on_the_pixels_edges_and_a_shape_drawn_in_it() {
-        let b = EditBox { center: [50.2, 40.7], size: [20.6, 9.2], angle: 0.0 };
-        // Each side to the nearest edge: 39.9..60.5 across, 36.1..45.3 down.
-        let sides = b.on_pixels(false);
-        assert_eq!((sides.center, sides.size), ([50.5, 40.5], [21.0, 9.0]));
-        // Moved, its size whole and kept: its corner (39.9, 36.1) to (40, 36).
-        let moved = b.on_pixels(true);
-        assert_eq!((moved.center, moved.size), ([50.5, 40.5], [21.0, 9.0]));
-        let small = EditBox { center: [5.0, 5.0], size: [0.2, 0.2], angle: 0.0 }.on_pixels(false);
-        assert_eq!(small.size, [1.0, 1.0], "less than a pixel");
+        // 39.75..60.25 across, 36.25..45.25 down.
+        let b = EditBox { center: [50.0, 40.75], size: [20.5, 9.0], angle: 0.0 };
+        let sides = |b: EditBox| {
+            let [w, h] = b.size.map(|v| v / 2.0);
+            [b.center[0] - w, b.center[1] - h, b.center[0] + w, b.center[1] + h]
+        };
+        // Its bottom-right corner dragged: that corner on the nearest, the top-left held.
+        assert_eq!(sides(b.on_pixels(Part::Corner(2))), [39.75, 36.25, 60.0, 45.0]);
+        // Its left side dragged: that side alone.
+        assert_eq!(sides(b.on_pixels(Part::Edge(3))), [40.0, 36.25, 60.25, 45.25]);
+        // Moved: its corner on a pixel's corner, its size kept as it is.
+        let moved = b.on_pixels(Part::Move);
+        assert_eq!((sides(moved), moved.size), ([40.0, 36.0, 60.5, 45.0], b.size));
+        let small = EditBox { center: [5.0, 5.0], size: [0.2, 0.2], angle: 0.0 }.on_pixels(Part::Corner(2));
+        assert!(small.size[0] >= 1.0 && small.size[1] >= 1.0, "less than a pixel: {small:?}");
         let turned = EditBox { angle: 0.3, ..b };
-        assert_eq!(turned.on_pixels(false), turned, "a turned box was moved");
+        assert_eq!(turned.on_pixels(Part::Corner(2)), turned, "a turned box was moved");
         // A shape drawn in its box and back is the same shape, its kind and edge kept.
         let s = Shape {
             kind: opal_core::mask::ShapeKind::Ellipse,

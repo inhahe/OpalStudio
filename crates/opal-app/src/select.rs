@@ -125,12 +125,18 @@ impl AppState {
     /// Makes the canvas the rectangle round what is selected.
     pub(crate) fn crop_to_selection(&mut self) {
         let d = self.active().expect("available");
-        let Extent::Within(b) = d.pixel_selection().expect("available").mask().extent() else {
-            return self.message(
-                MessageKind::Info,
-                "Crop to Selection",
-                "The selection reaches past every edge: there is no rectangle round it.",
-            );
+        let b = match d.pixel_selection().expect("available").mask().extent() {
+            Extent::Within(b) => b,
+            Extent::Nothing => {
+                return self.message(MessageKind::Info, "Crop to Selection", "The selection selects no pixel.");
+            }
+            Extent::Unbounded => {
+                return self.message(
+                    MessageKind::Info,
+                    "Crop to Selection",
+                    "The selection reaches past every edge: there is no rectangle round it.",
+                );
+            }
         };
         self.crop_canvas_to(&b, "Crop to selection", "The canvas is already the selection's rectangle.");
     }
@@ -220,6 +226,59 @@ mod tests {
     use opal_core::document::{Document, IdGen, Layer, LayerContent, LayerId, ObjectKind, Position};
     use opal_core::geom::IRect;
     use opal_core::raster::RasterImage;
+
+    #[test]
+    fn an_edit_that_selects_nothing_keeps_its_steps_to_be_put_right() {
+        use opal_core::mask::{Combine, Shape};
+        use opal_core::selection::{Selection, Step};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let a = Shape::rectangle(&IRect::new(0, 0, 100, 100).to_f(), true);
+        let b = Shape::rectangle(&IRect::new(50, 0, 150, 100).to_f(), true);
+        let s = Selection::new(Step::Shape { shape: a, combine: Combine::Replace })
+            .then(Step::Shape { shape: b, combine: Combine::Intersect });
+        let d = st.active_mut().unwrap();
+        d.set_pixel_selection(Some(s), "Select");
+        // B moved off A: nothing is in both, but the steps stay, and so does the box.
+        let before = d.pixel_selection().unwrap().before_last();
+        let away = Shape::rectangle(&IRect::new(200, 0, 300, 100).to_f(), true);
+        crate::select_tool::reshape(d, &before, away, Combine::Intersect, "Edit selection");
+        let now = d.pixel_selection().expect("the selection was dropped");
+        assert!(now.is_empty() && now.steps().len() == 2);
+        assert_eq!(crate::select_tool::editable(d), Some((away, Combine::Intersect)));
+    }
+
+    #[test]
+    fn a_locked_group_takes_no_new_layer_and_gives_no_layer_in_it_pixels() {
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let mut ids: [Option<LayerId>; 2] = [None; 2];
+        let d = st.active_mut().unwrap();
+        d.apply("Group", |doc: &mut Document, made: &mut IdGen| {
+            let g = made.layer();
+            let mut group = Layer::new_group(g, "G");
+            group.locked = true;
+            doc.insert(Position { parent: None, index: 1 }, group)?;
+            let a = made.layer();
+            doc.insert(Position { parent: Some(g), index: 0 }, Layer::new_empty(a, "A"))?;
+            ids = [Some(g), Some(a)];
+            Ok::<(), opal_core::document::TreeError>(())
+        })
+        .unwrap();
+        let [g, a] = ids.map(Option::unwrap);
+        d.select_only(a);
+        // A new layer goes above the locked group, not into it; so does a copy of A.
+        let made = st.new_layer_named(false, Some("New")).unwrap();
+        let doc = st.active().unwrap().doc();
+        let (pos, group) = (doc.position(made).unwrap(), doc.position(g).unwrap());
+        assert_eq!((pos.parent, pos.index), (None, group.index + 1), "added into the locked group");
+        st.active_mut().unwrap().select_only(a);
+        st.duplicate_layers();
+        assert_eq!(st.active().unwrap().doc().layer(g).unwrap().children().unwrap().len(), 1, "copied into it");
+        // Pixels cannot go into A, though it is not locked itself.
+        let refused = crate::api::pixels_go_into(st.active().unwrap().doc(), a).unwrap_err();
+        assert!(refused.contains("\"G\" is locked"), "{refused}");
+    }
 
     #[test]
     fn a_selected_group_is_cleared_where_it_shows_and_refused_as_its_own_flags_say() {

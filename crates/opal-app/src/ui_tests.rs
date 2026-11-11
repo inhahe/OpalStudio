@@ -3064,6 +3064,46 @@ fn the_box_round_the_last_shape_moves_it_sizes_it_and_takes_its_numbers() {
 }
 
 #[test]
+fn the_box_stands_aside_when_a_drag_combines_and_a_drag_back_where_it_began_makes_no_state() {
+    use egui::Modifiers;
+    use opal_core::geom::IRect;
+    use opal_core::mask::Extent;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    let none = Modifiers::NONE;
+    select_drag(&mut h, [100.0, 50.0], [200.0, 120.0], none, none);
+    let states = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().history.nodes().count();
+    let before = states(&h);
+    // Moved and brought back where it began: no state.
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let at = |x: f32, y: f32| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    h.hover_at(at(150.0, 80.0));
+    h.run();
+    h.drag_at(at(150.0, 80.0));
+    h.run();
+    h.hover_at(at(170.0, 90.0));
+    h.run();
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(120, 60, 220, 130))), "not moved while dragged");
+    h.hover_at(at(150.0, 80.0));
+    h.run();
+    h.drop_at(at(150.0, 80.0));
+    h.run();
+    assert_eq!(states(&h), before, "a drag that came back made a state");
+    // With the tool set to add, a plain drag inside the box adds a new shape, and the pointer
+    // over it does not offer to move it.
+    let s = h.state_mut().state_mut().tool_settings.get_mut(&crate::tools::ToolId::Select).unwrap();
+    s.set("select.combine", crate::settings::Value::Choice("add".into()));
+    h.hover_at(at(150.0, 80.0));
+    h.run();
+    assert_ne!(h.output().platform_output.cursor_icon, egui::CursorIcon::Move);
+    select_drag(&mut h, [150.0, 80.0], [300.0, 200.0], none, none);
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 50, 300, 200))), "it moved the box");
+    assert_eq!(h.state().state().active().unwrap().pixel_selection().unwrap().steps().len(), 2);
+}
+
+#[test]
 fn a_select_drag_given_up_elsewhere_or_changing_nothing_leaves_no_history_state() {
     use egui::Modifiers;
     let _gpu = gpu_lock();

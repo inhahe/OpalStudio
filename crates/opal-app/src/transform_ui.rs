@@ -225,16 +225,12 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen
     let paste = s.paste.clone();
     let aspect = st.prefs.bool("transform.aspect_locked");
     let snapping = st.prefs.bool("transform.snapping");
-    let lowest = screen.corners.iter().chain([&screen.rotate]).fold(f32::NEG_INFINITY, |m, p| m.max(p.y));
-    let center_x = screen.corners.iter().map(|p| p.x).sum::<f32>() / 4.0;
     // As wide as it was drawn last (its buttons vary).
     let bar_id = egui::Id::unique(("transform-toolbar", id.0));
-    let width = ctx.memory(|m| m.area_rect(bar_id)).map_or(300.0, |r| r.width());
-    let x = (center_x - width * 0.5).clamp(rect.left() + 4.0, (rect.right() - width - 4.0).max(rect.left() + 4.0));
-    let y = (lowest + 12.0).clamp(rect.top() + 4.0, rect.bottom() - 40.0);
+    let at = crate::edit_box::toolbar_at(ctx, rect, &screen.corners, &[screen.rotate], bar_id, 300.0);
     let mut action = None;
     let mut numbers = st.box_numbers;
-    let bar = egui::Area::new(bar_id).order(egui::Order::Foreground).fixed_pos(Pos2::new(x, y)).show(ctx, |ui| {
+    let bar = egui::Area::new(bar_id).order(egui::Order::Foreground).fixed_pos(at).show(ctx, |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
                 let b = |ui: &mut egui::Ui, glyph: char, on: bool, tip: &str| {

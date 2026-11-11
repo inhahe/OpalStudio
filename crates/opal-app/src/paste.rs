@@ -362,12 +362,8 @@ impl AppState {
             }
         };
         let active = d.active_layer().and_then(|a| d.doc().layer(a));
-        let into = active.filter(|l| !l.is_group() && !l.locked).map(|l| l.id);
-        let position = d
-            .active_layer()
-            .and_then(|a| d.doc().position(a))
-            .map(|p| Position { parent: p.parent, index: p.index + 1 })
-            .unwrap_or(Position { parent: None, index: d.doc().layers.len() });
+        let into = active.filter(|l| !l.is_group() && crate::commands::locked_for(d.doc(), l).is_none()).map(|l| l.id);
+        let position = AppState::above_active(d);
         d.begin_paste(pasted, place, sampling, position, into, how);
     }
 

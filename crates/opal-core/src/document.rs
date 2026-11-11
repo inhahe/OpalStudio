@@ -444,6 +444,12 @@ impl Document {
             && self.layers.iter().zip(&other.layers).all(|(a, b)| Arc::ptr_eq(a, b))
     }
 
+    /// Whether it is `other` as far as an edit can tell: what saving it keeps, and what is
+    /// selected.
+    pub fn same_as(&self, other: &Document) -> bool {
+        self.saves_as(other) && self.selection == other.selection
+    }
+
     /// Visits every layer depth first, bottom to top, with its depth (0 for top level).
     pub fn for_each_layer(&self, f: &mut dyn FnMut(&Layer, usize)) {
         fn walk(layers: &[Arc<Layer>], depth: usize, f: &mut dyn FnMut(&Layer, usize)) {

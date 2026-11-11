@@ -428,6 +428,11 @@ impl DocState {
     pub fn commit_pending(&mut self) {
         self.finish_transform();
         if let Some(p) = self.pending.take() {
+            // An edit that came back to where it began is no state of its own.
+            if p.doc.same_as(self.history.doc()) {
+                self.revision += 1;
+                return;
+            }
             let id = self.history.commit(p.doc, p.label);
             for &group in &self.groups {
                 self.made_by.entry(group).or_default().insert(id);

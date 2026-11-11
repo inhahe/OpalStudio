@@ -282,15 +282,10 @@ pub fn canvas_crop(
     }
 
     // ---- Buttons ----------------------------------------------------------------------
-    let lowest = corners.iter().fold(f32::NEG_INFINITY, |m, p| m.max(p.y));
-    let cx = corners.iter().map(|p| p.x).sum::<f32>() / 4.0;
-    // As wide as it was drawn last (with its numbers button or not).
     let bar_id = egui::Id::unique(("crop-toolbar", id.0));
-    let width = ctx.memory(|m| m.area_rect(bar_id)).map_or(160.0, |r| r.width());
-    let x = (cx - width * 0.5).clamp(rect.left() + 4.0, (rect.right() - width - 4.0).max(rect.left() + 4.0));
-    let y = (lowest + 12.0).clamp(rect.top() + 4.0, rect.bottom() - 40.0);
+    let at = crate::edit_box::toolbar_at(&ctx, rect, &corners, &[], bar_id, 160.0);
     let mut choice = None;
-    let bar = egui::Area::new(bar_id).order(egui::Order::Foreground).fixed_pos(Pos2::new(x, y)).show(&ctx, |ui| {
+    let bar = egui::Area::new(bar_id).order(egui::Order::Foreground).fixed_pos(at).show(&ctx, |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui

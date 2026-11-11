@@ -25,12 +25,7 @@ impl Options {
     /// The options `settings` (the Select tool's) give.
     pub fn of(settings: &Settings) -> Options {
         let kind = if settings.choice("select.shape") == "ellipse" { ShapeKind::Ellipse } else { ShapeKind::Rectangle };
-        let combine = match settings.choice("select.combine").as_str() {
-            "add" => Combine::Add,
-            "subtract" => Combine::Subtract,
-            "intersect" => Combine::Intersect,
-            _ => Combine::Replace,
-        };
+        let combine = Combine::named(&settings.choice("select.combine")).unwrap_or_default();
         Options { kind, combine, smooth: settings.bool("select.smooth") }
     }
 }
@@ -51,6 +46,8 @@ pub struct SelectDrag {
     /// yet squaring or centering it).
     shift_held: bool,
     alt_held: bool,
+    /// The egui pass its image was last drawn in (see [`canvas`]).
+    seen: u64,
 }
 
 impl SelectDrag {
@@ -80,6 +77,8 @@ pub struct ShapeDrag {
     combine: Combine,
     /// What the steps before it select.
     before: Selection,
+    /// The egui pass its image was last drawn in (see [`canvas`]).
+    seen: u64,
 }
 
 impl ShapeDrag {
@@ -94,11 +93,25 @@ impl ShapeDrag {
 }
 
 /// Makes `shape` the selection's last step in place of the one there, which combined as
-/// `combine` with what `before` selects, as the pending edit labeled `label`.
+/// `combine` with what `before` selects, as the pending edit labeled `label`. A selection
+/// that comes to nothing so keeps its steps, so that the box stays to be put right.
 pub fn reshape(d: &mut DocState, before: &Selection, shape: Shape, combine: Combine, label: &str) {
-    let made = before.then(Step::Shape { shape, combine });
-    let made = (!made.is_empty()).then(|| Arc::new(made));
-    d.edit_pending(label, |doc| doc.selection = made);
+    let made = Arc::new(before.then(Step::Shape { shape, combine }));
+    d.edit_pending(label, |doc| doc.selection = Some(made));
+}
+
+/// Whether a drag begun now, with `modifiers` held and the tool's `options`, may edit the box
+/// round the last shape: only when it would not combine a new one with what is selected.
+fn edits_box(modifiers: egui::Modifiers, options: Options) -> bool {
+    !modifiers.any() && options.combine == Combine::Replace
+}
+
+/// The history state selecting a shape of `kind` makes.
+pub fn label(kind: ShapeKind) -> &'static str {
+    match kind {
+        ShapeKind::Rectangle => "Rectangle selection",
+        ShapeKind::Ellipse => "Ellipse selection",
+    }
 }
 
 /// The selection's last shape, if it has one, and how it combines: what its box edits.
@@ -122,19 +135,25 @@ pub fn canvas(
     options: Options,
 ) {
     let modifiers = ctx.input(|i| i.modifiers);
-    if ctx.input(|i| i.key_pressed(Key::Escape)) {
-        if d.select_drag.take().is_some() {
-            return;
-        }
-        if let Some(s) = d.shape_drag.take() {
-            d.discard_pending(ShapeDrag::label(s.drag.part));
-            return;
-        }
+    // A drag whose image was not drawn in the pass before (another was shown in its place)
+    // is given up, as on Esc: its button may have been let go over that other one, and the
+    // drag would be finished on coming back.
+    let pass = ctx.cumulative_pass_nr();
+    let stale = |seen: u64| seen + 1 < pass;
+    let escape = ctx.input(|i| i.key_pressed(Key::Escape));
+    if d.select_drag.is_some_and(|s| escape || stale(s.seen)) {
+        d.select_drag = None;
+        return;
     }
-    // A drag on the box round the last shape edits it, unless keys held say to combine a new
-    // one with what is selected.
+    if d.shape_drag.as_ref().is_some_and(|s| escape || stale(s.seen)) {
+        let s = d.shape_drag.take().expect("checked");
+        d.discard_pending(ShapeDrag::label(s.drag.part));
+        return;
+    }
+    // A drag on the box round the last shape edits it, unless what a drag does now is
+    // combine a new one with what is selected (keys held, or the tool's setting).
     if response.drag_started_by(PointerButton::Primary)
-        && !modifiers.any()
+        && edits_box(modifiers, options)
         && let Some(origin) = ctx.input(|i| i.pointer.press_origin())
         && let Some((shape, combine)) = editable(d)
     {
@@ -143,8 +162,11 @@ pub fn canvas(
         if part != Part::New {
             let before = d.pixel_selection().expect("one with a shape").before_last();
             let drag = BoxDrag { part, from: to_doc(origin), start };
-            d.shape_drag = Some(ShapeDrag { drag, shape, combine, before });
+            d.shape_drag = Some(ShapeDrag { drag, shape, combine, before, seen: pass });
         }
+    }
+    if let Some(s) = d.shape_drag.as_mut() {
+        s.seen = pass;
     }
     if let Some(s) = d.shape_drag.clone() {
         if !ctx.input(|i| i.pointer.primary_down()) {
@@ -156,7 +178,7 @@ pub fn canvas(
         } else if let Some(p) = response.interact_pointer_pos() {
             // Shift keeps its proportions; upright, its sides stay on the pixels' edges.
             let keep = modifiers.shift.then(|| s.drag.start.size[0] / s.drag.start.size[1]);
-            let b = EditBox::dragged(&s.drag, to_doc(p), keep).on_pixels(s.drag.part == Part::Move);
+            let b = EditBox::dragged(&s.drag, to_doc(p), keep).on_pixels(s.drag.part);
             let shape = b.shape(&s.shape);
             if editable(d).map(|(now, _)| now) != Some(shape) {
                 reshape(d, &s.before, shape, s.combine, ShapeDrag::label(s.drag.part));
@@ -184,9 +206,11 @@ pub fn canvas(
             centered: false,
             shift_held: modifiers.shift,
             alt_held: modifiers.alt,
+            seen: pass,
         });
     }
     if let Some(drag) = &mut d.select_drag {
+        drag.seen = pass;
         drag.shift_held &= modifiers.shift;
         drag.alt_held &= modifiers.alt;
         drag.square = modifiers.shift && !drag.shift_held;
@@ -201,11 +225,7 @@ pub fn canvas(
         let shape = drag.shape(options.kind, options.smooth);
         if shape.size[0] >= 1.0 && shape.size[1] >= 1.0 {
             let made = opal_core::selection::with_shape(d.pixel_selection().map(|s| &**s), shape, drag.combine);
-            let label = match options.kind {
-                ShapeKind::Rectangle => "Rectangle selection",
-                ShapeKind::Ellipse => "Ellipse selection",
-            };
-            d.set_pixel_selection(Some(made), label);
+            d.set_pixel_selection(Some(made), label(options.kind));
         }
         return;
     }
@@ -230,6 +250,7 @@ pub fn draw_box(
     let ctx = ui.ctx().clone();
     let accent = st.palette.accent;
     let mut numbers = st.box_numbers;
+    let options = Options::of(st.tool_settings(crate::tools::ToolId::Select));
     let Some(d) = st.doc(id) else { return };
     let Some((shape, _)) = editable(d).filter(|_| d.select_drag.is_none()) else { return };
     let corners = EditBox::of_shape(&shape).corners().map(to_screen);
@@ -238,20 +259,17 @@ pub fn draw_box(
     painter.add(egui::Shape::closed_line(corners.to_vec(), Stroke::new(1.0, accent.gamma_multiply(0.6))));
     crate::edit_box::draw_handles(&painter, &screen, accent);
     let dragging = d.shape_drag.as_ref().map(|s| s.drag.part);
-    if let Some(part) = dragging.or_else(|| response.hover_pos().map(|p| screen.part_at(p))) {
-        // Elsewhere, a drag draws a new shape: the tool's own pointer.
+    let hovered = response.hover_pos().filter(|_| edits_box(ctx.input(|i| i.modifiers), options));
+    if let Some(part) = dragging.or_else(|| hovered.map(|p| screen.part_at(p))) {
+        // Elsewhere, or with a drag combining a new shape, the tool's own pointer.
         if part != Part::New {
             ctx.set_cursor_icon(crate::edit_box::cursor(part));
         }
     }
     // The numbers button under the box.
-    let lowest = corners.iter().fold(f32::NEG_INFINITY, |m, p| m.max(p.y));
-    let cx = corners.iter().map(|p| p.x).sum::<f32>() / 4.0;
     let bar_id = egui::Id::unique(("select-toolbar", id.0));
-    let width = ctx.memory(|m| m.area_rect(bar_id)).map_or(40.0, |r| r.width());
-    let x = (cx - width * 0.5).clamp(rect.left() + 4.0, (rect.right() - width - 4.0).max(rect.left() + 4.0));
-    let y = (lowest + 12.0).clamp(rect.top() + 4.0, rect.bottom() - 40.0);
-    let bar = egui::Area::new(bar_id).order(egui::Order::Foreground).fixed_pos(Pos2::new(x, y)).show(&ctx, |ui| {
+    let at = crate::edit_box::toolbar_at(&ctx, rect, &corners, &[], bar_id, 40.0);
+    let bar = egui::Area::new(bar_id).order(egui::Order::Foreground).fixed_pos(at).show(&ctx, |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| crate::box_fields::toggle(ui, &mut numbers));
     });
     st.box_numbers = numbers;

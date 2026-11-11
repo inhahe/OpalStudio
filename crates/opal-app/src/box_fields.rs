@@ -581,13 +581,13 @@ pub fn selection(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
     let Some((shape, combine)) = crate::select_tool::editable(d) else { return };
     let ppi = d.doc().resolution;
     // Positions count from layers as history has them (no box moves them).
-    let doc = d.history.doc().clone();
-    let origin = counted_from(d.origin, &doc);
-    let from = origin.locate(&doc).expect("counted_from gives one there");
+    let doc = d.history.doc();
+    let origin = counted_from(d.origin, doc);
+    let from = origin.locate(doc).expect("counted_from gives one there");
     let mut m = Measure { unit, reference, origin };
     let mut p = EditBox::of_shape(&shape).numbers(from, at);
     let how = Fields { keep: None, scale_of: None, px_decimals: 2, sides: 0.01..=FAR, salt };
-    if fields(ui, &mut p, &mut m, &doc, ppi, &how, &mut Vec::new()) {
+    if fields(ui, &mut p, &mut m, doc, ppi, &how, &mut Vec::new()) {
         let shape = EditBox::from_numbers(&p, from, at).shape(&shape);
         let before = d.pixel_selection().expect("one with a shape").before_last();
         crate::select_tool::reshape(d, &before, shape, combine, "Edit selection");

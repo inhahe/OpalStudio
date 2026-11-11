@@ -47,12 +47,19 @@ pub(crate) fn drawable(
 pub(crate) const CLIPPED: &str = "Part of an image reached so far past the canvas that drawing all of it would have \
      needed more memory than this computer has, so only the part around the canvas was kept.";
 
+/// Where a layer goes to be just above layer `id` of `doc`: in its group, or, if a group it
+/// is in is locked (what a locked group holds is part of it), just above the outermost such.
+pub(crate) fn above(doc: &opal_core::document::Document, id: LayerId) -> Option<Position> {
+    let groups = crate::commands::groups_above(doc, id);
+    let anchor = groups.iter().rposition(|g| g.locked).map_or(id, |i| groups[i].id);
+    doc.position(anchor).map(|p| Position { parent: p.parent, index: p.index + 1 })
+}
+
 impl AppState {
-    /// Where a new layer goes: just above the active layer, in its group.
+    /// Where a new layer goes: just above the active layer (see [`above`]), or at the top.
     pub(crate) fn above_active(d: &DocState) -> Position {
         d.active_layer()
-            .and_then(|a| d.doc().position(a))
-            .map(|p| Position { parent: p.parent, index: p.index + 1 })
+            .and_then(|a| above(d.doc(), a))
             .unwrap_or(Position { parent: None, index: d.doc().layers.len() })
     }
 
@@ -90,8 +97,8 @@ impl AppState {
                 let layer = doc.layer(src).ok_or(TreeError::NoSuchLayer(src))?;
                 let mut copy = copy_with_new_ids(layer, ids);
                 copy.name = format!("{} copy", layer.name);
-                let pos = doc.position(src).ok_or(TreeError::NoSuchLayer(src))?;
-                doc.insert(Position { parent: pos.parent, index: pos.index + 1 }, copy)?;
+                let pos = above(doc, src).ok_or(TreeError::NoSuchLayer(src))?;
+                doc.insert(pos, copy)?;
             }
             Ok::<(), TreeError>(())
         });

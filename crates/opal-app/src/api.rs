@@ -996,12 +996,12 @@ enum Content {
     Pixels(Vec<Pixel>),
 }
 
-/// Whether pixels can go into layer `target` of `doc`: one that is not locked and holds
-/// nothing yet or pixels alone, in one object.
-fn pixels_go_into(doc: &opal_core::document::Document, target: LayerId) -> Result<(), String> {
+/// Whether pixels can go into layer `target` of `doc`: one not locked (nor in a locked
+/// group) that holds nothing yet or pixels alone, in one object.
+pub(crate) fn pixels_go_into(doc: &opal_core::document::Document, target: LayerId) -> Result<(), String> {
     let layer = doc.layer(target).ok_or_else(|| format!("There is no layer {} in the image.", target.0))?;
-    if layer.locked {
-        return Err(format!("\"{}\" is locked. Unlock it first.", layer.name));
+    if let Some(locked) = crate::commands::locked_for(doc, layer) {
+        return Err(format!("\"{}\" is locked. Unlock it first.", locked.name));
     }
     match &layer.content {
         LayerContent::Objects(objects) if objects.is_empty() => Ok(()),
@@ -2204,32 +2204,9 @@ impl AppState {
         let delete =
             args.flag("delete").unwrap_or_else(|| self.tool_settings(crate::tools::ToolId::Crop).bool("crop.delete"));
         let sampling = crate::prefs::sampling(&self.prefs, "transform");
-        let params = method("crop").expect("crop is a method").params;
+        let b = self.box_by_args(id, args, "crop", true)?;
         let d = self.doc_mut(id).expect("found");
-        let (c, ppi) = (d.doc().canvas, d.doc().resolution);
-        let doc = d.history.doc();
-        let place = BoxArgs::of(args, params, Some(doc)).map_err(|why| format!("crop: {why}"))?;
-        let (at, from) = (place.at, place.from);
-        let (w, h) = (f64::from(c.width), f64::from(c.height));
-        // Left out, the rectangle is the canvas, x and y where the anchor's point of it is;
-        // so too for an expression that names the box.
-        let own = Own {
-            x: c.x as f64 + at[0] * w - from[0],
-            y: c.y as f64 + at[1] * h - from[1],
-            width: w,
-            height: h,
-            angle: 0.0,
-        };
-        let b = place.worked_out(doc, ppi, own).map_err(|why| format!("crop: {why}"))?;
-        let p = crate::transform::Params {
-            x: b.x.unwrap_or(own.x),
-            y: b.y.unwrap_or(own.y),
-            width: b.width.map_or(w, f64::round),
-            height: b.height.map_or(h, f64::round),
-            angle: b.angle.unwrap_or(0.0),
-            mirrored: false,
-        };
-        let b = crate::edit_box::EditBox::from_numbers(&p, from, at);
+        let c = d.doc().canvas;
         if b.canvas() != c || b.angle.abs() > 1e-9 || delete {
             d.crop_to(&b, delete, sampling).map_err(|why| format!("crop: {why}"))?;
         }
@@ -2238,35 +2215,18 @@ impl AppState {
         Ok(self.canvas_json())
     }
 
-    /// Selects a shape of `kind` as `args` give its box (the canvas's, unless they say), as
-    /// `select_rectangle` and `select_ellipse` do; what is selected then, as the `selection`
-    /// query tells it.
-    fn select_by_args(&mut self, kind: opal_core::mask::ShapeKind, args: &Args) -> Result<Value, String> {
-        use opal_core::mask::{Combine, Shape, ShapeKind};
-        let (name, label) = match kind {
-            ShapeKind::Rectangle => ("select_rectangle", "Rectangle selection"),
-            ShapeKind::Ellipse => ("select_ellipse", "Ellipse selection"),
-        };
-        let id = self.which(args)?;
-        self.show_doc(id);
-        let smooth = args
-            .flag("smooth")
-            .unwrap_or_else(|| self.tool_settings(crate::tools::ToolId::Select).bool("select.smooth"));
-        let combine = match args.text("combine") {
-            Some("add") => Combine::Add,
-            Some("subtract") => Combine::Subtract,
-            Some("intersect") => Combine::Intersect,
-            _ => Combine::Replace,
-        };
+    /// The box call `name` (`crop`, or a select call) gives in `args` for image `id`, as its
+    /// box numbers measure it: the canvas's where they leave numbers out (x and y where the
+    /// anchor's point of it is, so too for an expression naming the box), its sides whole
+    /// pixels if `whole`.
+    fn box_by_args(&self, id: DocId, args: &Args, name: &str, whole: bool) -> Result<crate::edit_box::EditBox, String> {
         let params = method(name).expect("a method").params;
-        let d = self.doc_mut(id).expect("found");
+        let d = self.doc(id).expect("found");
         let (c, ppi) = (d.doc().canvas, d.doc().resolution);
         let doc = d.history.doc();
         let place = BoxArgs::of(args, params, Some(doc)).map_err(|why| format!("{name}: {why}"))?;
         let (at, from) = (place.at, place.from);
         let (w, h) = (f64::from(c.width), f64::from(c.height));
-        // Left out, the shape's box is the canvas, x and y where the anchor's point of it is;
-        // so too for an expression that names the box.
         let own = Own {
             x: c.x as f64 + at[0] * w - from[0],
             y: c.y as f64 + at[1] * h - from[1],
@@ -2275,18 +2235,38 @@ impl AppState {
             angle: 0.0,
         };
         let b = place.worked_out(doc, ppi, own).map_err(|why| format!("{name}: {why}"))?;
+        let side = |v: Option<f64>, canvas: f64| v.map_or(canvas, |v| if whole { v.round() } else { v });
         let p = crate::transform::Params {
             x: b.x.unwrap_or(own.x),
             y: b.y.unwrap_or(own.y),
-            width: b.width.unwrap_or(w),
-            height: b.height.unwrap_or(h),
+            width: side(b.width, w),
+            height: side(b.height, h),
             angle: b.angle.unwrap_or(0.0),
             mirrored: false,
         };
+        Ok(crate::edit_box::EditBox::from_numbers(&p, from, at))
+    }
+
+    /// Selects a shape of `kind` as `args` give its box (the canvas's, unless they say), as
+    /// `select_rectangle` and `select_ellipse` do; what is selected then, as the `selection`
+    /// query tells it.
+    fn select_by_args(&mut self, kind: opal_core::mask::ShapeKind, args: &Args) -> Result<Value, String> {
+        use opal_core::mask::{Combine, Shape, ShapeKind};
+        let name = match kind {
+            ShapeKind::Rectangle => "select_rectangle",
+            ShapeKind::Ellipse => "select_ellipse",
+        };
+        let id = self.which(args)?;
+        self.show_doc(id);
+        let smooth = args
+            .flag("smooth")
+            .unwrap_or_else(|| self.tool_settings(crate::tools::ToolId::Select).bool("select.smooth"));
+        let combine = args.text("combine").and_then(Combine::named).unwrap_or_default();
+        let b = self.box_by_args(id, args, name, false)?;
         let like = Shape { kind, center: [0.0; 2], size: [0.0; 2], angle: 0.0, smooth };
-        let shape = crate::edit_box::EditBox::from_numbers(&p, from, at).shape(&like);
-        let made = opal_core::selection::with_shape(d.pixel_selection().map(|s| &**s), shape, combine);
-        d.set_pixel_selection(Some(made), label);
+        let d = self.doc_mut(id).expect("found");
+        let made = opal_core::selection::with_shape(d.pixel_selection().map(|s| &**s), b.shape(&like), combine);
+        d.set_pixel_selection(Some(made), crate::select_tool::label(kind));
         Ok(selection_json(d))
     }
 
