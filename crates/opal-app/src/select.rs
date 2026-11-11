@@ -183,6 +183,7 @@ impl AppState {
     /// edit, named for what the step does (the edit named for the one shown before given up).
     fn show_made(&mut self, step: Step, made: Arc<Selection>) {
         let Some(m) = self.modifying.as_mut() else { return };
+        m.failed = None;
         let before = m.shown.replace(step.clone());
         let doc = m.doc;
         let Some(d) = self.doc_mut(doc) else { return };
@@ -194,8 +195,8 @@ impl AppState {
 
     /// Has what the open modifier dialog makes with its step worked out off the interface
     /// thread, to be shown once done ([`poll_modifying`](Self::poll_modifying)); a step asked
-    /// for after it stops it, between the pieces of its work, or before it begins. It is not
-    /// begun if there is not memory enough for it.
+    /// for after it stops it, between the pieces of its work, or before it begins. It stops,
+    /// saying why, if there is not memory enough for it, measured as it goes.
     pub(crate) fn preview_modifying(&mut self, ctx: &eframe::egui::Context) {
         use std::sync::atomic::Ordering;
         let Some(m) = self.modifying.as_mut() else { return };
@@ -205,21 +206,25 @@ impl AppState {
         m.failed = None;
         let (step, before, generation) = (m.step.clone(), m.before.clone(), m.generation.clone());
         let (ends, asked) = (m.ends.0.clone(), m.step.clone());
-        // What is free, measured now; what the step needs, worked out in the job.
-        let mut memory = crate::memory::Allowance::now();
+        let measure = crate::memory::Measure::here();
         PREVIEWS.run(
             move || {
+                use opal_core::modify::{Bounds, Halt};
                 let stop = || generation.load(Ordering::SeqCst) != ours;
                 // Asked for after another, it may not be wanted by the time it begins.
                 if stop() {
                     return None;
                 }
-                if let Some(need) = step.memory(before.mask())
-                    && let Err(why) = memory.take(crate::memory::Need::at_once(need))
-                {
-                    return Some(Err(why));
+                // What is free, measured as the work begins.
+                let admission = crate::memory::Admission::new(measure.now());
+                let admit = |n| admission.admit(n);
+                match before.then_within(step, Bounds { stop: &stop, admit: &admit }) {
+                    Ok(made) => Some(Ok(Arc::new(made))),
+                    // Not wanted any more: nothing to tell, whatever held it back.
+                    Err(_) if stop() => None,
+                    Err(Halt::Stopped) => None,
+                    Err(Halt::NoMemory) => Some(Err(admission.refused())),
                 }
-                before.then_unless(step, &stop).map(|s| Ok(Arc::new(s)))
             },
             move |result| {
                 let made = match result {
@@ -231,6 +236,27 @@ impl AppState {
             },
             ctx,
         );
+    }
+
+    /// What a frame of the open modifier dialog came to: its fields set `step`, and OK
+    /// (`Some(true)`) or Cancel (`Some(false)`) was pressed, if either was. While what the step
+    /// makes is worked out, the image shows what it made last (its job asks for a frame once
+    /// done); after OK, the dialog closes once that is shown.
+    pub(crate) fn answer_modifying(&mut self, step: Step, done: Option<bool>, ctx: &eframe::egui::Context) {
+        // Cancel first: what a job made meanwhile must not close the dialog keeping it.
+        if done == Some(false) {
+            return self.end_modifying(false);
+        }
+        if let Some(m) = self.modifying.as_mut()
+            && m.step != step
+        {
+            m.step = step;
+            self.preview_modifying(ctx);
+        }
+        self.poll_modifying();
+        if done == Some(true) {
+            self.end_modifying(true);
+        }
     }
 
     /// Shows what a job made for the open modifier dialog, if it is done and for the step it
@@ -301,18 +327,26 @@ impl AppState {
         }
     }
 
-    /// Adds `step`, a modifier, to what is selected, as a history state; refused, saying why,
-    /// if there is not memory enough for it.
-    pub(crate) fn add_modifier(&mut self, step: Step) -> Result<(), String> {
-        let d = self.active_mut().expect("available");
+    /// Adds `step`, a modifier, to what is selected, as a history state, worked out off the
+    /// interface thread (see `edits`); refused, saying why, if there is not memory enough for
+    /// it, measured as it goes.
+    pub(crate) fn add_modifier(&mut self, step: Step) {
+        use opal_core::modify::{Bounds, Halt};
+        let d = self.active().expect("available");
         let before = d.pixel_selection().expect("available").clone();
-        // Kept while the work runs (it caps the tiles' memory).
-        let mut memory = crate::memory::Allowance::now();
-        if let Some(need) = step.memory(before.mask()) {
-            memory.take(crate::memory::Need::at_once(need))?;
-        }
-        d.set_pixel_selection(Some(before.then(step.clone())), modifier_label(&step));
-        Ok(())
+        let label = modifier_label(&step);
+        let measure = crate::memory::Measure::here();
+        let work = move |doc: &mut Document, _: &mut opal_core::document::IdGen, progress: &opal_io::Progress| {
+            let admission = crate::memory::Admission::new(measure.now());
+            let (stop, admit) = (|| progress.is_cancelled(), |n| admission.admit(n));
+            let made = before.then_within(step, Bounds { stop: &stop, admit: &admit }).map_err(|halt| match halt {
+                Halt::Stopped => crate::edits::CANCELLED.to_owned(),
+                Halt::NoMemory => admission.refused(),
+            })?;
+            doc.selection = (!made.is_empty()).then(|| Arc::new(made));
+            Ok(())
+        };
+        self.edit_later(d.id, label, crate::memory::Allowance::unlimited(), work, |_, _, ()| {});
     }
 
     /// Erases what is selected on the selected layers (as much of each pixel as it is
@@ -570,6 +604,13 @@ mod tests {
         assert_eq!(selected(&st), Extent::Within(IRect::new(100, 50, 200, 150)));
         st.end_modifying(true);
         assert!(st.modifying.as_ref().is_some_and(|m| !m.keeping()), "OK waited, or closed");
+        // A later job's for the same step, done after all: shown, the refusal gone.
+        let m = st.modifying.as_mut().unwrap();
+        let fits = std::sync::Arc::new(m.before.then(m.step.clone()));
+        m.ends.0.send((m.asked, Some((m.step.clone(), Ok(fits))))).unwrap();
+        st.poll_modifying();
+        let m = st.modifying.as_ref().unwrap();
+        assert!(m.failed().is_none(), "the refusal stayed beside what was shown");
         st.modifying.as_mut().unwrap().step = Step::Grow { by: 6.0, corners: Reach::Square };
         st.preview_modifying(&ctx);
         settle(&mut st);
@@ -578,6 +619,21 @@ mod tests {
         assert_eq!(selected(&st), Extent::Within(IRect::new(94, 44, 206, 156)));
         st.active_mut().unwrap().undo();
         let states = states + 1;
+        // Cancel pressed in the frame what OK waited for comes: nothing kept.
+        st.modify_selection(true, &ctx);
+        settle(&mut st);
+        let step = Step::Grow { by: 30.0, corners: Reach::Square };
+        let m = st.modifying.as_mut().unwrap();
+        m.step = step.clone();
+        m.asked += 1;
+        st.end_modifying(true);
+        let m = st.modifying.as_ref().unwrap();
+        let made = std::sync::Arc::new(m.before.then(step.clone()));
+        m.ends.0.send((m.asked, Some((step.clone(), Ok(made))))).unwrap();
+        st.answer_modifying(step, Some(false), &ctx);
+        assert!(st.modifying.is_none());
+        assert_eq!(st.active().unwrap().history.nodes().count(), states, "kept though cancelled");
+        assert_eq!(selected(&st), Extent::Within(IRect::new(100, 50, 200, 150)));
         // Set twice before either is shown: the last shown until the later is done, the
         // earlier never.
         st.modify_selection(true, &ctx);

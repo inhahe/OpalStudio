@@ -11,19 +11,14 @@ its colors are off; the user is warned when the image opens. Whether a profile i
 judged from its description text. **Fix:** color management with lcms2 in milestone 5:
 convert from the embedded profile into the working space on import.
 
-## Long edits run on the interface thread
+## The transform box's Apply, and Clear and Cut, run on the interface thread
 
-`layer_ops.rs` (Merge Down, Merge Selected and Visible, Flatten, Rasterize, Stamp Visible),
-`image_ops.rs` (`transform_all`: Rotate, Flip and Resize Image, the selection carried with
-them, its Grow and Feather steps worked out again), and `api.rs`'s `grow_selection` and
-`feather_selection`. Each runs on the interface thread (its parallel parts on rayon's
-threads), so the window neither repaints nor can stop it until it is done: seconds, for a
-large document or a selection grown far along a long outline. Only previews (the modifier
-dialogs', the projections), saves, exports and copies run off it. **Fix:** edits as jobs, as
-saves are: worked out off the interface thread from the document as it was, with the status
-bar's progress and Cancel (`opal_io::Progress`), applied as a history state once done if the
-document has not changed meanwhile. What may be done meanwhile (other images only, or
-anything, the job then refused if its image changed) is to be decided first.
+`transform.rs` (`finish_transform`: a layer of pixels turned a quarter or flipped is drawn
+into pixels again, `image_ops::on_grid`) and `select.rs` (`clear_within`). Unlike the edits
+in `edits` (design.md, *Edits that take long*), they are worked out where they are asked
+for, so a very large layer freezes the window while they are. **Fix:** the same as those:
+`AppState::edit_later` with their work, the box's session ended first (its pending document
+the one worked from), Cut's copy waiting for its clear as it waits now.
 
 ## GPU memory is only reported on Windows
 

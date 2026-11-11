@@ -441,9 +441,13 @@ with the outline's length (a tile wholly on one side of half is none of it), wor
 blocks of tiles, a window each (the block and the band round it), of the size that should
 take the least time for the tiles to work out (larger blocks repeat less of their margin, but
 fewer fit at once, and may cover more far from the outline), by as many workers as their
-windows fit in half a gigabyte, the other threads left free. The memory that takes (those
-windows, and the tiles made) is checked against what is free before the work begins: if
-there is not that much, the dialog says so, and a script's call is refused.
+windows fit in half a gigabyte, the other threads left free. The memory it takes is asked
+for as it goes (`modify::Bounds`, which also stop it when it is not wanted): the windows
+before it begins, then each block's tiles as they are kept, at the size they take (a row of
+levels a tile, for a straight edge), against what was free when it began, measured on its
+own thread (`memory::Admission`). Refused, it stops: the dialog says why, a script's call is
+refused, and Rotate, Flip or Resize Image working a carried recipe out again fail, saying
+why.
 Distances go to 1000 pixels at most (`modify::MAX_DISTANCE`).
 They work from the outline, where pixels are half selected, so a soft selection grown or
 feathered loses its own softness; growing by nothing, or a feather of no width, is no step.
@@ -634,14 +638,14 @@ curve editors.
   the crop box's numbers without scrolling in a window maximized on such a screen.
 - Files dropped on it open as images, in the order dropped, but not while a dialog is open
   (one opened behind it would become the image the dialog acts on): they wait for it to
-  close (`AppState::open_dropped`, looked at again every 200 ms while any wait).
+  close (`AppState::open_dropped`), in the frame its closing brings.
 
 ### Status bar
 
 - At its left, what the canvas does (the tool's description, or the transform box's hint),
-  or for a few seconds a notice; at its right, parts from its end: scripts connected, a
-  save or export under way, tiles on disk, GPU memory, and the active image's zoom, size,
-  resolution and the pointer's place.
+  or for a few seconds a notice; at its right, parts from its end: scripts connected, an
+  edit under way (see below), a save or export under way, tiles on disk, GPU memory, and the
+  active image's zoom, size, resolution and the pointer's place.
 - The text is laid out first, so that it is read out first, in the room the parts took
   when last shown (another pass at once where they grew), and cut short, whole on hover,
   where it does not fit. What other threads change (scripts connected, tiles on disk) is
@@ -650,6 +654,34 @@ curve editors.
   the least needed are left out (tiles on disk, GPU memory, the pointer's place, and so
   on, a save under way last); the scripts' open steps and the file's name are cut short
   past 260 points (`app::StatusPart`).
+
+### Edits that take long
+
+Merging (Merge Down, Selected, Visible and Group), Stamp Visible, Flatten, Rasterize, Rotate
+and Flip, Rotate by Angle, Resize Image, Crop and straighten, and a script's
+`grow_selection` and `feather_selection` are worked out off the interface thread
+(`edits`), from the image as it was (an edit in progress committed first), their parallel
+parts on the background threads, and applied as one history state once done (none, if they
+changed nothing). Their memory is checked before they begin, as before.
+
+- **The image stays as it was meanwhile, and nothing may change it** (`DocState::busy`):
+  its commands are unavailable, saying why ("Merge down is under way: wait for it to
+  finish, or cancel it in the status bar"), and so are undo and redo, saving and exporting
+  it; its tools are the hand (and the zoom), its keys change nothing, and its Layers and
+  History panels are greyed. Looking at it, copying from it, closing it (which gives the
+  edit up) and every other image stay free; a paste into it waits for the edit, and so do
+  scripts' calls. Changing the image would make the edit's result wrong, and refusing the
+  result then would throw away work the user asked for. Should it change anyway, the
+  result is not applied, and the user is told.
+- **Shown only if it takes a while.** The interface waits 60 ms for an edit as it begins:
+  one done by then is applied at once, as if it had been worked out there (the image never
+  busy, a script answered at once). One still under way after 300 ms shows in the status
+  bar, with how far it has got (the merges count tiles, the others objects; a spinner where
+  it cannot tell) and Cancel, which frees the image at once and leaves it as it was (the
+  work stops as soon as it next looks); its tab is marked, and the greyed panels say why.
+- **A script's call** that begins one is answered once it is applied, with what it would
+  have been answered with at once, and what was said meanwhile as its notes or its failure.
+- A failure, or a panic, in the work is told, the image left as it was.
 
 ### Look
 

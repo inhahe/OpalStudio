@@ -81,65 +81,100 @@ fn cropped(p: &PixelObject, canvas: &IRect) -> PixelObject {
 }
 
 impl DocState {
-    /// Crops to `b`: the canvas becomes the box, and if it was turned, everything turns
-    /// the other way about its center, so the box's contents come out upright.
-    ///
-    /// Moving the canvas changes no layer, but straightening and deleting cropped pixels
-    /// change every one, so they are refused (with the reason) while a layer is locked.
-    pub fn crop_to(
+    /// Why cropping to `b` (deleting what is cropped away if `delete`) is refused, if it is:
+    /// moving the canvas changes no layer, but straightening and deleting cropped pixels change
+    /// every one, so they are refused while a layer is locked.
+    pub fn crop_refused(&self, b: &EditBox, delete: bool) -> Option<String> {
+        let turned = b.angle.abs() > 1e-9;
+        if !turned && !delete {
+            return None;
+        }
+        let mut locked = None;
+        self.doc().for_each_layer(&mut |l, _| {
+            if l.locked && locked.is_none() {
+                locked = Some(l.name.clone());
+            }
+        });
+        let what = if turned { "Straightening" } else { "Deleting cropped pixels" };
+        locked.map(|name| format!("{what} changes every layer, and \"{name}\" is locked. Unlock it first."))
+    }
+}
+
+/// `doc` cropped to `b`: the canvas becomes the box, and if it was turned, everything turns
+/// the other way about its center, so the box's contents come out upright (drawn with
+/// `sampling`, within `memory`); what is cropped away is deleted if `delete`. Whether part of
+/// something drawn was left out (see `image_ops::transform_all`, which tells `progress`), or
+/// why it could not be done.
+pub fn crop_doc(
+    doc: &mut opal_core::document::Document,
+    b: &EditBox,
+    delete: bool,
+    sampling: opal_core::resample::Sampling,
+    memory: crate::memory::Allowance,
+    progress: &opal_io::Progress,
+) -> Result<bool, String> {
+    let canvas = b.canvas();
+    let mut clipped = false;
+    if b.angle.abs() > 1e-9 {
+        // Deleting what is cropped away is destructive anyway, so the turned pixels are
+        // resampled into pixels (which the deleting below then crops) rather than kept as
+        // images.
+        let m = Affine::rotate(-b.angle).about(b.center[0], b.center[1]);
+        clipped = transform_all(doc, &m, delete.then_some(sampling), sampling, &canvas.rect(), memory, progress)?;
+    }
+    doc.canvas = canvas;
+    if delete {
+        let rect = canvas.rect();
+        fn walk(l: &mut opal_core::document::Layer, rect: &IRect) {
+            match &mut l.content {
+                LayerContent::Objects(objects) => {
+                    for o in objects {
+                        if let ObjectKind::Pixels(p) = &o.kind {
+                            o.kind = ObjectKind::Pixels(cropped(p, rect));
+                        }
+                    }
+                }
+                LayerContent::Group(c) => c.iter_mut().for_each(|c| walk(Arc::make_mut(c), rect)),
+            }
+        }
+        for l in &mut doc.layers {
+            walk(Arc::make_mut(l), &rect);
+        }
+    }
+    Ok(clipped)
+}
+
+impl AppState {
+    /// Crops image `doc` to `b` ([`crop_doc`]), as an edit worked out off the interface thread
+    /// (see `edits`), its Crop box going once it is done; refused, saying why, as
+    /// [`crop_refused`](DocState::crop_refused) says.
+    pub fn crop_with(
         &mut self,
-        b: &EditBox,
+        doc: DocId,
+        b: EditBox,
         delete: bool,
         sampling: opal_core::resample::Sampling,
     ) -> Result<(), String> {
-        let canvas = b.canvas();
-        let turned = b.angle.abs() > 1e-9;
-        if turned || delete {
-            let mut locked = None;
-            self.doc().for_each_layer(&mut |l, _| {
-                if l.locked && locked.is_none() {
-                    locked = Some(l.name.clone());
-                }
-            });
-            if let Some(name) = locked {
-                let what = if turned { "Straightening" } else { "Deleting cropped pixels" };
-                return Err(format!("{what} changes every layer, and \"{name}\" is locked. Unlock it first."));
-            }
+        let d = self.doc(doc).ok_or("The image is closed.")?;
+        if let Some(why) = d.crop_refused(&b, delete) {
+            return Err(why);
         }
-        let label = if turned { "Crop and straighten" } else { "Crop" };
-        let mut clipped = false;
-        self.apply(label, |doc, _| {
-            if turned {
-                // Deleting what is cropped away is destructive anyway, so the turned pixels are
-                // resampled into pixels (which the deleting below then crops) rather than kept as
-                // images.
-                let m = Affine::rotate(-b.angle).about(b.center[0], b.center[1]);
-                clipped = transform_all(doc, &m, delete.then_some(sampling), sampling, &canvas.rect())?;
-            }
-            doc.canvas = canvas;
-            if delete {
-                let rect = canvas.rect();
-                fn walk(l: &mut opal_core::document::Layer, rect: &IRect) {
-                    match &mut l.content {
-                        LayerContent::Objects(objects) => {
-                            for o in objects {
-                                if let ObjectKind::Pixels(p) = &o.kind {
-                                    o.kind = ObjectKind::Pixels(cropped(p, rect));
-                                }
-                            }
-                        }
-                        LayerContent::Group(c) => c.iter_mut().for_each(|c| walk(Arc::make_mut(c), rect)),
-                    }
-                }
-                for l in &mut doc.layers {
-                    walk(Arc::make_mut(l), &rect);
+        let label = if b.angle.abs() > 1e-9 { "Crop and straighten" } else { "Crop" };
+        let measure = crate::memory::Measure::here();
+        let work = move |doc: &mut opal_core::document::Document,
+                         _: &mut opal_core::document::IdGen,
+                         progress: &opal_io::Progress| {
+            crop_doc(doc, &b, delete, sampling, measure.now(), progress)
+        };
+        self.edit_later(doc, label, crate::memory::Allowance::unlimited(), work, |st, doc, clipped| {
+            if let Some(d) = st.doc_mut(doc) {
+                d.crop = None;
+                d.revision += 1;
+                if clipped {
+                    d.notice = Some(crate::layer_ops::CLIPPED.into());
                 }
             }
-            Ok::<(), String>(())
-        })?;
-        if clipped {
-            self.notice = Some(crate::layer_ops::CLIPPED.into());
-        }
+        });
         Ok(())
     }
 }
@@ -311,10 +346,7 @@ pub fn canvas_crop(
         let delete = settings.bool("crop.delete");
         let b = d.crop.expect("set above");
         if b.canvas() != c || b.angle.abs() > 1e-9 || delete {
-            match d.crop_to(&b, delete, sampling) {
-                Ok(()) => d.crop = None,
-                Err(why) => refused = Some(why),
-            }
+            refused = st.crop_with(id, b, delete, sampling).err();
         }
     } else if choice == Some(false) {
         d.crop = None;
@@ -373,18 +405,24 @@ mod tests {
             Ok(())
         });
         let turned = EditBox { center: [50.0, 50.0], size: [60.0, 60.0], angle: 0.1 };
-        let sampling = opal_core::resample::Sampling::default();
-        assert!(s.crop_to(&turned, false, sampling).unwrap_err().contains("locked"));
+        assert!(s.crop_refused(&turned, false).unwrap().contains("locked"));
         let plain = EditBox { angle: 0.0, ..turned };
-        assert!(s.crop_to(&plain, true, sampling).is_err(), "deleting changes the locked layer");
-        assert!(s.crop_to(&plain, false, sampling).is_ok(), "moving the canvas changes no layer");
+        assert!(s.crop_refused(&plain, true).is_some(), "deleting changes the locked layer");
+        assert!(s.crop_refused(&plain, false).is_none(), "moving the canvas changes no layer");
     }
 
     #[test]
     fn deleting_cropped_pixels_works_when_straightening_too() {
         let mut s = state_with_image();
         let turned = EditBox { center: [50.0, 50.0], size: [40.0, 40.0], angle: 0.2 };
-        s.crop_to(&turned, true, opal_core::resample::Sampling::default()).unwrap();
+        let sampling = opal_core::resample::Sampling::default();
+        let mut doc = s.doc().clone();
+        let memory = crate::memory::Allowance::now();
+        crop_doc(&mut doc, &turned, true, sampling, memory, &opal_io::Progress::default()).unwrap();
+        let _ = s.apply::<String>("Crop", |d, _| {
+            *d = doc;
+            Ok(())
+        });
         let o = &s.doc().layers[0].objects()[0];
         let ObjectKind::Pixels(p) = &o.kind else { panic!("pixels, cropped") };
         let b = p.image.content_bounds().unwrap().translate(p.offset[0], p.offset[1]);

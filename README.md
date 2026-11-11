@@ -104,6 +104,11 @@ cargo test --workspace                     # all tests, interface tests included
   and Shift; merge down, merge selected, merge visible, merge a group, stamp visible,
   flatten; rasterize; thumbnails. Layers have no edges: content past the canvas is kept and
   shown dimmed.
+- **Long edits in the background.** Merging, flattening, rasterizing, rotating, flipping,
+  resizing and straightening a large image are worked out in the background: the window
+  stays usable, and the status bar shows how far the edit has got, with Cancel. That image
+  can't be changed until it is done (its commands say why), but you can look at it, copy
+  from it, and work on other images.
 - **History.** Doing something new after undoing starts a branch instead of discarding the
   redo states, and the History panel goes to any state on any branch. History may use a
   set amount of memory (a preference); past it, the oldest states and abandoned branches

@@ -44,6 +44,17 @@ const LAYER_MENU: &[Cmd] = &[
     Cmd::DeleteLayer,
 ];
 
+/// `panel`, which changes the active image, not to be used while an edit is under way on it
+/// (see `edits`): greyed, saying why, once the edit is shown under way.
+pub fn unless_busy(ui: &mut egui::Ui, st: &mut AppState, panel: fn(&mut egui::Ui, &mut AppState)) {
+    let busy = st.active().and_then(|d| d.busy.as_ref()).map(|b| (b.shown(), b.why()));
+    if let Some((true, why)) = &busy {
+        ui.label(RichText::new(why).color(st.palette.weak_text));
+        ui.separator();
+    }
+    ui.add_enabled_ui(busy.is_none(), |ui| panel(ui, st));
+}
+
 // ---- Layers ---------------------------------------------------------------------------
 
 pub fn layers_panel(ui: &mut egui::Ui, st: &mut AppState) {

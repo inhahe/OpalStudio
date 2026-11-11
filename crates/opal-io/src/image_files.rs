@@ -6,7 +6,7 @@ use crate::{IoError, Progress, write_atomically};
 use half::f16;
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, GenericImageView, ImageDecoder, ImageReader};
-use opal_core::composite::{composite_within_until, flatten};
+use opal_core::composite::{composite_until, flatten};
 use opal_core::document::{Document, Layer};
 use opal_core::geom::{Affine, IRect};
 use opal_core::raster::RasterImage;
@@ -391,7 +391,7 @@ fn resized<'d>(layers: &'d [Arc<Layer>], canvas: &IRect, s: &ExportSize, progres
     Some(Source::Resized { image: Box::new(image), to_size: to_size(&at, s), sampling: s.sampling })
 }
 
-/// The canvas composited ([`composite_within_until`], tiles alike made once across all of
+/// The canvas composited ([`composite_until`], tiles alike made once across all of
 /// it), advancing `progress` by the canvas's pixels as its tiles are made; `None` if it is
 /// cancelled meanwhile.
 fn composited(layers: &[Arc<Layer>], canvas: &IRect, progress: &Progress) -> Option<RasterImage> {
@@ -402,7 +402,7 @@ fn composited(layers: &[Arc<Layer>], canvas: &IRect, progress: &Progress) -> Opt
         progress.advance(now - told);
         told = now;
     };
-    let image = composite_within_until(layers, canvas, &mut |placed, total| {
+    let image = composite_until(layers, Some(canvas), &mut |placed, total| {
         tell(placed, total);
         !progress.is_cancelled()
     })?;

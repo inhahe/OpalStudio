@@ -724,8 +724,9 @@ fn images_of(l: &Layer) -> Vec<Arc<RasterImage>> {
     images
 }
 
-/// What a selection's masks (its own, and its mask steps') take memory for (by address),
-/// with the memory each part takes, each once (see `Mask::parts`).
+/// What a selection's masks (see `Selection::masks`: its own, the one it kept before its last
+/// step, and its mask steps') take memory for (by address), with the memory each part takes,
+/// each once (see `Mask::parts`).
 fn mask_tiles(s: &crate::selection::Selection) -> Vec<(usize, u64)> {
     let mut out: Vec<(usize, u64)> = s.masks().flat_map(|m| m.parts()).collect();
     out.sort_unstable();

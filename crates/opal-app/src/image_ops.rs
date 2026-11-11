@@ -7,10 +7,11 @@
 
 use crate::memory::Allowance;
 use crate::state::{AppState, MessageKind};
-use opal_core::document::{Canvas, Document, ImageObject, Layer, LayerContent, ObjectKind, PixelObject};
+use opal_core::document::{Canvas, Document, IdGen, ImageObject, Layer, LayerContent, ObjectKind, PixelObject};
 use opal_core::geom::{Affine, FRect, GridMap, IRect};
 use opal_core::raster::RasterImage;
 use opal_core::resample::{self, Sampling};
+use opal_io::Progress;
 use std::sync::Arc;
 
 /// A quarter turn or flip of the whole image.
@@ -107,25 +108,35 @@ impl Turn {
 /// where `m` is exact on the grid; otherwise they are resampled with `resample` if given, else
 /// become image objects drawn with `sampling`. Resampling keeps only the part within `keep` of
 /// what would reach too far (see `layer_ops::drawable`); returns whether it had to, or why
-/// nothing could be done: the pixels drawn would need more memory than is free.
+/// nothing could be done: the pixels drawn (and the selection's modifiers worked out again)
+/// would need more than `memory`, or the edit `progress` tells of (an object at a time) was
+/// cancelled.
 pub fn transform_all(
     doc: &mut Document,
     m: &Affine,
     resample: Option<Sampling>,
     sampling: Sampling,
     keep: &IRect,
+    memory: Allowance,
+    progress: &Progress,
 ) -> Result<bool, String> {
-    let mut to = Drawing::new(*keep, Allowance::now());
+    let mut to = Drawing::new(*keep, memory);
+    let mut objects = 0;
+    doc.for_each_layer(&mut |l, _| objects += l.objects().len());
+    progress.begin(objects as u64);
     fn walk(
         layer: &mut Layer,
         m: &Affine,
         resample_with: Option<Sampling>,
         sampling: Sampling,
         to: &mut Drawing,
+        progress: &Progress,
     ) -> Result<(), String> {
         match &mut layer.content {
             LayerContent::Objects(objects) => {
                 for o in objects {
+                    crate::edits::go_on(progress)?;
+                    progress.advance(1);
                     o.kind = match &o.kind {
                         ObjectKind::Image(i) => {
                             let t = i.transform.then(*m);
@@ -161,18 +172,26 @@ pub fn transform_all(
             }
             LayerContent::Group(children) => {
                 for c in children {
-                    walk(Arc::make_mut(c), m, resample_with, sampling, to)?;
+                    walk(Arc::make_mut(c), m, resample_with, sampling, to, progress)?;
                 }
             }
         }
         Ok(())
     }
     for l in &mut doc.layers {
-        walk(Arc::make_mut(l), m, resample, sampling, &mut to)?;
+        walk(Arc::make_mut(l), m, resample, sampling, &mut to, progress)?;
     }
-    // What is selected goes with what it was selected on.
+    // What is selected goes with what it was selected on (its modifiers worked out again,
+    // within what is left of the memory).
     if let Some(s) = doc.selection.take() {
-        doc.selection = Some(Arc::new(s.transformed(m))).filter(|s| !s.is_empty());
+        use opal_core::modify::{Bounds, Halt};
+        let admission = crate::memory::Admission::new(to.memory);
+        let (stop, admit) = (|| progress.is_cancelled(), |n| admission.admit(n));
+        let carried = s.transformed_within(m, Bounds { stop: &stop, admit: &admit }).map_err(|halt| match halt {
+            Halt::Stopped => crate::edits::CANCELLED.to_owned(),
+            Halt::NoMemory => admission.refused(),
+        })?;
+        doc.selection = Some(Arc::new(carried)).filter(|s| !s.is_empty());
     }
     Ok(to.clipped)
 }
@@ -265,17 +284,18 @@ const MAX_SIDE: u32 = crate::dialogs::MAX_SIDE;
 impl AppState {
     pub(crate) fn turn(&mut self, turn: Turn) {
         let sampling = crate::prefs::sampling(&self.prefs, "transform");
-        let d = self.active_mut().expect("available");
-        let result = d.apply(turn.label(), |doc, _| {
+        let doc = self.active_doc.expect("available");
+        let measure = crate::memory::Measure::here();
+        let work = move |doc: &mut Document, _: &mut IdGen, progress: &Progress| {
             let c = doc.canvas;
             let m = turn.map(&c);
-            transform_all(doc, &m, None, sampling, &c.rect())?;
+            transform_all(doc, &m, None, sampling, &c.rect(), measure.now(), progress)?;
             if matches!(turn, Turn::Clockwise | Turn::Counterclockwise) {
                 doc.canvas = Canvas { x: c.x, y: c.y, width: c.height, height: c.width };
             }
-            Ok::<(), String>(())
-        });
-        self.report(result);
+            Ok(())
+        };
+        self.edit_later(doc, turn.label(), Allowance::unlimited(), work, |_, _, ()| {});
     }
 
     /// Scales the image to `width × height`, about the canvas's corner, and gives it the
@@ -305,8 +325,9 @@ impl AppState {
                 ),
             );
         }
-        let mut clipped = false;
-        let result = d.apply("Resize image", |doc, _| {
+        let spec = spec.clone();
+        let measure = crate::memory::Measure::here();
+        let work = move |doc: &mut Document, _: &mut IdGen, progress: &Progress| {
             doc.resolution = spec.resolution;
             let c = doc.canvas;
             let (x, y) = (c.x as f64, c.y as f64);
@@ -314,14 +335,17 @@ impl AppState {
             let sy = f64::from(spec.height) / f64::from(c.height);
             let m = Affine::scale(sx, sy).about(x, y);
             let canvas = Canvas { width: spec.width, height: spec.height, ..c };
-            clipped = transform_all(doc, &m, resample.then_some(sampling), sampling, &canvas.rect())?;
+            let to = (resample.then_some(sampling), sampling, &canvas.rect(), measure.now());
+            let clipped = transform_all(doc, &m, to.0, to.1, to.2, to.3, progress)?;
             doc.canvas = canvas;
-            Ok::<(), String>(())
+            Ok(clipped)
+        };
+        let doc = d.id;
+        self.edit_later(doc, "Resize image", Allowance::unlimited(), work, |st, _, clipped| {
+            if clipped {
+                st.notify(crate::layer_ops::CLIPPED);
+            }
         });
-        self.report(result);
-        if clipped {
-            self.notify(crate::layer_ops::CLIPPED);
-        }
     }
 
     /// Gives the canvas the size and place `spec` describes.
@@ -368,13 +392,15 @@ impl AppState {
     /// the turned canvas if `grow`.
     pub(crate) fn rotate_by(&mut self, spec: &RotateBy) {
         let sampling = crate::prefs::sampling(&self.prefs, "transform");
-        let d = self.active_mut().expect("available");
-        let result = d.apply("Rotate", |doc, _| {
+        let doc = self.active_doc.expect("available");
+        let spec = spec.clone();
+        let measure = crate::memory::Measure::here();
+        let work = move |doc: &mut Document, _: &mut IdGen, progress: &Progress| {
             let c = doc.canvas;
             let r = c.rect().to_f();
             let [cx, cy] = r.center();
             let m = Affine::rotate(spec.degrees.to_radians()).about(cx, cy);
-            transform_all(doc, &m, None, sampling, &c.rect())?;
+            transform_all(doc, &m, None, sampling, &c.rect(), measure.now(), progress)?;
             if spec.grow {
                 let b = m.bounds(&r);
                 let (w, h) =
@@ -386,9 +412,9 @@ impl AppState {
                     height: h as u32,
                 };
             }
-            Ok::<(), String>(())
-        });
-        self.report(result);
+            Ok(())
+        };
+        self.edit_later(doc, "Rotate", Allowance::unlimited(), work, |_, _, ()| {});
     }
 }
 
@@ -424,25 +450,66 @@ mod tests {
         // Clockwise, the bottom-left corner comes to the top-left.
         let mut d = corners();
         let c = d.canvas;
-        transform_all(&mut d, &Turn::Clockwise.map(&c), None, Sampling::default(), &IRect::from_size(100, 100))
-            .unwrap();
+        transform_all(
+            &mut d,
+            &Turn::Clockwise.map(&c),
+            None,
+            Sampling::default(),
+            &IRect::from_size(100, 100),
+            Allowance::now(),
+            &Progress::default(),
+        )
+        .unwrap();
         assert!(
             close(pixel_at(&d, 10, 20), 0.4) && close(pixel_at(&d, 11, 20), 0.1) && close(pixel_at(&d, 11, 22), 0.2)
         );
         let mut d = corners();
-        transform_all(&mut d, &Turn::Counterclockwise.map(&c), None, Sampling::default(), &IRect::from_size(100, 100))
-            .unwrap();
+        transform_all(
+            &mut d,
+            &Turn::Counterclockwise.map(&c),
+            None,
+            Sampling::default(),
+            &IRect::from_size(100, 100),
+            Allowance::now(),
+            &Progress::default(),
+        )
+        .unwrap();
         assert!(close(pixel_at(&d, 10, 20), 0.2) && close(pixel_at(&d, 10, 22), 0.1));
         let mut d = corners();
-        transform_all(&mut d, &Turn::Half.map(&c), None, Sampling::default(), &IRect::from_size(100, 100)).unwrap();
+        transform_all(
+            &mut d,
+            &Turn::Half.map(&c),
+            None,
+            Sampling::default(),
+            &IRect::from_size(100, 100),
+            Allowance::now(),
+            &Progress::default(),
+        )
+        .unwrap();
         assert!(close(pixel_at(&d, 10, 20), 0.3) && close(pixel_at(&d, 12, 21), 0.1));
         let mut d = corners();
-        transform_all(&mut d, &Turn::FlipHorizontal.map(&c), None, Sampling::default(), &IRect::from_size(100, 100))
-            .unwrap();
+        transform_all(
+            &mut d,
+            &Turn::FlipHorizontal.map(&c),
+            None,
+            Sampling::default(),
+            &IRect::from_size(100, 100),
+            Allowance::now(),
+            &Progress::default(),
+        )
+        .unwrap();
         assert!(close(pixel_at(&d, 10, 20), 0.2) && close(pixel_at(&d, 12, 21), 0.4));
         let mut d = corners();
-        transform_all(&mut d, &Turn::FlipVertical.map(&c), None, Sampling::default(), &IRect::from_size(100, 100))
-            .unwrap();
+        transform_all(
+            &mut d,
+            &Turn::FlipVertical.map(&c),
+            None,
+            Sampling::default(),
+            &IRect::from_size(100, 100),
+            Allowance::now(),
+            &Progress::default(),
+        )
+        .unwrap();
         assert!(close(pixel_at(&d, 10, 20), 0.4) && close(pixel_at(&d, 12, 21), 0.2));
     }
 
@@ -450,10 +517,28 @@ mod tests {
     fn resizing_keeps_pixels_as_an_image_unless_resampling() {
         let mut d = corners();
         let m = Affine::scale(2.0, 2.0).about(10.0, 20.0);
-        transform_all(&mut d, &m, None, Sampling::default(), &IRect::from_size(100, 100)).unwrap();
+        transform_all(
+            &mut d,
+            &m,
+            None,
+            Sampling::default(),
+            &IRect::from_size(100, 100),
+            Allowance::now(),
+            &Progress::default(),
+        )
+        .unwrap();
         assert!(matches!(d.layers[0].objects()[0].kind, ObjectKind::Image(_)), "kept as an image object");
         let mut d = corners();
-        transform_all(&mut d, &m, Some(Sampling::default()), Sampling::default(), &IRect::from_size(100, 100)).unwrap();
+        transform_all(
+            &mut d,
+            &m,
+            Some(Sampling::default()),
+            Sampling::default(),
+            &IRect::from_size(100, 100),
+            Allowance::now(),
+            &Progress::default(),
+        )
+        .unwrap();
         assert!(matches!(d.layers[0].objects()[0].kind, ObjectKind::Pixels(_)), "resampled into pixels");
     }
 

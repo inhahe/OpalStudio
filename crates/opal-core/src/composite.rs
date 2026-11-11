@@ -850,13 +850,13 @@ fn composite_region(layers: &[Arc<Layer>], range: Option<&IRect>) -> RasterImage
     img
 }
 
-/// [`composite_within`] a batch of tiles at a time, telling `go_on` before each batch how
+/// [`composite_region`] a batch of tiles at a time, telling `go_on` before each batch how
 /// many of the places the tiles go have one so far, and how many there are in all (first
 /// `(0, 0)`, asked before anything is known or done), and stopping (`None`) if it says not
 /// to go on.
-pub fn composite_within_until(
+pub fn composite_until(
     layers: &[Arc<Layer>],
-    range: &IRect,
+    range: Option<&IRect>,
     go_on: &mut dyn FnMut(usize, usize) -> bool,
 ) -> Option<RasterImage> {
     // Enough sets of tiles to keep every thread busy, few enough to stop soon when asked.
@@ -865,8 +865,8 @@ pub fn composite_within_until(
     if !go_on(0, 0) {
         return None;
     }
-    prepare(layers, Some(range));
-    let work = tiles_to_make(layers, Some(range));
+    prepare(layers, range);
+    let work = tiles_to_make(layers, range);
     let total = work.iter().map(|(at, _)| at.len()).sum();
     let mut img = RasterImage::new();
     let mut placed = 0;

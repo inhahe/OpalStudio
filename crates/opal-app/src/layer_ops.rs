@@ -5,15 +5,16 @@
 //! part of the group).
 
 use crate::doc::{DocId, DocState};
+use crate::edits::{composited, go_on};
 use crate::memory::Allowance;
 use crate::state::{AppState, MessageKind};
-use opal_core::composite::composite_all;
 use opal_core::document::{
     Document, IdGen, Layer, LayerContent, LayerId, ObjectKind, PixelObject, Position, TreeError,
 };
 use opal_core::geom::{Affine, IRect};
 use opal_core::raster::RasterImage;
 use opal_core::resample::{self, Sampling};
+use opal_io::Progress;
 use std::sync::Arc;
 
 /// The most pixels merging or rasterizing may produce beyond what the canvas itself needs
@@ -180,30 +181,31 @@ impl AppState {
     }
 
     pub(crate) fn merge_down(&mut self) {
-        let d = self.active_mut().expect("available");
+        let d = self.active().expect("available");
         let upper = d.active_layer().expect("available");
         let pos = d.doc().position(upper).expect("the active layer exists");
         let below = d.doc().siblings(pos.parent).expect("its parent exists")[pos.index - 1].id;
         let pair: Vec<Arc<Layer>> =
             d.doc().siblings(pos.parent).expect("its parent exists")[pos.index - 1..=pos.index].to_vec();
-        // Kept while the work runs: it caps the tiles' memory.
-        let _memory = match check_size(&pair, &d.doc().canvas.rect()) {
+        let memory = match check_size(&pair, &d.doc().canvas.rect()) {
             Ok(memory) => memory,
             Err(why) => return self.message(MessageKind::Info, "Merge Down", why),
         };
-        let d = self.active_mut().expect("available");
-        let result = d.apply("Merge down", |doc, ids| {
-            let image = composite_all(&pair);
-            let lower = doc.layer(below).ok_or(TreeError::NoSuchLayer(below))?;
-            let merged = Layer::new_raster(below, ids.object(), lower.name.clone(), image);
-            doc.remove(upper)?;
-            *doc.layer_mut(below).ok_or(TreeError::NoSuchLayer(below))? = merged;
-            Ok::<(), TreeError>(())
+        let work = move |doc: &mut Document, ids: &mut IdGen, progress: &Progress| {
+            let image = composited(&pair, progress)?;
+            tree(|| {
+                let lower = doc.layer(below).ok_or(TreeError::NoSuchLayer(below))?;
+                let merged = Layer::new_raster(below, ids.object(), lower.name.clone(), image);
+                doc.remove(upper)?;
+                *doc.layer_mut(below).ok_or(TreeError::NoSuchLayer(below))? = merged;
+                Ok(())
+            })
+        };
+        self.edit_later(d.id, "Merge down", memory, work, move |st, doc, ()| {
+            if let Some(d) = st.doc_mut(doc) {
+                d.select_only(below);
+            }
         });
-        self.report(result);
-        if let Some(d) = self.active_mut() {
-            d.select_only(below);
-        }
     }
 
     /// Merges the visible selected layers into one, where the topmost of them was; hidden
@@ -216,55 +218,52 @@ impl AppState {
         let layers: Vec<Arc<Layer>> = sel.iter().map(|&l| Arc::new(doc.layer(l).expect("selected").clone())).collect();
         // What compositing the selected groups leaves out stays, just below the result.
         let kept: Vec<Arc<Layer>> = layers.iter().flat_map(|l| hidden_inside(l)).collect();
-        // Kept while the work runs: it caps the tiles' memory.
-        let _memory = match check_size(&layers, &d.doc().canvas.rect()) {
+        let memory = match check_size(&layers, &d.doc().canvas.rect()) {
             Ok(memory) => memory,
             Err(why) => return self.message(MessageKind::Info, "Merge Selected", why),
         };
         let adjacent = adjacent_siblings(doc, &sel);
-        let d = self.active_mut().expect("available");
-        let result = d.apply("Merge selected", |doc, ids| {
-            let image = composite_all(&layers);
-            let name = doc.layer(top).ok_or(TreeError::NoSuchLayer(top))?.name.clone();
-            for &l in &sel[..sel.len() - 1] {
-                doc.remove(l)?;
-            }
-            *doc.layer_mut(top).ok_or(TreeError::NoSuchLayer(top))? = Layer::new_raster(top, ids.object(), name, image);
-            let pos = doc.position(top).ok_or(TreeError::NoSuchLayer(top))?;
-            for (i, h) in kept.into_iter().enumerate() {
-                doc.insert(Position { parent: pos.parent, index: pos.index + i }, (*h).clone())?;
-            }
-            Ok::<(), TreeError>(())
-        });
-        let ok = result.is_ok();
-        self.report(result);
-        if ok {
-            if let Some(d) = self.active_mut() {
+        let work = move |doc: &mut Document, ids: &mut IdGen, progress: &Progress| {
+            let image = composited(&layers, progress)?;
+            tree(|| {
+                let name = doc.layer(top).ok_or(TreeError::NoSuchLayer(top))?.name.clone();
+                for &l in &sel[..sel.len() - 1] {
+                    doc.remove(l)?;
+                }
+                *doc.layer_mut(top).ok_or(TreeError::NoSuchLayer(top))? =
+                    Layer::new_raster(top, ids.object(), name, image);
+                let pos = doc.position(top).ok_or(TreeError::NoSuchLayer(top))?;
+                for (i, h) in kept.into_iter().enumerate() {
+                    doc.insert(Position { parent: pos.parent, index: pos.index + i }, (*h).clone())?;
+                }
+                Ok(())
+            })
+        };
+        self.edit_later(d.id, "Merge selected", memory, work, move |st, doc, ()| {
+            if let Some(d) = st.doc_mut(doc) {
                 d.select_only(top);
             }
             if !adjacent {
-                self.notify(
+                st.notify(
                     "The merged layers were not next to each other: the layers that lay between them are now \
                      below the merge, which can change how the image looks where they overlap.",
                 );
             }
-        }
+        });
     }
 
     /// Merges every visible layer into one, where the topmost of them was; hidden layers
     /// stay, in their order, below or above it as they were.
     pub(crate) fn merge_visible(&mut self) {
         let d = self.active().expect("available");
-        let top = d.doc().layers.clone();
-        // Kept while the work runs: it caps the tiles' memory.
-        let _memory = match check_size(&top, &d.doc().canvas.rect()) {
+        let memory = match check_size(&d.doc().layers, &d.doc().canvas.rect()) {
             Ok(memory) => memory,
             Err(why) => return self.message(MessageKind::Info, "Merge Visible", why),
         };
-        let d = self.active_mut().expect("available");
-        let result = d.apply("Merge visible", |doc, ids| {
-            let image = composite_all(&doc.layers);
-            let last_visible = doc.layers.iter().rposition(|l| shows(l)).ok_or(TreeError::IndexOutOfRange)?;
+        let work = |doc: &mut Document, ids: &mut IdGen, progress: &Progress| {
+            let image = composited(&doc.layers, progress)?;
+            let last_visible =
+                doc.layers.iter().rposition(|l| shows(l)).ok_or_else(|| TreeError::IndexOutOfRange.to_string())?;
             let keep = doc.layers[last_visible].clone();
             let mut below = Vec::new();
             let mut above = Vec::new();
@@ -279,9 +278,9 @@ impl AppState {
             }
             let merged = Layer::new_raster(keep.id, ids.object(), keep.name.clone(), image);
             doc.layers = below.into_iter().chain([Arc::new(merged)]).chain(above).collect();
-            Ok::<(), TreeError>(())
-        });
-        self.report(result);
+            Ok(())
+        };
+        self.edit_later(d.id, "Merge visible", memory, work, |_, _, ()| {});
     }
 
     /// Turns the active group into one pixel layer with the group's name, opacity and
@@ -291,65 +290,63 @@ impl AppState {
         let id = d.active_layer().expect("available");
         let group = d.doc().layer(id).expect("exists").clone();
         let children = group.children().expect("a group").to_vec();
-        // Kept while the work runs: it caps the tiles' memory.
-        let _memory = match check_size(&children, &d.doc().canvas.rect()) {
+        let memory = match check_size(&children, &d.doc().canvas.rect()) {
             Ok(memory) => memory,
             Err(why) => return self.message(MessageKind::Info, "Merge Group", why),
         };
-        let d = self.active_mut().expect("available");
-        let result = d.apply("Merge group", |doc, ids| {
-            let image = composite_all(&children);
-            let pos = doc.position(id).ok_or(TreeError::NoSuchLayer(id))?;
-            let hidden: Vec<Arc<Layer>> =
-                children.iter().flat_map(|c| if shows(c) { hidden_inside(c) } else { vec![c.clone()] }).collect();
-            let mut merged = Layer::new_raster(id, ids.object(), group.name.clone(), image);
-            merged.opacity = group.opacity;
-            merged.visible = group.visible;
-            *doc.layer_mut(id).ok_or(TreeError::NoSuchLayer(id))? = merged;
-            for (i, h) in hidden.into_iter().enumerate() {
-                doc.insert(Position { parent: pos.parent, index: pos.index + i }, (*h).clone())?;
+        let work = move |doc: &mut Document, ids: &mut IdGen, progress: &Progress| {
+            let image = composited(&children, progress)?;
+            tree(|| {
+                let pos = doc.position(id).ok_or(TreeError::NoSuchLayer(id))?;
+                let hidden: Vec<Arc<Layer>> =
+                    children.iter().flat_map(|c| if shows(c) { hidden_inside(c) } else { vec![c.clone()] }).collect();
+                let mut merged = Layer::new_raster(id, ids.object(), group.name.clone(), image);
+                merged.opacity = group.opacity;
+                merged.visible = group.visible;
+                *doc.layer_mut(id).ok_or(TreeError::NoSuchLayer(id))? = merged;
+                for (i, h) in hidden.into_iter().enumerate() {
+                    doc.insert(Position { parent: pos.parent, index: pos.index + i }, (*h).clone())?;
+                }
+                Ok(())
+            })
+        };
+        self.edit_later(d.id, "Merge group", memory, work, move |st, doc, ()| {
+            if let Some(d) = st.doc_mut(doc) {
+                d.select_only(id);
             }
-            Ok::<(), TreeError>(())
         });
-        self.report(result);
-        if let Some(d) = self.active_mut() {
-            d.select_only(id);
-        }
     }
 
     /// Adds a layer holding everything visible merged, above the active layer (outside any
     /// group), keeping the originals.
     pub(crate) fn stamp_visible(&mut self) {
         let d = self.active().expect("available");
-        let layers = d.doc().layers.clone();
-        // Kept while the work runs: it caps the tiles' memory.
-        let _memory = match check_size(&layers, &d.doc().canvas.rect()) {
+        let layers = &d.doc().layers;
+        let memory = match check_size(layers, &d.doc().canvas.rect()) {
             Ok(memory) => memory,
             Err(why) => return self.message(MessageKind::Info, "Stamp Visible", why),
         };
         let index = d.active_layer().and_then(|a| d.doc().path(a)).map_or(layers.len(), |p| p[0] + 1);
-        let d = self.active_mut().expect("available");
-        let result = d.apply("Stamp visible", |doc, ids| {
-            let image = composite_all(&doc.layers);
-            doc.insert(Position { parent: None, index }, Layer::new_raster(ids.layer(), ids.object(), "Stamp", image))
-        });
-        self.report(result);
+        let work = move |doc: &mut Document, ids: &mut IdGen, progress: &Progress| {
+            let image = composited(&doc.layers, progress)?;
+            let stamp = Layer::new_raster(ids.layer(), ids.object(), "Stamp", image);
+            tree(|| doc.insert(Position { parent: None, index }, stamp))
+        };
+        self.edit_later(d.id, "Stamp visible", memory, work, |_, _, ()| {});
     }
 
     pub(crate) fn flatten(&mut self) {
         let d = self.active().expect("available");
-        // Kept while the work runs: it caps the tiles' memory.
-        let _memory = match check_size(&d.doc().layers.clone(), &d.doc().canvas.rect()) {
+        let memory = match check_size(&d.doc().layers, &d.doc().canvas.rect()) {
             Ok(memory) => memory,
             Err(why) => return self.message(MessageKind::Info, "Flatten Image", why),
         };
-        let d = self.active_mut().expect("available");
-        let result = d.apply("Flatten image", |doc, ids| {
-            let image = composite_all(&doc.layers);
+        let work = |doc: &mut Document, ids: &mut IdGen, progress: &Progress| {
+            let image = composited(&doc.layers, progress)?;
             doc.layers = vec![Arc::new(Layer::new_raster(ids.layer(), ids.object(), "Background", image))];
-            Ok::<(), TreeError>(())
-        });
-        self.report(result);
+            Ok(())
+        };
+        self.edit_later(d.id, "Flatten image", memory, work, |_, _, ()| {});
     }
 
     /// Turns the image objects of the selected layers (and of the layers inside selected
@@ -359,20 +356,22 @@ impl AppState {
         let sel = d.selected_layers();
         let doc = d.doc();
         let targets: Vec<Arc<Layer>> = sel.iter().filter_map(|&l| doc.layer(l)).map(|l| Arc::new(l.clone())).collect();
-        // Kept while the work runs: it caps the tiles' memory.
-        let _memory = match rasterize_fits(&targets, &d.doc().canvas.rect(), Allowance::now()) {
+        let memory = match rasterize_fits(&targets, &d.doc().canvas.rect(), Allowance::now()) {
             Ok(memory) => memory,
             Err(why) => return self.message(MessageKind::Info, "Rasterize", why),
         };
-        let d = self.active_mut().expect("available");
-        let result = d.apply("Rasterize", |doc, _| {
+        // Each image object drawn is a piece of the work.
+        let objects = targets.iter().flat_map(|l| l.all_objects()).filter(|o| matches!(o.kind, ObjectKind::Image(_)));
+        let total = objects.count() as u64;
+        let work = move |doc: &mut Document, _: &mut IdGen, progress: &Progress| {
+            progress.begin(total);
             for id in sel {
-                let layer = doc.layer_mut(id).ok_or(TreeError::NoSuchLayer(id))?;
-                rasterize_layer(layer);
+                let layer = doc.layer_mut(id).ok_or_else(|| TreeError::NoSuchLayer(id).to_string())?;
+                rasterize_layer(layer, progress)?;
             }
-            Ok::<(), TreeError>(())
-        });
-        self.report(result);
+            Ok(())
+        };
+        self.edit_later(d.id, "Rasterize", memory, work, |_, _, ()| {});
     }
 
     pub(crate) fn toggle_layer(&mut self, visibility: bool) {
@@ -426,23 +425,32 @@ impl AppState {
     }
 }
 
-/// Turns every image object in `layer`, and in the layers inside it, into a pixel object.
-fn rasterize_layer(layer: &mut Layer) {
+/// Turns every image object in `layer`, and in the layers inside it, into a pixel object,
+/// telling `progress` as each is done, and stopping if the edit was cancelled.
+fn rasterize_layer(layer: &mut Layer, progress: &Progress) -> Result<(), String> {
     match &mut layer.content {
         LayerContent::Objects(objects) => {
             for o in objects {
                 if let ObjectKind::Image(i) = &o.kind {
+                    go_on(progress)?;
                     let image = resample::render_image(&i.image, &i.transform, &i.sampling, None);
                     o.kind = ObjectKind::Pixels(PixelObject { image: Arc::new(image), offset: [0, 0] });
+                    progress.advance(1);
                 }
             }
         }
         LayerContent::Group(children) => {
             for c in children {
-                rasterize_layer(Arc::make_mut(c));
+                rasterize_layer(Arc::make_mut(c), progress)?;
             }
         }
     }
+    Ok(())
+}
+
+/// What `f`, a change to the layer tree, came to, any failure told as text.
+fn tree(f: impl FnOnce() -> Result<(), TreeError>) -> Result<(), String> {
+    f().map_err(|e| e.to_string())
 }
 
 /// Whether `layer`, or a layer inside it, holds an image object.

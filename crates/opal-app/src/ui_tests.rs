@@ -10,7 +10,7 @@ use egui_kittest::kittest::Queryable;
 /// Held by each test while it uses the GPU. The harness renders with WARP, Windows' software
 /// rasterizer, which crashed (an access violation in its shader compiler) when several
 /// tests compiled shaders on their own devices at the same time.
-fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     GPU.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -2334,6 +2334,39 @@ fn a_write_under_way_shows_how_far_it_has_got_and_can_be_cancelled() {
 }
 
 #[test]
+fn an_edit_under_way_shows_in_the_status_bar_and_can_be_cancelled() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 64, 64);
+    let st = h.state_mut().state_mut();
+    st.edit_wait = std::time::Duration::ZERO;
+    let doc = st.active_doc.unwrap();
+    // Its work held back until let go, a quarter done.
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let work =
+        move |_: &mut opal_core::document::Document, _: &mut opal_core::document::IdGen, p: &opal_io::Progress| {
+            p.begin(4);
+            p.advance(1);
+            let _ = wait.recv();
+            Ok(())
+        };
+    st.edit_later(doc, "Flatten image", crate::memory::Allowance::now(), work, |_, _, ()| {});
+    // Nothing shown at first; once it has run a while, how far it has got, and a way to stop it.
+    h.run();
+    assert!(h.query_by_label("25%").is_none(), "shown at once");
+    std::thread::sleep(crate::edits::SHOWN_AFTER);
+    h.run();
+    assert!(h.query_by_label("25%").is_some(), "the status bar does not say how far the edit has got");
+    assert!(h.query_by_label("Flatten image\u{2026}").is_some());
+    h.get_by_label("Cancel").click();
+    h.run();
+    drop(go);
+    let st = h.state().state();
+    assert!(!st.editing(), "still under way once cancelled");
+    assert!(h.query_by_label("Cancel").is_none(), "still offered once cancelled");
+}
+
+#[test]
 fn a_failed_write_stops_a_quit_waiting_for_it() {
     let _gpu = gpu_lock();
     let mut h = harness();
@@ -2609,9 +2642,10 @@ fn a_view_taking_a_while_says_so() {
     let mut h = harness();
     image_of(&mut h, 256, 256);
     h.state_mut().state_mut().active_mut().unwrap().projector.wait = std::time::Duration::ZERO;
-    // The background threads held, so the next view cannot be done.
+    // The background threads held, so the next view cannot be done. (Its layer hidden: a
+    // change the interface makes itself, unlike a flip, which those threads would work out.)
     let held = crate::background::testing::hold(Some(crate::background::pool()));
-    h.state_mut().state_mut().queue.push(Cmd::FlipHorizontal);
+    h.state_mut().state_mut().queue.push(Cmd::ToggleVisible);
     h.run();
     assert!(h.query_by_label("Drawing…").is_none(), "said at once");
     std::thread::sleep(std::time::Duration::from_millis(200));

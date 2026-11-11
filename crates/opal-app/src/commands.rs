@@ -976,6 +976,42 @@ pub static RIBBON: &[Tab] = &[
 pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
     use Cmd::*;
     let needs_doc = || st.active().map(|_| ()).ok_or_else(|| "Open or create an image first.".to_owned());
+    // While an edit is under way on the image, nothing may change it, nor save it as it was
+    // before (see `edits`); looking at it, copying from it, closing it, and other images, are
+    // free, and a paste waits for it.
+    if let Some(b) = st.active().and_then(|d| d.busy.as_ref())
+        && !matches!(
+            cmd,
+            New | Open
+                | Preferences
+                | Exit
+                | ConnectAssistant
+                | RunScript
+                | Copy
+                | CopyMerged
+                | Paste
+                | PasteInPlace
+                | Close
+                | ZoomIn
+                | ZoomOut
+                | ZoomFit
+                | Zoom100
+                | ToggleOffCanvas
+                | ToggleRulers
+                | ToggleSelectionOverlay
+                | ToggleTheme
+                | ToggleRibbon
+                | CycleToolsPlace
+                | ResetPanels
+                | Search
+                | Help
+                | Shortcuts
+                | About
+                | WidgetGallery
+        )
+    {
+        return Err(b.why());
+    }
     match cmd {
         New
         | Open

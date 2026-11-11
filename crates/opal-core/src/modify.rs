@@ -108,39 +108,61 @@ fn coverage(d: f64) -> u16 {
     level((0.5 - d).clamp(0.0, 1.0) as f32)
 }
 
+/// What may hold a modifier's work back, asked as it goes: `stop`, between the pieces of it,
+/// whether it is wanted no longer; `admit`, before it takes memory of note (the windows it works
+/// out at once, then each block's tiles as it keeps them), whether it may take that many bytes
+/// more, all of them in memory.
+#[derive(Clone, Copy)]
+pub struct Bounds<'a> {
+    pub stop: &'a (dyn Fn() -> bool + Sync),
+    pub admit: &'a (dyn Fn(u64) -> bool + Sync),
+}
+
+/// Bounds that never hold the work back.
+pub const UNBOUNDED: Bounds<'static> = Bounds { stop: &never, admit: &always };
+
+fn never() -> bool {
+    false
+}
+
+fn always(_: u64) -> bool {
+    true
+}
+
+/// Why a modifier's work did not finish (see [`Bounds`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Halt {
+    /// It was wanted no longer.
+    Stopped,
+    /// It was not let take the memory it needed.
+    NoMemory,
+}
+
 impl Mask {
     /// The mask grown by `by` pixels (shrunk, if less than 0), its corners growing as `reach`
     /// says.
     pub fn grown(&self, by: f64, reach: Reach) -> Mask {
-        self.grown_unless(by, reach, &|| false).expect("never stopped")
+        self.grown_within(by, reach, UNBOUNDED).expect("unbounded")
     }
 
     /// The mask feathered: its edge falling off over `width` pixels, on the `side` of its
     /// outline, along `falloff`.
     pub fn feathered(&self, width: f64, side: Side, falloff: Falloff) -> Mask {
-        self.feathered_unless(width, side, falloff, &|| false).expect("never stopped")
+        self.feathered_within(width, side, falloff, UNBOUNDED).expect("unbounded")
     }
 
-    /// [`grown`](Self::grown), unless `stop` says to stop, which it is asked between the pieces
-    /// of the work: then none.
-    pub fn grown_unless(&self, by: f64, reach: Reach, stop: &(dyn Fn() -> bool + Sync)) -> Option<Mask> {
+    /// [`grown`](Self::grown), unless `bounds` hold it back.
+    pub fn grown_within(&self, by: f64, reach: Reach, bounds: Bounds) -> Result<Mask, Halt> {
         if by == 0.0 {
-            return Some(self.clone());
+            return Ok(self.clone());
         }
-        by_distance(self, grow_band(by), reach, |d| coverage(d - by), stop)
+        by_distance(self, grow_band(by), reach, |d| coverage(d - by), bounds)
     }
 
-    /// [`feathered`](Self::feathered), unless `stop` says to stop (see
-    /// [`grown_unless`](Self::grown_unless)).
-    pub fn feathered_unless(
-        &self,
-        width: f64,
-        side: Side,
-        falloff: Falloff,
-        stop: &(dyn Fn() -> bool + Sync),
-    ) -> Option<Mask> {
+    /// [`feathered`](Self::feathered), unless `bounds` hold it back.
+    pub fn feathered_within(&self, width: f64, side: Side, falloff: Falloff, bounds: Bounds) -> Result<Mask, Halt> {
         if width <= 0.0 {
-            return Some(self.clone());
+            return Ok(self.clone());
         }
         let outer = feather_outer(width, side);
         by_distance(
@@ -148,7 +170,7 @@ impl Mask {
             feather_band(width, side),
             Reach::Round,
             move |d| level(falloff.at((outer - d) / width) as f32),
-            stop,
+            bounds,
         )
     }
 }
@@ -243,16 +265,6 @@ fn near_tiles(mask: &Mask, band: Band) -> Vec<TileCoord> {
         .collect()
 }
 
-/// The memory growing or shrinking `mask` by `by` needs, in bytes (see [`memory_for`]).
-pub fn grow_memory(mask: &Mask, by: f64) -> u64 {
-    memory_for(mask, grow_band(by))
-}
-
-/// The memory feathering `mask` over `width` on `side` needs, in bytes (see [`memory_for`]).
-pub fn feather_memory(mask: &Mask, width: f64, side: Side) -> u64 {
-    memory_for(mask, feather_band(width, side))
-}
-
 /// Where a feather's falloff begins, from the outline, out (more than 0) or in.
 fn feather_outer(width: f64, side: Side) -> f64 {
     match side {
@@ -262,38 +274,33 @@ fn feather_outer(width: f64, side: Side) -> f64 {
     }
 }
 
-/// The memory working `mask` out within `band` of its outline needs, at most, on the threads
-/// of the pool it is called in: the windows worked out at once, and the tiles it makes (a
-/// level a pixel each, at most), all of it in memory.
-fn memory_for(mask: &Mask, band: Band) -> u64 {
-    let near = near_tiles(mask, band);
-    let (b, workers) = layout(band.most(), rayon::current_num_threads(), &near);
-    (workers * window_side(b, band.most()).pow(2) * WINDOW_PIXEL + near.len() * TILE_PIXELS * size_of::<u16>()) as u64
-}
-
 /// `mask` with each pixel's level what `level_of` makes of its distance to the outline, as
 /// `reach` measures it (less than 0 inside), worked out within `band` of it: farther, as
 /// `level_of` says at the band's edge. The tiles within the band are worked out in blocks, a
 /// window each (the block and a margin round it as wide as the band's farther way), by as many
-/// workers as [`layout`] says (no more of the threads taken); `stop` is asked before each, and
-/// if it says so, none.
+/// workers as [`layout`] says (no more of the threads taken). `bounds` stop it before each
+/// block, and are asked to admit the windows worked out at once, and each block's tiles as
+/// they are kept (at the size they take, which for a straight edge is a row of levels).
 fn by_distance(
     mask: &Mask,
     band: Band,
     reach: Reach,
     level_of: impl Fn(f64) -> u16 + Sync,
-    stop: &(dyn Fn() -> bool + Sync),
-) -> Option<Mask> {
+    bounds: Bounds,
+) -> Result<Mask, Halt> {
     let far_in = level_of(-band.inside);
     let far_out = level_of(band.outside);
     let far = |l: u16| if l >= HALF { far_in } else { far_out };
     let outside = far(mask.outside());
     let near = near_tiles(mask, band);
-    if stop() {
-        return None;
+    if (bounds.stop)() {
+        return Err(Halt::Stopped);
     }
     let (b, workers) = layout(band.most(), rayon::current_num_threads(), &near);
     let band = band.most();
+    if !(bounds.admit)((workers * window_side(b, band).pow(2) * WINDOW_PIXEL) as u64) {
+        return Err(Halt::NoMemory);
+    }
     let mut blocks: std::collections::HashMap<(i32, i32), Vec<TileCoord>> = std::collections::HashMap::new();
     for c in near {
         blocks.entry((c.x.div_euclid(b), c.y.div_euclid(b))).or_default().push(c);
@@ -304,37 +311,45 @@ fn by_distance(
     };
     debug_assert_eq!(window((0, 0)).width() as usize, window_side(b, band), "the window layout() reckons with");
     let blocks: Vec<((i32, i32), Vec<TileCoord>)> = blocks.into_iter().collect();
-    // Each worker takes the next block not taken, until none is left or `stop` says so.
+    // Each worker takes the next block not taken, until none is left or `bounds` hold it back
+    // (what holds it back the first, and the last, word).
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let stopped = std::sync::atomic::AtomicBool::new(false);
+    let halted: std::sync::Mutex<Option<Halt>> = std::sync::Mutex::new(None);
     let worked = std::sync::Mutex::new(Vec::with_capacity(blocks.len()));
     rayon::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|_| {
-                use std::sync::atomic::Ordering;
-                while let Some((at, tiles)) = blocks.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    if stopped.load(Ordering::Relaxed) || stop() {
-                        stopped.store(true, Ordering::Relaxed);
+                let halt = |why| {
+                    halted.lock().expect("not poisoned").get_or_insert(why);
+                };
+                while let Some((at, tiles)) = blocks.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
+                    if halted.lock().expect("not poisoned").is_some() {
                         return;
+                    }
+                    if (bounds.stop)() {
+                        return halt(Halt::Stopped);
                     }
                     let w = window(*at);
                     // No outline within reach of the block: each tile as its side ends.
-                    let made = match mask.side_in(&w, HALF) {
+                    let made: Vec<(TileCoord, MaskTile)> = match mask.side_in(&w, HALF) {
                         Some(inside) => {
                             tiles.iter().map(|&c| (c, MaskTile::Level(far(if inside { FULL } else { 0 })))).collect()
                         }
                         None => block_by_distance(mask, &w, tiles, band, reach, &level_of),
                     };
+                    if !(bounds.admit)(made.iter().map(|(_, t)| t.bytes()).sum()) {
+                        return halt(Halt::NoMemory);
+                    }
                     worked.lock().expect("not poisoned").extend(made);
                 }
             });
         }
     });
-    if stopped.into_inner() {
-        return None;
+    if let Some(why) = halted.into_inner().expect("not poisoned") {
+        return Err(why);
     }
     // Farther, each tile is as its side ends.
-    Some(mask.rebuilt(worked.into_inner().expect("not poisoned"), far, outside))
+    Ok(mask.rebuilt(worked.into_inner().expect("not poisoned"), far, outside))
 }
 
 /// The tiles `tiles` of [`by_distance`]'s mask, worked out over `window` (theirs, and the
@@ -564,7 +579,8 @@ mod tests {
         assert!(workers == 16 || ((workers + 1) * window > WINDOWS_MEMORY && workers * window <= WINDOWS_MEMORY));
         assert_eq!(layout(7.0, 16, &area).1, 16, "small windows, every thread");
         let m = rect(0.0, 0.0, 3000.0, 3000.0);
-        assert!(m.grown_unless(40.0, Reach::Round, &|| true).is_none(), "not stopped");
+        let stop = Bounds { stop: &|| true, ..UNBOUNDED };
+        assert_eq!(m.grown_within(40.0, Reach::Round, stop).unwrap_err(), Halt::Stopped, "not stopped");
         // Worked out in blocks, the same as tile by tile would give: a corner and a side.
         let grown = m.grown(40.0, Reach::Square);
         assert_eq!([grown.level_at(-40, -40), grown.level_at(-41, 1500), grown.level_at(1500, 3039)], [FULL, 0, FULL]);
@@ -582,17 +598,34 @@ mod tests {
     }
 
     #[test]
-    fn the_memory_a_modifier_needs_grows_with_its_reach_and_the_outline() {
-        let small = rect(0.0, 0.0, 100.0, 100.0);
-        let large = rect(0.0, 0.0, 10_000.0, 10_000.0);
+    fn a_modifier_asks_for_the_memory_it_takes_as_it_goes_and_stops_without_it() {
+        use std::sync::Mutex;
+        // What it asks for: the windows first, then the tiles it keeps, at the size they take.
+        let asked = |m: &Mask, grow: f64, refuse_after: usize| {
+            let asks = Mutex::new(Vec::new());
+            let admit = |n: u64| {
+                let mut a = asks.lock().unwrap();
+                a.push(n);
+                a.len() <= refuse_after
+            };
+            let r = m.grown_within(grow, Reach::Square, Bounds { admit: &admit, ..UNBOUNDED });
+            (r.err(), asks.into_inner().unwrap())
+        };
         let tile = (TILE_PIXELS * 2) as u64;
-        // The tiles round a small outline, and a window.
-        assert!(grow_memory(&small, 5.0) > tile);
-        assert!(grow_memory(&large, 5.0) > grow_memory(&small, 5.0) + 100 * tile, "a longer outline, more tiles");
-        assert!(feather_memory(&small, 900.0, Side::Centered) > feather_memory(&small, 10.0, Side::Centered));
-        // The windows no more than fit in their bound (or one, if it alone does not).
-        let near = near_tiles(&large, grow_band(900.0)).len() as u64;
-        assert!(grow_memory(&large, 900.0) <= WINDOWS_MEMORY as u64 + near * tile, "windows past the bound");
+        let large = rect(0.0, 0.0, 10_000.0, 10_000.0);
+        let (halt, asks) = asked(&large, 5.0, usize::MAX);
+        assert_eq!(halt, None);
+        assert!(asks[0] > 0 && asks[0] <= WINDOWS_MEMORY as u64, "the windows: {}", asks[0]);
+        // Straight edges and square corners keep a row of levels a tile, or none: far less than
+        // a whole tile's levels for each tile near the outline.
+        let near = near_tiles(&large, grow_band(5.0)).len() as u64;
+        let kept: u64 = asks[1..].iter().sum();
+        assert!(kept < near * tile / 20, "{kept} of {}", near * tile);
+        // Refused memory at its second ask, it stops, saying so.
+        assert_eq!(asked(&large, 5.0, 1).0, Some(Halt::NoMemory));
+        assert_eq!(asked(&large, 5.0, 0).0, Some(Halt::NoMemory), "the windows were not asked for");
+        // A step that changes nothing asks for nothing.
+        assert_eq!(asked(&large, 0.0, 0), (None, Vec::new()));
     }
 
     #[test]

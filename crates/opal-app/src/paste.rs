@@ -257,7 +257,9 @@ impl AppState {
             return Some("the dialog closes");
         }
         let d = r.target.and_then(|t| self.doc(t))?;
-        if d.transform.as_ref().is_some_and(|s| Some(s.serial) != r.box_then) {
+        if d.busy.is_some() {
+            Some("the edit under way on the image finishes")
+        } else if d.transform.as_ref().is_some_and(|s| Some(s.serial) != r.box_then) {
             Some("the transform box closes")
         } else if d.crop.is_some() && d.crop != r.crop_then {
             Some("you crop or leave the Crop tool")

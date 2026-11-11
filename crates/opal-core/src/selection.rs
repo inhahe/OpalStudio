@@ -4,7 +4,7 @@
 
 use crate::geom::Affine;
 use crate::mask::{Combine, Mask, Shape};
-use crate::modify::{Falloff, Reach, Side};
+use crate::modify::{Bounds, Falloff, Halt, Reach, Side, UNBOUNDED};
 use std::sync::Arc;
 
 /// A step of a selection's recipe: a maker, which makes a mask and combines it with the
@@ -33,22 +33,17 @@ pub enum Step {
 }
 
 impl Step {
-    /// The selection `before` (its mask) becomes after the step.
-    fn apply(&self, before: &Mask) -> Mask {
-        self.apply_unless(before, &|| false).expect("never stopped")
-    }
-
-    /// [`apply`](Self::apply), unless `stop` says to stop (asked between the pieces of a
-    /// modifier's work): then none.
-    fn apply_unless(&self, before: &Mask, stop: &(dyn Fn() -> bool + Sync)) -> Option<Mask> {
-        Some(match self {
+    /// The selection `before` (its mask) becomes after the step, unless `bounds` hold a
+    /// modifier's work back.
+    fn apply(&self, before: &Mask, bounds: Bounds) -> Result<Mask, Halt> {
+        Ok(match self {
             Step::Shape { shape, combine } => {
                 let made = Mask::of(shape);
                 before.combined(&made, *combine)
             }
             Step::Invert => before.inverted(),
-            Step::Grow { by, corners } => before.grown_unless(*by, *corners, stop)?,
-            Step::Feather { width, side, falloff } => before.feathered_unless(*width, *side, *falloff, stop)?,
+            Step::Grow { by, corners } => before.grown_within(*by, *corners, bounds)?,
+            Step::Feather { width, side, falloff } => before.feathered_within(*width, *side, *falloff, bounds)?,
             Step::Mask { mask } => (**mask).clone(),
         })
     }
@@ -81,16 +76,6 @@ impl Step {
             }
             Step::Mask { mask } => Step::Mask { mask: Arc::new(mask.transformed(m)) },
         })
-    }
-
-    /// The memory applying it to `before` needs, in bytes, all of it in memory (see
-    /// `modify::grow_memory`), if it may need much: a modifier's.
-    pub fn memory(&self, before: &Mask) -> Option<u64> {
-        match self {
-            Step::Grow { by, .. } => Some(crate::modify::grow_memory(before, *by)),
-            Step::Feather { width, side, .. } => Some(crate::modify::feather_memory(before, *width, *side)),
-            _ => None,
-        }
     }
 
     /// Whether it leaves every selection as it is (growing by nothing, a feather of no width).
@@ -144,6 +129,11 @@ impl Selection {
     /// The selection `steps` make, from nothing selected (the steps before the last that
     /// starts over are left out).
     pub fn of(steps: Vec<Step>) -> Selection {
+        Selection::of_within(steps, UNBOUNDED).expect("unbounded")
+    }
+
+    /// [`of`](Self::of), unless `bounds` hold a modifier's work back.
+    pub fn of_within(steps: Vec<Step>, bounds: Bounds) -> Result<Selection, Halt> {
         let first = steps.iter().rposition(Step::starts_over).unwrap_or(0);
         let steps = steps[first..].to_vec();
         let (mut mask, mut before) = (Arc::new(Mask::none()), None);
@@ -151,34 +141,34 @@ impl Selection {
             // A mask step's mask is shared, not copied.
             let next = match s {
                 Step::Mask { mask } => mask.clone(),
-                _ => Arc::new(s.apply(&mask)),
+                _ => Arc::new(s.apply(&mask, bounds)?),
             };
             before = Some(std::mem::replace(&mut mask, next));
         }
-        Selection { steps, mask, before }
+        Ok(Selection { steps, mask, before })
     }
 
     /// This selection with `step` after its steps (worked out from its mask, not again from
     /// the start; a step that starts over is the only one, and one that leaves it as it is,
     /// none).
     pub fn then(&self, step: Step) -> Selection {
-        self.then_unless(step, &|| false).expect("never stopped")
+        self.then_within(step, UNBOUNDED).expect("unbounded")
     }
 
-    /// [`then`](Self::then), unless `stop` says to stop (asked between the pieces of a
-    /// modifier's work, which may be long): then none.
-    pub fn then_unless(&self, step: Step, stop: &(dyn Fn() -> bool + Sync)) -> Option<Selection> {
+    /// [`then`](Self::then), unless `bounds` hold a modifier's work back (one that leaves the
+    /// selection as it is does none).
+    pub fn then_within(&self, step: Step, bounds: Bounds) -> Result<Selection, Halt> {
         // No step at all.
         if step.leaves_as_is() {
-            return Some(self.clone());
+            return Ok(self.clone());
         }
         if step.starts_over() {
-            return Some(Selection::of(vec![step]));
+            return Selection::of_within(vec![step], bounds);
         }
-        let mask = step.apply_unless(&self.mask, stop)?;
+        let mask = step.apply(&self.mask, bounds)?;
         let mut steps = self.steps.clone();
         steps.push(step);
-        Some(Selection { steps, mask: Arc::new(mask), before: Some(self.mask.clone()) })
+        Ok(Selection { steps, mask: Arc::new(mask), before: Some(self.mask.clone()) })
     }
 
     /// The selection `step` alone makes.
@@ -232,24 +222,28 @@ impl Selection {
     /// rectangle stretched along another way is no longer a rectangle), the selection up to
     /// it becomes its mask, carried pixel by pixel (see [`Mask::transformed`]).
     pub fn transformed(&self, m: &Affine) -> Selection {
+        self.transformed_within(m, UNBOUNDED).expect("unbounded")
+    }
+
+    /// [`transformed`](Self::transformed), unless `bounds` hold back the work of a modifier
+    /// worked out again.
+    pub fn transformed_within(&self, m: &Affine, bounds: Bounds) -> Result<Selection, Halt> {
         // The last step that cannot be carried, found before any is (carrying a mask step,
         // pixel by pixel, would be wasted on one that the mask taken in its place holds).
         let stuck = self.steps.iter().rposition(|s| !s.carried_by(m));
         let (mut steps, rest) = match stuck {
             None => (Vec::new(), &self.steps[..]),
             Some(last) => {
-                let up_to = if last + 1 == self.steps.len() {
-                    self.mask.clone()
-                } else if last + 2 == self.steps.len() {
-                    self.before_last().mask
-                } else {
-                    Selection::of(self.steps[..=last].to_vec()).mask
+                let up_to = match (&self.before, self.steps.len() - last) {
+                    (_, 1) => self.mask.clone(),
+                    (Some(before), 2) => before.clone(),
+                    _ => Selection::of_within(self.steps[..=last].to_vec(), bounds)?.mask,
                 };
                 (vec![Step::Mask { mask: Arc::new(up_to.transformed(m)) }], &self.steps[last + 1..])
             }
         };
         steps.extend(rest.iter().map(|s| s.transformed(m).expect("every step after the last stuck is carried")));
-        Selection::of(steps)
+        Selection::of_within(steps, bounds)
     }
 }
 
@@ -307,6 +301,18 @@ mod tests {
         assert_eq!(d.steps().len(), 1);
         let all = Step::Shape { shape: rect(0.0, 0.0, 5.0, 5.0), combine: Combine::Replace };
         assert_eq!(Selection::of(vec![Step::Invert, all.clone()]).steps(), [all]);
+    }
+
+    #[test]
+    fn a_modifier_worked_out_again_as_a_selection_is_carried_asks_for_its_memory() {
+        use crate::modify::{Bounds, Halt, UNBOUNDED};
+        let grown = Selection::new(Step::Shape { shape: rect(0.0, 0.0, 300.0, 100.0), combine: Combine::Replace })
+            .then(Step::Grow { by: 20.0, corners: Reach::Round });
+        // A quarter turn carries the grow, which is worked out again: within what is let.
+        let quarter = Affine::rotate(std::f64::consts::FRAC_PI_2);
+        let refuse = Bounds { admit: &|_| false, ..UNBOUNDED };
+        assert_eq!(grown.transformed_within(&quarter, refuse).unwrap_err(), Halt::NoMemory);
+        assert_eq!(grown.transformed_within(&quarter, UNBOUNDED).unwrap(), grown.transformed(&quarter));
     }
 
     #[test]

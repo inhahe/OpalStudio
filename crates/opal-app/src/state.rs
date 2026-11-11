@@ -240,6 +240,11 @@ pub struct AppState {
     /// Files dropped on the window and not yet opened, first dropped first (see
     /// [`open_dropped`](Self::open_dropped)).
     pub dropped: VecDeque<PathBuf>,
+    /// The window's, which work done elsewhere asks for a frame when it ends (one of its own,
+    /// which asks no one, with no window).
+    pub repaint: egui::Context,
+    /// How long an edit is waited for as it begins (see `edits::WAITED_FOR`).
+    pub edit_wait: std::time::Duration,
     pub thumbs: crate::thumbs::Thumbnails,
     /// A paste waiting for the clipboard to be read.
     pub reading: Option<Reading>,
@@ -376,6 +381,8 @@ impl AppState {
             rotate_by: None,
             modifying: None,
             dropped: VecDeque::new(),
+            repaint: egui::Context::default(),
+            edit_wait: crate::edits::WAITED_FOR,
             thumbs: Default::default(),
             reading: None,
             tile_budget: None,
@@ -404,6 +411,7 @@ impl AppState {
             || !self.copying.is_empty()
             || !self.made.is_empty()
             || !self.finishing.is_empty()
+            || self.editing()
     }
 
     /// Whether a dialog is open, so keys and the canvas belong to it. With no window, none
@@ -445,12 +453,14 @@ impl AppState {
         });
     }
 
-    /// What is done between frames, with or without a window: the copies and writes that
-    /// have finished reported, and a paste whose clipboard has been read placed
+    /// What is done between frames, with or without a window: the edits that have finished
+    /// applied (`edits`), the copies and writes that have finished reported, and a paste whose
+    /// clipboard has been read placed
     /// (`pointer_held` as for [`poll_writes`](Self::poll_writes) and
     /// [`poll_paste`](Self::poll_paste)), each image's history kept within the memory the preferences give it, and the tiles'
     /// share of memory kept to (and trouble writing them to disk told of).
     pub fn between_frames(&mut self, pointer_held: bool) {
+        self.poll_edits();
         self.poll_copies();
         self.poll_writes(pointer_held);
         self.poll_paste(pointer_held);
@@ -785,14 +795,13 @@ impl AppState {
     }
 
     /// Opens the files dropped on the window, in the order dropped, while no dialog is open
-    /// (one opened behind a dialog would become the image it acts on); whether any still wait.
-    pub fn open_dropped(&mut self) -> bool {
+    /// (one opened behind a dialog would become the image it acts on).
+    pub fn open_dropped(&mut self) {
         while !self.dialog_open()
             && let Some(path) = self.dropped.pop_front()
         {
             self.open_path(&path);
         }
-        !self.dropped.is_empty()
     }
 
     /// Opens a file, telling the user if that fails or if anything about it needs saying.
@@ -1059,6 +1068,8 @@ impl AppState {
     /// Closes a document, first asking about unsaved changes (after the question on screen,
     /// if one is). One already to close once its save is written just waits.
     pub fn request_close(&mut self, id: DocId) {
+        // An edit under way on it is given up: it was never part of the image.
+        self.cancel_edit(id);
         if self.writer.closing(id) {
             let title = self.doc(id).map(|d| d.title.clone()).unwrap_or_default();
             return self.notify(format!("\"{title}\" closes once it is saved."));
@@ -1184,12 +1195,13 @@ mod tests {
         // Behind a dialog, it would become the image the dialog acts on: it waits.
         st.rotate_by = Some(RotateBy { degrees: 30.0, grow: true });
         st.dropped.push_back(path.clone());
-        assert!(st.open_dropped());
+        st.open_dropped();
         assert_eq!(st.active_doc, first, "opened behind the dialog");
+        assert_eq!(st.dropped.len(), 1);
         st.rotate_by = None;
-        let waiting = st.open_dropped();
+        st.open_dropped();
         let _ = std::fs::remove_file(&path);
-        assert!(!waiting);
+        assert!(st.dropped.is_empty());
         assert_eq!(st.docs.len(), 2);
         assert_ne!(st.active_doc, first, "not opened once the dialog closed");
     }

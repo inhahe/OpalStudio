@@ -165,6 +165,9 @@ pub struct DocState {
     made_by: HashMap<u64, HashSet<NodeId>>,
     /// The states steps made (each one step's), which the run they are in keeps apart.
     named: HashSet<NodeId>,
+    /// An edit worked out off the interface thread, while one is (see `edits`): the image is
+    /// not to be changed until it is applied or cancelled.
+    pub busy: Option<crate::edits::Busy>,
 }
 
 impl DocState {
@@ -201,6 +204,7 @@ impl DocState {
             groups: Vec::new(),
             made_by: HashMap::new(),
             named: HashSet::new(),
+            busy: None,
         }
     }
 
@@ -363,16 +367,27 @@ impl DocState {
         f: impl FnOnce(&mut Document, &mut IdGen) -> Result<(), E>,
     ) -> Result<(), E> {
         self.commit_pending();
+        let mut d = self.history.doc().clone();
+        let mut ids = self.ids.clone();
+        f(&mut d, &mut ids)?;
+        let groups = self.groups.clone();
+        self.commit_made(d, ids, label, &groups);
+        Ok(())
+    }
+
+    /// Makes `made`, worked out from the current state with the identifiers `ids` (which it
+    /// gave out from this image's), the next history state, labeled `label`, made by the
+    /// script `groups` (see [`group_ended`](Self::group_ended)).
+    pub(crate) fn commit_made(&mut self, made: Document, ids: IdGen, label: &str, groups: &[u64]) {
+        debug_assert!(self.busy.is_none(), "the image changed while an edit was under way");
         let before = self.history.doc().clone();
-        let mut d = before.clone();
-        f(&mut d, &mut self.ids)?;
-        let id = self.history.commit(d, label);
-        for &group in &self.groups {
+        self.ids = ids;
+        let id = self.history.commit(made, label);
+        for &group in groups {
             self.made_by.entry(group).or_default().insert(id);
         }
         self.revision += 1;
         self.fix_active_layer(Some(&before));
-        Ok(())
     }
 
     /// Joins the states in `made`, made one after another, into one labeled `label` (see
@@ -402,6 +417,7 @@ impl DocState {
     /// pending edit of another kind (a transform box, say) is committed first: two edits
     /// never merge into one state.
     pub fn edit_pending(&mut self, label: &str, f: impl FnOnce(&mut Document)) {
+        debug_assert!(self.busy.is_none(), "an edit begun while another was under way");
         if self.pending.as_ref().is_some_and(|p| p.label != label) || self.transform.is_some() {
             self.commit_pending();
         }
@@ -465,6 +481,7 @@ impl DocState {
     }
 
     pub fn undo(&mut self) -> bool {
+        debug_assert!(self.busy.is_none(), "undone while an edit was under way");
         self.commit_pending();
         let before = self.history.doc().clone();
         let moved = self.history.undo();
@@ -476,6 +493,7 @@ impl DocState {
     }
 
     pub fn redo(&mut self) -> bool {
+        debug_assert!(self.busy.is_none(), "redone while an edit was under way");
         self.commit_pending();
         let before = self.history.doc().clone();
         let moved = self.history.redo();
@@ -487,6 +505,7 @@ impl DocState {
     }
 
     pub fn goto(&mut self, node: NodeId) {
+        debug_assert!(self.busy.is_none(), "another state gone to while an edit was under way");
         self.commit_pending();
         // Committing can drop old states to keep history within its budget.
         if !self.history.contains(node) {

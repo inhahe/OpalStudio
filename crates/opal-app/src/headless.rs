@@ -98,6 +98,7 @@ pub fn run(given: Vec<OsString>) -> i32 {
     };
     let ctx = egui::Context::default();
     let mut st = windowless_state();
+    st.repaint = ctx.clone();
     let file = std::env::temp_dir().join(format!("opal-headless-{}.json", std::process::id()));
     let mut server = match Server::start(file.clone(), ctx.clone()) {
         Ok(server) => server,
@@ -168,6 +169,7 @@ pub fn serve(given: Vec<OsString>) -> i32 {
     };
     let ctx = egui::Context::default();
     let mut st = windowless_state();
+    st.repaint = ctx.clone();
     let mut server = match Server::start(PathBuf::from(file), ctx.clone()) {
         Ok(server) => server,
         Err(e) => {

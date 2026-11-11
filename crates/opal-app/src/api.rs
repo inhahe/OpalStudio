@@ -1758,7 +1758,10 @@ impl AppState {
             None if method.name == "image" => self.image_by_args(&args, ctx),
             None if method.name == "pixels" => self.pixels_by_args(&args, ctx),
             None if method.name == "put_pixels" => self.put_pixels_by_args(&args, ctx),
-            None if method.name == "crop" => Reply::Now(self.crop_by_args(&args)),
+            None if method.name == "crop" => match self.crop_by_args(&args) {
+                Ok(()) => self.reply_when_done("crop", |st| st.canvas_json()),
+                Err(why) => Reply::Now(Err(why)),
+            },
             None if method.name == "select_rectangle" => {
                 Reply::Now(self.select_by_args(opal_core::mask::ShapeKind::Rectangle, &args))
             }
@@ -1768,18 +1771,7 @@ impl AppState {
             None if method.name == "set_preference" => Reply::Now(self.set_preference(&args, ctx)),
             None => Reply::Now(self.answer(&method.name, &args)),
         };
-        // What would have been told in a dialog comes back with the reply instead: an error,
-        // or a refusal (told as information), as the call's failure; a warning, or a notice
-        // the status bar would have shown, as a note.
-        let messages: Vec<_> = self.messages.drain(told.min(self.messages.len())..).collect();
-        let text = |m: &crate::state::Message| format!("{}: {}", m.title, m.body);
-        let refusals: Vec<String> = messages.iter().filter(|m| m.kind != MessageKind::Warning).map(text).collect();
-        let mut notes: Vec<String> = messages.iter().filter(|m| m.kind == MessageKind::Warning).map(text).collect();
-        if self.notice != notice
-            && let Some((said, _)) = &self.notice
-        {
-            notes.push(said.clone());
-        }
+        let (refusals, notes) = self.told_since(told, notice);
         let reply = match reply {
             Reply::Now(Ok(_)) if !refusals.is_empty() => Reply::Now(Err(refusals.join("\n"))),
             Reply::Now(Ok(value)) if !notes.is_empty() => Reply::Now(Ok(with_notes(value, notes))),
@@ -1829,11 +1821,47 @@ impl AppState {
         self.docs.iter_mut().for_each(|d| d.group_ended(group, label, step));
     }
 
+    /// What would have been told in a dialog since `told` messages were, while the status bar
+    /// said `notice`, which comes back with a call's reply instead (the messages taken): the
+    /// errors, and refusals (told as information), as the call's failure; the warnings, and a
+    /// notice the status bar would have shown, as notes.
+    pub(crate) fn told_since(
+        &mut self,
+        told: usize,
+        notice: Option<(String, std::time::Instant)>,
+    ) -> (Vec<String>, Vec<String>) {
+        let messages: Vec<_> = self.messages.drain(told.min(self.messages.len())..).collect();
+        let text = |m: &crate::state::Message| format!("{}: {}", m.title, m.body);
+        let refusals: Vec<String> = messages.iter().filter(|m| m.kind != MessageKind::Warning).map(text).collect();
+        let mut notes: Vec<String> = messages.iter().filter(|m| m.kind == MessageKind::Warning).map(text).collect();
+        if self.notice != notice
+            && let Some((said, _)) = &self.notice
+        {
+            notes.push(said.clone());
+        }
+        (refusals, notes)
+    }
+
+    /// The reply to call `name`, which may have begun an edit of the active image (see
+    /// `edits`): once that is applied, what `answer` gives then; at once, if it began none.
+    fn reply_when_done(&mut self, name: &str, answer: impl FnOnce(&AppState) -> Value + 'static) -> Reply {
+        let begun = self.active().and_then(|d| d.busy.as_ref()).is_some_and(|b| b.answer.is_none());
+        if !begun {
+            return Reply::Now(Ok(answer(self)));
+        }
+        self.next_answer += 1;
+        let n = self.next_answer;
+        let b = self.active_mut().and_then(|d| d.busy.as_mut()).expect("checked above");
+        b.answer = Some(crate::edits::Answer { n, name: name.to_owned(), with: Box::new(answer) });
+        Reply::Later(n)
+    }
+
     /// Whether scripts' calls wait now: while the user has a dialog open, holds a button
     /// (`pointer_down`), or has a transform box open, an edit in progress that a command
-    /// would commit under them.
+    /// would commit under them; or while an edit is under way (`edits`), which the script
+    /// may have begun and would go on from.
     pub fn scripts_wait(&self, pointer_down: bool) -> bool {
-        self.dialog_open() || pointer_down || self.docs.iter().any(|d| d.transform.is_some())
+        self.dialog_open() || pointer_down || self.docs.iter().any(|d| d.transform.is_some()) || self.editing()
     }
 
     /// Answers query `name`.
@@ -1991,7 +2019,7 @@ impl AppState {
                 let spec = ResizeImage { width, height, keep_aspect: false, resolution, keep_print_size: false };
                 let resample = args.flag("resample").unwrap_or_else(|| self.prefs.bool("resize.resample"));
                 self.resize_image(&spec, resample);
-                now(Ok(self.canvas_json()))
+                self.reply_when_done("resize_image", |st| st.canvas_json())
             }
             Cmd::ResizeCanvas => {
                 let c = self.active().expect("available").doc().canvas;
@@ -2019,7 +2047,7 @@ impl AppState {
                 if degrees != 0.0 {
                     self.rotate_by(&RotateBy { degrees, grow: args.flag("grow").unwrap_or(true) });
                 }
-                now(Ok(self.canvas_json()))
+                self.reply_when_done("rotate_by", |st| st.canvas_json())
             }
             Cmd::RotateCw | Cmd::RotateCcw | Cmd::Rotate180 | Cmd::FlipHorizontal | Cmd::FlipVertical => {
                 self.turn(match cmd {
@@ -2029,7 +2057,7 @@ impl AppState {
                     Cmd::FlipHorizontal => Turn::FlipHorizontal,
                     _ => Turn::FlipVertical,
                 });
-                now(Ok(self.canvas_json()))
+                self.reply_when_done(&snake(&format!("{cmd:?}")), |st| st.canvas_json())
             }
             Cmd::ToggleVisible | Cmd::ToggleLock => {
                 let visibility = cmd == Cmd::ToggleVisible;
@@ -2137,10 +2165,8 @@ impl AppState {
                         falloff: args.text("falloff").and_then(Falloff::named).unwrap_or_default(),
                     },
                 };
-                match self.add_modifier(step) {
-                    Ok(()) => now(Ok(selection_json(self.active().expect("available")))),
-                    Err(why) => now(Err(format!("{}: {why}", snake(&format!("{cmd:?}"))))),
-                }
+                self.add_modifier(step);
+                self.reply_when_done(&snake(&format!("{cmd:?}")), |st| selection_json(st.active().expect("available")))
             }
             Cmd::SelectAll | Cmd::Deselect | Cmd::InvertSelection => {
                 self.run(cmd, ctx);
@@ -2150,7 +2176,7 @@ impl AppState {
             _ => {
                 // The rest take no more than the image and layers set above.
                 self.run(cmd, ctx);
-                now(Ok(self.selected_layers_json()))
+                self.reply_when_done(&snake(&format!("{cmd:?}")), |st| st.selected_layers_json())
             }
         }
     }
@@ -2279,7 +2305,7 @@ impl AppState {
     }
 
     /// Crops the image `args` names to the rectangle they give (see the `crop` method).
-    fn crop_by_args(&mut self, args: &Args) -> Result<Value, String> {
+    fn crop_by_args(&mut self, args: &Args) -> Result<(), String> {
         let id = self.which(args)?;
         self.show_doc(id);
         let delete =
@@ -2288,12 +2314,13 @@ impl AppState {
         let b = self.box_by_args(id, args, "crop", true)?;
         let d = self.doc_mut(id).expect("found");
         let c = d.doc().canvas;
+        // The Crop tool's box, if it had one, goes back around the new canvas (once cropped).
         if b.canvas() != c || b.angle.abs() > 1e-9 || delete {
-            d.crop_to(&b, delete, sampling).map_err(|why| format!("crop: {why}"))?;
+            self.crop_with(id, b, delete, sampling).map_err(|why| format!("crop: {why}"))?;
+        } else {
+            d.crop = None;
         }
-        // The Crop tool's box, if it had one, goes back around the new canvas.
-        d.crop = None;
-        Ok(self.canvas_json())
+        Ok(())
     }
 
     /// The box call `name` (`crop`, or a select call) gives in `args` for image `id`, as its
@@ -3168,8 +3195,28 @@ mod tests {
         let states = st.active().unwrap().history.nodes().count();
         let _pretend = crate::memory::testing::pretend_free(Some(1000));
         let why = now(&mut st, "grow_selection", json!({ "by": 5 })).unwrap_err();
-        assert!(why.starts_with("grow_selection: This would need about"), "{why}");
+        assert!(why.starts_with("Grow selection: This would need about"), "{why}");
         assert_eq!(st.active().unwrap().history.nodes().count(), states);
+    }
+
+    #[test]
+    fn a_call_that_begins_an_edit_is_answered_once_it_is_applied() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 40, "height": 20 })).unwrap();
+        now(&mut st, "new_layer", json!({})).unwrap();
+        st.edit_wait = std::time::Duration::ZERO;
+        // The background threads held, so that the merge is still under way when answered
+        // (while no window test runs, whose views need them).
+        let _windows = crate::ui_tests::gpu_lock();
+        let held = crate::background::testing::hold(Some(crate::background::pool()));
+        let Reply::Later(n) = st.call("merge_down", &args(json!({})), &egui::Context::default()) else {
+            panic!("answered before the merge was done")
+        };
+        assert!(st.scripts_wait(false), "the next call would not wait for it");
+        drop(held);
+        let layers = later(&mut st, n).unwrap();
+        assert_eq!(layers["layers"].as_array().map(Vec::len), Some(1), "{layers}");
+        assert_eq!(st.active().unwrap().history.undo_label(), Some("Merge down"));
     }
 
     #[test]
@@ -3648,6 +3695,7 @@ mod tests {
     /// budget).
     fn later(st: &mut AppState, n: u64) -> Result<Value, String> {
         for _ in 0..1000 {
+            st.poll_edits();
             st.poll_copies();
             st.poll_writes(false);
             st.poll_paste(false);

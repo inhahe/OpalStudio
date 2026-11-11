@@ -81,13 +81,22 @@ impl JobThread {
     }
 }
 
-/// The job waiting for a [`LatestJob`]'s thread, if one is, and what tells the thread so.
-type Slot = (Mutex<Option<Job>>, Condvar);
+/// What a [`LatestJob`]'s thread waits on, and what tells it to look again.
+type Slot = (Mutex<Waiting>, Condvar);
+
+/// The job waiting for a [`LatestJob`]'s thread, if one is, and whether its owner is gone (then
+/// the thread ends once no job is left).
+#[derive(Default)]
+struct Waiting {
+    job: Option<Job>,
+    closed: bool,
+}
 
 /// A thread that runs only the latest of the jobs given it, one at a time, each inside a pool
 /// of its own: they neither wait behind [`pool`]'s work (saves, exports) nor keep it waiting.
 /// A job given while another runs replaces any waiting, which is dropped without running.
-/// Started when first given a job.
+/// Started when first given a job, it ends when this is dropped. (Should its pool not start,
+/// the jobs' parallel parts run on rayon's global pool instead.)
 pub struct LatestJob {
     name: &'static str,
     slot: OnceLock<Arc<Slot>>,
@@ -118,19 +127,25 @@ impl LatestJob {
                         .num_threads(n)
                         .thread_name(move |i| format!("{name} {i}"))
                         .build()
-                        .expect("starting a pool of threads");
+                        .ok();
                     let (waiting, given) = &*theirs;
                     loop {
                         // The slot let go of before the job runs, for the next to be given.
                         let job = {
                             let mut slot = waiting.lock().unwrap_or_else(|e| e.into_inner());
-                            while slot.is_none() {
+                            while slot.job.is_none() && !slot.closed {
                                 slot = given.wait(slot).unwrap_or_else(|e| e.into_inner());
                             }
-                            slot.take().expect("given")
+                            match slot.job.take() {
+                                Some(job) => job,
+                                None => return,
+                            }
                         };
                         // Jobs catch their own panics; the thread goes on whatever comes.
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pool.install(job)));
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &pool {
+                            Some(pool) => pool.install(job),
+                            None => job(),
+                        }));
                     }
                 })
                 .expect("starting a background thread");
@@ -142,8 +157,17 @@ impl LatestJob {
             ctx.request_repaint();
         });
         let (waiting, given) = &**slot;
-        *waiting.lock().unwrap_or_else(|e| e.into_inner()) = Some(job);
+        waiting.lock().unwrap_or_else(|e| e.into_inner()).job = Some(job);
         given.notify_one();
+    }
+}
+
+impl Drop for LatestJob {
+    fn drop(&mut self) {
+        if let Some((waiting, given)) = self.slot.get().map(|s| &**s) {
+            waiting.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+            given.notify_one();
+        }
     }
 }
 
@@ -246,8 +270,6 @@ mod tests {
 
     #[test]
     fn of_the_jobs_given_meanwhile_only_the_latest_runs_and_off_the_background_pool() {
-        // Every thread of the background pool held while the jobs run.
-        let held = testing::hold(Some(pool()));
         let t = LatestJob::new("test latest");
         let ctx = egui::Context::default();
         let (tx, rx) = mpsc::channel();
@@ -264,15 +286,37 @@ mod tests {
         began.1.recv_timeout(Duration::from_secs(10)).expect("the first job never began");
         for i in [2, 3] {
             let tx = tx.clone();
-            let numbers: Vec<u64> = (0..100_000).collect();
-            let work = move || (numbers.par_iter().sum::<u64>() == 4_999_950_000).then_some(i);
+            // Its parallel parts on the threads of its own pool.
+            let work = move || {
+                let names: Vec<String> = (0..64)
+                    .into_par_iter()
+                    .map(|_| std::thread::current().name().unwrap_or_default().to_owned())
+                    .collect();
+                names.iter().all(|n| n.starts_with("test latest ")).then_some(i)
+            };
             t.run(work, move |r| tx.send(r.ok().flatten()).unwrap(), &ctx);
         }
         go.0.send(()).unwrap();
         let got: Vec<Option<i32>> = (0..2).map(|_| rx.recv_timeout(Duration::from_secs(10)).ok().flatten()).collect();
-        drop(held);
-        assert_eq!(got, [Some(1), Some(3)], "the latest did not run, or waited for the background pool");
+        assert_eq!(got, [Some(1), Some(3)], "the latest did not run, or not on its own threads");
         assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "the job replaced ran");
+    }
+
+    #[test]
+    fn a_latest_job_s_thread_ends_once_it_is_dropped() {
+        let t = LatestJob::new("test latest");
+        let (tx, rx) = mpsc::channel();
+        t.run(|| (), move |_| tx.send(()).unwrap(), &egui::Context::default());
+        rx.recv_timeout(Duration::from_secs(10)).expect("the job never ran");
+        // Its thread holds the slot while it lives.
+        let slot = Arc::downgrade(t.slot.get().expect("started"));
+        drop(t);
+        let mut waited = 0;
+        while slot.upgrade().is_some() {
+            assert!(waited < 1000, "the thread went on");
+            std::thread::sleep(Duration::from_millis(5));
+            waited += 1;
+        }
     }
 
     #[test]

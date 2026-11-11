@@ -121,6 +121,10 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     // still scroll the view, and the box stays, waiting).
     let boxed = d.transform.is_some();
     let box_active = boxed && !space;
+    // While an edit is under way on the image, it may only be looked at: every tool is the
+    // hand, but the zoom (see `edits`).
+    let frozen = d.busy.is_some();
+    let tool = if frozen && tool != ToolId::Zoom { ToolId::Hand } else { tool };
     let canvas = crate::doc::canvas_rect(&d.doc().canvas);
     d.view.viewport = vp;
     d.view.screen_rect = rect;
@@ -300,7 +304,8 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     // The boxes set their own cursors, by the handle under the pointer.
     // The crop box belongs to the chosen tool, so it stays while Space scrolls the view.
     let cropping = chosen == ToolId::Crop && !boxed;
-    if (response.hovered() || response.dragged()) && !(box_active || (cropping && !space)) {
+    let crop_box_cursor = cropping && !space && !frozen;
+    if (response.hovered() || response.dragged()) && !box_active && !crop_box_cursor {
         ctx.set_cursor_icon(cursor);
     }
     if !cropping && d.crop.take().is_some() {
@@ -474,7 +479,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     }
     if boxed {
         crate::transform_ui::canvas_box(ui, st, id, &response, rect, !space);
-    } else if cropping {
+    } else if cropping && !frozen {
         crate::crop::canvas_crop(ui, st, id, &response, rect, !space);
     } else if tool == ToolId::Select {
         crate::select_tool::draw_box(ui, st, id, &response, rect, &to_screen);

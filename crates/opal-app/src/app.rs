@@ -87,6 +87,7 @@ impl OpalApp {
         // Ctrl+Plus and Ctrl+Minus zoom the canvas; the interface's size is a preference.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let mut st = AppState::new();
+        st.repaint = cc.egui_ctx.clone();
         if persist {
             config::load(&mut st);
         }
@@ -336,6 +337,10 @@ impl OpalApp {
         let crop_delete = self.st.tool_settings(ToolId::Crop).bool("crop.delete");
         let sampling = crate::prefs::sampling(&self.st.prefs, "transform");
         let Some(d) = self.st.active_mut() else { return };
+        // While an edit is under way on the image, they change nothing (see `edits`).
+        if d.busy.is_some() {
+            return;
+        }
         let cropping = crop_tool && d.crop.is_some();
         let boxed = d.transform.is_some() || cropping;
         let mut refused = None;
@@ -359,10 +364,8 @@ impl OpalApp {
             if enter {
                 let b = d.crop.expect("cropping");
                 if b.canvas() != d.doc().canvas || b.angle != 0.0 || crop_delete {
-                    match d.crop_to(&b, crop_delete, sampling) {
-                        Ok(()) => d.crop = None,
-                        Err(why) => refused = Some(why),
-                    }
+                    let id = d.id;
+                    refused = self.st.crop_with(id, b, crop_delete, sampling).err();
                 }
             } else if escape {
                 d.crop = None;
@@ -454,11 +457,9 @@ impl OpalApp {
             i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect()
         });
         self.st.dropped.extend(dropped);
-        // Those waiting for a dialog to close are looked at again now and then, as closing it
-        // need not bring another frame.
-        if self.st.open_dropped() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
-        }
+        // Those waiting open in the frame after the dialog closes, which closing it brings
+        // (the dialogs are part of `signature`).
+        self.st.open_dropped();
     }
 
     /// Closing the window, or Exit, asks about unsaved changes first.
@@ -699,6 +700,13 @@ impl OpalApp {
         StatusSeen { clients, steps, shut_out, tiles: opal_core::store::status() }
     }
 
+    /// The image whose edit the status bar shows under way, if one is (see `edits`): the active
+    /// image's, else the first busy image's, once it has run long enough to be shown.
+    fn shown_edit(&self) -> Option<DocId> {
+        let shown = |d: &&crate::doc::DocState| d.busy.as_ref().is_some_and(crate::edits::Busy::shown);
+        self.st.active().filter(shown).or_else(|| self.st.docs.iter().find(shown)).map(|d| d.id)
+    }
+
     /// The parts of the status bar there is something for, from its right end, by `seen`.
     fn status_parts(&self, seen: &StatusSeen) -> Vec<StatusPart> {
         let mut parts = Vec::new();
@@ -707,6 +715,9 @@ impl OpalApp {
         }
         if self.st.writer.pending().next().is_some() {
             parts.push(StatusPart::Write);
+        }
+        if self.shown_edit().is_some() {
+            parts.push(StatusPart::Edit);
         }
         if seen.tiles.on_disk > 0 {
             parts.push(StatusPart::Disk);
@@ -767,6 +778,33 @@ impl OpalApp {
                     }
                     ui.label(RichText::new(format!("{}  Scripts are disconnected", crate::icons::INFO)).color(weak));
                 }
+            }
+            // The edit shown under way (see `edits`): how far it has got, and a way to stop it.
+            StatusPart::Edit => {
+                let Some(id) = self.shown_edit() else { return };
+                let d = self.st.doc(id).expect("found");
+                let b = d.busy.as_ref().expect("found");
+                let label = b.label.clone();
+                // Another image's says which.
+                let what =
+                    if Some(id) == self.st.active_doc { label.clone() } else { format!("{label} in {}", d.title) };
+                let fraction = b.progress.fraction();
+                let tip = format!("Stop {}; the image stays as it was.", label.to_lowercase());
+                if ui.small_button("Cancel").on_hover_text(tip).clicked() {
+                    self.st.cancel_edit(id);
+                    return;
+                }
+                match fraction {
+                    Some(f) => {
+                        let pct = format!("{}%", (f * 100.0).floor());
+                        ui.add(egui::ProgressBar::new(f).desired_width(90.0).desired_height(14.0).text(pct));
+                    }
+                    None => {
+                        ui.spinner();
+                    }
+                }
+                capped(ui, RichText::new(format!("{what}\u{2026}")).color(weak));
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
             }
             // The write under way: how far it has got, and a way to stop it.
             StatusPart::Write => {
@@ -883,6 +921,7 @@ impl OpalApp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum StatusPart {
     Scripts,
+    Edit,
     Write,
     Disk,
     Gpu,
@@ -894,7 +933,7 @@ enum StatusPart {
 
 impl StatusPart {
     /// The order they are left out in where the bar is too short for all of them.
-    const LEAST_NEEDED_FIRST: [StatusPart; 8] = [
+    const LEAST_NEEDED_FIRST: [StatusPart; 9] = [
         StatusPart::Disk,
         StatusPart::Gpu,
         StatusPart::Pointer,
@@ -903,6 +942,7 @@ impl StatusPart {
         StatusPart::Zoom,
         StatusPart::Scripts,
         StatusPart::Write,
+        StatusPart::Edit,
     ];
 }
 
@@ -1238,8 +1278,17 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
         match pane {
             Pane::Welcome => "Start".into(),
             Pane::Document(id) => match self.st.doc(*id) {
-                Some(d) if d.is_dirty() => format!("{}  ●", d.title).into(),
-                Some(d) => d.title.clone().into(),
+                Some(d) => {
+                    let mut title = d.title.clone();
+                    if d.is_dirty() {
+                        title.push_str("  ●");
+                    }
+                    // An edit shown under way on it (see `edits`).
+                    if d.busy.as_ref().is_some_and(crate::edits::Busy::shown) {
+                        title.push_str(&format!("  {}", icons::HISTORY));
+                    }
+                    title.into()
+                }
                 None => "Closed".into(),
             },
             Pane::Layers => format!("{}  Layers", icons::LAYER).into(),
@@ -1259,8 +1308,8 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
         match *pane {
             Pane::Document(id) => canvas::canvas_ui(ui, self.st, id),
             Pane::Welcome => welcome(ui, self.st),
-            Pane::Layers => inset(ui, &mut |ui| panels::layers_panel(ui, self.st)),
-            Pane::History => inset(ui, &mut |ui| panels::history_panel(ui, self.st)),
+            Pane::Layers => inset(ui, &mut |ui| panels::unless_busy(ui, self.st, panels::layers_panel)),
+            Pane::History => inset(ui, &mut |ui| panels::unless_busy(ui, self.st, panels::history_panel)),
             Pane::ToolSettings => inset(ui, &mut |ui| {
                 // As wide as the pane, whatever it holds, so that its scroll bar is at its edge.
                 let area = egui::ScrollArea::vertical().auto_shrink([false, true]);

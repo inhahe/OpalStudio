@@ -675,16 +675,7 @@ fn modifying(ctx: &egui::Context, st: &mut AppState) {
             done = ok_cancel(ui, "OK");
         }
     });
-    if step != set {
-        st.modifying.as_mut().expect("open").step = step;
-        st.preview_modifying(ctx);
-    }
-    // While what it makes is worked out, the image shows what it made last (its job asks for
-    // a frame once done); after OK, the dialog closes once it is shown.
-    st.poll_modifying();
-    if let Some(keep) = done {
-        st.end_modifying(keep);
-    }
+    st.answer_modifying(step, done, ctx);
 }
 
 /// The modifier dialog's fields for `step`, lengths read in `scope`.

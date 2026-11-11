@@ -118,6 +118,11 @@ impl Allowance {
         Allowance { free, taken: Need::default(), hold: None }
     }
 
+    /// No limit, capping nothing: for work that measures what it takes itself.
+    pub fn unlimited() -> Allowance {
+        Allowance { free: None, taken: Need::default(), hold: None }
+    }
+
     /// `bytes` of memory with nothing going to disk, or no limit if `None`.
     #[cfg(test)]
     pub fn memory(bytes: Option<u64>) -> Allowance {
@@ -148,6 +153,67 @@ impl Allowance {
     /// The cap on tiles, to keep while work carried on elsewhere runs (letting go of the rest).
     pub fn into_hold(self) -> Option<opal_core::store::Hold> {
         self.hold
+    }
+}
+
+/// What a selection modifier's work (`opal_core::modify::Bounds::admit`, asked from its
+/// workers) may take as it goes, set aside from an allowance, and why it was refused, once it
+/// was.
+pub struct Admission {
+    memory: std::sync::Mutex<Allowance>,
+    refused: std::sync::Mutex<Option<String>>,
+}
+
+impl Admission {
+    pub fn new(memory: Allowance) -> Admission {
+        Admission { memory: std::sync::Mutex::new(memory), refused: Default::default() }
+    }
+
+    /// Whether `bytes` more may be taken, all of them in memory (set aside if so).
+    pub fn admit(&self, bytes: u64) -> bool {
+        match self.memory.lock().expect("not poisoned").take(Need::at_once(bytes)) {
+            Ok(()) => true,
+            Err(why) => {
+                self.refused.lock().expect("not poisoned").get_or_insert(why);
+                false
+            }
+        }
+    }
+
+    /// Why it was refused.
+    pub fn refused(&self) -> String {
+        let why = self.refused.lock().expect("not poisoned").clone();
+        why.unwrap_or_else(|| "There was not memory enough for it.".into())
+    }
+}
+
+/// Where the memory free for work is measured: on any thread, when the work begins, as on the
+/// thread that made it (where tests may pretend: `testing::pretend_free`).
+#[derive(Clone, Copy, Debug)]
+pub struct Measure {
+    #[cfg(test)]
+    pretended: Option<Option<Free>>,
+}
+
+impl Measure {
+    /// Measured as on this thread.
+    pub fn here() -> Measure {
+        Measure {
+            #[cfg(test)]
+            pretended: testing::FREE.get(),
+        }
+    }
+
+    /// What is free now ([`Allowance::now`]).
+    pub fn now(self) -> Allowance {
+        #[cfg(test)]
+        if let Some(free) = self.pretended {
+            let was = testing::FREE.replace(Some(free));
+            let allowance = Allowance::now();
+            testing::FREE.set(was);
+            return allowance;
+        }
+        Allowance::now()
     }
 }
 
