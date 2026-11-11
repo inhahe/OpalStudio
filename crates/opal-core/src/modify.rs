@@ -12,6 +12,38 @@ use crate::tile::{TILE_PIXELS, TILE_SIZE, TileCoord};
 use rayon::prelude::*;
 use std::collections::HashSet;
 
+/// The farthest a selection is grown, shrunk or feathered (in pixels), by a dialog, a call,
+/// or a transform carrying the step: past it, the step is taken as its mask (see
+/// `Selection::transformed`). The memory a tile's working needs grows with its square.
+pub const MAX_DISTANCE: f64 = 1000.0;
+
+/// The memory the windows worked out at once may take: tiles are worked out in parallel in
+/// batches no larger.
+const WINDOWS_MEMORY: usize = 512 << 20;
+
+/// What a pixel of a window takes while it is worked out: its level, its nearest point of the
+/// outline, and how far that is.
+const WINDOW_PIXEL: usize = 2 + 8 + 4;
+
+/// The names of `ALL`'s values, as the recipe (serde), the API and the dialogs name them.
+macro_rules! named {
+    ($t:ident: $($v:ident = $n:literal),+) => {
+        impl $t {
+            pub const ALL: [$t; [$($n),+].len()] = [$($t::$v),+];
+            pub const NAMES: [&'static str; [$($n),+].len()] = [$($n),+];
+
+            /// The one named `name` (see `NAMES`).
+            pub fn named(name: &str) -> Option<$t> {
+                $t::NAMES.iter().position(|n| *n == name).map(|i| $t::ALL[i])
+            }
+        }
+    };
+}
+
+named!(Reach: Round = "round", Square = "square", Diamond = "diamond");
+named!(Side: Inward = "inward", Outward = "outward", Centered = "centered");
+named!(Falloff: Gaussian = "gaussian", Linear = "linear");
+
 /// How far a pixel is from the outline, so what shape growing gives a corner.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,7 +142,9 @@ impl Mask {
             Side::Outward => width,
             Side::Centered => width / 2.0,
         };
-        by_distance(self, width + 2.0, Reach::Round, move |d| level(falloff.at((outer - d) / width) as f32))
+        // Past the falloff's far side, each way, every pixel is as the falloff ends.
+        let band = outer.max(width - outer) + 2.0;
+        by_distance(self, band, Reach::Round, move |d| level(falloff.at((outer - d) / width) as f32))
     }
 }
 
@@ -122,57 +156,27 @@ fn by_distance(mask: &Mask, band: f64, reach: Reach, level_of: impl Fn(f64) -> u
     let far_out = level_of(band);
     let far = |l: u16| if l >= HALF { far_in } else { far_out };
     let outside = far(mask.outside());
-    let side = |t: Option<&MaskTile>| match t {
-        None => Some(mask.outside() >= HALF),
-        Some(MaskTile::Level(l)) => Some(*l >= HALF),
-        Some(_) => None,
-    };
-    // The tiles the outline may cross: those with levels of their own, and those of one
-    // level beside one across the outline (or with levels of their own).
-    let mut edges: HashSet<TileCoord> = HashSet::new();
-    for y in mask.kept_rows() {
-        for (x0, x1, t) in mask.row_runs(y) {
-            for x in x0..x1 {
-                let c = TileCoord::new(x, y);
-                let here = side(Some(t));
-                if here.is_none() {
-                    edges.insert(c);
-                    continue;
-                }
-                for n in [TileCoord::new(x - 1, y), TileCoord::new(x + 1, y), TileCoord::new(x, y - 1), TileCoord::new(x, y + 1)] {
-                    if side(mask.tile(n)) != here {
-                        edges.insert(c);
-                        edges.insert(n);
-                    }
-                }
-            }
-        }
-    }
-    // Those within the band of them.
-    let k = (band / f64::from(TILE_SIZE)).ceil() as i32 + 1;
+    // The tiles within the band of those the outline may cross: a pixel within it of the
+    // outline lies at most that many tiles across or down from the outline's tile.
+    let k = (band / f64::from(TILE_SIZE)).ceil() as i32;
     let mut near: HashSet<TileCoord> = HashSet::new();
-    for c in &edges {
+    for c in mask.edge_tiles() {
         for dy in -k..=k {
             for dx in -k..=k {
                 near.insert(TileCoord::new(c.x + dx, c.y + dy));
             }
         }
     }
-    let worked: Vec<(TileCoord, MaskTile)> =
-        near.par_iter().map(|&c| (c, tile_by_distance(mask, c, band, reach, &level_of))).collect();
-    // Farther, each tile kept the level its side's.
-    let mut tiles = worked;
-    for y in mask.kept_rows() {
-        for (x0, x1, t) in mask.row_runs(y) {
-            for x in x0..x1 {
-                let c = TileCoord::new(x, y);
-                if let (false, MaskTile::Level(l)) = (near.contains(&c), t) {
-                    tiles.push((c, MaskTile::Level(far(*l))));
-                }
-            }
-        }
+    // Worked out in batches whose windows' memory stays within WINDOWS_MEMORY.
+    let side = TILE_SIZE as usize + 2 * (band.ceil() as usize + 1);
+    let at_once = (WINDOWS_MEMORY / (side * side * WINDOW_PIXEL)).max(1);
+    let near: Vec<TileCoord> = near.into_iter().collect();
+    let mut worked = Vec::with_capacity(near.len());
+    for batch in near.chunks(at_once) {
+        worked.par_extend(batch.par_iter().map(|&c| (c, tile_by_distance(mask, c, band, reach, &level_of))));
     }
-    Mask::from_tiles(tiles, outside)
+    // Farther, each tile is as its side ends.
+    mask.rebuilt(worked, far, outside)
 }
 
 /// Tile `c` of [`by_distance`]'s mask.
@@ -180,6 +184,10 @@ fn tile_by_distance(mask: &Mask, c: TileCoord, band: f64, reach: Reach, level_of
     let margin = band.ceil() as i64 + 1;
     let r = c.rect(0);
     let window = r.expand(margin);
+    // No outline within reach: as its side ends.
+    if let Some(l) = mask.uniform_in(&window) {
+        return MaskTile::Level(level_of(if l >= HALF { -band } else { band }));
+    }
     let (w, h) = (window.width() as usize, window.height() as usize);
     let levels = mask.levels_in(&window);
     let inside = |i: usize| levels[i] >= HALF;
@@ -279,6 +287,10 @@ mod tests {
         assert_eq!(diamond.level_at(97, 96), FULL);
         // The sides stay straight and sharp, on whole pixels.
         assert_eq!([round.level_at(150, 89), round.level_at(150, 90)], [0, FULL]);
+        // On the tiles' edges, eight tiles wide: its top grown along the middle too, far from
+        // the tiles where its runs begin and end.
+        let aligned = rect(0.0, 256.0, 2048.0, 768.0).grown(10.0, Reach::Square);
+        assert_eq!([aligned.level_at(1024, 245), aligned.level_at(1024, 246)], [0, FULL]);
     }
 
     #[test]
@@ -316,6 +328,28 @@ mod tests {
         assert!(at(&g, 92) < at(&centered, 92), "{} against {}", at(&g, 92), at(&centered, 92));
         // Far from its outline, as it was.
         assert_eq!([centered.level_at(250, 50), centered.level_at(1000, 1000)], [FULL, 0]);
+    }
+
+    #[test]
+    fn the_modifiers_ways_are_named_as_the_recipe_names_them() {
+        fn check<T: serde::Serialize + PartialEq + std::fmt::Debug + Copy>(all: &[T], names: &[&str], named: fn(&str) -> Option<T>) {
+            for (v, n) in all.iter().zip(names) {
+                assert_eq!(serde_json::to_value(v).unwrap(), serde_json::json!(n));
+                assert_eq!(named(n), Some(*v));
+            }
+        }
+        check(&Reach::ALL, &Reach::NAMES, Reach::named);
+        check(&Side::ALL, &Side::NAMES, Side::named);
+        check(&Falloff::ALL, &Falloff::NAMES, Falloff::named);
+    }
+
+    #[test]
+    fn a_selection_as_large_as_a_canvas_may_be_is_grown_in_time_with_its_edges() {
+        // 300,000 pixels a side: its inside, 1.37 million tiles, is never looked at tile by tile.
+        let m = rect(0.0, 0.0, 300_000.0, 300_000.0);
+        let grown = m.grown(3.0, Reach::Square);
+        assert_eq!(grown.extent(), Extent::Within(IRect::new(-3, -3, 300_003, 300_003)));
+        assert_eq!(grown.level_at(150_000, 150_000), FULL);
     }
 
     #[test]

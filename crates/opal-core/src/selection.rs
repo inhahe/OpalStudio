@@ -17,8 +17,8 @@ pub enum Step {
     /// The opposite of the selection so far: selected where it was not.
     Invert,
     /// The selection so far grown by `by` pixels (shrunk, by less than 0), its corners as
-    /// `reach` says.
-    Grow { by: f64, reach: Reach },
+    /// `corners` says.
+    Grow { by: f64, corners: Reach },
     /// The selection so far feathered: its edge falling off over `width` pixels, on the
     /// `side` of its outline, along `falloff`.
     Feather { width: f64, side: Side, falloff: Falloff },
@@ -41,7 +41,7 @@ impl Step {
                 before.combined(&made, *combine)
             }
             Step::Invert => before.inverted(),
-            Step::Grow { by, reach } => before.grown(*by, *reach),
+            Step::Grow { by, corners } => before.grown(*by, *corners),
             Step::Feather { width, side, falloff } => before.feathered(*width, *side, *falloff),
             Step::Mask { mask } => (**mask).clone(),
         }
@@ -53,18 +53,35 @@ impl Step {
     }
 
     /// The step `m` carries this one to, if there is one: shapes as [`Shape::transformed`]
-    /// says, distances only by a map that scales them alike every way (a turn, a flip, an even
-    /// scale), a mask always.
+    /// says; distances only by a map that scales them alike every way (a turn, a flip, an even
+    /// scale), and square or diamond ones only by one that keeps the pixel grid's axes (a
+    /// quarter turn, a flip), as they are measured along them; not past
+    /// [`MAX_DISTANCE`](crate::modify::MAX_DISTANCE); a mask always.
     fn transformed(&self, m: &Affine) -> Option<Step> {
+        let distance = |d: f64, on_axes: bool| {
+            let scale = even_scale(m)?;
+            let axes = (m.b.abs() < 1e-9 && m.c.abs() < 1e-9) || (m.a.abs() < 1e-9 && m.d.abs() < 1e-9);
+            let d = d * scale;
+            ((axes || !on_axes) && d.abs() <= crate::modify::MAX_DISTANCE).then_some(d)
+        };
         Some(match self {
             Step::Shape { shape, combine } => Step::Shape { shape: shape.transformed(m)?, combine: *combine },
             Step::Invert => Step::Invert,
-            Step::Grow { by, reach } => Step::Grow { by: by * even_scale(m)?, reach: *reach },
+            Step::Grow { by, corners } => Step::Grow { by: distance(*by, *corners != Reach::Round)?, corners: *corners },
             Step::Feather { width, side, falloff } => {
-                Step::Feather { width: width * even_scale(m)?, side: *side, falloff: *falloff }
+                Step::Feather { width: distance(*width, false)?, side: *side, falloff: *falloff }
             }
             Step::Mask { mask } => Step::Mask { mask: Arc::new(mask.transformed(m)) },
         })
+    }
+
+    /// Whether it leaves every selection as it is (growing by nothing, a feather of no width).
+    fn leaves_as_is(&self) -> bool {
+        match self {
+            Step::Grow { by, .. } => *by == 0.0,
+            Step::Feather { width, .. } => *width <= 0.0,
+            _ => false,
+        }
     }
 
     /// Whether `m` carries it exactly (without the work of carrying a mask step, which it
@@ -108,8 +125,13 @@ impl Selection {
     }
 
     /// This selection with `step` after its steps (worked out from its mask, not again from
-    /// the start; a step that starts over is the only one).
+    /// the start; a step that starts over is the only one, and one that leaves it as it is,
+    /// none).
     pub fn then(&self, step: Step) -> Selection {
+        // No step at all.
+        if step.leaves_as_is() {
+            return self.clone();
+        }
         if step.starts_over() {
             return Selection::of(vec![step]);
         }
@@ -294,7 +316,7 @@ mod tests {
     #[test]
     fn grown_and_feathered_steps_are_carried_by_even_scales_and_else_taken_as_their_mask() {
         let s = Selection::new(Step::Shape { shape: rect(100.0, 100.0, 200.0, 150.0), combine: Combine::Replace })
-            .then(Step::Grow { by: 10.0, reach: Reach::Square })
+            .then(Step::Grow { by: 10.0, corners: Reach::Square })
             .then(Step::Feather { width: 4.0, side: Side::Inward, falloff: Falloff::Linear });
         assert_eq!(s.mask().extent(), crate::mask::Extent::Within(crate::geom::IRect::new(90, 90, 210, 160)));
         // Doubled every way: still steps, their distances doubled.
@@ -304,6 +326,21 @@ mod tests {
         // Turned a quarter, so too, unscaled.
         let turned = s.transformed(&Affine::rotate(std::f64::consts::FRAC_PI_2));
         assert!(matches!(turned.steps()[1], Step::Grow { by, .. } if (by - 10.0).abs() < 1e-9));
+        // Turned otherwise, square corners are not square to the grid: the selection up to the
+        // grow is taken as its mask, the feather after it carried; round ones are carried.
+        let thirty = Affine::rotate(30f64.to_radians());
+        assert!(matches!(s.transformed(&thirty).steps(), [Step::Mask { .. }, Step::Feather { .. }]));
+        let round = Selection::new(Step::Shape { shape: rect(100.0, 100.0, 200.0, 150.0), combine: Combine::Replace })
+            .then(Step::Grow { by: 10.0, corners: Reach::Round });
+        assert!(matches!(round.transformed(&thirty).steps(), [_, Step::Grow { .. }]));
+        // Scaled past the farthest a step may reach, it is not carried (and so is taken as its
+        // mask with the steps before it).
+        let far = Affine::scale(200.0, 200.0);
+        assert!(Step::Grow { by: 10.0, corners: Reach::Round }.transformed(&far).is_none());
+        assert!(Step::Feather { width: 4.0, side: Side::Inward, falloff: Falloff::Linear }.transformed(&far).is_some());
+        // A step that changes nothing is no step.
+        assert_eq!(s.then(Step::Grow { by: 0.0, corners: Reach::Round }), s);
+        assert_eq!(s.then(Step::Feather { width: 0.0, side: Side::Centered, falloff: Falloff::Linear }), s);
         // Stretched one way only: the selection up to the feather is taken as its mask.
         let stretched = s.transformed(&Affine::scale(2.0, 1.0));
         assert!(matches!(stretched.steps(), [Step::Mask { .. }]), "{:?}", stretched.steps());

@@ -654,30 +654,31 @@ fn modifying(ctx: &egui::Context, st: &mut AppState) {
     let doc = st.active().map(|d| d.doc());
     let ppi = doc.map_or(opal_core::units::DEFAULT_PPI, |d| d.resolution);
     let scope = lengths::image_scope(doc, st.unit(), ppi);
+    use opal_core::modify::{Falloff, MAX_DISTANCE, Reach, Side};
     let mut step = m.step.clone();
     let mut done = None;
-    let choice = |ui: &mut egui::Ui, label: &str, salt: &str, value: &mut String, options: &[(&str, &str)]| {
+    // A menu of `options`, each with its name, the one `value` is marked.
+    fn choice<T: PartialEq + Copy>(ui: &mut egui::Ui, label: &str, salt: &str, value: &mut T, options: &[(T, &str)]) {
         ui.label(label);
-        let shown = options.iter().find(|(id, _)| *id == value.as_str()).map_or("", |(_, name)| *name);
+        let shown = options.iter().find(|(v, _)| v == value).map_or("", |(_, name)| *name);
         egui::ComboBox::from_id_salt(salt).selected_text(shown).show_ui(ui, |ui| {
-            for (id, name) in options {
-                ui.selectable_value(value, (*id).to_owned(), *name);
+            for (v, name) in options {
+                ui.selectable_value(value, *v, *name);
             }
         });
         ui.end_row();
-    };
+    }
     egui::Modal::new(egui::Id::unique("modify-selection")).show(ctx, |ui| {
         match &mut step {
-            Step::Grow { by, reach } => {
+            Step::Grow { by, corners } => {
                 ui.heading("Grow or shrink the selection");
                 ui.add_space(4.0);
                 egui::Grid::new("grow").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
                     ui.label("By");
-                    ui.add(lengths::length_field(by, scope, -1000.0..=1000.0, 2).remember("select.grow"));
+                    ui.add(lengths::length_field(by, scope, -MAX_DISTANCE..=MAX_DISTANCE, 2).remember("select.grow"));
                     ui.end_row();
-                    let mut id = serde_json::to_value(*reach).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
-                    choice(ui, "Corners", "grow-reach", &mut id, &[("round", "Round"), ("square", "Square"), ("diamond", "Diamond")]);
-                    *reach = serde_json::from_value(serde_json::json!(id)).unwrap_or_default();
+                    let options = [(Reach::Round, "Round"), (Reach::Square, "Square"), (Reach::Diamond, "Diamond")];
+                    choice(ui, "Corners", "grow-corners", corners, &options);
                 });
                 ui.label(RichText::new("Less than 0 shrinks it.").small().color(palette.weak_text));
             }
@@ -686,14 +687,11 @@ fn modifying(ctx: &egui::Context, st: &mut AppState) {
                 ui.add_space(4.0);
                 egui::Grid::new("feather").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
                     ui.label("Width");
-                    ui.add(lengths::length_field(width, scope, 0.0..=1000.0, 2).remember("select.feather"));
+                    ui.add(lengths::length_field(width, scope, 0.0..=MAX_DISTANCE, 2).remember("select.feather"));
                     ui.end_row();
-                    let mut id = serde_json::to_value(*side).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
-                    choice(ui, "Falls off", "feather-side", &mut id, &[("inward", "Inward"), ("outward", "Outward"), ("centered", "Centered")]);
-                    *side = serde_json::from_value(serde_json::json!(id)).unwrap_or_default();
-                    let mut id = serde_json::to_value(*falloff).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
-                    choice(ui, "Falloff", "feather-falloff", &mut id, &[("gaussian", "Gaussian"), ("linear", "Linear")]);
-                    *falloff = serde_json::from_value(serde_json::json!(id)).unwrap_or_default();
+                    let sides = [(Side::Inward, "Inward"), (Side::Outward, "Outward"), (Side::Centered, "Centered")];
+                    choice(ui, "Falls off", "feather-side", side, &sides);
+                    choice(ui, "Falloff", "feather-falloff", falloff, &[(Falloff::Gaussian, "Gaussian"), (Falloff::Linear, "Linear")]);
                 });
             }
             _ => {}
@@ -701,8 +699,12 @@ fn modifying(ctx: &egui::Context, st: &mut AppState) {
         done = ok_cancel(ui, "OK");
     });
     if step != m.step {
-        st.modifying = Some(crate::select::Modifying { step, ..m });
-        st.show_modifying();
+        st.modifying.as_mut().expect("open").step = step;
+        st.preview_modifying(ctx);
+    }
+    // While what it makes is worked out, the image shows what it made last.
+    if st.poll_modifying() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(30));
     }
     if let Some(keep) = done {
         st.end_modifying(keep);

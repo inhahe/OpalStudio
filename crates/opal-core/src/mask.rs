@@ -412,22 +412,86 @@ impl Mask {
         self.rows.get(&y).map_or(NO_RUNS, Vec::as_slice)
     }
 
-    /// The rows of tiles with tiles kept, top to bottom (by their y, in tiles).
-    pub(crate) fn kept_rows(&self) -> impl Iterator<Item = i32> + '_ {
-        self.rows.keys().copied()
+    /// The tiles the outline (where the levels cross half) may cross: those with levels of
+    /// their own, and those of one level beside one on the other side of half (or with levels
+    /// of its own), found run by run, so in time with the outline's length, not the area.
+    pub(crate) fn edge_tiles(&self) -> std::collections::HashSet<TileCoord> {
+        let side = |t: &MaskTile| match t {
+            MaskTile::Level(l) => Some(*l >= HALF),
+            _ => None,
+        };
+        let outside = MaskTile::Level(self.outside);
+        let mut out = std::collections::HashSet::new();
+        let mut ys: Vec<i32> = self.rows.keys().flat_map(|&y| [y, y + 1]).collect();
+        ys.sort_unstable();
+        ys.dedup();
+        for y in ys {
+            // Across the line between rows y - 1 and y.
+            for (x0, x1, above, below) in pieces(self.row(y - 1), self.row(y), &outside, &outside) {
+                let (a, b) = (side(above), side(below));
+                if a.is_none() || b.is_none() || a != b {
+                    for x in x0..x1 {
+                        out.insert(TileCoord::new(x, y - 1));
+                        out.insert(TileCoord::new(x, y));
+                    }
+                }
+            }
+            // Along row y, where its runs begin and end.
+            for r in self.row(y) {
+                for (x, beside) in [(r.x0, r.x0 - 1), (r.x1 - 1, r.x1)] {
+                    let other = self.tile(TileCoord::new(beside, y)).unwrap_or(&outside);
+                    if side(&r.tile).is_none() || side(other) != side(&r.tile) {
+                        out.insert(TileCoord::new(x, y));
+                        out.insert(TileCoord::new(beside, y));
+                    }
+                }
+            }
+        }
+        out
     }
 
-    /// The mask of `tiles` (each at most once) and the level `outside` everywhere else.
-    pub(crate) fn from_tiles(mut tiles: Vec<(TileCoord, MaskTile)>, outside: u16) -> Mask {
-        tiles.sort_unstable_by_key(|(c, _)| (c.y, c.x));
-        let mut rows: Vec<(i32, Vec<Run>)> = Vec::new();
-        for (c, t) in tiles {
-            if rows.last().is_none_or(|(y, _)| *y != c.y) {
-                rows.push((c.y, Vec::new()));
-            }
-            push(&mut rows.last_mut().expect("one for this row").1, c.x, c.x + 1, t, outside);
+    /// The mask with the tiles `worked` (each at most once), every other tile kept here made
+    /// `far` of its level, run by run, and the level `outside` everywhere else.
+    pub(crate) fn rebuilt(&self, worked: Vec<(TileCoord, MaskTile)>, far: impl Fn(u16) -> u16, outside: u16) -> Mask {
+        let mut by_row: BTreeMap<i32, Vec<(i32, i32, MaskTile)>> = BTreeMap::new();
+        for (c, t) in worked {
+            by_row.entry(c.y).or_default().push((c.x, c.x + 1, t));
         }
-        rows.retain(|(_, r)| !r.is_empty());
+        for (&y, row) in &self.rows {
+            let mut at: Vec<i32> = by_row.get(&y).map(|w| w.iter().map(|(x, _, _)| *x).collect()).unwrap_or_default();
+            at.sort_unstable();
+            let segments = by_row.entry(y).or_default();
+            for r in row {
+                // What the run's tiles not worked become: a tile with levels of its own is always
+                // worked (the outline may cross it), so this is a run's level.
+                let level = match &r.tile {
+                    MaskTile::Level(l) => far(*l),
+                    t => far(t.get(0, 0)),
+                };
+                let mut from = r.x0;
+                for &x in &at[at.partition_point(|&x| x < r.x0)..at.partition_point(|&x| x < r.x1)] {
+                    if x > from {
+                        segments.push((from, x, MaskTile::Level(level)));
+                    }
+                    from = x + 1;
+                }
+                if from < r.x1 {
+                    segments.push((from, r.x1, MaskTile::Level(level)));
+                }
+            }
+        }
+        let rows: Vec<(i32, Vec<Run>)> = by_row
+            .into_iter()
+            .map(|(y, mut segments)| {
+                segments.sort_unstable_by_key(|(x0, _, _)| *x0);
+                let mut row = Vec::new();
+                for (x0, x1, t) in segments {
+                    push(&mut row, x0, x1, t, outside);
+                }
+                (y, row)
+            })
+            .filter(|(_, r)| !r.is_empty())
+            .collect();
         Mask::shared(rows, outside)
     }
 

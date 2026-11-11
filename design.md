@@ -433,14 +433,20 @@ to the outline: measured from where the outline crosses between pixels, read bet
 levels so that a smooth edge stays smooth (a smooth circle grown is the larger circle to
 within a tenth of a pixel), spread to every pixel by Danielsson's sweeps, in the measure the
 shape asks for (round: straight across; square: the farther of across and down; diamond:
-across and down together), and only in a band of tiles round the outline. They work from the
-outline, where pixels are half selected, so a soft selection grown or feathered loses its own
-softness. On the Select tab, *Grow or Shrink* and *Feather* open dialogs that show what they
-make at once (a pending edit, *Grow selection*, *Shrink selection* or *Feather selection*),
-kept on OK; scripts call `grow_selection` (`by`, `corners`) and `feather_selection`
-(`width`, `side`, `falloff`). Rotate, Flip and Resize Image carry them by an even scale,
-their distances scaled; a stretch takes the selection up to them as its mask. Custom falloff
-curves, and editing them later in the selection panel, are to come.
+across and down together), and only in a band of tiles round the outline (found run by run,
+in time with the outline's length), each tile's window worked out in batches whose memory
+stays within half a gigabyte. Distances go to 1000 pixels at most (`modify::MAX_DISTANCE`).
+They work from the outline, where pixels are half selected, so a soft selection grown or
+feathered loses its own softness; growing by nothing, or a feather of no width, is no step.
+On the Select tab, *Grow or Shrink* and *Feather* open dialogs (refused while a box is open)
+that show what they make (a pending edit, *Grow selection*, *Shrink selection* or *Feather
+selection*), worked out off the interface thread as the numbers are set, the image showing
+the last done meanwhile; kept on OK. Scripts call `grow_selection` (`by`, `corners`) and
+`feather_selection` (`width`, `side`, `falloff`), the names the recipe gives them. Rotate,
+Flip and Resize Image carry them when they scale every length alike, their distances
+scaled, up to the farthest a step may reach; square and diamond corners, measured along the
+pixel grid, only by quarter turns and flips. Otherwise the selection up to them is taken as
+its mask. Custom falloff curves, and editing them later in the selection panel, are to come.
 
 ### The outline tool
 

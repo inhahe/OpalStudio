@@ -369,13 +369,13 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             DOCUMENT,
             Param {
                 name: "by",
-                kind: Kind::Length { min: -1000.0, max: 1000.0 },
+                kind: Kind::Length { min: -opal_core::modify::MAX_DISTANCE, max: opal_core::modify::MAX_DISTANCE },
                 help: "How far the outline moves out; less than 0, in.",
                 otherwise: Otherwise::Required,
             },
             Param {
                 name: "corners",
-                kind: Kind::Choice(&["round", "square", "diamond"]),
+                kind: Kind::Choice(&opal_core::modify::Reach::NAMES),
                 help: "How its corners grow: round, square, or to a point as a diamond's.",
                 otherwise: Otherwise::Value("\"round\""),
             },
@@ -385,19 +385,19 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             DOCUMENT,
             Param {
                 name: "width",
-                kind: Kind::Length { min: 0.0, max: 1000.0 },
+                kind: Kind::Length { min: 0.0, max: opal_core::modify::MAX_DISTANCE },
                 help: "How wide the falloff from fully selected to not at all is.",
                 otherwise: Otherwise::Required,
             },
             Param {
                 name: "side",
-                kind: Kind::Choice(&["inward", "outward", "centered"]),
+                kind: Kind::Choice(&opal_core::modify::Side::NAMES),
                 help: "Where the falloff lies: inside the outline, outside it, or half each way.",
                 otherwise: Otherwise::Value("\"centered\""),
             },
             Param {
                 name: "falloff",
-                kind: Kind::Choice(&["gaussian", "linear"]),
+                kind: Kind::Choice(&opal_core::modify::Falloff::NAMES),
                 help: "Its shape: as a Gaussian blur's edge, or straight.",
                 otherwise: Otherwise::Value("\"gaussian\""),
             },
@@ -2101,17 +2101,18 @@ impl AppState {
                 now(Ok(json!({ "layer": id.0 })))
             }
             Cmd::GrowSelection | Cmd::FeatherSelection => {
+                use opal_core::modify::{Falloff, Reach, Side};
                 use opal_core::selection::Step;
-                let named = |name: &str| serde_json::json!(args.text(name).unwrap_or_default());
+                // Each a name its choice allows (checked), or its default.
                 let step = match cmd {
                     Cmd::GrowSelection => Step::Grow {
                         by: args.number("by"),
-                        reach: serde_json::from_value(named("corners")).unwrap_or_default(),
+                        corners: args.text("corners").and_then(Reach::named).unwrap_or_default(),
                     },
                     _ => Step::Feather {
                         width: args.number("width"),
-                        side: serde_json::from_value(named("side")).unwrap_or_default(),
-                        falloff: serde_json::from_value(named("falloff")).unwrap_or_default(),
+                        side: args.text("side").and_then(Side::named).unwrap_or_default(),
+                        falloff: args.text("falloff").and_then(Falloff::named).unwrap_or_default(),
                     },
                 };
                 self.add_modifier(step);
@@ -3128,7 +3129,7 @@ mod tests {
             .unwrap();
         let s = now(&mut st, "grow_selection", json!({ "by": "10px", "corners": "square" })).unwrap();
         assert_eq!(s["bounds"], json!([90, 40, 120, 120]));
-        assert_eq!(s["steps"][1], json!({ "step": "grow", "by": 10.0, "reach": "square" }));
+        assert_eq!(s["steps"][1], json!({ "step": "grow", "by": 10.0, "corners": "square" }));
         let s = now(&mut st, "grow_selection", json!({ "by": -20 })).unwrap();
         assert_eq!(s["bounds"], json!([110, 60, 80, 80]));
         let s = now(&mut st, "feather_selection", json!({ "width": 8, "side": "outward", "falloff": "linear" })).unwrap();

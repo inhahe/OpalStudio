@@ -983,6 +983,10 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         | StampVisible | ResizeCanvas | CropToContent | Place | SelectAll => needs_doc(),
         Deselect | InvertSelection | CropToSelection | GrowSelection | FeatherSelection => {
             let d = st.active().ok_or("Open or create an image first.")?;
+            // The dialog shows what it makes as the image's pending edit: the box's first.
+            if matches!(cmd, GrowSelection | FeatherSelection) && d.transform.is_some() {
+                return Err("Apply or cancel the box first.".into());
+            }
             d.pixel_selection().map(|_| ()).ok_or_else(|| "Nothing is selected.".to_owned())
         }
         Clear | Cut => crate::select::clear_refused(st.active().ok_or("Open or create an image first.")?),

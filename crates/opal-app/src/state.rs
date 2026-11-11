@@ -412,7 +412,8 @@ impl AppState {
                 || self.export.is_some()
                 || self.resize_image.is_some()
                 || self.resize_canvas.is_some()
-                || self.rotate_by.is_some())
+                || self.rotate_by.is_some()
+                || self.modifying.is_some())
     }
 
     /// The color scheme in use: the chosen one, or the system's when following it.

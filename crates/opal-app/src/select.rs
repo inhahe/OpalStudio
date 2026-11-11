@@ -12,13 +12,26 @@ use std::sync::Arc;
 /// A selection's outline: closed lines, in document coordinates (see `Mask::outline`).
 pub type Outline = Arc<Vec<Vec<[f64; 2]>>>;
 
-/// The Grow or Shrink, or Feather, dialog, while it is open: the step it adds, and the
-/// selection it adds it to. What it would make shows as the image's pending edit.
+/// The Grow or Shrink, or Feather, dialog, while it is open: the step it adds, the selection
+/// it adds it to, and the step the image's pending edit shows. What a step set makes is
+/// worked out off the interface thread (`AppState::preview_modifying`), the latest only.
 #[derive(Clone, Debug)]
 pub struct Modifying {
     pub step: Step,
     pub before: Arc<Selection>,
+    shown: Option<Step>,
+    /// The step last asked for, which a job worked out for another one gives way to.
+    latest: Arc<std::sync::Mutex<Step>>,
+    /// What a job made, for the step it was asked for.
+    made: Arc<std::sync::Mutex<Option<Preview>>>,
 }
+
+/// A step a modifier dialog was set to, and what it makes.
+type Preview = (Step, Arc<Selection>);
+
+/// The thread the modifier dialogs' previews are worked out on.
+static PREVIEWS: std::sync::Mutex<crate::background::JobThread> =
+    std::sync::Mutex::new(crate::background::JobThread::new("selection previews"));
 
 /// The history state adding `step`, a modifier, makes.
 pub fn modifier_label(step: &Step) -> &'static str {
@@ -106,43 +119,87 @@ impl AppState {
         d.set_pixel_selection(Some(s), "Invert selection");
     }
 
-    /// Opens the Grow or Shrink dialog (`grow`), or the Feather dialog, on what is selected.
+    /// Opens the Grow or Shrink dialog (`grow`), or the Feather dialog, on what is selected,
+    /// what it makes shown at once.
     pub(crate) fn modify_selection(&mut self, grow: bool) {
         use opal_core::modify::{Falloff, Reach, Side};
         let d = self.active().expect("available");
         let before = d.pixel_selection().expect("available").clone();
         let step = if grow {
-            Step::Grow { by: 5.0, reach: Reach::Round }
+            Step::Grow { by: 5.0, corners: Reach::Round }
         } else {
             Step::Feather { width: 10.0, side: Side::Centered, falloff: Falloff::Gaussian }
         };
-        self.modifying = Some(Modifying { step, before });
+        let latest = Arc::new(std::sync::Mutex::new(step.clone()));
+        self.modifying = Some(Modifying { step, before, shown: None, latest, made: Default::default() });
         self.show_modifying();
     }
 
-    /// Shows what the open modifier dialog would make, as the active image's pending edit.
-    pub(crate) fn show_modifying(&mut self) {
-        let Some(m) = self.modifying.clone() else { return };
+    /// Shows `made`, what the open modifier dialog makes with `step`, as the active image's
+    /// pending edit, named for what the step does (the edit named for the one shown before
+    /// given up).
+    fn show_made(&mut self, step: Step, made: Arc<Selection>) {
+        let Some(m) = self.modifying.as_mut() else { return };
+        let before = m.shown.replace(step.clone());
         let Some(d) = self.active_mut() else { return };
-        let made = Arc::new(m.before.then(m.step.clone()));
-        // A label of its own each way (grown, shrunk), the other's edit given up.
-        for other in ["Grow selection", "Shrink selection", "Feather selection"] {
-            if other != modifier_label(&m.step) {
-                d.discard_pending(other);
-            }
+        if let Some(before) = before.filter(|b| modifier_label(b) != modifier_label(&step)) {
+            d.discard_pending(modifier_label(&before));
         }
-        d.edit_pending(modifier_label(&m.step), |doc| doc.selection = (!made.is_empty()).then_some(made));
+        d.edit_pending(modifier_label(&step), |doc| doc.selection = (!made.is_empty()).then_some(made));
     }
 
-    /// Ends the open modifier dialog: what it made a history state of its own if `keep`, else
-    /// given up.
+    /// Shows what the open modifier dialog makes with its step, worked out here and now.
+    pub(crate) fn show_modifying(&mut self) {
+        let Some(m) = self.modifying.clone() else { return };
+        self.show_made(m.step.clone(), Arc::new(m.before.then(m.step)));
+    }
+
+    /// Has what the open modifier dialog makes with its step worked out off the interface
+    /// thread, to be shown once done ([`poll_modifying`](Self::poll_modifying)); a step asked
+    /// for after it takes its place, unless its work has begun.
+    pub(crate) fn preview_modifying(&mut self, ctx: &eframe::egui::Context) {
+        let Some(m) = self.modifying.clone() else { return };
+        *m.latest.lock().expect("not poisoned") = m.step.clone();
+        let (step, before, latest, made) = (m.step, m.before, m.latest, m.made);
+        PREVIEWS.lock().expect("not poisoned").run(
+            move || {
+                let wanted = *latest.lock().expect("not poisoned") == step;
+                wanted.then(|| (step.clone(), Arc::new(before.then(step))))
+            },
+            move |result| {
+                if let Ok(Some(result)) = result {
+                    *made.lock().expect("not poisoned") = Some(result);
+                }
+            },
+            ctx,
+        );
+    }
+
+    /// Shows what a job made for the open modifier dialog, if it is done and for the step it
+    /// has now; whether it is waiting for one still.
+    pub(crate) fn poll_modifying(&mut self) -> bool {
+        let Some(m) = self.modifying.clone() else { return false };
+        if let Some((step, made)) = m.made.lock().expect("not poisoned").take()
+            && step == m.step
+        {
+            self.show_made(step, made);
+        }
+        self.modifying.as_ref().is_some_and(|m| m.shown.as_ref() != Some(&m.step))
+    }
+
+    /// Ends the open modifier dialog: what it makes a history state of its own if `keep`
+    /// (worked out now if its preview is not done), else given up.
     pub(crate) fn end_modifying(&mut self, keep: bool) {
-        let Some(m) = self.modifying.take() else { return };
+        let Some(m) = self.modifying.clone() else { return };
+        if keep && m.shown.as_ref() != Some(&m.step) {
+            self.show_modifying();
+        }
+        let shown = self.modifying.take().and_then(|m| m.shown);
         let Some(d) = self.active_mut() else { return };
         if keep {
             d.commit_pending();
-        } else {
-            d.discard_pending(modifier_label(&m.step));
+        } else if let Some(shown) = shown {
+            d.discard_pending(modifier_label(&shown));
         }
     }
 
@@ -340,12 +397,19 @@ mod tests {
         d.set_pixel_selection(Some(Selection::new(Step::Shape { shape: a, combine: Combine::Replace })), "Select");
         let states = d.history.nodes().count();
         let selected = |st: &AppState| st.active().unwrap().pixel_selection().unwrap().mask().extent();
-        // Opened: grown by 5 at once, as an edit not yet a state.
+        // Not while a box is open: its edit would be applied under the dialog's.
+        assert!(st.active_mut().unwrap().begin_transform(opal_core::resample::Sampling::default()));
+        let why = crate::commands::availability(&st, crate::commands::Cmd::GrowSelection).unwrap_err();
+        assert!(why.contains("Apply or cancel the box first"), "{why}");
+        st.active_mut().unwrap().cancel_transform();
+        // Opened: grown by 5 at once, as an edit not yet a state; a dialog, which keys and
+        // calls wait for.
         st.modify_selection(true);
+        assert!(st.dialog_open());
         assert_eq!(selected(&st), Extent::Within(IRect::new(95, 45, 205, 155)));
         assert_eq!(st.active().unwrap().pending_label(), Some("Grow selection"));
         // Set to shrink by 10, square: shown so, under its own name.
-        st.modifying.as_mut().unwrap().step = Step::Grow { by: -10.0, reach: Reach::Square };
+        st.modifying.as_mut().unwrap().step = Step::Grow { by: -10.0, corners: Reach::Square };
         st.show_modifying();
         assert_eq!(selected(&st), Extent::Within(IRect::new(110, 60, 190, 140)));
         assert_eq!(st.active().unwrap().pending_label(), Some("Shrink selection"));
@@ -353,6 +417,18 @@ mod tests {
         st.end_modifying(false);
         assert_eq!(selected(&st), Extent::Within(IRect::new(100, 50, 200, 150)));
         assert_eq!(st.active().unwrap().history.nodes().count(), states);
+        // Set off the interface thread: shown once done, the last shown until then.
+        st.modify_selection(true);
+        st.modifying.as_mut().unwrap().step = Step::Grow { by: 20.0, corners: Reach::Square };
+        st.preview_modifying(&eframe::egui::Context::default());
+        let mut waited = 0;
+        while st.poll_modifying() {
+            assert!(waited < 500, "the preview never came");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            waited += 1;
+        }
+        assert_eq!(selected(&st), Extent::Within(IRect::new(80, 30, 220, 170)));
+        st.end_modifying(false);
         // Feathered, OK: a state of its own, the feather a step of the recipe.
         st.modify_selection(false);
         st.end_modifying(true);

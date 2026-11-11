@@ -347,22 +347,27 @@ fn opacity_row(ui: &mut egui::Ui, st: &mut AppState) {
     let Some(d) = st.active_mut() else { return };
     let Some(id) = d.active_layer() else { return };
     let Some(layer) = d.doc().layer(id) else { return };
-    let locked = crate::commands::locked_for(d.doc(), layer).is_some();
+    let locked = crate::commands::locked_for(d.doc(), layer).map(|l| l.name.clone());
     let mut pct = f64::from(layer.opacity) * 100.0;
     ui.horizontal(|ui| {
         let label = ui.label("Opacity");
         // Dragged on the slider, or typed (an expression) into the field beside it.
-        let slider =
-            ui.add_enabled(!locked, egui::Slider::new(&mut pct, 0.0..=100.0).fixed_decimals(0).show_value(false));
+        let slider = ui.add_enabled(
+            locked.is_none(),
+            egui::Slider::new(&mut pct, 0.0..=100.0).fixed_decimals(0).show_value(false),
+        );
         let scope = crate::lengths::image_scope(Some(d.doc()), unit, d.doc().resolution);
         let field = crate::number_field::NumberField::number(&mut pct, scope)
             .range(0.0..=100.0)
             .suffix("%")
             .decimals(0, 1)
             .remember("opacity");
-        let field = ui.add_enabled(!locked, field);
+        let field = ui.add_enabled(locked.is_none(), field);
         let r = slider.labelled_by(label.id) | field.labelled_by(label.id);
-        let r = if locked { r.on_disabled_hover_text("The layer is locked.") } else { r };
+        let r = match &locked {
+            Some(name) => r.on_disabled_hover_text(format!("\"{name}\" is locked.")),
+            None => r,
+        };
         if r.changed() {
             d.edit_pending("Change opacity", |doc| {
                 if let Some(l) = doc.layer_mut(id) {
