@@ -148,9 +148,10 @@ pub struct DocState {
     /// Something an operation on the document wants said in the status bar.
     pub notice: Option<String>,
     /// The outline of the selection's mask (the marching ants' path), with the mask it is of
-    /// (see `DocState::selection_outline`): weakly, so that it keeps alive no mask that history
-    /// has let go (and no other mask takes that one's place while it is held so).
-    pub outline: Option<(std::sync::Weak<opal_core::mask::Mask>, crate::select::Outline)>,
+    /// and the level it runs at (see `DocState::selection_outline`): the mask weakly, so that
+    /// it keeps alive no mask that history has let go (and no other mask takes that one's
+    /// place while it is held so).
+    pub outline: Option<(std::sync::Weak<opal_core::mask::Mask>, u16, crate::select::Outline)>,
     /// Whether the user has been told that history states are being dropped.
     told_dropped: bool,
     /// The groups (by number) a call being carried out is in: the script run its

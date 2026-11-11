@@ -5,7 +5,7 @@ use opal_core::resample::{Method, Sampling};
 use opal_core::units::{ResolutionUnit, Unit};
 
 pub const SECTIONS: &[&str] =
-    &["Interface", "Canvas", "Navigation", "History", "Memory", "Transform", "Resize", "Export", "Scripting"];
+    &["Interface", "Canvas", "Navigation", "Selection", "History", "Memory", "Transform", "Resize", "Export", "Scripting"];
 
 /// The units of length, as a setting's choices: `opal_core`'s, in their order.
 const UNITS: [(&str, &str); Unit::ALL.len()] = {
@@ -323,6 +323,19 @@ pub static PREFS: &[Def] = &[
         section: "Canvas",
         kind: Kind::Float { min: 0.25, max: 64.0, decimals: 2, suffix: " GB", log: true },
         default: Init::Float(2.0),
+        advanced: true,
+    },
+    // Selection
+    Def {
+        key: "selection.threshold",
+        label: "Marching ants at",
+        help: "The outline of what is selected runs round the pixels selected at least this much: \
+               lower, it goes round a soft selection's faint parts too; higher, round its solid \
+               part alone. What acts on the selection acts on each pixel as much as it is \
+               selected, whatever this says.",
+        section: "Selection",
+        kind: Kind::Float { min: 1.0, max: 99.0, decimals: 0, suffix: "%", log: false },
+        default: Init::Float(50.0),
         advanced: true,
     },
     // Navigation

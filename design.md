@@ -287,8 +287,8 @@ new pixel = old pixel × (1 − m) + changed pixel × m        (m = the mask val
 
 Because every operation goes through this one step, limiting an operation to the selection
 and soft (feathered) selections work for all operations without per-operation code. The
-marching ants show where the mask crosses a threshold (default 0.5, adjustable); a view
-option shows the mask as a red overlay.
+marching ants show where the mask crosses a threshold (default 0.5, adjustable:
+Preferences › Selection, *Marching ants at*); a view option shows the mask as a red overlay.
 
 - **Storage** (`opal_core::mask`). The mask covers the whole plane, as layers do: 16-bit
   levels in 256×256 tiles on the images' grid, sparse, so that a selection across a huge

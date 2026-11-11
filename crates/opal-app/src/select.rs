@@ -32,21 +32,23 @@ impl crate::doc::DocState {
     }
 
     /// The outline of what is selected (the marching ants' path, in document coordinates),
-    /// worked out once for each selection's mask and kept until another is asked for, or none
-    /// (nothing is selected).
-    pub fn selection_outline(&mut self) -> Option<Outline> {
+    /// round the pixels selected at least `threshold` (a level): worked out once for each
+    /// selection's mask and threshold, and kept until another is asked for, or none (nothing
+    /// is selected).
+    pub fn selection_outline(&mut self, threshold: u16) -> Option<Outline> {
         let Some(s) = self.pixel_selection() else {
             self.outline = None;
             return None;
         };
         let mask = s.mask().clone();
-        if let Some((of, lines)) = &self.outline
+        if let Some((of, at, lines)) = &self.outline
             && std::ptr::eq(of.as_ptr(), Arc::as_ptr(&mask))
+            && *at == threshold
         {
             return Some(lines.clone());
         }
-        let lines = Arc::new(mask.outline(opal_core::mask::HALF));
-        self.outline = Some((Arc::downgrade(&mask), lines.clone()));
+        let lines = Arc::new(mask.outline(threshold));
+        self.outline = Some((Arc::downgrade(&mask), threshold, lines.clone()));
         Some(lines)
     }
 }

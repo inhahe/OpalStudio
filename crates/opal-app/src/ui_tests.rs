@@ -2753,7 +2753,7 @@ fn select_all_deselect_and_invert_change_what_is_selected_as_history_states() {
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
     h.run();
     assert_eq!(selected(&h), Some(Extent::Within(IRect::new(0, 0, 300, 200))));
-    let outline = h.state_mut().state_mut().active_mut().unwrap().selection_outline().unwrap();
+    let outline = h.state_mut().state_mut().active_mut().unwrap().selection_outline(opal_core::mask::HALF).unwrap();
     let mut corners = outline[0].clone();
     corners.sort_by(|a, b| a.partial_cmp(b).unwrap());
     assert_eq!(outline.len(), 1);
@@ -2838,6 +2838,24 @@ fn crop_to_selection_makes_the_canvas_the_rectangle_round_it() {
     command(&mut h, Cmd::InvertSelection);
     command(&mut h, Cmd::CropToSelection);
     assert_eq!(canvas(&h), Canvas { x: 10, y: 20, width: 101, height: 50 });
+}
+
+#[test]
+fn the_ants_run_where_the_preference_says() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    // Pixel 10 across is half selected.
+    select_rect(&mut h, [10.5, 20.0, 110.0, 70.0]);
+    let left = |h: &mut Harness<'static, OpalApp>| {
+        h.run();
+        let d = h.state().state().active().unwrap();
+        let (_, at, lines) = d.outline.as_ref().expect("the outline drawn");
+        (*at, lines.iter().flatten().map(|p| p[0]).fold(f64::INFINITY, f64::min))
+    };
+    assert_eq!(left(&mut h), (opal_core::mask::HALF, 10.0), "round the pixel half selected, at 50%");
+    h.state_mut().state_mut().prefs.set("selection.threshold", crate::settings::Value::Float(60.0));
+    assert_eq!(left(&mut h).1, 11.0, "round the pixel half selected at 60%");
 }
 
 #[test]

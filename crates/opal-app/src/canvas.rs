@@ -104,6 +104,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let zs = st.tool_settings(ToolId::Zoom).clone();
     let ms = st.tool_settings(ToolId::Move).clone();
     let select = crate::select_tool::Options::of(st.tool_settings(ToolId::Select));
+    let threshold = opal_core::mask::level((st.prefs.f64("selection.threshold") / 100.0) as f32);
     let snapping = st.prefs.bool("transform.snapping");
     let snap_points = st.prefs.f64("transform.snap_distance") as f32;
     let palette = st.palette;
@@ -438,7 +439,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     }
     // What is selected: its outline, the marching ants. They march while they are seen and
     // the window has the focus: each step is a frame of the whole window.
-    if let Some(lines) = d.selection_outline() {
+    if let Some(lines) = d.selection_outline(threshold) {
         march(&ctx, draw_ants(ui, &lines, rect, &to_screen, ctx.input(|i| i.time)));
     }
     if let Some(drag) = &d.select_drag {
