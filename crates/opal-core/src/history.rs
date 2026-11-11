@@ -1075,7 +1075,8 @@ mod tests {
     fn a_mask_step_s_mask_is_counted_as_well_as_the_mask_its_selection_comes_to() {
         use crate::mask::{Mask, Shape, ShapeKind};
         use crate::selection::{Selection, Step};
-        let shape = Shape { kind: ShapeKind::Ellipse, center: [300.0, 300.0], size: [400.0, 300.0], angle: 0.0, smooth: true };
+        let shape =
+            Shape { kind: ShapeKind::Ellipse, center: [300.0, 300.0], size: [400.0, 300.0], angle: 0.0, smooth: true };
         let held = Arc::new(Mask::of(&shape));
         // Inverted after it: the selection comes to a mask of its own, and its step keeps the
         // one it was.

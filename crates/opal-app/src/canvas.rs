@@ -105,7 +105,8 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let ms = st.tool_settings(ToolId::Move).clone();
     let select = crate::select_tool::Options::of(st.tool_settings(ToolId::Select));
     let threshold = opal_core::mask::level((st.prefs.f64("selection.threshold") / 100.0) as f32);
-    let overlay = st.prefs.bool("selection.overlay").then(|| (st.prefs.f64("selection.overlay_opacity") / 100.0) as f32);
+    let overlay =
+        st.prefs.bool("selection.overlay").then(|| (st.prefs.f64("selection.overlay_opacity") / 100.0) as f32);
     let snapping = st.prefs.bool("transform.snapping");
     let snap_points = st.prefs.f64("transform.snap_distance") as f32;
     let palette = st.palette;

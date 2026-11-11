@@ -229,7 +229,14 @@ impl OnScreen {
 /// Where a box's toolbar goes, on screen: under the box (`corners`, and below them anything
 /// else of it in `also`), centred on it, inside `view`, as wide as it was drawn last (the area
 /// `bar`; `guess` until it has been). In a view too short for it, at its top.
-pub fn toolbar_at(ctx: &egui::Context, view: Rect, corners: &[Pos2; 4], also: &[Pos2], bar: egui::Id, guess: f32) -> Pos2 {
+pub fn toolbar_at(
+    ctx: &egui::Context,
+    view: Rect,
+    corners: &[Pos2; 4],
+    also: &[Pos2],
+    bar: egui::Id,
+    guess: f32,
+) -> Pos2 {
     let lowest = corners.iter().chain(also).fold(f32::NEG_INFINITY, |m, p| m.max(p.y));
     let middle = corners.iter().map(|p| p.x).sum::<f32>() / 4.0;
     let width = ctx.memory(|m| m.area_rect(bar)).map_or(guess, |r| r.width());
@@ -317,7 +324,11 @@ mod tests {
             let [w, h] = b.size.map(|v| v / 2.0);
             [b.center[0] - w, b.center[1] - h, b.center[0] + w, b.center[1] + h]
         };
-        let of = |[x0, y0, x1, y1]: [f64; 4]| EditBox { center: [(x0 + x1) / 2.0, (y0 + y1) / 2.0], size: [x1 - x0, y1 - y0], angle: 0.0 };
+        let of = |[x0, y0, x1, y1]: [f64; 4]| EditBox {
+            center: [(x0 + x1) / 2.0, (y0 + y1) / 2.0],
+            size: [x1 - x0, y1 - y0],
+            angle: 0.0,
+        };
         // 39.75..60.25 across, 36.25..45.25 down.
         let from = of([39.75, 36.25, 60.25, 45.25]);
         // Its bottom-right corner dragged to (60.4, 44.6): that corner on the nearest, the

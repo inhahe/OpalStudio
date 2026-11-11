@@ -977,8 +977,23 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
     use Cmd::*;
     let needs_doc = || st.active().map(|_| ()).ok_or_else(|| "Open or create an image first.".to_owned());
     match cmd {
-        New | Open | Preferences | Exit | ConnectAssistant | ToggleOffCanvas | ToggleRulers | ToggleSelectionOverlay
-        | ToggleTheme | ToggleRibbon | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts | About | WidgetGallery => Ok(()),
+        New
+        | Open
+        | Preferences
+        | Exit
+        | ConnectAssistant
+        | ToggleOffCanvas
+        | ToggleRulers
+        | ToggleSelectionOverlay
+        | ToggleTheme
+        | ToggleRibbon
+        | CycleToolsPlace
+        | ResetPanels
+        | Search
+        | Help
+        | Shortcuts
+        | About
+        | WidgetGallery => Ok(()),
         Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup | CopyMerged
         | StampVisible | ResizeCanvas | CropToContent | Place | SelectAll => needs_doc(),
         Deselect | InvertSelection | CropToSelection | GrowSelection | FeatherSelection => {
@@ -1164,7 +1179,10 @@ pub fn locked_layer(doc: &opal_core::document::Document) -> Option<String> {
 }
 
 /// The groups `layer` of `doc` is in, the one holding it first.
-pub(crate) fn groups_above(doc: &opal_core::document::Document, layer: opal_core::document::LayerId) -> Vec<&opal_core::document::Layer> {
+pub(crate) fn groups_above(
+    doc: &opal_core::document::Document,
+    layer: opal_core::document::LayerId,
+) -> Vec<&opal_core::document::Layer> {
     let mut out = Vec::new();
     let mut above = doc.position(layer).and_then(|p| p.parent);
     while let Some(g) = above.and_then(|g| doc.layer(g)) {

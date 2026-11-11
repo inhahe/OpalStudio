@@ -1948,7 +1948,8 @@ fn a_late_paste_waits_for_a_crop_box_changed_meanwhile() {
     let st = h.state_mut().state_mut();
     assert!(st.active().unwrap().crop.is_some(), "the crop tool is still chosen");
     st.reading = Some(read(st));
-    st.active_mut().unwrap().crop = Some(crate::edit_box::EditBox { center: [50.0, 50.0], size: [60.0, 40.0], angle: 0.0 });
+    st.active_mut().unwrap().crop =
+        Some(crate::edit_box::EditBox { center: [50.0, 50.0], size: [60.0, 40.0], angle: 0.0 });
     h.run();
     assert!(h.state().state().active().unwrap().transform.is_none(), "the crop box was thrown away");
     h.key_press(egui::Key::V);
@@ -2867,7 +2868,8 @@ fn the_selection_overlay_shows_what_is_not_selected_under_red() {
     // Past the canvas, nothing is drawn, and nothing is covered.
     let img = render(&mut h, "selection-overlay");
     let v = h.state().state().active().unwrap().view;
-    let p = (v.screen_rect.min + v.to_screen(egui::vec2(350.0, 100.0)) / h.ctx.pixels_per_point()) * h.ctx.pixels_per_point();
+    let p = (v.screen_rect.min + v.to_screen(egui::vec2(350.0, 100.0)) / h.ctx.pixels_per_point())
+        * h.ctx.pixels_per_point();
     let past = img.get_pixel(p.x as u32, p.y as u32).0;
     assert!(past[0] < 100, "red past the canvas: {past:?}");
 }

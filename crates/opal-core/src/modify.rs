@@ -112,7 +112,8 @@ impl Falloff {
 /// The error function, to within 1.5 × 10⁻⁷ (Abramowitz and Stegun, 7.1.26).
 fn erf(x: f64) -> f64 {
     let t = 1.0 / (1.0 + 0.327_591_1 * x.abs());
-    let poly = t * (0.254_829_592 + t * (-0.284_496_736 + t * (1.421_413_741 + t * (-1.453_152_027 + t * 1.061_405_429))));
+    let poly =
+        t * (0.254_829_592 + t * (-0.284_496_736 + t * (1.421_413_741 + t * (-1.453_152_027 + t * 1.061_405_429))));
     let y = 1.0 - poly * (-x * x).exp();
     if x < 0.0 { -y } else { y }
 }
@@ -146,7 +147,13 @@ impl Mask {
 
     /// [`feathered`](Self::feathered), unless `stop` says to stop (see
     /// [`grown_unless`](Self::grown_unless)).
-    pub fn feathered_unless(&self, width: f64, side: Side, falloff: Falloff, stop: &(dyn Fn() -> bool + Sync)) -> Option<Mask> {
+    pub fn feathered_unless(
+        &self,
+        width: f64,
+        side: Side,
+        falloff: Falloff,
+        stop: &(dyn Fn() -> bool + Sync),
+    ) -> Option<Mask> {
         if width <= 0.0 {
             return Some(self.clone());
         }
@@ -172,7 +179,8 @@ fn block_tiles(band: f64, threads: usize, near: &[TileCoord]) -> i32 {
     let side = f64::from(TILE_SIZE);
     let time = |b: i32| {
         let window = (f64::from(b) * side + margin).powi(2);
-        let workers = (WINDOWS_MEMORY as f64 / (window * WINDOW_PIXEL as f64)).floor().clamp(1.0, threads.max(1) as f64);
+        let workers =
+            (WINDOWS_MEMORY as f64 / (window * WINDOW_PIXEL as f64)).floor().clamp(1.0, threads.max(1) as f64);
         let blocks: HashSet<(i32, i32)> = near.iter().map(|c| (c.x.div_euclid(b), c.y.div_euclid(b))).collect();
         (blocks.len() as f64 / workers).ceil() * window
     };
@@ -237,7 +245,9 @@ fn by_distance(
                     let w = window(*at);
                     // No outline within reach of the block: each tile as its side ends.
                     let made = match mask.side_in(&w, HALF) {
-                        Some(inside) => tiles.iter().map(|&c| (c, MaskTile::Level(far(if inside { FULL } else { 0 })))).collect(),
+                        Some(inside) => {
+                            tiles.iter().map(|&c| (c, MaskTile::Level(far(if inside { FULL } else { 0 })))).collect()
+                        }
                         None => block_by_distance(mask, &w, tiles, band, reach, &level_of),
                     };
                     worked.lock().expect("not poisoned").extend(made);
@@ -318,7 +328,9 @@ fn block_by_distance(
             offer(nearest, dist, i, p);
         }
     };
-    let at = |x: i64, y: i64| (x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h).then(|| y as usize * w + x as usize);
+    let at = |x: i64, y: i64| {
+        (x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h).then(|| y as usize * w + x as usize)
+    };
     for y in 0..h as i64 {
         for x in 0..w as i64 {
             let i = at(x, y).expect("within");
@@ -375,7 +387,8 @@ mod tests {
         assert_eq!(m.grown(10.0, Reach::Square).extent(), Extent::Within(IRect::new(90, 90, 210, 160)));
         assert_eq!(m.grown(-10.0, Reach::Round).extent(), Extent::Within(IRect::new(110, 110, 190, 140)));
         // Round, the corner 10 out along the diagonal is not reached, square it is.
-        let (round, square, diamond) = (m.grown(10.0, Reach::Round), m.grown(10.0, Reach::Square), m.grown(10.0, Reach::Diamond));
+        let (round, square, diamond) =
+            (m.grown(10.0, Reach::Round), m.grown(10.0, Reach::Square), m.grown(10.0, Reach::Diamond));
         assert_eq!(square.level_at(91, 91), FULL);
         assert_eq!(round.level_at(91, 91), 0);
         assert_eq!(round.level_at(94, 94), FULL, "within 10 of the corner (100, 100)");
@@ -392,7 +405,13 @@ mod tests {
     #[test]
     fn a_smooth_circle_grown_is_the_larger_smooth_circle() {
         let circle = |r: f64| {
-            Mask::of(&Shape { kind: ShapeKind::Ellipse, center: [300.3, 299.6], size: [2.0 * r, 2.0 * r], angle: 0.0, smooth: true })
+            Mask::of(&Shape {
+                kind: ShapeKind::Ellipse,
+                center: [300.3, 299.6],
+                size: [2.0 * r, 2.0 * r],
+                angle: 0.0,
+                smooth: true,
+            })
         };
         let grown = circle(60.0).grown(25.0, Reach::Round);
         let expected = circle(85.0);
@@ -428,7 +447,11 @@ mod tests {
 
     #[test]
     fn the_modifiers_ways_are_named_as_the_recipe_names_them() {
-        fn check<T: serde::Serialize + PartialEq + std::fmt::Debug + Copy>(all: &[T], names: &[&str], named: fn(&str) -> Option<T>) {
+        fn check<T: serde::Serialize + PartialEq + std::fmt::Debug + Copy>(
+            all: &[T],
+            names: &[&str],
+            named: fn(&str) -> Option<T>,
+        ) {
             for (v, n) in all.iter().zip(names) {
                 assert_eq!(serde_json::to_value(v).unwrap(), serde_json::json!(n));
                 assert_eq!(named(n), Some(*v));
@@ -471,7 +494,8 @@ mod tests {
     fn a_soft_tile_wholly_on_one_side_of_half_is_no_part_of_the_outline() {
         // Inside a selected rectangle, a tile of levels from 60% to 90%: all above half, so the
         // outline does not cross it, and growing leaves it fully selected (it is in).
-        let soft: std::sync::Arc<[u16]> = (0..TILE_PIXELS).map(|i| level(0.6 + 0.3 * (i % 256) as f32 / 255.0)).collect();
+        let soft: std::sync::Arc<[u16]> =
+            (0..TILE_PIXELS).map(|i| level(0.6 + 0.3 * (i % 256) as f32 / 255.0)).collect();
         let m = rect(0.0, 0.0, 4096.0, 4096.0).rebuilt(vec![(TileCoord::new(8, 8), MaskTile::Levels(soft))], |l| l, 0);
         assert!(!m.edge_tiles().contains(&TileCoord::new(8, 8)), "a tile wholly above half taken for the outline's");
         assert_eq!(m.grown(4.0, Reach::Round).level_at(2100, 2100), FULL);

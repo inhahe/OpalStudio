@@ -691,7 +691,13 @@ fn modifying(ctx: &egui::Context, st: &mut AppState) {
                     ui.end_row();
                     let sides = [(Side::Inward, "Inward"), (Side::Outward, "Outward"), (Side::Centered, "Centered")];
                     choice(ui, "Falls off", "feather-side", side, &sides);
-                    choice(ui, "Falloff", "feather-falloff", falloff, &[(Falloff::Gaussian, "Gaussian"), (Falloff::Linear, "Linear")]);
+                    choice(
+                        ui,
+                        "Falloff",
+                        "feather-falloff",
+                        falloff,
+                        &[(Falloff::Gaussian, "Gaussian"), (Falloff::Linear, "Linear")],
+                    );
                 });
             }
             _ => {}

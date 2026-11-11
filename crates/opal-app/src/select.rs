@@ -644,7 +644,8 @@ mod tests {
             doc.insert(Position { parent: None, index: 1 }, Layer::new_group(g, "G"))?;
             for (i, name) in ["A", "B"].into_iter().enumerate() {
                 let id = made.layer();
-                let mut l = Layer::new_raster(id, made.object(), name, RasterImage::filled(&IRect::new(0, 0, 300, 200), red));
+                let mut l =
+                    Layer::new_raster(id, made.object(), name, RasterImage::filled(&IRect::new(0, 0, 300, 200), red));
                 l.visible = name == "A";
                 doc.insert(Position { parent: Some(g), index: i }, l)?;
                 ids[i + 1] = Some(id);

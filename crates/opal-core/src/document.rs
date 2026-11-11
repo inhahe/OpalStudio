@@ -120,7 +120,10 @@ impl Object {
                 }
                 (ObjectKind::Image(a), ObjectKind::Image(b)) => {
                     let ImageObject { image, frame, transform, sampling } = a;
-                    Arc::ptr_eq(image, &b.image) && *frame == b.frame && *transform == b.transform && *sampling == b.sampling
+                    Arc::ptr_eq(image, &b.image)
+                        && *frame == b.frame
+                        && *transform == b.transform
+                        && *sampling == b.sampling
                 }
                 _ => false,
             }

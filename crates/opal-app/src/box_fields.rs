@@ -3,8 +3,8 @@
 //! tool settings panel, and in a panel that opens from the numbers button by the box; a
 //! box of any later tool (a selection's) is meant to take the same fields.
 
-use crate::edit_box::EditBox;
 use crate::doc::DocId;
+use crate::edit_box::EditBox;
 use crate::lengths;
 use crate::number_field::NumberField;
 use crate::state::AppState;

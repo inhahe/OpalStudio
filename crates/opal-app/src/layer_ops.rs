@@ -166,7 +166,11 @@ impl AppState {
         }
         // Out of a locked group, into one, or within one, it would change what the group holds.
         let doc = d.doc();
-        let into = to.parent.and_then(|g| doc.layer(g)).into_iter().chain(to.parent.map(|g| crate::commands::groups_above(doc, g)).unwrap_or_default());
+        let into = to
+            .parent
+            .and_then(|g| doc.layer(g))
+            .into_iter()
+            .chain(to.parent.map(|g| crate::commands::groups_above(doc, g)).unwrap_or_default());
         if let Some(g) = crate::commands::groups_above(doc, id).into_iter().chain(into).find(|g| g.locked) {
             let why = format!("\"{}\" is locked: what it holds stays as it is. Unlock it first.", g.name);
             return self.message(MessageKind::Info, "Move layer", why);

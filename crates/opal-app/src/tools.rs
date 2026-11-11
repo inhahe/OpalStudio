@@ -40,7 +40,10 @@ pub struct Variants {
 impl Variants {
     /// The setting that chooses among them, in `settings` (their tool's), and the variants
     /// by id and name.
-    pub fn options(&self, settings: &crate::settings::Settings) -> Option<(&'static Def, &'static [(&'static str, &'static str)])> {
+    pub fn options(
+        &self,
+        settings: &crate::settings::Settings,
+    ) -> Option<(&'static Def, &'static [(&'static str, &'static str)])> {
         let d = settings.defs().iter().find(|d| d.key == self.key)?;
         match d.kind {
             Kind::Choice(options) => Some((d, options)),

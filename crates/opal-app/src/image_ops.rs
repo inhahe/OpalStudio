@@ -554,7 +554,10 @@ mod tests {
         assert_eq!(selected(&st), Extent::Within(IRect::new(10, 5, 35, 55)));
         // Still the rectangle it was, on the grid.
         let steps = st.active().unwrap().pixel_selection().unwrap().steps().to_vec();
-        assert!(matches!(steps[..], [Step::Shape { shape: Shape { angle: 0.0, size: [25.0, 50.0], .. }, .. }]), "{steps:?}");
+        assert!(
+            matches!(steps[..], [Step::Shape { shape: Shape { angle: 0.0, size: [25.0, 50.0], .. }, .. }]),
+            "{steps:?}"
+        );
         // Undone, back where it was.
         for _ in 0..3 {
             st.active_mut().unwrap().undo();

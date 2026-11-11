@@ -189,7 +189,8 @@ mod tests {
         })
         .unwrap();
         s.select_only(g);
-        let drag = MoveDrag { from: [5.0, 5.0], bounds: s.selected_layers_bounds(), guides: Guides::default(), shown: None };
+        let drag =
+            MoveDrag { from: [5.0, 5.0], bounds: s.selected_layers_bounds(), guides: Guides::default(), shown: None };
         // Two pixels right: within snapping distance of the dot's own edges, which must not
         // pull it back.
         let (d, _) = s.move_delta(&drag, [7.0, 5.0], false, 3.0);
@@ -211,7 +212,8 @@ mod tests {
     #[test]
     fn moves_snap_to_the_canvas_edges() {
         let (s, _) = doc_with_dot();
-        let drag = MoveDrag { from: [5.0, 5.0], bounds: s.selected_layers_bounds(), guides: Guides::default(), shown: None };
+        let drag =
+            MoveDrag { from: [5.0, 5.0], bounds: s.selected_layers_bounds(), guides: Guides::default(), shown: None };
         // The dot (5..6) dragged to x = 96.6: its right edge, at 97.6, snaps to the canvas's at 100.
         let (d, g) = s.move_delta(&drag, [96.6, 5.0], false, 3.0);
         assert_eq!(d, [94, 0]);

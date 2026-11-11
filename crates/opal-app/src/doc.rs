@@ -634,7 +634,8 @@ mod tests {
         let mut s = state();
         let id = s.active_layer().unwrap();
         let states = s.history.nodes().count();
-        let opacity = |s: &mut DocState, v: f32| s.edit_pending("Change opacity", |doc| doc.layer_mut(id).unwrap().opacity = v);
+        let opacity =
+            |s: &mut DocState, v: f32| s.edit_pending("Change opacity", |doc| doc.layer_mut(id).unwrap().opacity = v);
         opacity(&mut s, 0.4);
         opacity(&mut s, 1.0);
         s.commit_pending();

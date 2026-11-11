@@ -4,8 +4,18 @@ use crate::settings::{Def, Init, Kind, Settings};
 use opal_core::resample::{Method, Sampling};
 use opal_core::units::{ResolutionUnit, Unit};
 
-pub const SECTIONS: &[&str] =
-    &["Interface", "Canvas", "Navigation", "Selection", "History", "Memory", "Transform", "Resize", "Export", "Scripting"];
+pub const SECTIONS: &[&str] = &[
+    "Interface",
+    "Canvas",
+    "Navigation",
+    "Selection",
+    "History",
+    "Memory",
+    "Transform",
+    "Resize",
+    "Export",
+    "Scripting",
+];
 
 /// The units of length, as a setting's choices: `opal_core`'s, in their order.
 const UNITS: [(&str, &str); Unit::ALL.len()] = {

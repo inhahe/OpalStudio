@@ -174,7 +174,9 @@ impl MaskTile {
     pub fn address(&self) -> Option<usize> {
         match self {
             MaskTile::Level(_) => None,
-            MaskTile::Columns(l) | MaskTile::Rows(l) | MaskTile::Levels(l) => Some(Arc::as_ptr(l).cast::<u16>() as usize),
+            MaskTile::Columns(l) | MaskTile::Rows(l) | MaskTile::Levels(l) => {
+                Some(Arc::as_ptr(l).cast::<u16>() as usize)
+            }
         }
     }
 
@@ -182,7 +184,9 @@ impl MaskTile {
     fn levels(&self) -> Cow<'_, [u16]> {
         match self {
             MaskTile::Levels(l) => Cow::Borrowed(l),
-            _ => Cow::Owned((0..TILE_SIZE).flat_map(|y| (0..TILE_SIZE).map(move |x| (x, y))).map(|(x, y)| self.get(x, y)).collect()),
+            _ => Cow::Owned(
+                (0..TILE_SIZE).flat_map(|y| (0..TILE_SIZE).map(move |x| (x, y))).map(|(x, y)| self.get(x, y)).collect(),
+            ),
         }
     }
 
@@ -698,7 +702,8 @@ impl Mask {
         let rows: Vec<(i32, Vec<Run>)> = (first.y..=last.y)
             .into_par_iter()
             .map(|y| {
-                let tiles: Vec<MaskTile> = (first.x..=last.x).into_par_iter().map(|x| tile(TileCoord::new(x, y))).collect();
+                let tiles: Vec<MaskTile> =
+                    (first.x..=last.x).into_par_iter().map(|x| tile(TileCoord::new(x, y))).collect();
                 let mut row = Vec::new();
                 for (x, t) in (first.x..).zip(tiles) {
                     push(&mut row, x, x + 1, t, self.outside);
@@ -866,8 +871,8 @@ fn edge_tile(shape: &impl Coverage, c: TileCoord) -> MaskTile {
             for y in by..by + BLOCK {
                 let row = &mut levels[(y * TILE_SIZE) as usize..][..SIDE];
                 for x in bx..bx + BLOCK {
-                    row[x as usize] =
-                        fill.unwrap_or_else(|| level(shape.at(x0 + f64::from(x - bx) + 0.5, y0 + f64::from(y - by) + 0.5)));
+                    row[x as usize] = fill
+                        .unwrap_or_else(|| level(shape.at(x0 + f64::from(x - bx) + 0.5, y0 + f64::from(y - by) + 0.5)));
                 }
             }
         }
@@ -1418,7 +1423,8 @@ mod tests {
     #[test]
     fn masks_alike_are_kept_alike_however_they_were_made() {
         let whole = Mask::of(&rect(0.0, 0.0, 1024.0, 512.0));
-        let halves = Mask::of(&rect(0.0, 0.0, 512.0, 512.0)).combined(&Mask::of(&rect(512.0, 0.0, 1024.0, 512.0)), Combine::Add);
+        let halves =
+            Mask::of(&rect(0.0, 0.0, 512.0, 512.0)).combined(&Mask::of(&rect(512.0, 0.0, 1024.0, 512.0)), Combine::Add);
         assert_eq!(halves, whole);
         assert_eq!(whole.rows.values().map(Vec::len).collect::<Vec<_>>(), [1, 1], "one run a row");
         // Taken away again, nothing, kept as nothing.
@@ -1427,7 +1433,8 @@ mod tests {
 
     #[test]
     fn an_ellipse_s_pixels_told_without_the_bisection_are_covered_as_much_as_with_it() {
-        for (size, angle, smooth) in [([40.0, 40.0], 0.0, true), ([300.0, 41.0], 30.0, true), ([90.0, 13.0], -70.0, false)]
+        for (size, angle, smooth) in
+            [([40.0, 40.0], 0.0, true), ([300.0, 41.0], 30.0, true), ([90.0, 13.0], -70.0, false)]
         {
             let e = Shape { kind: ShapeKind::Ellipse, center: [3.25, -7.5], size, angle, smooth };
             for y in -160..160 {

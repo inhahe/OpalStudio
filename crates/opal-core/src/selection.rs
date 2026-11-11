@@ -73,7 +73,9 @@ impl Step {
         Some(match self {
             Step::Shape { shape, combine } => Step::Shape { shape: shape.transformed(m)?, combine: *combine },
             Step::Invert => Step::Invert,
-            Step::Grow { by, corners } => Step::Grow { by: distance(*by, *corners != Reach::Round)?, corners: *corners },
+            Step::Grow { by, corners } => {
+                Step::Grow { by: distance(*by, *corners != Reach::Round)?, corners: *corners }
+            }
             Step::Feather { width, side, falloff } => {
                 Step::Feather { width: distance(*width, false)?, side: *side, falloff: *falloff }
             }
@@ -104,7 +106,8 @@ impl Step {
 /// turn or flip times an even scale).
 fn even_scale(m: &Affine) -> Option<f64> {
     let (across, down) = (m.a.hypot(m.b), m.c.hypot(m.d));
-    let even = (across - down).abs() <= 1e-9 * across.max(down) && (m.a * m.c + m.b * m.d).abs() <= 1e-9 * across * down;
+    let even =
+        (across - down).abs() <= 1e-9 * across.max(down) && (m.a * m.c + m.b * m.d).abs() <= 1e-9 * across * down;
     even.then_some(across)
 }
 
@@ -271,8 +274,12 @@ mod tests {
     #[test]
     fn a_selection_is_carried_through_a_transform_shape_by_shape_or_as_its_mask() {
         use crate::mask::{Extent, HALF};
-        let a = Selection::new(Step::Shape { shape: rect(0.0, 0.0, 300.0, 100.0), combine: Combine::Replace })
-            .then(Step::Shape { shape: Shape { kind: ShapeKind::Ellipse, ..rect(400.0, 0.0, 500.0, 50.0) }, combine: Combine::Add });
+        let a = Selection::new(Step::Shape { shape: rect(0.0, 0.0, 300.0, 100.0), combine: Combine::Replace }).then(
+            Step::Shape {
+                shape: Shape { kind: ShapeKind::Ellipse, ..rect(400.0, 0.0, 500.0, 50.0) },
+                combine: Combine::Add,
+            },
+        );
         // A quarter turn clockwise about the origin: x goes to -y, y to x.
         let quarter = Affine::rotate(std::f64::consts::FRAC_PI_2);
         let b = a.transformed(&quarter);
@@ -286,9 +293,15 @@ mod tests {
         assert_eq!(c.mask().extent(), Extent::Within(crate::geom::IRect::new(0, 0, 1000, 100)));
         // Turned by 30° and then stretched, the rectangle is no longer one: what was selected
         // up to it is carried as its mask; the ellipse after it is still a shape.
-        let turned = Selection::new(Step::Shape { shape: Shape { angle: 30.0, ..rect(0.0, 0.0, 300.0, 100.0) }, combine: Combine::Replace })
-            .then(Step::Shape { shape: Shape { kind: ShapeKind::Ellipse, ..rect(400.0, 0.0, 500.0, 50.0) }, combine: Combine::Add })
-            .then(Step::Invert);
+        let turned = Selection::new(Step::Shape {
+            shape: Shape { angle: 30.0, ..rect(0.0, 0.0, 300.0, 100.0) },
+            combine: Combine::Replace,
+        })
+        .then(Step::Shape {
+            shape: Shape { kind: ShapeKind::Ellipse, ..rect(400.0, 0.0, 500.0, 50.0) },
+            combine: Combine::Add,
+        })
+        .then(Step::Invert);
         let stretch = Affine::scale(2.0, 1.0);
         let d = turned.transformed(&stretch);
         assert!(matches!(d.steps(), [Step::Mask { .. }, Step::Shape { .. }, Step::Invert]), "{:?}", d.steps());
@@ -300,7 +313,8 @@ mod tests {
         let (s30, c30) = 30f64.to_radians().sin_cos();
         let corner = stretch.apply([150.0 - 150.0 * c30 + 50.0 * s30, 50.0 - 150.0 * s30 - 50.0 * c30]);
         let lines = d.mask().outline(HALF);
-        let near = lines.iter().flatten().map(|p| (p[0] - corner[0]).hypot(p[1] - corner[1])).fold(f64::INFINITY, f64::min);
+        let near =
+            lines.iter().flatten().map(|p| (p[0] - corner[0]).hypot(p[1] - corner[1])).fold(f64::INFINITY, f64::min);
         assert!(near < 2.0, "the nearest point of the outline is {near} from the corner {corner:?}");
         // A turned ellipse stretched is another ellipse: every point of its edge, stretched,
         // is on the edge of the one it is carried to.

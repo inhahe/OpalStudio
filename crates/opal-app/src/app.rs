@@ -244,9 +244,7 @@ impl OpalApp {
                 || i.events.iter().any(|e| {
                     matches!(
                         e,
-                        Event::Key { pressed: true, .. }
-                            | Event::PointerButton { .. }
-                            | Event::MouseWheel { .. }
+                        Event::Key { pressed: true, .. } | Event::PointerButton { .. } | Event::MouseWheel { .. }
                     )
                 });
             (i.modifiers.alt, other)
@@ -619,7 +617,8 @@ impl OpalApp {
         (st.new_image.is_some(), st.export.is_some(), st.prefs_open, st.about_open, st.gallery_open, &st.help)
             .hash(&mut h);
         (st.assistant_open, &st.mcp_http).hash(&mut h);
-        (st.resize_image.is_some(), st.resize_canvas.is_some(), st.rotate_by.is_some(), st.modifying.is_some()).hash(&mut h);
+        (st.resize_image.is_some(), st.resize_canvas.is_some(), st.rotate_by.is_some(), st.modifying.is_some())
+            .hash(&mut h);
         st.reading.is_some().hash(&mut h);
         st.writer.busy().hash(&mut h);
         st.notice.as_ref().map(|n| &n.0).hash(&mut h);

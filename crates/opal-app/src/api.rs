@@ -552,9 +552,26 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             FROM_ANCHOR,
             UNIT,
         ],
-        Preferences | Exit | RunScript | ConnectAssistant | ZoomIn | ZoomOut | ZoomFit | Zoom100 | ToggleOffCanvas
-        | ToggleRulers | ToggleSelectionOverlay | ToggleTheme | ToggleRibbon | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts
-        | About | WidgetGallery => return None,
+        Preferences
+        | Exit
+        | RunScript
+        | ConnectAssistant
+        | ZoomIn
+        | ZoomOut
+        | ZoomFit
+        | Zoom100
+        | ToggleOffCanvas
+        | ToggleRulers
+        | ToggleSelectionOverlay
+        | ToggleTheme
+        | ToggleRibbon
+        | CycleToolsPlace
+        | ResetPanels
+        | Search
+        | Help
+        | Shortcuts
+        | About
+        | WidgetGallery => return None,
     })
 }
 
@@ -1937,7 +1954,11 @@ impl AppState {
                 self.next_answer += 1;
                 let n = self.next_answer;
                 let all = crate::memory::Allowance::now();
-                if self.copy_within(cmd == Cmd::CopyMerged, all, Some(n), ctx) { Reply::Later(n) } else { now(Ok(json!({}))) }
+                if self.copy_within(cmd == Cmd::CopyMerged, all, Some(n), ctx) {
+                    Reply::Later(n)
+                } else {
+                    now(Ok(json!({})))
+                }
             }
             Cmd::Cut => {
                 self.next_answer += 1;
@@ -3133,7 +3154,8 @@ mod tests {
         assert_eq!(s["steps"][1], json!({ "step": "grow", "by": 10.0, "corners": "square" }));
         let s = now(&mut st, "grow_selection", json!({ "by": -20 })).unwrap();
         assert_eq!(s["bounds"], json!([110, 60, 80, 80]));
-        let s = now(&mut st, "feather_selection", json!({ "width": 8, "side": "outward", "falloff": "linear" })).unwrap();
+        let s =
+            now(&mut st, "feather_selection", json!({ "width": 8, "side": "outward", "falloff": "linear" })).unwrap();
         // Falling off outward over 8: pixel 102, whose middle is 7.5 out of the side at 110,
         // still a little selected; 101 not.
         assert_eq!(s["bounds"], json!([102, 52, 96, 96]), "{s}");
@@ -3183,7 +3205,8 @@ mod tests {
         assert_eq!(cut(&mut st).unwrap(), json!({ "width": 50, "height": 100 }));
         assert_eq!([alpha(&st, 275, 100), alpha(&st, 350, 100)], [0.0, 1.0], "erased what it did not copy");
         // A copy the clipboard refuses: the cut is taken back, and cannot be redone.
-        st.clipboard = Box::new(TestClipboard { refuses: Some("The clipboard is in use.".into()), ..Default::default() });
+        st.clipboard =
+            Box::new(TestClipboard { refuses: Some("The clipboard is in use.".into()), ..Default::default() });
         select(&mut st, [0.0, 0.0, 100.0, 100.0]);
         let said = cut(&mut st).unwrap_err();
         assert!(said.contains("in use, so nothing was cut"), "{said}");
