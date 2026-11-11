@@ -429,7 +429,8 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
     for l in file.layers {
         layers.push(Arc::new(build_layer(l, &tiles, path)?));
     }
-    let doc = Document { canvas: file.canvas, resolution: file.resolution, layers };
+    // Selections are not kept in the file (a later version of it will keep their recipes).
+    let doc = Document { canvas: file.canvas, resolution: file.resolution, layers, selection: None };
     let mut ids = IdGen::starting_at(file.next_id);
     ids.reserve_above(&doc);
     Ok(Loaded { doc, ids })

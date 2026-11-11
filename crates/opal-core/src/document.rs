@@ -421,11 +421,18 @@ pub struct Document {
     pub resolution: f64,
     /// Top-level layers, bottom to top.
     pub layers: Vec<Arc<Layer>>,
+    /// What is selected, if anything: operations limited to it act through its mask.
+    pub selection: Option<Arc<crate::selection::Selection>>,
 }
 
 impl Document {
     pub fn new(width: u32, height: u32) -> Document {
-        Document { canvas: Canvas::sized(width, height), resolution: crate::units::DEFAULT_PPI, layers: Vec::new() }
+        Document {
+            canvas: Canvas::sized(width, height),
+            resolution: crate::units::DEFAULT_PPI,
+            layers: Vec::new(),
+            selection: None,
+        }
     }
 
     /// Visits every layer depth first, bottom to top, with its depth (0 for top level).

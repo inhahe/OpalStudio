@@ -6,6 +6,7 @@
 //! (see [`History::set_budget`]), the oldest states are dropped.
 
 use crate::document::{Document, Layer, LayerContent, ObjectKind};
+use crate::mask::MaskTile;
 use crate::raster::RasterImage;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -446,7 +447,8 @@ impl History {
 /// Tiles are counted by the chunks images keep them in (see `RasterImage::chunks`), which
 /// an image shares with its edited copy but for the chunks the edit changed: so counting a
 /// new state walks the tiles of the chunks new to the account alone, not every tile of each
-/// layer it changed.
+/// layer it changed. A state's selection holds the tiles of its mask (those with levels of
+/// their own), counted with the layers' tiles.
 #[derive(Clone, Debug, Default)]
 struct Usage {
     /// Each distinct layer the states hold: in how many states, its chunks and its images.
@@ -458,6 +460,8 @@ struct Usage {
     tiles: Counted<u64>,
     /// Each distinct image: in how many of those layers.
     images: Counted<Arc<RasterImage>>,
+    /// Each distinct selection the states hold: in how many states, and its mask's tiles.
+    selections: HashMap<usize, HeldSelection>,
     /// The memory those tiles take.
     tile_bytes: u64,
     /// The current state's layers, and their chunks, tiles and images, each with how many
@@ -467,6 +471,15 @@ struct Usage {
     current: Counted<u64>,
     current_images: Counted<()>,
     current_bytes: u64,
+    /// The current state's selection, if it has one.
+    current_selection: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct HeldSelection {
+    states: usize,
+    /// Its mask's tiles with levels of their own, each once, with the memory each takes.
+    tiles: Vec<(usize, u64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -541,6 +554,19 @@ impl Usage {
             });
             e.states += 1;
         }
+        if let Some(s) = &doc.selection {
+            let Usage { selections, tiles, tile_bytes, .. } = self;
+            let e = selections.entry(address(s)).or_insert_with(|| {
+                let held = mask_tiles(s);
+                for &(t, b) in &held {
+                    if tiles.add(t, || b) {
+                        *tile_bytes += b;
+                    }
+                }
+                HeldSelection { states: 0, tiles: held }
+            });
+            e.states += 1;
+        }
     }
 
     /// Takes away what a dropped state's document alone held.
@@ -563,6 +589,19 @@ impl Usage {
             held.images.iter().for_each(|i| {
                 self.images.remove(address(i));
             });
+        }
+        if let Some(s) = &doc.selection {
+            let key = address(s);
+            let e = self.selections.get_mut(&key).expect("counted");
+            e.states -= 1;
+            if e.states == 0 {
+                let held = self.selections.remove(&key).expect("counted");
+                for (t, _) in held.tiles {
+                    if let Some(b) = self.tiles.remove(t) {
+                        self.tile_bytes -= b;
+                    }
+                }
+            }
         }
     }
 
@@ -603,6 +642,25 @@ impl Usage {
             });
         }
         *current_layers = now;
+        let now = doc.selection.as_ref().map(address);
+        if now != self.current_selection {
+            let Usage { selections, current, current_bytes, .. } = self;
+            if let Some(k) = self.current_selection {
+                for &(t, _) in &selections[&k].tiles {
+                    if let Some(b) = current.remove(t) {
+                        *current_bytes -= b;
+                    }
+                }
+            }
+            if let Some(k) = now {
+                for &(t, b) in &selections[&k].tiles {
+                    if current.add(t, || b) {
+                        *current_bytes += b;
+                    }
+                }
+            }
+            self.current_selection = now;
+        }
     }
 
     /// The bytes the current state does not hold: tiles, and the reduced copies of images
@@ -648,6 +706,22 @@ fn images_of(l: &Layer) -> Vec<Arc<RasterImage>> {
     images.sort_unstable_by_key(address);
     images.dedup_by_key(|i| address(i));
     images
+}
+
+/// The tiles of a selection's mask with levels of their own (by address), with the memory
+/// each takes, each once.
+fn mask_tiles(s: &crate::selection::Selection) -> Vec<(usize, u64)> {
+    let mut out: Vec<(usize, u64)> = s
+        .mask()
+        .tiles()
+        .filter_map(|(_, t)| match t {
+            MaskTile::Levels(l) => Some((Arc::as_ptr(l).cast::<u16>() as usize, t.bytes())),
+            MaskTile::Level(_) => None,
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// The tiles of a chunk (by address) with the memory each takes, each once.
@@ -915,7 +989,12 @@ mod tests {
         let images =
             |d: &Document| -> Vec<Arc<RasterImage>> { layers_of(d).into_iter().flat_map(|l| images_of(l)).collect() };
         let tiles = |d: &Document| -> HashMap<usize, u64> {
-            images(d).iter().flat_map(|i| i.tiles().map(|(_, t)| (address(t), t.bytes())).collect::<Vec<_>>()).collect()
+            let mut out: HashMap<usize, u64> = images(d)
+                .iter()
+                .flat_map(|i| i.tiles().map(|(_, t)| (address(t), t.bytes())).collect::<Vec<_>>())
+                .collect();
+            out.extend(d.selection.iter().flat_map(|s| mask_tiles(s)));
+            out
         };
         let current = tiles(h.doc());
         let current_images: HashSet<usize> = images(h.doc()).iter().map(address).collect();
@@ -928,6 +1007,37 @@ mod tests {
             );
         }
         others.values().sum::<u64>() + other_images.values().map(|i| i.reduced_bytes()).sum::<u64>()
+    }
+
+    #[test]
+    fn a_selection_s_mask_is_counted_with_the_state_that_holds_it() {
+        use crate::mask::{Combine, Shape, ShapeKind};
+        use crate::selection::{Selection, Step};
+        let shape = |x: f64| Shape {
+            kind: ShapeKind::Ellipse,
+            center: [x, 300.0],
+            size: [400.0, 300.0],
+            angle: 0.0,
+            smooth: true,
+        };
+        let mut h = History::new(Document::new(1000, 1000), "new");
+        let mut d = h.doc().clone();
+        let first = Selection::new(Step::Shape { shape: shape(300.0), combine: Combine::Replace });
+        let bytes = first.mask().bytes();
+        assert!(bytes > 0);
+        d.selection = Some(Arc::new(first.clone()));
+        h.commit(d.clone(), "Select");
+        assert_eq!(h.memory(), 0, "the current state's selection was counted");
+        assert!(counted_right(&h));
+        // Another selection current: the first's tiles count, as no other state shares them.
+        d.selection = Some(Arc::new(first.then(Step::Invert)));
+        h.commit(d, "Invert");
+        assert_eq!(h.memory(), bytes);
+        assert!(counted_right(&h));
+        // Back to it: the inverted one's count instead.
+        h.undo();
+        assert!(counted_right(&h));
+        assert_eq!(h.memory(), h.node(h.redo_target().unwrap()).doc.selection.as_ref().unwrap().mask().bytes());
     }
 
     #[test]

@@ -3,9 +3,11 @@
 //! - [`tile`]: 256×256 tiles of premultiplied linear-light RGBA in half floats.
 //! - [`raster`]: sparse, unbounded bitmaps made of tiles that are copied only when changed.
 //! - [`document`]: the canvas and its tree of layers.
+//! - [`mask`]: selections' masks, the shapes they are made of, and the blend through them.
 //! - [`history`]: the undo tree, whose nodes are cheap snapshots of the document.
 //! - [`composite`]: flattening layers into the projection, the cached image that is shown.
 //! - [`resample`]: drawing a bitmap through a transform (image objects, resizing).
+//! - [`selection`]: what is selected: the steps that made it, and the mask they come to.
 //! - [`geom`]: rectangles and affine transforms.
 //! - [`curve`]: editable curves, used by settings throughout the editor.
 //! - [`units`]: units of length and the resolution that converts them to pixels.
@@ -19,8 +21,10 @@ pub mod document;
 pub mod expr;
 pub mod geom;
 pub mod history;
+pub mod mask;
 pub mod raster;
 pub mod resample;
+pub mod selection;
 pub mod store;
 pub mod tile;
 pub mod units;

@@ -290,6 +290,26 @@ and soft (feathered) selections work for all operations without per-operation co
 marching ants show where the mask crosses a threshold (default 0.5, adjustable); a view
 option shows the mask as a red overlay.
 
+- **Storage** (`opal_core::mask`). The mask covers the whole plane, as layers do: 16-bit
+  levels in 256×256 tiles on the images' grid, sparse. A tile not kept has the mask's
+  *outside* level (0, or 1 once inverted, so that a selection can be the plane but for a
+  hole), and a tile all of one level is kept as that level alone, so a selection across a
+  huge canvas costs its edges. Copies share tiles until one changes; history counts a
+  state's mask tiles with its layers' tiles.
+- **Shapes** (rectangles and ellipses, turned or not) give each pixel the part of it they
+  cover, worked out from the exact distance to their edge (an ellipse's by bisection), or,
+  with smoothing off, all or nothing by the pixel's middle. Tiles wholly inside or outside
+  are told from their middles' distance, so only the tiles the edge crosses are worked out
+  pixel by pixel.
+- **Combining** soft masks: *add* keeps the greater level, *intersect* the lesser, and
+  *subtract* the lesser of the level before and the opposite of the new one; so adding a
+  selection to itself changes nothing.
+- **The outline** (the marching ants' path) runs along the pixels' edges, round those at the
+  threshold or above, as Photoshop's and GIMP's do: at high zoom, where pixels are sharp
+  squares, it follows them. Pixels meeting only at a corner have lines of their own.
+- `.opal` files do not keep selections yet; a later version of the format keeps their
+  recipes.
+
 ### The recipe
 
 A selection is kept as an ordered list of steps, not only as its final mask:
@@ -304,8 +324,10 @@ stored as Bézier curves; makers that produce pixels (AI, color range, painted m
 their settings and their resulting mask. AI steps cache their result and rerun only when
 their own inputs change. Users who never open the panel just make selections as usual.
 
-A selection maker used while a selection exists works within it (intersect). AI selection
-inside a selection runs the model on that crop.
+The makers that look at the pixels (AI, color range, magic wand) work within a selection
+that exists (intersect); AI selection inside a selection runs the model on that crop. The
+shape makers (rectangle, ellipse, outline) combine as their mode says, replacing it by
+default.
 
 ### Feather
 
