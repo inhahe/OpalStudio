@@ -13,6 +13,7 @@
 
 use crate::geom::{Affine, IRect};
 use crate::mask::{Class, Coverage, FULL, MASK_REACH, MaskTile, world};
+use crate::modify::{Bounds, Halt, UNBOUNDED};
 use crate::tile::{TILE_PIXELS, TILE_SIZE, TileCoord};
 use std::collections::HashMap;
 
@@ -83,18 +84,35 @@ impl Outline {
 
     /// What it covers, to make a mask of (`Mask::of`).
     pub fn filled(&self) -> Filled {
-        Filled::of(&self.polygon(), self.smooth)
+        self.filled_within(UNBOUNDED).expect("unbounded")
+    }
+
+    /// [`filled`](Self::filled), unless `bounds` hold it back: the points its curves are
+    /// flattened to, then its edges and their lists by row of tiles, admitted before they are
+    /// made. What it then holds is [`Filled::bytes`], to give back once its mask is made.
+    pub fn filled_within(&self, bounds: Bounds) -> Result<Filled, Halt> {
+        let points = (flattened_len(self.start, &self.segments) * std::mem::size_of::<[f64; 2]>()) as u64;
+        if !(bounds.admit)(points) {
+            return Err(Halt::NoMemory);
+        }
+        let polygon = self.polygon();
+        let made = if (bounds.admit)(Filled::need(&polygon)) {
+            Ok(Filled::of(&polygon, self.smooth))
+        } else {
+            Err(Halt::NoMemory)
+        };
+        (bounds.give_back)(points);
+        made
     }
 }
 
-/// The points of the line from `start` along `segments`: their ends, and their curves
-/// flattened to within [`TOLERANCE`]; to fewer points, each curve in proportion, if together
-/// they would come to more than [`MOST_FLATTENED`].
-pub fn flattened(start: [f64; 2], segments: &[Segment]) -> Vec<[f64; 2]> {
-    // Enough pieces for each curve that each strays at most the tolerance: a cubic's
-    // distance from its chord is at most 3/4 of its control polygon's second differences.
+/// How many pieces each of `segments` (from `start`) is flattened to before the share
+/// [`MOST_FLATTENED`] leaves: a line one, a curve enough that each strays at most
+/// [`TOLERANCE`] (a cubic's distance from its chord is at most 3/4 of its control polygon's
+/// second differences), up to [`MOST_POINTS`].
+fn pieces(start: [f64; 2], segments: &[Segment]) -> Vec<usize> {
     let mut at = start;
-    let pieces: Vec<usize> = segments
+    segments
         .iter()
         .map(|s| {
             let n = match *s {
@@ -110,7 +128,19 @@ pub fn flattened(start: [f64; 2], segments: &[Segment]) -> Vec<[f64; 2]> {
             at = s.end();
             n
         })
-        .collect();
+        .collect()
+}
+
+/// How many points [`flattened`] makes of `segments` from `start`, at most.
+fn flattened_len(start: [f64; 2], segments: &[Segment]) -> usize {
+    pieces(start, segments).iter().sum::<usize>().min(MOST_FLATTENED + segments.len()) + 1
+}
+
+/// The points of the line from `start` along `segments`: their ends, and their curves
+/// flattened to within [`TOLERANCE`]; to fewer points, each curve in proportion, if together
+/// they would come to more than [`MOST_FLATTENED`].
+pub fn flattened(start: [f64; 2], segments: &[Segment]) -> Vec<[f64; 2]> {
+    let pieces = pieces(start, segments);
     let all: usize = pieces.iter().sum();
     let share = if all > MOST_FLATTENED { MOST_FLATTENED as f64 / all as f64 } else { 1.0 };
     let mut points = Vec::with_capacity(all.min(MOST_FLATTENED + segments.len()) + 1);
@@ -186,6 +216,18 @@ fn tile_of(v: f64) -> i32 {
     (v / f64::from(TILE_SIZE)).floor().clamp(f64::from(-MASK_REACH - 1), f64::from(MASK_REACH)) as i32
 }
 
+/// How many rows of tiles within the mask's reach an edge from height `y0` to `y1` is listed in.
+fn rows_spanned(y0: f64, y1: f64) -> u64 {
+    let (first, last) = (tile_of(y0.min(y1)).max(-MASK_REACH), tile_of(y0.max(y1)).min(MASK_REACH - 1));
+    u64::try_from(i64::from(last) - i64::from(first) + 1).unwrap_or(0)
+}
+
+/// The bytes `edges` edges take, listed `entries` times by row of tiles (twice what a list's
+/// entry takes, for the room lists keep spare).
+fn held(edges: u64, entries: u64) -> u64 {
+    edges * std::mem::size_of::<Edge>() as u64 + entries * 2 * std::mem::size_of::<usize>() as u64
+}
+
 /// An edge in a tile's coordinates, from its top to its bottom, with which way it winds (+1
 /// where the outline runs down it, -1 where up).
 type Down = ([f64; 2], [f64; 2], i32);
@@ -216,6 +258,19 @@ impl Filled {
             IRect::new(x0.floor() as i64, y0.floor() as i64, x1.ceil() as i64, y1.ceil() as i64).intersect(&world())
         };
         Filled { edges, rows, bounds, smooth }
+    }
+
+    /// The bytes a `Filled` of the polygon `points` holds (its edges, and their lists by row of
+    /// tiles, with room to spare), worked out without making it.
+    fn need(points: &[[f64; 2]]) -> u64 {
+        let n = points.len();
+        let entries: u64 = (0..n).map(|i| rows_spanned(points[i][1], points[(i + 1) % n][1])).sum();
+        held(n as u64, entries)
+    }
+
+    /// The bytes it holds (as [`need`](Self::need) counts them).
+    pub fn bytes(&self) -> u64 {
+        held(self.edges.len() as u64, self.rows.values().map(|r| r.len() as u64).sum())
     }
 
     /// The winding number of the point `p`: how many times the outline goes round it.
@@ -727,6 +782,24 @@ mod tests {
                 (2907, 4000, Class::Outside)
             ]
         );
+    }
+
+    #[test]
+    fn an_outline_s_points_and_their_lists_are_admitted_before_they_are_made() {
+        use crate::modify::{Bounds, Halt, UNBOUNDED};
+        // A thousand sides zigzagging across a million pixels, each listed in 3,900 rows of
+        // tiles: some 4 million entries, refused within a megabyte, before any is made.
+        let mut zigzag = polygon(&[[0.0, 0.0]], true);
+        for i in 1..=1000 {
+            zigzag.segments.push(Segment::Line { to: [f64::from(i), if i % 2 == 1 { 1e6 } else { 0.0 }] });
+        }
+        let megabyte = |n: u64| n <= 1 << 20;
+        let refused = zigzag.filled_within(Bounds { admit: &megabyte, ..UNBOUNDED });
+        assert_eq!(refused.err(), Some(Halt::NoMemory));
+        // What it holds once made is what was counted.
+        let f = zigzag.filled();
+        assert_eq!(f.bytes(), Filled::need(&zigzag.polygon()));
+        assert!(f.bytes() > 32 << 20, "{}", f.bytes());
     }
 
     #[test]

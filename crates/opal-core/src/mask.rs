@@ -621,18 +621,29 @@ impl Mask {
 
     /// The mask of `shape`: each pixel's level, how much of it the shape covers.
     pub fn of(shape: &impl Coverage) -> Mask {
-        let bounds = shape.bounds().intersect(&world());
-        if bounds.is_empty() {
-            return Mask::none();
+        Mask::of_within(shape, crate::modify::UNBOUNDED).expect("unbounded")
+    }
+
+    /// [`of`](Self::of), unless `bounds` hold it back: the tiles its edge crosses along each
+    /// row are admitted at the most a tile can take before they are worked out, and what they
+    /// come to taking less is given back.
+    pub fn of_within(shape: &impl Coverage, bounds: crate::modify::Bounds) -> Result<Mask, crate::modify::Halt> {
+        let area = shape.bounds().intersect(&world());
+        if area.is_empty() {
+            return Ok(Mask::none());
         }
-        let first = TileCoord::containing(bounds.x0, bounds.y0);
-        let last = TileCoord::containing(bounds.x1 - 1, bounds.y1 - 1);
-        let rows: Vec<(i32, Vec<Run>)> = (first.y..=last.y)
+        let first = TileCoord::containing(area.x0, area.y0);
+        let last = TileCoord::containing(area.x1 - 1, area.y1 - 1);
+        let rows: Vec<(i32, (Vec<Run>, u64))> = (first.y..=last.y)
             .into_par_iter()
-            .map(|y| (y, row_of(shape, y, first.x, last.x + 1)))
-            .filter(|(_, r)| !r.is_empty())
-            .collect();
-        Mask::shared(rows, 0)
+            .map(|y| row_of(shape, y, first.x, last.x + 1, bounds).map(|r| (y, r)))
+            .filter(|r| !matches!(r, Ok((_, (row, _))) if row.is_empty()))
+            .collect::<Result<_, _>>()?;
+        let kept: u64 = rows.iter().map(|(_, (_, k))| k).sum();
+        let mask = Mask::shared(rows.into_iter().map(|(y, (row, _))| (y, row)).collect(), 0);
+        // Alike tiles share their levels: what that spares is given back too.
+        (bounds.give_back)(kept.saturating_sub(mask.bytes()));
+        Ok(mask)
     }
 
     /// The opposite: selected where it is not, and the other way round.
@@ -1020,9 +1031,28 @@ fn class(shape: &impl Coverage, cx: f64, cy: f64, side: f64) -> Class {
     }
 }
 
-/// Row `y` of tiles, those from `x0` to `x1`, of the mask of `shape`.
-fn row_of(shape: &impl Coverage, y: i32, x0: i32, x1: i32) -> Vec<Run> {
+/// Row `y` of tiles, those from `x0` to `x1`, of the mask of `shape`, with the bytes it holds
+/// (what `bounds` admitted for it and kept), unless `bounds` hold it back (see
+/// [`Mask::of_within`]).
+fn row_of(
+    shape: &impl Coverage,
+    y: i32,
+    x0: i32,
+    x1: i32,
+    bounds: crate::modify::Bounds,
+) -> Result<(Vec<Run>, u64), crate::modify::Halt> {
+    use crate::modify::Halt;
+    if (bounds.stop)() {
+        return Err(Halt::Stopped);
+    }
     let told = shape.row(y, x0, x1).unwrap_or_else(|| tile_by_tile(shape, y, x0, x1));
+    // Its edge tiles at a level a pixel, its runs one a tile told apart, and the row itself.
+    let edges = told.iter().filter(|t| t.2 == Class::Edge).count() as u64;
+    let runs = |n: usize| (n * std::mem::size_of::<Run>() + std::mem::size_of::<(i32, Vec<Run>)>()) as u64;
+    let most = edges * (TILE_PIXELS * std::mem::size_of::<u16>()) as u64 + runs(told.len());
+    if !(bounds.admit)(most) {
+        return Err(Halt::NoMemory);
+    }
     let tiles: Vec<(i32, i32, MaskTile)> = told
         .into_par_iter()
         .filter_map(|(a, b, c)| match c {
@@ -1034,11 +1064,14 @@ fn row_of(shape: &impl Coverage, y: i32, x0: i32, x1: i32) -> Vec<Run> {
             }
         })
         .collect();
+    let levels: u64 = tiles.iter().map(|(_, _, t)| t.bytes()).sum();
     let mut row = Vec::new();
     for (a, b, t) in tiles {
         push(&mut row, a, b, t, 0);
     }
-    row
+    let kept = if row.is_empty() { 0 } else { levels + runs(row.len()) };
+    (bounds.give_back)(most.saturating_sub(kept));
+    Ok((row, kept))
 }
 
 /// Row `y` of tiles, those from `x0` to `x1`, told apart tile by tile (as `Coverage::row`
@@ -1546,6 +1579,44 @@ fn ellipse_distance(x: f64, y: f64, a: f64, b: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shape_s_mask_is_made_within_the_memory_admitted() {
+        use crate::modify::{Bounds, Halt, UNBOUNDED};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // A turned ellipse 20,000 pixels across: its edge's tiles each keep a level a pixel.
+        let e = Shape {
+            kind: ShapeKind::Ellipse,
+            center: [0.0, 0.0],
+            size: [20_000.0, 9_000.0],
+            angle: 30.0,
+            smooth: true,
+        };
+        let taken = AtomicU64::new(0);
+        let (admit, give_back) = (
+            |n: u64| {
+                taken.fetch_add(n, Ordering::Relaxed);
+                true
+            },
+            |n: u64| {
+                taken.fetch_sub(n, Ordering::Relaxed);
+            },
+        );
+        let m = Mask::of_within(&e, Bounds { admit: &admit, give_back: &give_back, ..UNBOUNDED }).unwrap();
+        // All it holds was admitted first (as much more as alike tiles share).
+        assert!(
+            taken.load(Ordering::Relaxed) >= m.bytes(),
+            "{} admitted for {}",
+            taken.load(Ordering::Relaxed),
+            m.bytes()
+        );
+        assert!(m.bytes() > 10 << 20, "{}", m.bytes());
+        // Short of that, refused, not made.
+        let short = |n: u64| n < 1 << 20 && taken.fetch_add(n, Ordering::Relaxed) < 4 << 20;
+        taken.store(0, Ordering::Relaxed);
+        let refused = Mask::of_within(&e, Bounds { admit: &short, ..UNBOUNDED });
+        assert_eq!(refused.err(), Some(Halt::NoMemory));
+    }
 
     #[test]
     fn no_mask_keeps_a_tile_past_its_reach_so_every_one_is_read_back_from_bytes() {

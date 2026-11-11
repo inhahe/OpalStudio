@@ -307,7 +307,12 @@ red, a preference.
   million pixels either way, the pixels past that at its level outside): every mask is cut
   to it as it is made, so that every one can be written to a file and read back, and what
   makes a mask of a shape or outline, or carries one, works nothing out past it, however far
-  the shape reaches. Copies share tiles until one changes, and combining keeps sharing a
+  the shape reaches. A shape's or an outline's mask is made within the memory free: each row
+  of tiles admits its edge tiles, at a level a pixel, before they are worked out (giving back
+  what they come to less), and an outline its flattened points and its edges' lists by row
+  of tiles before making them (`Mask::of_within`, `Outline::filled_within`); a tool's or a
+  script's new selection past that is refused, saying so (`DocState::select_with`), and one
+  worked out again in an edit (a step changed, the selection carried) ends the edit so. Copies share tiles until one changes, and combining keeps sharing a
   tile the other mask leaves as it is (adding nothing to it, say); history counts a state's
   masks (the one its selection comes to, and those its mask steps keep) with its layers'
   tiles. Operations

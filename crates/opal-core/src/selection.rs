@@ -57,15 +57,17 @@ pub enum MaskOf {
 }
 
 impl Step {
-    /// The selection `before` (its mask) becomes after the step, unless `bounds` hold a
-    /// modifier's work back.
+    /// The selection `before` (its mask) becomes after the step, unless `bounds` hold its work
+    /// back (a maker's mask, or a modifier's).
     fn apply(&self, before: &Mask, bounds: Bounds) -> Result<Mask, Halt> {
         Ok(match self {
-            Step::Shape { shape, combine } => {
-                let made = Mask::of(shape);
-                before.combined(&made, *combine)
+            Step::Shape { shape, combine } => before.combined(&Mask::of_within(shape, bounds)?, *combine),
+            Step::Outline { outline, combine } => {
+                let filled = outline.filled_within(bounds)?;
+                let made = Mask::of_within(&filled, bounds);
+                (bounds.give_back)(filled.bytes());
+                before.combined(&made?, *combine)
             }
-            Step::Outline { outline, combine } => before.combined(&Mask::of(&outline.filled()), *combine),
             Step::Invert => before.inverted(),
             Step::Grow { by, corners } => before.grown_within(*by, *corners, bounds)?,
             Step::Feather { width, side, falloff } => before.feathered_within(*width, *side, *falloff, bounds)?,
@@ -110,10 +112,11 @@ impl Step {
         matches!(self, Step::Grow { .. } | Step::Feather { .. } | Step::Smooth { .. } | Step::Border { .. })
     }
 
-    /// Whether it is a modifier at work: one whose mask takes the memory `Bounds` admit as it
-    /// is made.
-    fn modifies(&self) -> bool {
-        self.is_modifier() && !self.leaves_as_is()
+    /// Whether the mask it comes to takes the memory `Bounds` admit as it is made: a modifier's
+    /// at work, or a shape's or an outline's (combined with what was selected, the mask that
+    /// comes to stands for theirs).
+    fn takes(&self) -> bool {
+        (self.is_modifier() && !self.leaves_as_is()) || matches!(self, Step::Shape { .. } | Step::Outline { .. })
     }
 
     /// Whether the step makes a selection of its own, the steps before it no longer counting.
@@ -217,7 +220,8 @@ impl Selection {
         // One that leaves the selection as it is is no step, as when it is added.
         let steps: Vec<Step> = steps[first..].iter().filter(|s| !s.leaves_as_is()).cloned().collect();
         let (mut mask, mut before) = (Arc::new(Mask::none()), None);
-        // Whether the mask before was a modifier's: what it took is given back once it goes.
+        // Whether the mask before took what bounds admit (see `Step::takes`): given back once it
+        // goes.
         let mut made_before = false;
         for (i, s) in steps.iter().enumerate() {
             // A mask step's mask is shared, not copied.
@@ -229,18 +233,18 @@ impl Selection {
             if made_before && let Some(gone) = gone {
                 give_back(gone, bounds);
             }
-            made_before = i > 0 && steps[i - 1].modifies();
+            made_before = i > 0 && steps[i - 1].takes();
         }
         Ok(Selection { steps, mask, before })
     }
 
-    /// Its mask, the rest of what it holds let go: the mask before its last step, if a
-    /// modifier made it, given back to `bounds`.
+    /// Its mask, the rest of what it holds let go: the mask before its last step, if it took
+    /// what bounds admit (`Step::takes`), given back to `bounds`.
     fn into_mask(self, bounds: Bounds) -> Arc<Mask> {
         let n = self.steps.len();
         if let Some(before) = self.before
             && n >= 2
-            && self.steps[n - 2].modifies()
+            && self.steps[n - 2].takes()
         {
             give_back(before, bounds);
         }
@@ -344,14 +348,14 @@ impl Selection {
         let (mut steps, rest) = match stuck {
             None => (Vec::new(), &self.steps[..]),
             Some(last) => {
-                // Worked out again, the mask up to it goes once carried (given back, if a
-                // modifier made it).
+                // Worked out again, the mask up to it goes once carried (given back, if it took
+                // what bounds admit).
                 let (up_to, made) = match (&self.before, self.steps.len() - last) {
                     (_, 1) => (self.mask.clone(), false),
                     (Some(before), 2) => (before.clone(), false),
                     _ => {
                         let made = Selection::of_within(self.steps[..=last].to_vec(), bounds)?;
-                        (made.into_mask(bounds), self.steps[last].modifies())
+                        (made.into_mask(bounds), self.steps[last].takes())
                     }
                 };
                 let carried =
@@ -367,8 +371,8 @@ impl Selection {
     }
 }
 
-/// Gives back to `bounds` what `mask`, a modifier's, took as it was made (see `Bounds`), if
-/// this was the last hold on it.
+/// Gives back to `bounds` what `mask` took as it was made (see `Step::takes`), if this was the
+/// last hold on it.
 fn give_back(mask: Arc<Mask>, bounds: Bounds) {
     if let Some(mask) = Arc::into_inner(mask) {
         (bounds.give_back)(mask.bytes());
@@ -378,22 +382,30 @@ fn give_back(mask: Arc<Mask>, bounds: Bounds) {
 /// The selection a maker `step` (a shape, an outline, or a mask) makes with the document's selection
 /// `before` (or with none).
 pub fn with_maker(before: Option<&Selection>, step: Step) -> Selection {
+    with_maker_within(before, step, UNBOUNDED).expect("unbounded")
+}
+
+/// [`with_maker`], unless `bounds` hold its work back.
+pub fn with_maker_within(before: Option<&Selection>, step: Step, bounds: Bounds) -> Result<Selection, Halt> {
     match before {
-        Some(s) => s.then(step),
+        Some(s) => s.then_within(step, bounds),
         // With nothing selected, adding is making, and taking away or keeping only what is in
         // both leaves nothing.
-        None => match step {
-            Step::Shape { shape, combine: Combine::Replace | Combine::Add } => {
-                Selection::new(Step::Shape { shape, combine: Combine::Replace })
-            }
-            Step::Outline { outline, combine: Combine::Replace | Combine::Add } => {
-                Selection::new(Step::Outline { outline, combine: Combine::Replace })
-            }
-            Step::Mask { mask, combine: Combine::Replace | Combine::Add, of } => {
-                Selection::new(Step::Mask { mask, combine: Combine::Replace, of })
-            }
-            step => Selection::of(vec![step]),
-        },
+        None => Selection::of_within(
+            vec![match step {
+                Step::Shape { shape, combine: Combine::Replace | Combine::Add } => {
+                    Step::Shape { shape, combine: Combine::Replace }
+                }
+                Step::Outline { outline, combine: Combine::Replace | Combine::Add } => {
+                    Step::Outline { outline, combine: Combine::Replace }
+                }
+                Step::Mask { mask, combine: Combine::Replace | Combine::Add, of } => {
+                    Step::Mask { mask, combine: Combine::Replace, of }
+                }
+                step => step,
+            }],
+            bounds,
+        ),
     }
 }
 

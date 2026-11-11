@@ -2649,8 +2649,8 @@ impl AppState {
         let like = Shape { kind, center: [0.0; 2], size: [0.0; 2], angle: 0.0, smooth };
         let d = self.doc_mut(id).expect("found");
         let step = opal_core::selection::Step::Shape { shape: b.shape(&like), combine };
-        let made = opal_core::selection::with_maker(d.pixel_selection().map(|s| &**s), step);
-        d.set_pixel_selection(Some(made), crate::select_tool::label(crate::select_tool::Draws::Shape(kind)));
+        d.select_with(step, crate::select_tool::label(crate::select_tool::Draws::Shape(kind)))
+            .map_err(|why| format!("{name}: {why}"))?;
         Ok(selection_json(d))
     }
 
@@ -2727,8 +2727,7 @@ impl AppState {
             smooth,
         };
         let step = opal_core::selection::Step::Outline { outline, combine };
-        let made = opal_core::selection::with_maker(d.pixel_selection().map(|s| &**s), step);
-        d.set_pixel_selection(Some(made), crate::outline_tool::LABEL);
+        d.select_with(step, crate::outline_tool::LABEL).map_err(|why| format!("select_outline: {why}"))?;
         Ok(selection_json(d))
     }
 
@@ -3791,6 +3790,16 @@ mod tests {
         assert_eq!(s["bounds"], json!([10, 10, 240, 140]), "{s}");
         let why = now(&mut st, "select_outline", json!({ "points": [[0, 0], [5, 5]] })).unwrap_err();
         assert!(why.contains("a list of points"), "{why}");
+        // A slanting outline whose mask would take more memory than is free: refused, said so,
+        // nothing changed.
+        let before = st.active().unwrap().pixel_selection().cloned();
+        let slant = json!({ "points": [[0, 0], [2e5, 1e5], [0, 10]] });
+        let why = {
+            let _pretend = crate::memory::testing::pretend_free(Some(64 << 20));
+            now(&mut st, "select_outline", slant).unwrap_err()
+        };
+        assert!(why.starts_with("select_outline: ") && why.contains("memory"), "{why}");
+        assert_eq!(st.active().unwrap().pixel_selection().cloned(), before);
         // A point farther from the canvas's corner than a box's may be put: refused.
         let far = json!({ "points": [[-1e8, -1e8], [1e8, -1e8], [1e8, 500]] });
         let why = now(&mut st, "select_outline", far).unwrap_err();

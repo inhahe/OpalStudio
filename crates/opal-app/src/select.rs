@@ -138,6 +138,15 @@ pub fn next_selection_name(doc: &Document) -> String {
     (1..).map(|n| format!("Selection {n}")).find(|name| doc.saved_selection(name).is_none()).expect("one is free")
 }
 
+/// What `make` makes within the memory free now (measured here), or why there was not memory
+/// enough for it: what a selection made on the interface thread, by a tool or a script's call,
+/// is made within.
+pub(crate) fn within_memory<T>(
+    make: impl FnOnce(opal_core::modify::Bounds) -> Result<T, opal_core::modify::Halt>,
+) -> Result<T, String> {
+    crate::memory::Admission::within(crate::memory::Measure::here().now(), &|| false, make)
+}
+
 /// The selection `kept` is, brought back: carried as the image has changed since, if it has
 /// (within the memory `measure` finds, unless `stop` says to stop); nothing, if it selects
 /// nothing. What Load Selection and Reselect bring back.
@@ -189,6 +198,16 @@ impl crate::doc::DocState {
             doc.selection = selection;
             Ok::<(), ()>(())
         });
+    }
+
+    /// Selects what the maker `step` makes with what is selected (see `with_maker`), as a
+    /// history state labeled `label`, its mask made within the memory free now; or says why
+    /// not: there was not memory enough for it (nothing changes then).
+    pub fn select_with(&mut self, step: Step, label: &str) -> Result<(), String> {
+        let before = self.pixel_selection().cloned();
+        let made = within_memory(|b| opal_core::selection::with_maker_within(before.as_deref(), step, b))?;
+        self.set_pixel_selection(Some(made), label);
+        Ok(())
     }
 
     /// Selects nothing, as a history state labeled "Deselect", keeping what was selected for
@@ -1277,6 +1296,28 @@ mod tests {
         st.finish_edits();
         let loaded = st.active().unwrap().pixel_selection().expect("nothing loaded").steps().to_vec();
         assert_eq!(loaded, steps, "the recipe was not brought back");
+    }
+
+    #[test]
+    fn a_shape_reshaped_past_the_memory_free_is_refused_and_said_so() {
+        use opal_core::mask::{Combine, Shape, ShapeKind};
+        use opal_core::selection::{Selection, Step};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let shape = Shape::rectangle(&IRect::new(20, 20, 60, 50).to_f(), false);
+        st.active_mut()
+            .unwrap()
+            .set_pixel_selection(Some(Selection::new(Step::Shape { shape, combine: Combine::Replace })), "Select");
+        let before = st.active().unwrap().pixel_selection().cloned();
+        // Its box dragged out to a turned ellipse whose edge's tiles would take some 470 MB.
+        let huge = Shape { kind: ShapeKind::Ellipse, center: [0.0, 0.0], size: [2e5, 9e4], angle: 30.0, smooth: true };
+        let d = st.active_mut().unwrap();
+        {
+            let _pretend = crate::memory::testing::pretend_free(Some(64 << 20));
+            crate::select_tool::reshape(d, &Selection::of(Vec::new()), huge, Combine::Replace, "Resize selection");
+        }
+        assert!(d.notice.as_ref().is_some_and(|n| n.contains("memory")), "{:?}", d.notice);
+        assert_eq!(d.pixel_selection().cloned(), before, "the selection changed");
     }
 
     #[test]

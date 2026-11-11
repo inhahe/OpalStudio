@@ -128,14 +128,15 @@ impl Outlining {
 }
 
 /// Closes the outline being drawn on `d` and selects what it encloses, combined as it says (a
-/// history state, `LABEL`); with fewer than three points, it is given up.
+/// history state, `LABEL`), unless there is not memory enough for it (the status bar says so);
+/// with fewer than three points, it is given up.
 pub fn close(d: &mut DocState, smooth: bool) {
     let Some(o) = d.outlining.take() else { return };
     d.revision += 1;
     let Some(outline) = o.outline(smooth) else { return };
-    let step = Step::Outline { outline, combine: o.combine };
-    let made = opal_core::selection::with_maker(d.pixel_selection().map(|s| &**s), step);
-    d.set_pixel_selection(Some(made), LABEL);
+    if let Err(why) = d.select_with(Step::Outline { outline, combine: o.combine }, LABEL) {
+        d.notice = Some(why);
+    }
 }
 
 /// What the outline tool does with a frame of the canvas's `response` on document `d`:

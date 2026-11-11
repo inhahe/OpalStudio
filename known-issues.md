@@ -58,18 +58,3 @@ its socket file behind, for one running (a socket file would; the abstract names
 not leave one). Waits on a non-Windows build. **Fix:** build and test it there; consider a
 socket file in the user's runtime folder (mode 0600) instead, connected to (not merely
 found) to tell whether an editor is there.
-
-## A shape's or an outline's mask is not counted against memory
-
-`crates/opal-core/src/selection.rs` (`Step::apply`, the `Shape` and `Outline` arms) and
-`crates/opal-core/src/mask.rs` (`Mask::of`). A modifier's mask is admitted against free memory
-as it is made (`Bounds`), but a shape's or an outline's is not. Its work follows its edge's
-length (and stops at `MASK_REACH`), but a long slanting edge crosses tiles that each keep a
-level a pixel (128 KB): a script's turned ellipse or slanting outline 1e7 pixels long makes
-some 80,000 of them, about 10 GB, and an outline of a million points zigzagging across the
-reach lists each edge in every row of tiles it spans before any of it is made. **Fix:**
-`Mask::of_within(shape, bounds)`, admitting each row's edge tiles (`Coverage::row` and the
-convex path both know them before working them out) and an outline's row entries (summed
-from its edges' spans, before `Filled::of` lists them), used by `Step::apply` with its
-`Bounds`; the interface thread's tools (the Select and Outline tools, whose shapes the screen
-bounds) keep `Mask::of`.

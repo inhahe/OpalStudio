@@ -149,12 +149,18 @@ impl ShapeDrag {
 }
 
 /// Makes `shape` the selection's last step in place of the one there, which combined as
-/// `combine` with what `before` selects, as the pending edit labeled `label`. A selection
-/// that comes to nothing so keeps its steps while the edit goes on, so that the box stays to
-/// be put right (once done, nothing is selected: `DocState::commit_pending`).
+/// `combine` with what `before` selects, as the pending edit labeled `label`, unless there is
+/// not memory enough for it (the status bar says so, and the selection stays as it was). A
+/// selection that comes to nothing so keeps its steps while the edit goes on, so that the box
+/// stays to be put right (once done, nothing is selected: `DocState::commit_pending`).
 pub fn reshape(d: &mut DocState, before: &Selection, shape: Shape, combine: Combine, label: &str) {
-    let made = Arc::new(before.then(Step::Shape { shape, combine }));
-    d.edit_pending(label, |doc| doc.selection = Some(made));
+    match crate::select::within_memory(|b| before.then_within(Step::Shape { shape, combine }, b)) {
+        Ok(made) => {
+            let made = Arc::new(made);
+            d.edit_pending(label, |doc| doc.selection = Some(made));
+        }
+        Err(why) => d.notice = Some(why),
+    }
 }
 
 /// Whether a drag begun now, with `modifiers` held and the tool's `options`, may edit the box
@@ -188,13 +194,14 @@ pub fn label(draws: Draws) -> &'static str {
 }
 
 /// Selects what `drag` selects on document `d` with the tool's `options`, unless that has no
-/// width or height.
+/// width or height, or there is not memory enough for it (the status bar says so).
 fn select(d: &mut DocState, drag: &SelectDrag, options: Options) {
     let shape = drag.shape(options, &d.doc().canvas.rect());
-    if shape.size[0] >= 1.0 && shape.size[1] >= 1.0 {
-        let step = Step::Shape { shape, combine: drag.combine };
-        let made = opal_core::selection::with_maker(d.pixel_selection().map(|s| &**s), step);
-        d.set_pixel_selection(Some(made), label(options.draws));
+    if shape.size[0] >= 1.0
+        && shape.size[1] >= 1.0
+        && let Err(why) = d.select_with(Step::Shape { shape, combine: drag.combine }, label(options.draws))
+    {
+        d.notice = Some(why);
     }
 }
 
