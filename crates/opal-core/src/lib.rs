@@ -22,6 +22,7 @@ pub mod expr;
 pub mod geom;
 pub mod history;
 pub mod mask;
+pub mod modify;
 pub mod raster;
 pub mod resample;
 pub mod selection;

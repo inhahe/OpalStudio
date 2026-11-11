@@ -50,6 +50,8 @@ pub enum Cmd {
     InvertSelection,
     Clear,
     CropToSelection,
+    GrowSelection,
+    FeatherSelection,
     CropToContent,
     ResizeImage,
     ResizeCanvas,
@@ -113,7 +115,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 68] = [
+    pub const ALL: [Cmd; 70] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -154,6 +156,8 @@ impl Cmd {
         Cmd::InvertSelection,
         Cmd::Clear,
         Cmd::CropToSelection,
+        Cmd::GrowSelection,
+        Cmd::FeatherSelection,
         Cmd::CropToContent,
         Cmd::ResizeImage,
         Cmd::ResizeCanvas,
@@ -494,6 +498,26 @@ impl Cmd {
                 "Select nothing.",
                 "Commands then act on whole layers again. Undo brings the selection back.",
                 const { &[ctrl(Key::D)] },
+            ),
+            Cmd::GrowSelection => i(
+                "Grow or Shrink",
+                icons::GROW,
+                "Grow the selection by a distance, or shrink it.",
+                "Moves the selection's outline out (or in, by a distance less than 0), its corners \
+                 growing round, square or to a point as you choose. It works from the outline (where \
+                 pixels are half selected), keeping the edge smooth if it was. It is a step of the \
+                 selection's recipe, so Rotate, Flip and Resize Image carry it.",
+                &[],
+            ),
+            Cmd::FeatherSelection => i(
+                "Feather",
+                icons::FEATHER,
+                "Soften the selection's edge over a width.",
+                "The edge falls off from fully selected to not at all over the width you give, \
+                 inside the outline, outside it, or half each way, as a Gaussian blur's edge does or \
+                 straight. What acts on the selection then acts on each pixel of the falloff as much \
+                 as it is selected.",
+                &[],
             ),
             Cmd::InvertSelection => i(
                 "Invert Selection",
@@ -848,6 +872,12 @@ pub static RIBBON: &[Tab] = &[
                 cmds: &[Cmd::SelectAll, Cmd::Deselect, Cmd::InvertSelection],
             },
             Group {
+                name: "Modify",
+                description: "Changing the selection's edge: moving it out or in, and softening it.",
+                large: 0,
+                cmds: &[Cmd::GrowSelection, Cmd::FeatherSelection],
+            },
+            Group {
                 name: "Selected",
                 description: "Acting on what is selected, as much of each pixel as it is selected.",
                 large: 1,
@@ -951,7 +981,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         | ToggleTheme | ToggleRibbon | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts | About | WidgetGallery => Ok(()),
         Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup | CopyMerged
         | StampVisible | ResizeCanvas | CropToContent | Place | SelectAll => needs_doc(),
-        Deselect | InvertSelection | CropToSelection => {
+        Deselect | InvertSelection | CropToSelection | GrowSelection | FeatherSelection => {
             let d = st.active().ok_or("Open or create an image first.")?;
             d.pixel_selection().map(|_| ()).ok_or_else(|| "Nothing is selected.".to_owned())
         }

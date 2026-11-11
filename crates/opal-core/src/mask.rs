@@ -78,7 +78,7 @@ impl MaskTile {
     }
 
     /// The tile `levels` (a tile's worth, row by row) make, kept as compactly as they allow.
-    fn from_levels(levels: Vec<u16>) -> MaskTile {
+    pub(crate) fn from_levels(levels: Vec<u16>) -> MaskTile {
         debug_assert_eq!(levels.len(), TILE_PIXELS);
         let first = &levels[..SIDE];
         if levels.chunks_exact(SIDE).all(|row| row == first) {
@@ -410,6 +410,25 @@ impl Mask {
     /// The runs of row `y` of tiles (none, if it keeps no tile).
     fn row(&self, y: i32) -> &[Run] {
         self.rows.get(&y).map_or(NO_RUNS, Vec::as_slice)
+    }
+
+    /// The rows of tiles with tiles kept, top to bottom (by their y, in tiles).
+    pub(crate) fn kept_rows(&self) -> impl Iterator<Item = i32> + '_ {
+        self.rows.keys().copied()
+    }
+
+    /// The mask of `tiles` (each at most once) and the level `outside` everywhere else.
+    pub(crate) fn from_tiles(mut tiles: Vec<(TileCoord, MaskTile)>, outside: u16) -> Mask {
+        tiles.sort_unstable_by_key(|(c, _)| (c.y, c.x));
+        let mut rows: Vec<(i32, Vec<Run>)> = Vec::new();
+        for (c, t) in tiles {
+            if rows.last().is_none_or(|(y, _)| *y != c.y) {
+                rows.push((c.y, Vec::new()));
+            }
+            push(&mut rows.last_mut().expect("one for this row").1, c.x, c.x + 1, t, outside);
+        }
+        rows.retain(|(_, r)| !r.is_empty());
+        Mask::shared(rows, outside)
     }
 
     /// The tiles kept along row `y` of tiles, left to right: each run's tiles (`x0..x1`, in

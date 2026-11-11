@@ -365,6 +365,44 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
         | RotateCcw | Rotate180 | FlipHorizontal | FlipVertical | ReapplyAllPlacements | SelectAll | Deselect
         | InvertSelection | CropToSelection => &[DOCUMENT],
         Clear | Cut => &[DOCUMENT, LAYERS],
+        GrowSelection => &[
+            DOCUMENT,
+            Param {
+                name: "by",
+                kind: Kind::Length { min: -1000.0, max: 1000.0 },
+                help: "How far the outline moves out; less than 0, in.",
+                otherwise: Otherwise::Required,
+            },
+            Param {
+                name: "corners",
+                kind: Kind::Choice(&["round", "square", "diamond"]),
+                help: "How its corners grow: round, square, or to a point as a diamond's.",
+                otherwise: Otherwise::Value("\"round\""),
+            },
+            UNIT,
+        ],
+        FeatherSelection => &[
+            DOCUMENT,
+            Param {
+                name: "width",
+                kind: Kind::Length { min: 0.0, max: 1000.0 },
+                help: "How wide the falloff from fully selected to not at all is.",
+                otherwise: Otherwise::Required,
+            },
+            Param {
+                name: "side",
+                kind: Kind::Choice(&["inward", "outward", "centered"]),
+                help: "Where the falloff lies: inside the outline, outside it, or half each way.",
+                otherwise: Otherwise::Value("\"centered\""),
+            },
+            Param {
+                name: "falloff",
+                kind: Kind::Choice(&["gaussian", "linear"]),
+                help: "Its shape: as a Gaussian blur's edge, or straight.",
+                otherwise: Otherwise::Value("\"gaussian\""),
+            },
+            UNIT,
+        ],
         NewLayer | NewGroup => &[
             DOCUMENT,
             Param { name: "name", kind: Kind::Text, help: "Its name.", otherwise: Otherwise::Now("a numbered one") },
@@ -2062,6 +2100,23 @@ impl AppState {
                 self.rename_layer(doc.expect("available"), id, args.text("name").expect("required").to_owned());
                 now(Ok(json!({ "layer": id.0 })))
             }
+            Cmd::GrowSelection | Cmd::FeatherSelection => {
+                use opal_core::selection::Step;
+                let named = |name: &str| serde_json::json!(args.text(name).unwrap_or_default());
+                let step = match cmd {
+                    Cmd::GrowSelection => Step::Grow {
+                        by: args.number("by"),
+                        reach: serde_json::from_value(named("corners")).unwrap_or_default(),
+                    },
+                    _ => Step::Feather {
+                        width: args.number("width"),
+                        side: serde_json::from_value(named("side")).unwrap_or_default(),
+                        falloff: serde_json::from_value(named("falloff")).unwrap_or_default(),
+                    },
+                };
+                self.add_modifier(step);
+                now(Ok(selection_json(self.active().expect("available"))))
+            }
             Cmd::SelectAll | Cmd::Deselect | Cmd::InvertSelection => {
                 self.run(cmd, ctx);
                 // What is selected now, as the `selection` query tells it.
@@ -3060,6 +3115,29 @@ mod tests {
         assert_eq!(s["bounds"], json!([9, 10, 1, 100]), "{s}");
         // A box made of nothing is refused.
         assert!(now(&mut st, "select_ellipse", json!({ "width": 0 })).is_err());
+    }
+
+    #[test]
+    fn selections_are_grown_shrunk_and_feathered_by_calls() {
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 300, "height": 200 })).unwrap();
+        // Nothing selected: refused, saying why.
+        assert!(now(&mut st, "grow_selection", json!({ "by": 5 })).unwrap_err().contains("Nothing is selected"));
+        now(&mut st, "select_rectangle", json!({ "x": 100, "y": 50, "width": 100, "height": 100, "smooth": false }))
+            .unwrap();
+        let s = now(&mut st, "grow_selection", json!({ "by": "10px", "corners": "square" })).unwrap();
+        assert_eq!(s["bounds"], json!([90, 40, 120, 120]));
+        assert_eq!(s["steps"][1], json!({ "step": "grow", "by": 10.0, "reach": "square" }));
+        let s = now(&mut st, "grow_selection", json!({ "by": -20 })).unwrap();
+        assert_eq!(s["bounds"], json!([110, 60, 80, 80]));
+        let s = now(&mut st, "feather_selection", json!({ "width": 8, "side": "outward", "falloff": "linear" })).unwrap();
+        // Falling off outward over 8: pixel 102, whose middle is 7.5 out of the side at 110,
+        // still a little selected; 101 not.
+        assert_eq!(s["bounds"], json!([102, 52, 96, 96]), "{s}");
+        assert_eq!(s["steps"][3]["step"], json!("feather"));
+        let label = st.active().unwrap().history.undo_label().map(str::to_owned);
+        assert_eq!(label.as_deref(), Some("Feather selection"));
     }
 
     #[test]

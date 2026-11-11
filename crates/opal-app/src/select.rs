@@ -12,6 +12,23 @@ use std::sync::Arc;
 /// A selection's outline: closed lines, in document coordinates (see `Mask::outline`).
 pub type Outline = Arc<Vec<Vec<[f64; 2]>>>;
 
+/// The Grow or Shrink, or Feather, dialog, while it is open: the step it adds, and the
+/// selection it adds it to. What it would make shows as the image's pending edit.
+#[derive(Clone, Debug)]
+pub struct Modifying {
+    pub step: Step,
+    pub before: Arc<Selection>,
+}
+
+/// The history state adding `step`, a modifier, makes.
+pub fn modifier_label(step: &Step) -> &'static str {
+    match step {
+        Step::Grow { by, .. } if *by < 0.0 => "Shrink selection",
+        Step::Grow { .. } => "Grow selection",
+        _ => "Feather selection",
+    }
+}
+
 impl crate::doc::DocState {
     /// What is selected now, if anything.
     pub fn pixel_selection(&self) -> Option<&Arc<Selection>> {
@@ -87,6 +104,53 @@ impl AppState {
         let d = self.active_mut().expect("available");
         let s = d.pixel_selection().expect("available").then(Step::Invert);
         d.set_pixel_selection(Some(s), "Invert selection");
+    }
+
+    /// Opens the Grow or Shrink dialog (`grow`), or the Feather dialog, on what is selected.
+    pub(crate) fn modify_selection(&mut self, grow: bool) {
+        use opal_core::modify::{Falloff, Reach, Side};
+        let d = self.active().expect("available");
+        let before = d.pixel_selection().expect("available").clone();
+        let step = if grow {
+            Step::Grow { by: 5.0, reach: Reach::Round }
+        } else {
+            Step::Feather { width: 10.0, side: Side::Centered, falloff: Falloff::Gaussian }
+        };
+        self.modifying = Some(Modifying { step, before });
+        self.show_modifying();
+    }
+
+    /// Shows what the open modifier dialog would make, as the active image's pending edit.
+    pub(crate) fn show_modifying(&mut self) {
+        let Some(m) = self.modifying.clone() else { return };
+        let Some(d) = self.active_mut() else { return };
+        let made = Arc::new(m.before.then(m.step.clone()));
+        // A label of its own each way (grown, shrunk), the other's edit given up.
+        for other in ["Grow selection", "Shrink selection", "Feather selection"] {
+            if other != modifier_label(&m.step) {
+                d.discard_pending(other);
+            }
+        }
+        d.edit_pending(modifier_label(&m.step), |doc| doc.selection = (!made.is_empty()).then_some(made));
+    }
+
+    /// Ends the open modifier dialog: what it made a history state of its own if `keep`, else
+    /// given up.
+    pub(crate) fn end_modifying(&mut self, keep: bool) {
+        let Some(m) = self.modifying.take() else { return };
+        let Some(d) = self.active_mut() else { return };
+        if keep {
+            d.commit_pending();
+        } else {
+            d.discard_pending(modifier_label(&m.step));
+        }
+    }
+
+    /// Adds `step`, a modifier, to what is selected, as a history state.
+    pub(crate) fn add_modifier(&mut self, step: Step) {
+        let d = self.active_mut().expect("available");
+        let s = d.pixel_selection().expect("available").then(step.clone());
+        d.set_pixel_selection(Some(s), modifier_label(&step));
     }
 
     /// Erases what is selected on the selected layers (as much of each pixel as it is
@@ -262,6 +326,39 @@ mod tests {
         // Once the edit is done, nothing is selected: one way of having nothing.
         d.commit_pending();
         assert!(d.pixel_selection().is_none());
+    }
+
+    #[test]
+    fn the_modifier_dialogs_show_what_they_make_at_once_and_keep_it_only_on_ok() {
+        use opal_core::mask::{Combine, Extent, Shape};
+        use opal_core::modify::Reach;
+        use opal_core::selection::{Selection, Step};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let a = Shape::rectangle(&IRect::new(100, 50, 200, 150).to_f(), false);
+        let d = st.active_mut().unwrap();
+        d.set_pixel_selection(Some(Selection::new(Step::Shape { shape: a, combine: Combine::Replace })), "Select");
+        let states = d.history.nodes().count();
+        let selected = |st: &AppState| st.active().unwrap().pixel_selection().unwrap().mask().extent();
+        // Opened: grown by 5 at once, as an edit not yet a state.
+        st.modify_selection(true);
+        assert_eq!(selected(&st), Extent::Within(IRect::new(95, 45, 205, 155)));
+        assert_eq!(st.active().unwrap().pending_label(), Some("Grow selection"));
+        // Set to shrink by 10, square: shown so, under its own name.
+        st.modifying.as_mut().unwrap().step = Step::Grow { by: -10.0, reach: Reach::Square };
+        st.show_modifying();
+        assert_eq!(selected(&st), Extent::Within(IRect::new(110, 60, 190, 140)));
+        assert_eq!(st.active().unwrap().pending_label(), Some("Shrink selection"));
+        // Cancelled: as it was, no state.
+        st.end_modifying(false);
+        assert_eq!(selected(&st), Extent::Within(IRect::new(100, 50, 200, 150)));
+        assert_eq!(st.active().unwrap().history.nodes().count(), states);
+        // Feathered, OK: a state of its own, the feather a step of the recipe.
+        st.modify_selection(false);
+        st.end_modifying(true);
+        let d = st.active().unwrap();
+        assert_eq!(d.history.undo_label(), Some("Feather selection"));
+        assert!(matches!(d.pixel_selection().unwrap().steps(), [_, Step::Feather { .. }]));
     }
 
     #[test]

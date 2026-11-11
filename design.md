@@ -428,6 +428,20 @@ centered on the outline. The shape of the falloff is a curve (Gaussian by defaul
 custom curves are options). It is a recipe step, so it stays adjustable. Grow/shrink has an
 adjustable shape (round, square, diamond).
 
+Both are built (`opal_core::modify`, `Step::Grow`, `Step::Feather`), from each pixel's distance
+to the outline: measured from where the outline crosses between pixels, read between their
+levels so that a smooth edge stays smooth (a smooth circle grown is the larger circle to
+within a tenth of a pixel), spread to every pixel by Danielsson's sweeps, in the measure the
+shape asks for (round: straight across; square: the farther of across and down; diamond:
+across and down together), and only in a band of tiles round the outline. They work from the
+outline, where pixels are half selected, so a soft selection grown or feathered loses its own
+softness. On the Select tab, *Grow or Shrink* and *Feather* open dialogs that show what they
+make at once (a pending edit, *Grow selection*, *Shrink selection* or *Feather selection*),
+kept on OK; scripts call `grow_selection` (`by`, `corners`) and `feather_selection`
+(`width`, `side`, `falloff`). Rotate, Flip and Resize Image carry them by an even scale,
+their distances scaled; a stretch takes the selection up to them as its mask. Custom falloff
+curves, and editing them later in the selection panel, are to come.
+
 ### The outline tool
 
 Freehand, anchor-and-curve, polygon and edge-snapping selection are one tool whose segments

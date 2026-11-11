@@ -399,6 +399,29 @@ Make the canvas the rectangle round the selection.
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 
+### `grow_selection`
+
+Grow the selection by a distance, or shrink it.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `by` (required) | length | How far the outline moves out; less than 0, in. From -1000.0 to 1000.0 pixels. |
+| `corners` | `round`, `square`, `diamond` | How its corners grow: round, square, or to a point as a diamond's. Default: "round". |
+| `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
+
+### `feather_selection`
+
+Soften the selection's edge over a width.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `width` (required) | length | How wide the falloff from fully selected to not at all is. From 0.0 to 1000.0 pixels. |
+| `side` | `inward`, `outward`, `centered` | Where the falloff lies: inside the outline, outside it, or half each way. Default: "centered". |
+| `falloff` | `gaussian`, `linear` | Its shape: as a Gaussian blur's edge, or straight. Default: "gaussian". |
+| `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
+
 ### `crop_to_content`
 
 Shrink (or grow) the canvas to fit what the visible layers hold.

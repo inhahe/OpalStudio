@@ -4,6 +4,7 @@
 
 use crate::geom::Affine;
 use crate::mask::{Combine, Mask, Shape};
+use crate::modify::{Falloff, Reach, Side};
 use std::sync::Arc;
 
 /// A step of a selection's recipe: a maker, which makes a mask and combines it with the
@@ -15,6 +16,12 @@ pub enum Step {
     Shape { shape: Shape, combine: Combine },
     /// The opposite of the selection so far: selected where it was not.
     Invert,
+    /// The selection so far grown by `by` pixels (shrunk, by less than 0), its corners as
+    /// `reach` says.
+    Grow { by: f64, reach: Reach },
+    /// The selection so far feathered: its edge falling off over `width` pixels, on the
+    /// `side` of its outline, along `falloff`.
+    Feather { width: f64, side: Side, falloff: Falloff },
     /// A mask as it is, which replaces the selection so far: what a selection carried through
     /// a transform its shapes could not follow becomes (see [`Selection::transformed`]). It
     /// is told without its mask, and so cannot be read back.
@@ -34,6 +41,8 @@ impl Step {
                 before.combined(&made, *combine)
             }
             Step::Invert => before.inverted(),
+            Step::Grow { by, reach } => before.grown(*by, *reach),
+            Step::Feather { width, side, falloff } => before.feathered(*width, *side, *falloff),
             Step::Mask { mask } => (**mask).clone(),
         }
     }
@@ -43,14 +52,37 @@ impl Step {
         matches!(self, Step::Shape { combine: Combine::Replace, .. } | Step::Mask { .. })
     }
 
-    /// The step `m` carries this one to, if there is one (see [`Shape::transformed`]).
+    /// The step `m` carries this one to, if there is one: shapes as [`Shape::transformed`]
+    /// says, distances only by a map that scales them alike every way (a turn, a flip, an even
+    /// scale), a mask always.
     fn transformed(&self, m: &Affine) -> Option<Step> {
         Some(match self {
             Step::Shape { shape, combine } => Step::Shape { shape: shape.transformed(m)?, combine: *combine },
             Step::Invert => Step::Invert,
+            Step::Grow { by, reach } => Step::Grow { by: by * even_scale(m)?, reach: *reach },
+            Step::Feather { width, side, falloff } => {
+                Step::Feather { width: width * even_scale(m)?, side: *side, falloff: *falloff }
+            }
             Step::Mask { mask } => Step::Mask { mask: Arc::new(mask.transformed(m)) },
         })
     }
+
+    /// Whether `m` carries it exactly (without the work of carrying a mask step, which it
+    /// always does).
+    fn carried_by(&self, m: &Affine) -> bool {
+        match self {
+            Step::Mask { .. } | Step::Invert => true,
+            other => other.transformed(m).is_some(),
+        }
+    }
+}
+
+/// How much `m` scales every length, if it scales them alike every way (its linear part a
+/// turn or flip times an even scale).
+fn even_scale(m: &Affine) -> Option<f64> {
+    let (across, down) = (m.a.hypot(m.b), m.c.hypot(m.d));
+    let even = (across - down).abs() <= 1e-9 * across.max(down) && (m.a * m.c + m.b * m.d).abs() <= 1e-9 * across * down;
+    even.then_some(across)
 }
 
 /// A selection: see the module's description. Its mask is worked out from its steps when it
@@ -134,7 +166,7 @@ impl Selection {
     pub fn transformed(&self, m: &Affine) -> Selection {
         // The last step that cannot be carried, found before any is (carrying a mask step,
         // pixel by pixel, would be wasted on one that the mask taken in its place holds).
-        let stuck = self.steps.iter().rposition(|s| matches!(s, Step::Shape { shape, .. } if shape.transformed(m).is_none()));
+        let stuck = self.steps.iter().rposition(|s| !s.carried_by(m));
         let (mut steps, rest) = match stuck {
             None => (Vec::new(), &self.steps[..]),
             Some(last) => {
@@ -257,6 +289,24 @@ mod tests {
         let told = serde_json::to_string(&s.steps()[0]).unwrap();
         assert_eq!(told, r#"{"step":"mask"}"#);
         assert!(serde_json::from_str::<Step>(&told).is_err(), "read back as no mask at all");
+    }
+
+    #[test]
+    fn grown_and_feathered_steps_are_carried_by_even_scales_and_else_taken_as_their_mask() {
+        let s = Selection::new(Step::Shape { shape: rect(100.0, 100.0, 200.0, 150.0), combine: Combine::Replace })
+            .then(Step::Grow { by: 10.0, reach: Reach::Square })
+            .then(Step::Feather { width: 4.0, side: Side::Inward, falloff: Falloff::Linear });
+        assert_eq!(s.mask().extent(), crate::mask::Extent::Within(crate::geom::IRect::new(90, 90, 210, 160)));
+        // Doubled every way: still steps, their distances doubled.
+        let doubled = s.transformed(&Affine::scale(2.0, 2.0));
+        assert!(matches!(doubled.steps()[1], Step::Grow { by: 20.0, .. }), "{:?}", doubled.steps());
+        assert!(matches!(doubled.steps()[2], Step::Feather { width: 8.0, .. }));
+        // Turned a quarter, so too, unscaled.
+        let turned = s.transformed(&Affine::rotate(std::f64::consts::FRAC_PI_2));
+        assert!(matches!(turned.steps()[1], Step::Grow { by, .. } if (by - 10.0).abs() < 1e-9));
+        // Stretched one way only: the selection up to the feather is taken as its mask.
+        let stretched = s.transformed(&Affine::scale(2.0, 1.0));
+        assert!(matches!(stretched.steps(), [Step::Mask { .. }]), "{:?}", stretched.steps());
     }
 
     #[test]

@@ -77,6 +77,10 @@ pub const SNAP: char = '\u{e6c4}';
 pub const RULER: char = '\u{f67c}';
 /// ic_fluent_highlight_20_regular.
 pub const OVERLAY: char = '\u{f47c}';
+/// ic_fluent_arrow_expand_20_regular.
+pub const GROW: char = '\u{e0c5}';
+/// ic_fluent_blur_20_regular.
+pub const FEATHER: char = '\u{f8fa}';
 pub const NUMBERS: char = '\u{e748}';
 pub const PRINT_SIZE: char = '\u{f62a}';
 pub const PLACE: char = '\u{e97d}';

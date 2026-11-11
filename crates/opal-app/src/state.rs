@@ -235,6 +235,8 @@ pub struct AppState {
     pub resize_image: Option<ResizeImage>,
     pub resize_canvas: Option<ResizeCanvas>,
     pub rotate_by: Option<RotateBy>,
+    /// The Grow or Shrink, or Feather, dialog, while open.
+    pub modifying: Option<crate::select::Modifying>,
     pub thumbs: crate::thumbs::Thumbnails,
     /// A paste waiting for the clipboard to be read.
     pub reading: Option<Reading>,
@@ -369,6 +371,7 @@ impl AppState {
             resize_image: None,
             resize_canvas: None,
             rotate_by: None,
+            modifying: None,
             thumbs: Default::default(),
             reading: None,
             tile_budget: None,
@@ -590,6 +593,8 @@ impl AppState {
             Cmd::SelectAll => self.select_all(),
             Cmd::Deselect => self.deselect(),
             Cmd::InvertSelection => self.invert_selection(),
+            Cmd::GrowSelection => self.modify_selection(true),
+            Cmd::FeatherSelection => self.modify_selection(false),
             Cmd::Clear => self.clear_selected(),
             Cmd::Cut => {
                 self.cut(None, ctx);

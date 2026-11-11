@@ -34,6 +34,8 @@ pub fn show_all(ctx: &egui::Context, st: &mut AppState) {
         resize_canvas(ctx, st);
     } else if st.rotate_by.is_some() {
         rotate_by(ctx, st);
+    } else if st.modifying.is_some() {
+        modifying(ctx, st);
     }
     preferences(ctx, st);
     about(ctx, st);
@@ -641,6 +643,69 @@ fn rotate_by(ctx: &egui::Context, st: &mut AppState) {
         }
         Some(false) => st.rotate_by = None,
         None => st.rotate_by = Some(spec),
+    }
+}
+
+/// The Grow or Shrink, or Feather, dialog: what it sets shows at once, on the image.
+fn modifying(ctx: &egui::Context, st: &mut AppState) {
+    use opal_core::selection::Step;
+    let Some(m) = st.modifying.clone() else { return };
+    let palette = st.palette;
+    let doc = st.active().map(|d| d.doc());
+    let ppi = doc.map_or(opal_core::units::DEFAULT_PPI, |d| d.resolution);
+    let scope = lengths::image_scope(doc, st.unit(), ppi);
+    let mut step = m.step.clone();
+    let mut done = None;
+    let choice = |ui: &mut egui::Ui, label: &str, salt: &str, value: &mut String, options: &[(&str, &str)]| {
+        ui.label(label);
+        let shown = options.iter().find(|(id, _)| *id == value.as_str()).map_or("", |(_, name)| *name);
+        egui::ComboBox::from_id_salt(salt).selected_text(shown).show_ui(ui, |ui| {
+            for (id, name) in options {
+                ui.selectable_value(value, (*id).to_owned(), *name);
+            }
+        });
+        ui.end_row();
+    };
+    egui::Modal::new(egui::Id::unique("modify-selection")).show(ctx, |ui| {
+        match &mut step {
+            Step::Grow { by, reach } => {
+                ui.heading("Grow or shrink the selection");
+                ui.add_space(4.0);
+                egui::Grid::new("grow").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                    ui.label("By");
+                    ui.add(lengths::length_field(by, scope, -1000.0..=1000.0, 2).remember("select.grow"));
+                    ui.end_row();
+                    let mut id = serde_json::to_value(*reach).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+                    choice(ui, "Corners", "grow-reach", &mut id, &[("round", "Round"), ("square", "Square"), ("diamond", "Diamond")]);
+                    *reach = serde_json::from_value(serde_json::json!(id)).unwrap_or_default();
+                });
+                ui.label(RichText::new("Less than 0 shrinks it.").small().color(palette.weak_text));
+            }
+            Step::Feather { width, side, falloff } => {
+                ui.heading("Feather the selection");
+                ui.add_space(4.0);
+                egui::Grid::new("feather").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                    ui.label("Width");
+                    ui.add(lengths::length_field(width, scope, 0.0..=1000.0, 2).remember("select.feather"));
+                    ui.end_row();
+                    let mut id = serde_json::to_value(*side).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+                    choice(ui, "Falls off", "feather-side", &mut id, &[("inward", "Inward"), ("outward", "Outward"), ("centered", "Centered")]);
+                    *side = serde_json::from_value(serde_json::json!(id)).unwrap_or_default();
+                    let mut id = serde_json::to_value(*falloff).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+                    choice(ui, "Falloff", "feather-falloff", &mut id, &[("gaussian", "Gaussian"), ("linear", "Linear")]);
+                    *falloff = serde_json::from_value(serde_json::json!(id)).unwrap_or_default();
+                });
+            }
+            _ => {}
+        }
+        done = ok_cancel(ui, "OK");
+    });
+    if step != m.step {
+        st.modifying = Some(crate::select::Modifying { step, ..m });
+        st.show_modifying();
+    }
+    if let Some(keep) = done {
+        st.end_modifying(keep);
     }
 }
 
