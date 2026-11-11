@@ -75,6 +75,7 @@ pub enum Cmd {
     ToggleRibbon,
     CycleToolsPlace,
     ResetPanels,
+    ScreenMode,
     Search,
     Help,
     Shortcuts,
@@ -115,7 +116,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 70] = [
+    pub const ALL: [Cmd; 71] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -181,6 +182,7 @@ impl Cmd {
         Cmd::ToggleRibbon,
         Cmd::CycleToolsPlace,
         Cmd::ResetPanels,
+        Cmd::ScreenMode,
         Cmd::Search,
         Cmd::Help,
         Cmd::Shortcuts,
@@ -719,6 +721,15 @@ impl Cmd {
                  screens.",
                 &[],
             ),
+            Cmd::ScreenMode => i(
+                "Screen Mode",
+                icons::FULL_SCREEN,
+                "Show the window full screen, then the image alone, then as usual again (F).",
+                "Full screen hides the window's title bar and the taskbar. The image alone hides \
+                 the ribbon, the panels and the status bar too, so that it has the whole screen; F \
+                 brings them back.",
+                const { &[plain(Key::F)] },
+            ),
             Cmd::ResetPanels => i(
                 "Reset Panels",
                 icons::DOCK,
@@ -949,7 +960,7 @@ pub static RIBBON: &[Tab] = &[
                 name: "Interface",
                 description: "How Opal Studio itself looks.",
                 large: 0,
-                cmds: &[Cmd::ToggleTheme, Cmd::ToggleRibbon, Cmd::CycleToolsPlace, Cmd::ResetPanels],
+                cmds: &[Cmd::ScreenMode, Cmd::ToggleTheme, Cmd::ToggleRibbon, Cmd::CycleToolsPlace, Cmd::ResetPanels],
             },
         ],
     },
@@ -1003,6 +1014,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
                 | ToggleRibbon
                 | CycleToolsPlace
                 | ResetPanels
+                | ScreenMode
                 | Search
                 | Help
                 | Shortcuts
@@ -1025,6 +1037,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         | ToggleRibbon
         | CycleToolsPlace
         | ResetPanels
+        | ScreenMode
         | Search
         | Help
         | Shortcuts
@@ -1267,6 +1280,7 @@ pub fn checked(st: &AppState, cmd: Cmd) -> Option<bool> {
         Cmd::ToggleSelectionOverlay => Some(st.prefs.bool("selection.overlay")),
         Cmd::ToggleTheme => Some(!st.palette.dark),
         Cmd::ToggleRibbon => Some(st.prefs.choice("ui.ribbon") == "single"),
+        Cmd::ScreenMode => Some(st.screen != crate::state::ScreenMode::Standard),
         Cmd::ToggleVisible => active_layer(st).ok().map(|l| !l.visible),
         Cmd::ToggleLock => active_layer(st).ok().map(|l| l.locked),
         _ => None,

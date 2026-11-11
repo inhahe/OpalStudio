@@ -27,6 +27,7 @@ pub const ARROW_DOWN: char = '\u{f148}';
 pub const ZOOM_IN: char = '\u{f8c4}';
 pub const ZOOM_OUT: char = '\u{f8c6}';
 pub const ZOOM_FIT: char = '\u{ee8c}';
+pub const FULL_SCREEN: char = '\u{e684}';
 pub const ZOOM_100: char = '\u{f70a}';
 pub const HAND: char = '\u{e6db}';
 pub const HELP: char = '\u{f63d}';

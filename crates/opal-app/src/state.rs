@@ -243,6 +243,8 @@ pub struct AppState {
     /// The window's, which work done elsewhere asks for a frame when it ends (one of its own,
     /// which asks no one, with no window).
     pub repaint: egui::Context,
+    /// How the window shows the image (F cycles through them).
+    pub screen: ScreenMode,
     /// How long an edit is waited for as it begins (see `edits::WAITED_FOR`).
     pub edit_wait: std::time::Duration,
     pub thumbs: crate::thumbs::Thumbnails,
@@ -382,6 +384,7 @@ impl AppState {
             modifying: None,
             dropped: VecDeque::new(),
             repaint: egui::Context::default(),
+            screen: ScreenMode::Standard,
             edit_wait: crate::edits::WAITED_FOR,
             thumbs: Default::default(),
             reading: None,
@@ -722,6 +725,14 @@ impl AppState {
                 self.settings_touched();
             }
             Cmd::ResetPanels => self.reset_panels = true,
+            Cmd::ScreenMode => {
+                self.screen = self.screen.next();
+                match self.screen {
+                    ScreenMode::Standard => {}
+                    ScreenMode::FullScreen => self.notify("Full screen: F again shows the image alone."),
+                    ScreenMode::ImageAlone => self.notify("The image alone: F brings the window back."),
+                }
+            }
             Cmd::Search => self.ribbon.focus_search = true,
             Cmd::Help => self.help = Some(self.help_topic_here()),
             Cmd::Shortcuts => self.help = Some(HelpTopic::Shortcuts),
@@ -1119,6 +1130,30 @@ impl AppState {
     pub(crate) fn report<E: std::fmt::Display>(&mut self, r: Result<(), E>) {
         if let Err(e) = r {
             self.message(MessageKind::Error, "That did not work", e.to_string());
+        }
+    }
+}
+
+/// How the window shows the image (design.md, *The window*).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ScreenMode {
+    /// As usual.
+    #[default]
+    Standard,
+    /// The window full screen, as it is otherwise.
+    FullScreen,
+    /// The window full screen, with the active image alone in it: no ribbon, panels or status
+    /// bar (as usual while no image is open).
+    ImageAlone,
+}
+
+impl ScreenMode {
+    /// The one F goes to from this one.
+    pub fn next(self) -> ScreenMode {
+        match self {
+            ScreenMode::Standard => ScreenMode::FullScreen,
+            ScreenMode::FullScreen => ScreenMode::ImageAlone,
+            ScreenMode::ImageAlone => ScreenMode::Standard,
         }
     }
 }

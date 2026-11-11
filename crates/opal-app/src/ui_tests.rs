@@ -2367,6 +2367,47 @@ fn an_edit_under_way_shows_in_the_status_bar_and_can_be_cancelled() {
 }
 
 #[test]
+fn f_shows_the_window_full_screen_then_the_image_alone_then_as_usual() {
+    use crate::state::ScreenMode;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 64, 64);
+    // The ribbon's tabs, the panels' and the status bar's parts, are what the image alone hides.
+    let framed = |h: &Harness<'static, OpalApp>| h.query_by_label("Home").is_some();
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        h.key_press(egui::Key::F);
+        h.run();
+        seen.push((h.state().state().screen, framed(&h)));
+    }
+    assert_eq!(
+        seen,
+        [(ScreenMode::FullScreen, true), (ScreenMode::ImageAlone, false), (ScreenMode::Standard, true)],
+        "F does not cycle the screen modes, or the image alone shows the rest"
+    );
+    // The image alone still takes the tools: a click on it with the zoom zooms in.
+    let st = h.state_mut().state_mut();
+    st.screen = ScreenMode::ImageAlone;
+    st.set_tool(crate::tools::ToolId::Zoom);
+    h.run();
+    let d = h.state().state().active().unwrap();
+    let (before, at) = (d.view.zoom, d.view.screen_rect.center());
+    h.hover_at(at);
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    }
+    h.run();
+    assert!(h.state().state().active().unwrap().view.zoom > before, "the image alone took no click");
+}
+
+#[test]
 fn a_failed_write_stops_a_quit_waiting_for_it() {
     let _gpu = gpu_lock();
     let mut h = harness();

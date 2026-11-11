@@ -636,6 +636,11 @@ curve editors.
   (Wayland), nothing is done. (`app::fit_to_monitor`, once.)
 - The starting layout's split gives the tool settings half the right column, which shows
   the crop box's numbers without scrolling in a window maximized on such a screen.
+- Screen modes (View › Screen Mode, F): standard; full screen (the window's title bar and the
+  taskbar gone); and the image alone, full screen with only the active image in it, no
+  ribbon, panels, tool strip or status bar, its tools and keys working as ever (while no
+  image is open, the window is shown as usual). A notice says how to go on or back. Not
+  kept between sessions (`AppState::screen`).
 - Files dropped on it open as images, in the order dropped, but not while a dialog is open
   (one opened behind it would become the image the dialog acts on): they wait for it to
   close (`AppState::open_dropped`), in the frame its closing brings.

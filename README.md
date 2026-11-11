@@ -114,7 +114,8 @@ cargo test --workspace                     # all tests, interface tests included
   set amount of memory (a preference); past it, the oldest states and abandoned branches
   are dropped, never the newest work.
 - **Viewing.** Zoom with the wheel, the Zoom tool, pinching or the zoom commands; scroll
-  with the Hand tool, Space-drag or the middle button. The image is drawn on the GPU in
+  with the Hand tool, Space-drag or the middle button. F goes full screen, then shows the
+  image alone with nothing round it, then back. The image is drawn on the GPU in
   linear light, smoothly when zoomed out and as sharp pixels when zoomed in. Rulers along
   the top and left of the view (View › Rulers, Ctrl+R) count from the canvas's corner in
   the unit sizes are shown in, and mark where the pointer is.

@@ -567,6 +567,7 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
         | ToggleRibbon
         | CycleToolsPlace
         | ResetPanels
+        | ScreenMode
         | Search
         | Help
         | Shortcuts

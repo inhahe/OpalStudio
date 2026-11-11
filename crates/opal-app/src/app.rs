@@ -11,7 +11,7 @@ use crate::help;
 use crate::icons;
 use crate::panels;
 use crate::ribbon::{self, button_keytips, tab_keytips};
-use crate::state::{AppState, Confirm, Keytips};
+use crate::state::{AppState, Confirm, Keytips, ScreenMode};
 use crate::theme;
 use crate::tools::ToolId;
 use eframe::egui::{self, Event, Key, Modifiers, RichText, ViewportCommand};
@@ -67,6 +67,8 @@ pub struct OpalApp {
     mcp_http: Option<crate::mcp_http::HttpServer>,
     /// The port it could not be served on, not tried again until the preferences change.
     mcp_http_failed: Option<u16>,
+    /// Whether the window was last asked to be full screen (see `AppState::screen`).
+    full_screen: bool,
 }
 
 impl OpalApp {
@@ -117,6 +119,7 @@ impl OpalApp {
             alt_down: false,
             field_had_keys: false,
             fitted_to_monitor: false,
+            full_screen: false,
             #[cfg(test)]
             status_given: None,
             work_area,
@@ -700,6 +703,36 @@ impl OpalApp {
         StatusSeen { clients, steps, shut_out, tiles: opal_core::store::status() }
     }
 
+    /// The window as usual, round the panels: the ribbon, the status bar, the tools' strip if
+    /// they are at a side, and the panels.
+    fn frame_ui(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("ribbon").frame(egui::Frame::NONE).resizable(false).show(ui, |ui| {
+            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+            ribbon::ribbon_ui(ui, &mut self.st);
+        });
+        egui::Panel::bottom("status").resizable(false).show(ui, |ui| self.status_bar(ui));
+        let strip = self.st.prefs.choice("ui.tools");
+        if strip != "ribbon" {
+            let panel =
+                if strip == "left" { egui::Panel::left("tools-strip") } else { egui::Panel::right("tools-strip") };
+            panel.exact_size(44.0).resizable(false).show(ui, |ui| {
+                let mut y = ui.max_rect().top() + 6.0;
+                for t in ToolId::ALL {
+                    let r = egui::Rect::from_min_size(
+                        egui::pos2(ui.max_rect().center().x - 16.0, y),
+                        egui::Vec2::splat(32.0),
+                    );
+                    ribbon::tool_button(ui, &mut self.st, t, r);
+                    y += 36.0;
+                }
+            });
+        }
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(ui.visuals().panel_fill)).show(ui, |ui| {
+            let mut behavior = Behavior { st: &mut self.st };
+            self.tree.ui(&mut behavior, ui);
+        });
+    }
+
     /// The image whose edit the status bar shows under way, if one is (see `edits`): the active
     /// image's, else the first busy image's, once it has run long enough to be shown.
     fn shown_edit(&self) -> Option<DocId> {
@@ -999,31 +1032,19 @@ impl eframe::App for OpalApp {
         self.handle_dropped_files(&ctx);
         self.poll_gpu();
 
-        egui::Panel::top("ribbon").frame(egui::Frame::NONE).resizable(false).show(ui, |ui| {
-            ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-            ribbon::ribbon_ui(ui, &mut self.st);
-        });
-        egui::Panel::bottom("status").resizable(false).show(ui, |ui| self.status_bar(ui));
-        let strip = self.st.prefs.choice("ui.tools");
-        if strip != "ribbon" {
-            let panel =
-                if strip == "left" { egui::Panel::left("tools-strip") } else { egui::Panel::right("tools-strip") };
-            panel.exact_size(44.0).resizable(false).show(ui, |ui| {
-                let mut y = ui.max_rect().top() + 6.0;
-                for t in ToolId::ALL {
-                    let r = egui::Rect::from_min_size(
-                        egui::pos2(ui.max_rect().center().x - 16.0, y),
-                        egui::Vec2::splat(32.0),
-                    );
-                    ribbon::tool_button(ui, &mut self.st, t, r);
-                    y += 36.0;
-                }
-            });
+        // The screen mode: full screen, or not; the image alone, or with the rest.
+        let full = self.st.screen != ScreenMode::Standard;
+        if full != self.full_screen {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(full));
+            self.full_screen = full;
         }
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(ui.visuals().panel_fill)).show(ui, |ui| {
-            let mut behavior = Behavior { st: &mut self.st };
-            self.tree.ui(&mut behavior, ui);
-        });
+        match (self.st.screen == ScreenMode::ImageAlone).then_some(self.st.active_doc).flatten() {
+            Some(id) => {
+                let fill = egui::Frame::NONE.fill(ui.visuals().panel_fill);
+                egui::CentralPanel::default().frame(fill).show(ui, |ui| canvas::canvas_ui(ui, &mut self.st, id));
+            }
+            None => self.frame_ui(ui),
+        }
 
         dialogs::show_all(&ctx, &mut self.st);
         help::help_window(&ctx, &mut self.st);
