@@ -942,7 +942,7 @@ pub static RIBBON: &[Tab] = &[
             Group {
                 name: "Select",
                 description: "What commands act on: all of the canvas, nothing, or the opposite. The \
-                              Select tool (M) draws rectangles and ellipses.",
+                              Select tool (M) draws rectangles and ellipses, and single rows and columns.",
                 large: 1,
                 cmds: &[Cmd::SelectAll, Cmd::Deselect, Cmd::Reselect, Cmd::InvertSelection, Cmd::SelectLayerPixels],
             },

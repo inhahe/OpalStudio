@@ -106,3 +106,5 @@ pub const CUT: char = '\u{f33a}';
 pub const CLEAR: char = '\u{e5e4}';
 pub const RECTANGLE: char = '\u{ea09}';
 pub const ELLIPSE: char = '\u{e8a2}';
+pub const SINGLE_ROW: char = '\u{eb59}';
+pub const SINGLE_COLUMN: char = '\u{eb60}';

@@ -115,9 +115,15 @@ pub static SELECT_SETTINGS: &[Def] = &[
     Def {
         key: "select.shape",
         label: "Shape",
-        help: "What a drag draws.",
+        help: "What a drag draws: a rectangle or an ellipse; or a single row or column of pixels, \
+               the canvas across, where the pointer is let go (a click is enough).",
         section: "Select",
-        kind: Kind::Choice(&[("rectangle", "Rectangle"), ("ellipse", "Ellipse")]),
+        kind: Kind::Choice(&[
+            ("rectangle", "Rectangle"),
+            ("ellipse", "Ellipse"),
+            ("row", "Single row"),
+            ("column", "Single column"),
+        ]),
         default: Init::Choice("rectangle"),
         advanced: false,
     },
@@ -154,18 +160,24 @@ static SELECT: ToolInfo = ToolInfo {
     name: "Select",
     icon: icons::RECTANGLE,
     key: Key::M,
-    description: "Drag to select a rectangle or an ellipse (Shift adds, Alt takes away); drag its box to \
-                  move, size or turn it.",
-    help: "Drag across the canvas to select a rectangle, or an ellipse (choose which at the top of \
-           the tool settings). Edges fall on whole pixels. Holding Shift as the drag starts adds \
-           to what is selected, Alt takes away, and both keep only what is in both (or choose \
-           with Combine); pressing Shift once dragging makes it a square or a circle, and Alt \
-           draws it from its middle. Esc while dragging gives up the drag; a click without a \
-           drag selects nothing. The last shape selected keeps a box: drag inside it to move \
-           it, a handle to size it (Shift keeps its proportions), or just outside a corner to \
-           turn it; the button under it gives its exact position, size and angle, in any unit.",
+    description: "Drag to select a rectangle or an ellipse, or click for a single row or column \
+                  (Shift adds, Alt takes away); drag its box to move, size or turn it.",
+    help: "Drag across the canvas to select a rectangle or an ellipse, or click for a single row \
+           or column of pixels the canvas across (choose which at the top of the tool settings; \
+           a row or column follows the pointer while it is held). Edges fall on whole pixels. \
+           Holding Shift as the drag starts adds to what is selected, Alt takes away, and both \
+           keep only what is in both (or choose with Combine); pressing Shift once dragging \
+           makes it a square or a circle, and Alt draws it from its middle. Esc while dragging \
+           gives up the drag; a click without a drag selects nothing, but a row or column. The \
+           last shape selected keeps a box, while a rectangle or an ellipse is chosen: drag \
+           inside it to move it, a handle to size it (Shift keeps its proportions), or just \
+           outside a corner to turn it; the button under it gives its exact position, size and \
+           angle, in any unit.",
     settings: SELECT_SETTINGS,
-    variants: Some(Variants { key: "select.shape", icons: &[icons::RECTANGLE, icons::ELLIPSE] }),
+    variants: Some(Variants {
+        key: "select.shape",
+        icons: &[icons::RECTANGLE, icons::ELLIPSE, icons::SINGLE_ROW, icons::SINGLE_COLUMN],
+    }),
 };
 
 pub static CROP_SETTINGS: &[Def] = &[

@@ -3296,6 +3296,58 @@ fn the_select_tool_selects_a_rectangle_dragged_on_whole_pixels_and_combines_by_t
 }
 
 #[test]
+fn single_rows_and_columns_are_selected_the_canvas_across_by_a_click_or_a_drag() {
+    use crate::tools::ToolId;
+    use egui_kittest::kittest::by;
+    use opal_core::geom::IRect;
+    use opal_core::mask::{Extent, FULL};
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    h.state_mut().state_mut().set_tool(ToolId::Select);
+    h.run();
+    let none = egui::Modifiers::NONE;
+    let within = |x0, y0, x1, y1| Some(Extent::Within(IRect::new(x0, y0, x1, y1)));
+    let label = |h: &Harness<'static, OpalApp>| {
+        h.state().state().active().unwrap().history.undo_label().map(str::to_owned).unwrap_or_default()
+    };
+    let level = |h: &Harness<'static, OpalApp>, x, y| {
+        h.state().state().active().unwrap().pixel_selection().unwrap().mask().level_at(x, y)
+    };
+    h.get(on_side(by().label("Single row").role(egui::accesskit::Role::RadioButton), false)).click();
+    h.run();
+    // Dragged, the row the pointer is let go on: the pixel under it, not the nearest corner.
+    select_drag(&mut h, [100.4, 50.6], [250.2, 120.7], none, none);
+    assert_eq!(selected(&h), within(0, 120, 400, 121));
+    assert_eq!(label(&h), "Single row selection");
+    // A drag from the middle of its top edge, where its box's handle would be, makes a row of
+    // its own, rather than sizing it.
+    select_drag(&mut h, [200.0, 120.5], [200.0, 140.5], none, none);
+    assert_eq!(selected(&h), within(0, 140, 400, 141));
+    // Clicked (pressed and let go at once), with Shift: another row added.
+    let click = |h: &mut Harness<'static, OpalApp>, [x, y]: [f32; 2], held: egui::Modifiers| {
+        let v = h.state().state().active().unwrap().view;
+        let at = v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / h.ctx.pixels_per_point();
+        h.event(egui::Event::ModifiersChanged(held));
+        h.hover_at(at);
+        h.run();
+        h.drag_at(at);
+        h.drop_at(at);
+        h.run();
+        h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+        h.run();
+    };
+    click(&mut h, [30.0, 200.5], egui::Modifiers::SHIFT);
+    assert_eq!([level(&h, 5, 200), level(&h, 399, 140), level(&h, 5, 150)], [FULL, FULL, 0]);
+    // A column, the canvas down, replacing them.
+    h.get(on_side(by().label("Single column").role(egui::accesskit::Role::RadioButton), false)).click();
+    h.run();
+    click(&mut h, [300.5, 20.0], none);
+    assert_eq!(selected(&h), within(300, 0, 301, 300));
+    assert_eq!(label(&h), "Single column selection");
+}
+
+#[test]
 fn the_select_tool_s_variant_is_chosen_atop_its_settings_and_an_ellipse_drawn() {
     use crate::tools::ToolId;
     use egui_kittest::kittest::by;

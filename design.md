@@ -397,6 +397,16 @@ selected) makes no history state. *Smooth edges* (on by default)
 selects a pixel the edge crosses as much as the shape covers it. Each selection is a history
 state, *Rectangle selection* or *Ellipse selection*.
 
+**Single row and single column**, its other two variants, select a line of pixels a pixel
+thin, the canvas across (or down): the one under the pointer, not the nearest corner, and
+the nearest within the canvas when the pointer is past it. A click is enough; while the
+button is held it follows the pointer, as marching ants, and the line it is let go on is
+selected (*Single row selection*, *Single column selection*), combined as a shape's drag
+is. Each is a rectangle step, so the box below edits it once a rectangle or an ellipse is
+chosen again, and `select_rectangle` with a `height` (or `width`) of 1 selects one from a
+script; while a row or column is chosen the box is not shown, since round a line a pixel
+thin it would catch the presses meant for the next one.
+
 **Its box.** The selection's last step, when it is a shape, has a box round it (`edit_box`,
 shared with the Crop tool; an ellipse's is the rectangle round it, turned with it). Where a
 drag would replace what is selected (no key held, *Combine* replace), a drag from inside it

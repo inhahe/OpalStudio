@@ -452,7 +452,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         march(&ctx, draw_ants(ui, &lines, rect, &to_screen, ctx.input(|i| i.time)));
     }
     if let Some(drag) = &d.select_drag {
-        crate::select_tool::draw(ui, drag, select, rect, &to_screen);
+        crate::select_tool::draw(ui, drag, select, &d.doc().canvas.rect(), rect, &to_screen);
     }
     if let Some(m) = &d.moving {
         draw_guides(ui, &m.guides, rect, &to_screen);

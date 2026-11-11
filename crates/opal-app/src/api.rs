@@ -2441,7 +2441,7 @@ impl AppState {
         let like = Shape { kind, center: [0.0; 2], size: [0.0; 2], angle: 0.0, smooth };
         let d = self.doc_mut(id).expect("found");
         let made = opal_core::selection::with_shape(d.pixel_selection().map(|s| &**s), b.shape(&like), combine);
-        d.set_pixel_selection(Some(made), crate::select_tool::label(kind));
+        d.set_pixel_selection(Some(made), crate::select_tool::label(crate::select_tool::Draws::Shape(kind)));
         Ok(selection_json(d))
     }
 
