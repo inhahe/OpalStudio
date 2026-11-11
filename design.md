@@ -434,12 +434,15 @@ levels so that a smooth edge stays smooth (a smooth circle grown is the larger c
 within a tenth of a pixel), spread to every pixel by Danielsson's sweeps, in the measure the
 shape asks for (round: straight across; square: the farther of across and down; diamond:
 across and down together; a sharp edge's corners exactly), and only in a band of tiles
-round the outline (found run by run, in time with the outline's length; a tile wholly on one
-side of half is none of it), worked out in blocks of tiles, a window each (the block and the
-band round it), of the size that should take the least time for the tiles to work out (larger
-blocks repeat less of their margin, but fewer fit at once, and may cover more far from the
-outline), by as many workers as their windows fit in half a gigabyte, the other threads
-left free.
+round the outline, each side as far as the levels vary there (grown by 900, 900 pixels out
+but only beside the outline in, where every pixel stays selected), found run by run, in time
+with the outline's length (a tile wholly on one side of half is none of it), worked out in
+blocks of tiles, a window each (the block and the band round it), of the size that should
+take the least time for the tiles to work out (larger blocks repeat less of their margin, but
+fewer fit at once, and may cover more far from the outline), by as many workers as their
+windows fit in half a gigabyte, the other threads left free. The memory that takes (those
+windows, and the tiles made) is checked against what is free before the work begins: if
+there is not that much, the dialog says so, and a script's call is refused.
 Distances go to 1000 pixels at most (`modify::MAX_DISTANCE`).
 They work from the outline, where pixels are half selected, so a soft selection grown or
 feathered loses its own softness; growing by nothing, or a feather of no width, is no step.
@@ -447,10 +450,15 @@ On the Select tab, *Grow or Shrink* and *Feather* open dialogs (refused while a 
 that show what they make on their own image (a pending edit, *Grow selection*, *Shrink
 selection* or *Feather selection*, which a save leaves pending, as it changes nothing saved),
 worked out off the interface thread as the numbers are set (lengths in that image's
-resolution), the first included, the image showing the last done meanwhile; work a later
-setting makes needless stops before it begins or between blocks; kept on OK, which waits for
-the last job's end (every job's end is counted, a failed one's too) and works the step out
-itself if that made nothing. A save applies an open box, as ever. Scripts call `grow_selection` (`by`, `corners`) and
+resolution), the first included, the image showing the last done meanwhile. The jobs run one
+at a time on a thread with a pool of threads of their own (`background::LatestJob`), so they
+neither wait behind saves and exports nor keep them waiting; a job set while another runs
+replaces any waiting, and work a later setting makes needless stops before it begins or
+between blocks. Each job tells its end on a channel, whatever came of it. OK keeps what is
+shown once it is what the step set makes: while that is worked out, the dialog waits, saying
+so (only Cancel can be pressed), the interface going on. A step that could not be worked out
+(not memory enough, or a failure) shows the selection as it was, the dialog saying why, and
+OK keeps nothing until another is set. A save applies an open box. Scripts call `grow_selection` (`by`, `corners`) and
 `feather_selection` (`width`, `side`, `falloff`), the names the recipe gives them. Rotate,
 Flip and Resize Image carry them when they scale every length alike, their distances
 scaled, up to the farthest a step may reach; square and diamond corners, measured along the

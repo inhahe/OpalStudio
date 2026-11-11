@@ -11,6 +11,20 @@ its colors are off; the user is warned when the image opens. Whether a profile i
 judged from its description text. **Fix:** color management with lcms2 in milestone 5:
 convert from the embedded profile into the working space on import.
 
+## Long edits run on the interface thread
+
+`layer_ops.rs` (Merge Down, Merge Selected and Visible, Flatten, Rasterize, Stamp Visible),
+`image_ops.rs` (`transform_all`: Rotate, Flip and Resize Image, the selection carried with
+them, its Grow and Feather steps worked out again), and `api.rs`'s `grow_selection` and
+`feather_selection`. Each runs on the interface thread (its parallel parts on rayon's
+threads), so the window neither repaints nor can stop it until it is done: seconds, for a
+large document or a selection grown far along a long outline. Only previews (the modifier
+dialogs', the projections), saves, exports and copies run off it. **Fix:** edits as jobs, as
+saves are: worked out off the interface thread from the document as it was, with the status
+bar's progress and Cancel (`opal_io::Progress`), applied as a history state once done if the
+document has not changed meanwhile. What may be done meanwhile (other images only, or
+anything, the job then refused if its image changed) is to be decided first.
+
 ## GPU memory is only reported on Windows
 
 `crates/opal-app/src/gpu_memory.rs`. **Fix:** query `VK_EXT_memory_budget` through wgpu's

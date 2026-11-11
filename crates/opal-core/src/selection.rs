@@ -83,6 +83,16 @@ impl Step {
         })
     }
 
+    /// The memory applying it to `before` needs, in bytes, all of it in memory (see
+    /// `modify::grow_memory`), if it may need much: a modifier's.
+    pub fn memory(&self, before: &Mask) -> Option<u64> {
+        match self {
+            Step::Grow { by, .. } => Some(crate::modify::grow_memory(before, *by)),
+            Step::Feather { width, side, .. } => Some(crate::modify::feather_memory(before, *width, *side)),
+            _ => None,
+        }
+    }
+
     /// Whether it leaves every selection as it is (growing by nothing, a feather of no width).
     fn leaves_as_is(&self) -> bool {
         match self {

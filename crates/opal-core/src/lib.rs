@@ -15,6 +15,23 @@
 //! Everything a history state holds is shared through [`std::sync::Arc`], so taking a
 //! snapshot copies pointers, and changing a tile copies that tile alone.
 
+/// Gives a fieldless enum `ALL` (its values, in order), `NAMES` (their names, as the recipe
+/// (serde), the API and the dialogs give them), and `named()` (the value of a name). The
+/// tests of each check serde's names against `NAMES`.
+macro_rules! named {
+    ($t:ident: $($v:ident = $n:literal),+) => {
+        impl $t {
+            pub const ALL: [$t; [$($n),+].len()] = [$($t::$v),+];
+            pub const NAMES: [&'static str; [$($n),+].len()] = [$($n),+];
+
+            /// The one named `name` (see `NAMES`).
+            pub fn named(name: &str) -> Option<$t> {
+                $t::NAMES.iter().position(|n| *n == name).map(|i| $t::ALL[i])
+            }
+        }
+    };
+}
+
 pub mod composite;
 pub mod curve;
 pub mod document;

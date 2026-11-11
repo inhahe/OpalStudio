@@ -207,12 +207,7 @@ fn run(shared: &Shared) {
         match update {
             Ok(shown) => s.shown = Some(Arc::new(shown)),
             Err(e) => {
-                let why = e
-                    .downcast_ref::<&str>()
-                    .map(|m| m.to_string())
-                    .or_else(|| e.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "a panic".into());
-                s.failed = Some(why);
+                s.failed = Some(crate::background::panic_message(&*e));
             }
         }
         let failed = s.failed.is_some();

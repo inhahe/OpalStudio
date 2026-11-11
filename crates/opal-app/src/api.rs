@@ -2137,8 +2137,10 @@ impl AppState {
                         falloff: args.text("falloff").and_then(Falloff::named).unwrap_or_default(),
                     },
                 };
-                self.add_modifier(step);
-                now(Ok(selection_json(self.active().expect("available"))))
+                match self.add_modifier(step) {
+                    Ok(()) => now(Ok(selection_json(self.active().expect("available")))),
+                    Err(why) => now(Err(format!("{}: {why}", snake(&format!("{cmd:?}"))))),
+                }
             }
             Cmd::SelectAll | Cmd::Deselect | Cmd::InvertSelection => {
                 self.run(cmd, ctx);
@@ -3162,6 +3164,12 @@ mod tests {
         assert_eq!(s["steps"][3]["step"], json!("feather"));
         let label = st.active().unwrap().history.undo_label().map(str::to_owned);
         assert_eq!(label.as_deref(), Some("Feather selection"));
+        // Not memory enough: refused, saying why, the selection as it was.
+        let states = st.active().unwrap().history.nodes().count();
+        let _pretend = crate::memory::testing::pretend_free(Some(1000));
+        let why = now(&mut st, "grow_selection", json!({ "by": 5 })).unwrap_err();
+        assert!(why.starts_with("grow_selection: This would need about"), "{why}");
+        assert_eq!(st.active().unwrap().history.nodes().count(), states);
     }
 
     #[test]

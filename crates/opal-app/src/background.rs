@@ -1,7 +1,7 @@
 //! Work done off the interface thread.
 
 use eframe::egui;
-use std::sync::{OnceLock, mpsc};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 
 /// The threads background work runs its parallel parts on (projections, saves and exports,
 /// copies): a pool apart from rayon's global one, which the interface thread uses (for a
@@ -21,6 +21,15 @@ pub fn pool() -> &'static rayon::ThreadPool {
 }
 
 type Job = Box<dyn FnOnce() + Send>;
+
+/// What a panic said, given what it was made with (`panic!`'s message, as a rule).
+pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|m| m.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic".into())
+}
 
 /// A thread that runs jobs one after another, in the order given, each inside [`pool`];
 /// started when first needed.
@@ -69,6 +78,72 @@ impl JobThread {
         }
         // Not to be lost however unlikely this is: done here, then.
         job();
+    }
+}
+
+/// The job waiting for a [`LatestJob`]'s thread, if one is, and what tells the thread so.
+type Slot = (Mutex<Option<Job>>, Condvar);
+
+/// A thread that runs only the latest of the jobs given it, one at a time, each inside a pool
+/// of its own: they neither wait behind [`pool`]'s work (saves, exports) nor keep it waiting.
+/// A job given while another runs replaces any waiting, which is dropped without running.
+/// Started when first given a job.
+pub struct LatestJob {
+    name: &'static str,
+    slot: OnceLock<Arc<Slot>>,
+}
+
+impl LatestJob {
+    pub const fn new(name: &'static str) -> LatestJob {
+        LatestJob { name, slot: OnceLock::new() }
+    }
+
+    /// Runs `work`, unless another job is given before it begins, then `done` with what it
+    /// gave (an error if it panicked), then asks `ctx` to repaint.
+    pub fn run<R: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> R + Send + 'static,
+        done: impl FnOnce(std::thread::Result<R>) + Send + 'static,
+        ctx: &egui::Context,
+    ) {
+        let name = self.name;
+        let slot = self.slot.get_or_init(|| {
+            let slot: Arc<Slot> = Arc::default();
+            let theirs = slot.clone();
+            std::thread::Builder::new()
+                .name(name.into())
+                .spawn(move || {
+                    let n = std::thread::available_parallelism().map_or(2, |n| n.get());
+                    let pool = rayon::ThreadPoolBuilder::new()
+                        .num_threads(n)
+                        .thread_name(move |i| format!("{name} {i}"))
+                        .build()
+                        .expect("starting a pool of threads");
+                    let (waiting, given) = &*theirs;
+                    loop {
+                        // The slot let go of before the job runs, for the next to be given.
+                        let job = {
+                            let mut slot = waiting.lock().unwrap_or_else(|e| e.into_inner());
+                            while slot.is_none() {
+                                slot = given.wait(slot).unwrap_or_else(|e| e.into_inner());
+                            }
+                            slot.take().expect("given")
+                        };
+                        // Jobs catch their own panics; the thread goes on whatever comes.
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pool.install(job)));
+                    }
+                })
+                .expect("starting a background thread");
+            slot
+        });
+        let ctx = ctx.clone();
+        let job: Job = Box::new(move || {
+            done(std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)));
+            ctx.request_repaint();
+        });
+        let (waiting, given) = &**slot;
+        *waiting.lock().unwrap_or_else(|e| e.into_inner()) = Some(job);
+        given.notify_one();
     }
 }
 
@@ -167,5 +242,52 @@ mod tests {
         let got = rx.recv_timeout(Duration::from_secs(10));
         drop(held);
         assert_eq!(got.ok().flatten(), Some(4_999_950_000), "the job waited for the global pool");
+    }
+
+    #[test]
+    fn of_the_jobs_given_meanwhile_only_the_latest_runs_and_off_the_background_pool() {
+        // Every thread of the background pool held while the jobs run.
+        let held = testing::hold(Some(pool()));
+        let t = LatestJob::new("test latest");
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::channel();
+        // The first keeps the thread until let go, while two more are given.
+        let (began, go) = (mpsc::channel::<()>(), mpsc::channel::<()>());
+        let (first_began, release) = (began.0, go.1);
+        let first = tx.clone();
+        let work = move || {
+            first_began.send(()).unwrap();
+            release.recv().unwrap();
+            1
+        };
+        t.run(work, move |r| first.send(r.ok()).unwrap(), &ctx);
+        began.1.recv_timeout(Duration::from_secs(10)).expect("the first job never began");
+        for i in [2, 3] {
+            let tx = tx.clone();
+            let numbers: Vec<u64> = (0..100_000).collect();
+            let work = move || (numbers.par_iter().sum::<u64>() == 4_999_950_000).then_some(i);
+            t.run(work, move |r| tx.send(r.ok().flatten()).unwrap(), &ctx);
+        }
+        go.0.send(()).unwrap();
+        let got: Vec<Option<i32>> = (0..2).map(|_| rx.recv_timeout(Duration::from_secs(10)).ok().flatten()).collect();
+        drop(held);
+        assert_eq!(got, [Some(1), Some(3)], "the latest did not run, or waited for the background pool");
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "the job replaced ran");
+    }
+
+    #[test]
+    fn a_latest_job_s_panic_is_reported_and_the_thread_goes_on() {
+        let t = LatestJob::new("test latest");
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::channel();
+        for i in [1, 2] {
+            let tx = tx.clone();
+            let work = move || {
+                assert!(i != 1, "job 1 fails");
+                i
+            };
+            t.run(work, move |r| tx.send(r.ok()).unwrap(), &ctx);
+            assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok((i == 2).then_some(i)));
+        }
     }
 }

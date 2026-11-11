@@ -17,21 +17,28 @@ pub type Outline = Arc<Vec<Vec<[f64; 2]>>>;
 /// adds, the selection it adds it to, and the step that image's pending edit shows. What a
 /// step set makes is worked out off the interface thread (`AppState::preview_modifying`), the
 /// latest only.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Modifying {
     doc: DocId,
     pub step: Step,
     pub before: Arc<Selection>,
     shown: Option<Step>,
-    /// The number of the job last asked for (jobs are numbered from 1).
+    /// Why what the step makes could not be worked out (not memory enough, say), if it could
+    /// not: the dialog says so, and keeps nothing until another step is set.
+    failed: Option<String>,
+    /// Whether OK was pressed while what the step makes was being worked out: it is kept
+    /// once shown, the dialog waiting until then.
+    keeping: bool,
+    /// The number of the job last asked for (jobs are numbered from 1), and of the last that
+    /// has ended (as `ends` has told).
     asked: u64,
+    ended: u64,
     /// The job wanted: one asked for after it, or the dialog's end, makes it another, and a
     /// job not wanted stops, before it begins or between the pieces of its work.
     generation: Arc<std::sync::atomic::AtomicU64>,
-    /// The number of the last job that has ended, however (done, stopped, or failed).
-    ended: Arc<std::sync::atomic::AtomicU64>,
-    /// What a job made, for the step it was asked for.
-    made: Arc<std::sync::Mutex<Option<Preview>>>,
+    /// Where each job tells its end, however it ends (done, stopped, or failed), and what it
+    /// made, if anything; and where the dialog reads them.
+    ends: (std::sync::mpsc::Sender<Ended>, std::sync::mpsc::Receiver<Ended>),
 }
 
 impl Modifying {
@@ -39,14 +46,26 @@ impl Modifying {
     pub fn doc(&self) -> DocId {
         self.doc
     }
+
+    /// Why what the step set makes could not be worked out, if it could not.
+    pub fn failed(&self) -> Option<&str> {
+        self.failed.as_deref()
+    }
+
+    /// Whether OK was pressed, and the dialog waits for what the step makes.
+    pub fn keeping(&self) -> bool {
+        self.keeping
+    }
 }
 
-/// A step a modifier dialog was set to, and what it makes.
-type Preview = (Step, Arc<Selection>);
+/// A step a modifier dialog was set to, and what it makes, or why that could not be made.
+type Preview = (Step, Result<Arc<Selection>, String>);
+
+/// A modifier dialog's job, ended: its number, and what it made, if anything.
+type Ended = (u64, Option<Preview>);
 
 /// The thread the modifier dialogs' previews are worked out on.
-static PREVIEWS: std::sync::Mutex<crate::background::JobThread> =
-    std::sync::Mutex::new(crate::background::JobThread::new("selection previews"));
+static PREVIEWS: crate::background::LatestJob = crate::background::LatestJob::new("selection previews");
 
 /// The history state adding `step`, a modifier, makes.
 pub fn modifier_label(step: &Step) -> &'static str {
@@ -150,10 +169,12 @@ impl AppState {
             step,
             before,
             shown: None,
+            failed: None,
+            keeping: false,
             asked: 0,
+            ended: 0,
             generation: Default::default(),
-            ended: Default::default(),
-            made: Default::default(),
+            ends: std::sync::mpsc::channel(),
         });
         self.preview_modifying(ctx);
     }
@@ -171,69 +192,104 @@ impl AppState {
         d.edit_pending(modifier_label(&step), |doc| doc.selection = (!made.is_empty()).then_some(made));
     }
 
-    /// Shows what the open modifier dialog makes with its step, worked out here and now.
-    pub(crate) fn show_modifying(&mut self) {
-        let Some(m) = self.modifying.clone() else { return };
-        self.show_made(m.step.clone(), Arc::new(m.before.then(m.step)));
-    }
-
     /// Has what the open modifier dialog makes with its step worked out off the interface
     /// thread, to be shown once done ([`poll_modifying`](Self::poll_modifying)); a step asked
-    /// for after it stops it, between the pieces of its work, or before it begins.
+    /// for after it stops it, between the pieces of its work, or before it begins. It is not
+    /// begun if there is not memory enough for it.
     pub(crate) fn preview_modifying(&mut self, ctx: &eframe::egui::Context) {
         use std::sync::atomic::Ordering;
         let Some(m) = self.modifying.as_mut() else { return };
         m.asked += 1;
         let ours = m.asked;
         m.generation.store(ours, Ordering::SeqCst);
-        let (step, before, generation, made) = (m.step.clone(), m.before.clone(), m.generation.clone(), m.made.clone());
-        let ended = m.ended.clone();
-        PREVIEWS.lock().expect("not poisoned").run(
+        m.failed = None;
+        let (step, before, generation) = (m.step.clone(), m.before.clone(), m.generation.clone());
+        let (ends, asked) = (m.ends.0.clone(), m.step.clone());
+        // What is free, measured now; what the step needs, worked out in the job.
+        let mut memory = crate::memory::Allowance::now();
+        PREVIEWS.run(
             move || {
                 let stop = || generation.load(Ordering::SeqCst) != ours;
                 // Asked for after another, it may not be wanted by the time it begins.
                 if stop() {
                     return None;
                 }
-                let selection = before.then_unless(step.clone(), &stop)?;
-                Some((step, Arc::new(selection)))
+                if let Some(need) = step.memory(before.mask())
+                    && let Err(why) = memory.take(crate::memory::Need::at_once(need))
+                {
+                    return Some(Err(why));
+                }
+                before.then_unless(step, &stop).map(|s| Ok(Arc::new(s)))
             },
             move |result| {
-                if let Ok(Some(result)) = result {
-                    *made.lock().expect("not poisoned") = Some(result);
-                }
-                // Ended, whatever came of it (a panic included), so that no one waits on.
-                ended.fetch_max(ours, Ordering::SeqCst);
+                let made = match result {
+                    Ok(made) => made,
+                    Err(panic) => Some(Err(format!("This went wrong: {}.", crate::background::panic_message(&*panic)))),
+                };
+                // Told whatever came of it, so that no one waits on. (The dialog may have closed.)
+                let _ = ends.send((ours, made.map(|made| (asked, made))));
             },
             ctx,
         );
     }
 
     /// Shows what a job made for the open modifier dialog, if it is done and for the step it
-    /// has now; whether the last job asked for is still under way.
+    /// has now, or why it could not be made (the image then shows the selection as it was);
+    /// once that is shown after OK, ends the dialog keeping it. Whether the last job asked
+    /// for is still under way.
     pub(crate) fn poll_modifying(&mut self) -> bool {
-        use std::sync::atomic::Ordering;
-        let Some(m) = self.modifying.clone() else { return false };
-        if let Some((step, made)) = m.made.lock().expect("not poisoned").take()
-            && step == m.step
-        {
-            self.show_made(step, made);
+        let Some(m) = self.modifying.as_mut() else { return false };
+        // The jobs end one after another: the last to have made something is the latest.
+        let mut made = None;
+        while let Ok((n, preview)) = m.ends.1.try_recv() {
+            m.ended = m.ended.max(n);
+            made = preview.or(made);
         }
-        m.ended.load(Ordering::SeqCst) < m.asked
+        let under_way = m.ended < m.asked;
+        match made {
+            Some((step, Ok(made))) if step == m.step => self.show_made(step, made),
+            Some((step, Err(why))) if step == m.step => self.take_back_modifying(why),
+            _ => {}
+        }
+        let Some(m) = self.modifying.as_ref() else { return false };
+        if m.keeping && m.shown.as_ref() == Some(&m.step) {
+            self.close_modifying(true);
+        } else if m.keeping && !under_way {
+            // Nothing to keep: the dialog stays, saying why.
+            let why = m.failed.clone().unwrap_or_else(|| "This could not be worked out.".into());
+            self.take_back_modifying(why);
+        }
+        under_way
     }
 
-    /// Ends the open modifier dialog: what it makes a history state of its own if `keep` (its
-    /// preview waited for if under way, and worked out here if it did not come, as when its
-    /// job failed), else given up. The jobs it asked for stop.
-    pub(crate) fn end_modifying(&mut self, keep: bool) {
-        if keep {
-            while self.poll_modifying() {
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
-            if self.modifying.as_ref().is_some_and(|m| m.shown.as_ref() != Some(&m.step)) {
-                self.show_modifying();
-            }
+    /// Shows the selection as it was before the open modifier dialog, with `why` what its step
+    /// makes could not be worked out; OK pressed waits no longer.
+    fn take_back_modifying(&mut self, why: String) {
+        let Some(m) = self.modifying.as_mut() else { return };
+        m.failed = Some(why);
+        m.keeping = false;
+        let (shown, doc) = (m.shown.take(), m.doc);
+        if let (Some(shown), Some(d)) = (shown, self.doc_mut(doc)) {
+            d.discard_pending(modifier_label(&shown));
         }
+    }
+
+    /// Ends the open modifier dialog: if `keep` (OK), what it makes a history state of its
+    /// own once shown, at once if it is, else once its job is done, the dialog waiting
+    /// meanwhile ([`poll_modifying`](Self::poll_modifying)); else (Cancel) given up.
+    pub(crate) fn end_modifying(&mut self, keep: bool) {
+        let Some(m) = self.modifying.as_mut() else { return };
+        if keep {
+            m.keeping = true;
+            self.poll_modifying();
+        } else {
+            self.close_modifying(false);
+        }
+    }
+
+    /// Closes the open modifier dialog, keeping what it shows as a history state of its own if
+    /// `keep`, else giving it up. The jobs it asked for stop.
+    fn close_modifying(&mut self, keep: bool) {
         let Some(m) = self.modifying.take() else { return };
         // No job is wanted now.
         m.generation.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -245,11 +301,18 @@ impl AppState {
         }
     }
 
-    /// Adds `step`, a modifier, to what is selected, as a history state.
-    pub(crate) fn add_modifier(&mut self, step: Step) {
+    /// Adds `step`, a modifier, to what is selected, as a history state; refused, saying why,
+    /// if there is not memory enough for it.
+    pub(crate) fn add_modifier(&mut self, step: Step) -> Result<(), String> {
         let d = self.active_mut().expect("available");
-        let s = d.pixel_selection().expect("available").then(step.clone());
-        d.set_pixel_selection(Some(s), modifier_label(&step));
+        let before = d.pixel_selection().expect("available").clone();
+        // Kept while the work runs (it caps the tiles' memory).
+        let mut memory = crate::memory::Allowance::now();
+        if let Some(need) = step.memory(before.mask()) {
+            memory.take(crate::memory::Need::at_once(need))?;
+        }
+        d.set_pixel_selection(Some(before.then(step.clone())), modifier_label(&step));
+        Ok(())
     }
 
     /// Erases what is selected on the selected layers (as much of each pixel as it is
@@ -464,22 +527,57 @@ mod tests {
         assert_eq!(st.active().unwrap().pending_label(), Some("Grow selection"));
         // Set to shrink by 10, square: shown so, under its own name.
         st.modifying.as_mut().unwrap().step = Step::Grow { by: -10.0, corners: Reach::Square };
-        st.show_modifying();
+        st.preview_modifying(&ctx);
+        settle(&mut st);
         assert_eq!(selected(&st), Extent::Within(IRect::new(110, 60, 190, 140)));
         assert_eq!(st.active().unwrap().pending_label(), Some("Shrink selection"));
         // Cancelled: as it was, no state.
         st.end_modifying(false);
         assert_eq!(selected(&st), Extent::Within(IRect::new(100, 50, 200, 150)));
         assert_eq!(st.active().unwrap().history.nodes().count(), states);
-        // A job that ends without what it was to make (stopped here; failed, it ends so too):
-        // OK does not wait on for it, but works the step out itself.
+        // OK while what it makes is worked out (a job taken as under way here, and asked for
+        // after): the dialog waits, saying so, then closes, keeping it, once it is shown.
         st.modify_selection(true, &ctx);
-        st.modifying.as_ref().unwrap().generation.store(0, std::sync::atomic::Ordering::SeqCst);
+        settle(&mut st);
+        let m = st.modifying.as_mut().unwrap();
+        m.step = Step::Grow { by: 30.0, corners: Reach::Square };
+        m.asked += 1;
         st.end_modifying(true);
+        assert!(st.modifying.as_ref().is_some_and(|m| m.keeping()), "closed before it was shown");
+        assert_eq!(selected(&st), Extent::Within(IRect::new(95, 45, 205, 155)));
+        st.preview_modifying(&ctx);
+        settle(&mut st);
+        assert!(st.modifying.is_none(), "still waiting once shown");
+        assert_eq!(selected(&st), Extent::Within(IRect::new(70, 20, 230, 180)));
         assert_eq!(st.active().unwrap().history.undo_label(), Some("Grow selection"));
         st.active_mut().unwrap().undo();
         // (Its state stays, to be redone: counted from here.)
         let states = st.active().unwrap().history.nodes().count();
+        // Set to a step there is not memory enough for: the dialog says so, the image shows
+        // the selection as it was, and OK keeps nothing, the dialog staying; a step that fits
+        // is shown, and kept.
+        st.modify_selection(true, &ctx);
+        settle(&mut st);
+        assert_eq!(st.active().unwrap().pending_label(), Some("Grow selection"));
+        let pretend = crate::memory::testing::pretend_free(Some(1000));
+        st.modifying.as_mut().unwrap().step = Step::Grow { by: 7.0, corners: Reach::Square };
+        st.preview_modifying(&ctx);
+        drop(pretend);
+        settle(&mut st);
+        let why = st.modifying.as_ref().unwrap().failed().map(str::to_owned);
+        assert!(why.as_deref().is_some_and(|w| w.starts_with("This would need about")), "{why:?}");
+        assert!(st.active().unwrap().pending_label().is_none(), "what was shown before stayed");
+        assert_eq!(selected(&st), Extent::Within(IRect::new(100, 50, 200, 150)));
+        st.end_modifying(true);
+        assert!(st.modifying.as_ref().is_some_and(|m| !m.keeping()), "OK waited, or closed");
+        st.modifying.as_mut().unwrap().step = Step::Grow { by: 6.0, corners: Reach::Square };
+        st.preview_modifying(&ctx);
+        settle(&mut st);
+        assert!(st.modifying.as_ref().unwrap().failed().is_none());
+        st.end_modifying(true);
+        assert_eq!(selected(&st), Extent::Within(IRect::new(94, 44, 206, 156)));
+        st.active_mut().unwrap().undo();
+        let states = states + 1;
         // Set twice before either is shown: the last shown until the later is done, the
         // earlier never.
         st.modify_selection(true, &ctx);
@@ -514,14 +612,31 @@ mod tests {
         assert_eq!(st.doc(first).unwrap().pending_label(), Some("Grow selection"), "the save committed it");
         st.end_modifying(false);
         assert_eq!(st.doc(first).unwrap().history.nodes().count(), states, "cancelled, a state was left");
-        // A box open, though, a save applies it, as before.
-        assert!(st.doc_mut(first).unwrap().begin_transform(opal_core::resample::Sampling::default()));
-        st.save_to(first, path.clone(), crate::writer::Then::Nothing, &ctx);
-        assert!(st.doc(first).unwrap().transform.is_none(), "the box stayed open through a save");
+        // A box open, though, a save applies it: one that changes what is saved (its pixels
+        // an image object while it is open), and one that does not (unmoved, over a layer
+        // turned, an image object already).
+        let sampling = opal_core::resample::Sampling::default();
+        for changes in [true, false] {
+            if !changes {
+                let d = st.doc_mut(first).unwrap();
+                assert!(d.begin_transform(sampling));
+                let turned = d.transform.as_ref().unwrap().start.then(opal_core::geom::Affine::rotate(0.1));
+                d.set_box(turned, None);
+                d.finish_transform();
+            }
+            assert!(st.doc_mut(first).unwrap().begin_transform(sampling));
+            let d = st.doc(first).unwrap();
+            assert_eq!(!d.pending.as_ref().unwrap().doc.saves_as(d.history.doc()), changes);
+            st.save_to(first, path.clone(), crate::writer::Then::Nothing, &ctx);
+            assert!(st.doc(first).unwrap().transform.is_none(), "the box stayed open through a save");
+        }
         st.show_doc(first);
-        // Feathered, OK at once: waited for, a state of its own, the feather a step of the recipe.
+        // Feathered, OK at once: kept once shown, a state of its own, the feather a step of the
+        // recipe.
         st.modify_selection(false, &ctx);
         st.end_modifying(true);
+        settle(&mut st);
+        assert!(st.modifying.is_none());
         let d = st.active().unwrap();
         assert_eq!(d.history.undo_label(), Some("Feather selection"));
         assert!(matches!(d.pixel_selection().unwrap().steps(), [_, Step::Feather { .. }]));

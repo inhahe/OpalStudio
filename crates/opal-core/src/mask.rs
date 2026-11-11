@@ -245,17 +245,9 @@ pub enum Combine {
     Intersect,
 }
 
+named!(Combine: Replace = "replace", Add = "add", Subtract = "subtract", Intersect = "intersect");
+
 impl Combine {
-    /// Every way of combining, and its name, in that order: as the Select tool's setting,
-    /// scripts and the recipe (serde) name them.
-    pub const ALL: [Combine; 4] = [Combine::Replace, Combine::Add, Combine::Subtract, Combine::Intersect];
-    pub const NAMES: [&'static str; 4] = ["replace", "add", "subtract", "intersect"];
-
-    /// The way of combining named `name` (see [`NAMES`](Self::NAMES)).
-    pub fn named(name: &str) -> Option<Combine> {
-        Combine::NAMES.iter().position(|n| *n == name).map(|i| Combine::ALL[i])
-    }
-
     /// Whether a new mask's level `new` leaves every level before as it is.
     fn keeps_before(self, new: u16) -> bool {
         match self {

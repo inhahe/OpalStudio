@@ -27,21 +27,6 @@ const WINDOW_PIXEL: usize = 2 + std::mem::size_of::<Option<[f32; 2]>>() + 4;
 /// The most tiles a side a block worked out in one window has.
 const MOST_BLOCK: i32 = 8;
 
-/// The names of `ALL`'s values, as the recipe (serde), the API and the dialogs name them.
-macro_rules! named {
-    ($t:ident: $($v:ident = $n:literal),+) => {
-        impl $t {
-            pub const ALL: [$t; [$($n),+].len()] = [$($t::$v),+];
-            pub const NAMES: [&'static str; [$($n),+].len()] = [$($n),+];
-
-            /// The one named `name` (see `NAMES`).
-            pub fn named(name: &str) -> Option<$t> {
-                $t::NAMES.iter().position(|n| *n == name).map(|i| $t::ALL[i])
-            }
-        }
-    };
-}
-
 named!(Reach: Round = "round", Square = "square", Diamond = "diamond");
 named!(Side: Inward = "inward", Outward = "outward", Centered = "centered");
 named!(Falloff: Gaussian = "gaussian", Linear = "linear");
@@ -142,7 +127,7 @@ impl Mask {
         if by == 0.0 {
             return Some(self.clone());
         }
-        by_distance(self, by.abs() + 2.0, reach, |d| coverage(d - by), stop)
+        by_distance(self, grow_band(by), reach, |d| coverage(d - by), stop)
     }
 
     /// [`feathered`](Self::feathered), unless `stop` says to stop (see
@@ -157,67 +142,158 @@ impl Mask {
         if width <= 0.0 {
             return Some(self.clone());
         }
-        // Where the falloff begins, from the outline, out (more than 0) or in.
-        let outer = match side {
-            Side::Inward => 0.0,
-            Side::Outward => width,
-            Side::Centered => width / 2.0,
-        };
-        // Past the falloff's far side, each way, every pixel is as the falloff ends.
-        let band = outer.max(width - outer) + 2.0;
-        by_distance(self, band, Reach::Round, move |d| level(falloff.at((outer - d) / width) as f32), stop)
+        let outer = feather_outer(width, side);
+        by_distance(
+            self,
+            feather_band(width, side),
+            Reach::Round,
+            move |d| level(falloff.at((outer - d) / width) as f32),
+            stop,
+        )
     }
 }
 
-/// How many tiles a side the blocks worked out in one window have for `band`, with `threads`
-/// to work them out on and the tiles `near` to work out: those that should take the least
-/// time. A larger block repeats less of its margin, but fewer fit in [`WINDOWS_MEMORY`] at
+/// How far from the outline a modifier's levels vary, inside it and outside: past that, each
+/// way, every pixel is as the band's edge says. (Two pixels more than the levels' own reach,
+/// for the pixels beside the outline, whose distance is read between their levels.)
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Band {
+    inside: f64,
+    outside: f64,
+}
+
+impl Band {
+    /// Out to `outside` pixels beyond the outline, and `inside` within it (each at least 0).
+    fn new(inside: f64, outside: f64) -> Band {
+        Band { inside: inside.max(0.0) + 2.0, outside: outside.max(0.0) + 2.0 }
+    }
+
+    /// The farther way.
+    fn most(self) -> f64 {
+        self.inside.max(self.outside)
+    }
+}
+
+/// The band growing by `by` (shrinking, if less than 0) works out: the levels vary where a
+/// pixel is `by` from the outline, inside it if `by` is less than 0, else outside.
+fn grow_band(by: f64) -> Band {
+    Band::new(-by, by)
+}
+
+/// The band a feather over `width` on `side` works out: from where its falloff begins
+/// (outside the outline) to `width` farther in.
+fn feather_band(width: f64, side: Side) -> Band {
+    let outer = feather_outer(width, side);
+    Band::new(width - outer, outer)
+}
+
+/// The side of the window a block of `b` tiles a side is worked out in for `band`: the block,
+/// and a margin of the band round it (and a pixel, for the distances read between pixels).
+fn window_side(b: i32, band: f64) -> usize {
+    b as usize * TILE_SIZE as usize + 2 * (band.ceil() as usize + 1)
+}
+
+/// How the tiles `near`, worked out for `band`, are worked out with `threads`: in blocks of
+/// how many tiles a side, by how many workers at once (as many as their windows fit in
+/// [`WINDOWS_MEMORY`], of the threads, and one at least). The size is the one that should take
+/// the least time: a larger block repeats less of its margin, but fewer fit in the memory at
 /// once to keep the threads busy, and it works out the whole block's tiles however few of them
 /// are near the outline. Of two alike, the smaller.
-fn block_tiles(band: f64, threads: usize, near: &[TileCoord]) -> i32 {
-    let margin = 2.0 * (band.ceil() + 1.0);
-    let side = f64::from(TILE_SIZE);
+fn layout(band: f64, threads: usize, near: &[TileCoord]) -> (i32, usize) {
     let time = |b: i32| {
-        let window = (f64::from(b) * side + margin).powi(2);
-        let workers =
-            (WINDOWS_MEMORY as f64 / (window * WINDOW_PIXEL as f64)).floor().clamp(1.0, threads.max(1) as f64);
+        let window = window_side(b, band).pow(2);
+        let workers = (WINDOWS_MEMORY / (window * WINDOW_PIXEL)).clamp(1, threads.max(1));
         let blocks: HashSet<(i32, i32)> = near.iter().map(|c| (c.x.div_euclid(b), c.y.div_euclid(b))).collect();
-        (blocks.len() as f64 / workers).ceil() * window
+        (blocks.len().div_ceil(workers) * window, b, workers)
     };
-    (1..=MOST_BLOCK).min_by(|&a, &b| time(a).total_cmp(&time(b))).expect("one at least")
+    // Each size's time once; of two alike, the first (the smaller).
+    let (_, b, workers) = (1..=MOST_BLOCK).map(time).min_by_key(|&(t, b, _)| (t, b)).expect("one size at least");
+    (b, workers)
+}
+
+/// The tiles of `mask` with pixels within `band` of its outline, each on its own side: a
+/// pixel that near it lies at most that many tiles across or down from a tile the outline may
+/// cross, and a tile it does not cross is all on one side.
+fn near_tiles(mask: &Mask, band: Band) -> Vec<TileCoord> {
+    let tiles = |pixels: f64| (pixels / f64::from(TILE_SIZE)).ceil() as i32;
+    let (inside, outside) = (tiles(band.inside), tiles(band.outside));
+    let k = inside.max(outside);
+    // How many tiles across or down each is from the nearest the outline may cross.
+    let mut apart: std::collections::HashMap<TileCoord, i32> = std::collections::HashMap::new();
+    for c in mask.edge_tiles() {
+        for dy in -k..=k {
+            for dx in -k..=k {
+                let d = dx.abs().max(dy.abs());
+                let e = apart.entry(TileCoord::new(c.x + dx, c.y + dy)).or_insert(d);
+                *e = (*e).min(d);
+            }
+        }
+    }
+    apart
+        .into_iter()
+        .filter(|&(c, d)| {
+            d <= inside.min(outside)
+                || match mask.side_in(&c.rect(0), HALF) {
+                    Some(true) => d <= inside,
+                    Some(false) => d <= outside,
+                    None => true,
+                }
+        })
+        .map(|(c, _)| c)
+        .collect()
+}
+
+/// The memory growing or shrinking `mask` by `by` needs, in bytes (see [`memory_for`]).
+pub fn grow_memory(mask: &Mask, by: f64) -> u64 {
+    memory_for(mask, grow_band(by))
+}
+
+/// The memory feathering `mask` over `width` on `side` needs, in bytes (see [`memory_for`]).
+pub fn feather_memory(mask: &Mask, width: f64, side: Side) -> u64 {
+    memory_for(mask, feather_band(width, side))
+}
+
+/// Where a feather's falloff begins, from the outline, out (more than 0) or in.
+fn feather_outer(width: f64, side: Side) -> f64 {
+    match side {
+        Side::Inward => 0.0,
+        Side::Outward => width,
+        Side::Centered => width / 2.0,
+    }
+}
+
+/// The memory working `mask` out within `band` of its outline needs, at most, on the threads
+/// of the pool it is called in: the windows worked out at once, and the tiles it makes (a
+/// level a pixel each, at most), all of it in memory.
+fn memory_for(mask: &Mask, band: Band) -> u64 {
+    let near = near_tiles(mask, band);
+    let (b, workers) = layout(band.most(), rayon::current_num_threads(), &near);
+    (workers * window_side(b, band.most()).pow(2) * WINDOW_PIXEL + near.len() * TILE_PIXELS * size_of::<u16>()) as u64
 }
 
 /// `mask` with each pixel's level what `level_of` makes of its distance to the outline, as
-/// `reach` measures it (less than 0 inside), worked out within `band` pixels of it: farther,
-/// as `level_of` says at the band's edge. The tiles within the band are worked out in blocks,
-/// a window each (the block and a margin of the band round it), by as many workers as their
-/// windows fit in [`WINDOWS_MEMORY`] (no more of the threads taken); `stop` is asked before
-/// each, and if it says so, none.
+/// `reach` measures it (less than 0 inside), worked out within `band` of it: farther, as
+/// `level_of` says at the band's edge. The tiles within the band are worked out in blocks, a
+/// window each (the block and a margin round it as wide as the band's farther way), by as many
+/// workers as [`layout`] says (no more of the threads taken); `stop` is asked before each, and
+/// if it says so, none.
 fn by_distance(
     mask: &Mask,
-    band: f64,
+    band: Band,
     reach: Reach,
     level_of: impl Fn(f64) -> u16 + Sync,
     stop: &(dyn Fn() -> bool + Sync),
 ) -> Option<Mask> {
-    let far_in = level_of(-band);
-    let far_out = level_of(band);
+    let far_in = level_of(-band.inside);
+    let far_out = level_of(band.outside);
     let far = |l: u16| if l >= HALF { far_in } else { far_out };
     let outside = far(mask.outside());
-    // The tiles within the band of those the outline may cross: a pixel within it of the
-    // outline lies at most that many tiles across or down from the outline's tile.
-    let k = (band / f64::from(TILE_SIZE)).ceil() as i32;
-    let mut near: HashSet<TileCoord> = HashSet::new();
-    for c in mask.edge_tiles() {
-        for dy in -k..=k {
-            for dx in -k..=k {
-                near.insert(TileCoord::new(c.x + dx, c.y + dy));
-            }
-        }
+    let near = near_tiles(mask, band);
+    if stop() {
+        return None;
     }
-    let near: Vec<TileCoord> = near.into_iter().collect();
-    let threads = rayon::current_num_threads().max(1);
-    let b = block_tiles(band, threads, &near);
+    let (b, workers) = layout(band.most(), rayon::current_num_threads(), &near);
+    let band = band.most();
     let mut blocks: std::collections::HashMap<(i32, i32), Vec<TileCoord>> = std::collections::HashMap::new();
     for c in near {
         blocks.entry((c.x.div_euclid(b), c.y.div_euclid(b))).or_default().push(c);
@@ -226,8 +302,7 @@ fn by_distance(
         let (a, z) = (TileCoord::new(bx * b, by * b).rect(0), TileCoord::new(bx * b + b - 1, by * b + b - 1).rect(0));
         IRect::new(a.x0, a.y0, z.x1, z.y1).expand(band.ceil() as i64 + 1)
     };
-    let bytes = (window((0, 0)).width() as usize).pow(2) * WINDOW_PIXEL;
-    let workers = (WINDOWS_MEMORY / bytes).clamp(1, threads);
+    debug_assert_eq!(window((0, 0)).width() as usize, window_side(b, band), "the window layout() reckons with");
     let blocks: Vec<((i32, i32), Vec<TileCoord>)> = blocks.into_iter().collect();
     // Each worker takes the next block not taken, until none is left or `stop` says so.
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -476,13 +551,18 @@ mod tests {
         // Near tiles covering an area, a small band, threads to keep busy: blocks of several
         // tiles a side, which repeat less of their margin than a tile alone would.
         let area: Vec<TileCoord> = (0..100).flat_map(|y| (0..100).map(move |x| TileCoord::new(x, y))).collect();
-        assert!(block_tiles(7.0, 16, &area) > 1);
+        assert!(layout(7.0, 16, &area).0 > 1);
         // A line of tiles, or one alone: a tile at a time, rather than blocks mostly far from
         // the outline.
         let line: Vec<TileCoord> = (0..2000).map(|x| TileCoord::new(x, 0)).collect();
-        assert_eq!(block_tiles(7.0, 16, &line), 1);
-        assert_eq!(block_tiles(7.0, 16, &[TileCoord::new(3, 3)]), 1);
-        assert!((1..=MOST_BLOCK).contains(&block_tiles(1002.0, 16, &area)));
+        assert_eq!(layout(7.0, 16, &line).0, 1);
+        assert_eq!(layout(7.0, 16, &[TileCoord::new(3, 3)]).0, 1);
+        let (b, workers) = layout(1002.0, 16, &area);
+        assert!((1..=MOST_BLOCK).contains(&b));
+        // As many workers as their windows fit in the memory, if not as many as the threads.
+        let window = window_side(b, 1002.0).pow(2) * WINDOW_PIXEL;
+        assert!(workers == 16 || ((workers + 1) * window > WINDOWS_MEMORY && workers * window <= WINDOWS_MEMORY));
+        assert_eq!(layout(7.0, 16, &area).1, 16, "small windows, every thread");
         let m = rect(0.0, 0.0, 3000.0, 3000.0);
         assert!(m.grown_unless(40.0, Reach::Round, &|| true).is_none(), "not stopped");
         // Worked out in blocks, the same as tile by tile would give: a corner and a side.
@@ -499,6 +579,40 @@ mod tests {
         let m = rect(0.0, 0.0, 4096.0, 4096.0).rebuilt(vec![(TileCoord::new(8, 8), MaskTile::Levels(soft))], |l| l, 0);
         assert!(!m.edge_tiles().contains(&TileCoord::new(8, 8)), "a tile wholly above half taken for the outline's");
         assert_eq!(m.grown(4.0, Reach::Round).level_at(2100, 2100), FULL);
+    }
+
+    #[test]
+    fn the_memory_a_modifier_needs_grows_with_its_reach_and_the_outline() {
+        let small = rect(0.0, 0.0, 100.0, 100.0);
+        let large = rect(0.0, 0.0, 10_000.0, 10_000.0);
+        let tile = (TILE_PIXELS * 2) as u64;
+        // The tiles round a small outline, and a window.
+        assert!(grow_memory(&small, 5.0) > tile);
+        assert!(grow_memory(&large, 5.0) > grow_memory(&small, 5.0) + 100 * tile, "a longer outline, more tiles");
+        assert!(feather_memory(&small, 900.0, Side::Centered) > feather_memory(&small, 10.0, Side::Centered));
+        // The windows no more than fit in their bound (or one, if it alone does not).
+        let near = near_tiles(&large, grow_band(900.0)).len() as u64;
+        assert!(grow_memory(&large, 900.0) <= WINDOWS_MEMORY as u64 + near * tile, "windows past the bound");
+    }
+
+    #[test]
+    fn each_side_of_the_outline_is_worked_out_only_as_far_as_its_levels_vary() {
+        // The left edge of a large square at x = 0: tile -1 outside it, tile 0 inside.
+        let large = rect(0.0, 0.0, 10_000.0, 10_000.0);
+        let near = |by: f64| near_tiles(&large, grow_band(by)).into_iter().collect::<HashSet<TileCoord>>();
+        let reaches = |near: &HashSet<TileCoord>, x: i32| near.contains(&TileCoord::new(x, 20));
+        // Grown by 900: four tiles out, but inside, where every pixel stays selected, only the
+        // tile beside the outline's.
+        let grown = near(900.0);
+        assert!(reaches(&grown, -5) && !reaches(&grown, -6), "outside, as far as the band");
+        assert!(reaches(&grown, 1) && !reaches(&grown, 2), "inside, past where its levels vary");
+        // Shrunk, the other way round.
+        let shrunk = near(-900.0);
+        assert!(reaches(&shrunk, 4) && !reaches(&shrunk, 5));
+        assert!(reaches(&shrunk, -2) && !reaches(&shrunk, -3));
+        // And what it makes is what it was: selected all the way in, to 300 out.
+        let m = rect(0.0, 0.0, 1000.0, 1000.0).grown(300.0, Reach::Square);
+        assert_eq!([m.level_at(500, 500), m.level_at(-300, 500), m.level_at(-301, 500)], [FULL, FULL, 0]);
     }
 
     #[test]

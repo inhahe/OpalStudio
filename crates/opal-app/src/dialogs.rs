@@ -648,15 +648,54 @@ fn rotate_by(ctx: &egui::Context, st: &mut AppState) {
 
 /// The Grow or Shrink, or Feather, dialog: what it sets shows at once, on the image.
 fn modifying(ctx: &egui::Context, st: &mut AppState) {
-    use opal_core::selection::Step;
-    let Some(m) = st.modifying.clone() else { return };
+    let Some(m) = st.modifying.as_ref() else { return };
+    let (set, keeping, failed) = (m.step.clone(), m.keeping(), m.failed().map(str::to_owned));
     let palette = st.palette;
     let doc = st.doc(m.doc()).map(|d| d.doc());
     let ppi = doc.map_or(opal_core::units::DEFAULT_PPI, |d| d.resolution);
     let scope = lengths::image_scope(doc, st.unit(), ppi);
-    use opal_core::modify::{Falloff, MAX_DISTANCE, Reach, Side};
-    let mut step = m.step.clone();
+    let mut step = set.clone();
     let mut done = None;
+    egui::Modal::new(egui::Id::unique("modify-selection")).show(ctx, |ui| {
+        ui.add_enabled_ui(!keeping, |ui| modifier_fields(ui, &mut step, scope, palette));
+        if let Some(why) = failed {
+            ui.add_space(4.0);
+            ui.label(RichText::new(why).color(ui.visuals().error_fg_color));
+        }
+        if keeping {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Working it out\u{2026}");
+            });
+            if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                done = Some(false);
+            }
+        } else {
+            done = ok_cancel(ui, "OK");
+        }
+    });
+    if step != set {
+        st.modifying.as_mut().expect("open").step = step;
+        st.preview_modifying(ctx);
+    }
+    // While what it makes is worked out, the image shows what it made last (its job asks for
+    // a frame once done); after OK, the dialog closes once it is shown.
+    st.poll_modifying();
+    if let Some(keep) = done {
+        st.end_modifying(keep);
+    }
+}
+
+/// The modifier dialog's fields for `step`, lengths read in `scope`.
+fn modifier_fields(
+    ui: &mut egui::Ui,
+    step: &mut opal_core::selection::Step,
+    scope: Scope<'_>,
+    palette: crate::theme::Palette,
+) {
+    use opal_core::modify::{Falloff, MAX_DISTANCE, Reach, Side};
+    use opal_core::selection::Step;
     // A menu of `options`, each with its name, the one `value` is marked.
     fn choice<T: PartialEq + Copy>(ui: &mut egui::Ui, label: &str, salt: &str, value: &mut T, options: &[(T, &str)]) {
         ui.label(label);
@@ -668,51 +707,38 @@ fn modifying(ctx: &egui::Context, st: &mut AppState) {
         });
         ui.end_row();
     }
-    egui::Modal::new(egui::Id::unique("modify-selection")).show(ctx, |ui| {
-        match &mut step {
-            Step::Grow { by, corners } => {
-                ui.heading("Grow or shrink the selection");
-                ui.add_space(4.0);
-                egui::Grid::new("grow").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-                    ui.label("By");
-                    ui.add(lengths::length_field(by, scope, -MAX_DISTANCE..=MAX_DISTANCE, 2).remember("select.grow"));
-                    ui.end_row();
-                    let options = [(Reach::Round, "Round"), (Reach::Square, "Square"), (Reach::Diamond, "Diamond")];
-                    choice(ui, "Corners", "grow-corners", corners, &options);
-                });
-                ui.label(RichText::new("Less than 0 shrinks it.").small().color(palette.weak_text));
-            }
-            Step::Feather { width, side, falloff } => {
-                ui.heading("Feather the selection");
-                ui.add_space(4.0);
-                egui::Grid::new("feather").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-                    ui.label("Width");
-                    ui.add(lengths::length_field(width, scope, 0.0..=MAX_DISTANCE, 2).remember("select.feather"));
-                    ui.end_row();
-                    let sides = [(Side::Inward, "Inward"), (Side::Outward, "Outward"), (Side::Centered, "Centered")];
-                    choice(ui, "Falls off", "feather-side", side, &sides);
-                    choice(
-                        ui,
-                        "Falloff",
-                        "feather-falloff",
-                        falloff,
-                        &[(Falloff::Gaussian, "Gaussian"), (Falloff::Linear, "Linear")],
-                    );
-                });
-            }
-            _ => {}
+    match step {
+        Step::Grow { by, corners } => {
+            ui.heading("Grow or shrink the selection");
+            ui.add_space(4.0);
+            egui::Grid::new("grow").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                ui.label("By");
+                ui.add(lengths::length_field(by, scope, -MAX_DISTANCE..=MAX_DISTANCE, 2).remember("select.grow"));
+                ui.end_row();
+                let options = [(Reach::Round, "Round"), (Reach::Square, "Square"), (Reach::Diamond, "Diamond")];
+                choice(ui, "Corners", "grow-corners", corners, &options);
+            });
+            ui.label(RichText::new("Less than 0 shrinks it.").small().color(palette.weak_text));
         }
-        done = ok_cancel(ui, "OK");
-    });
-    if step != m.step {
-        st.modifying.as_mut().expect("open").step = step;
-        st.preview_modifying(ctx);
-    }
-    // While what it makes is worked out, the image shows what it made last (its job asks for
-    // a frame once done).
-    st.poll_modifying();
-    if let Some(keep) = done {
-        st.end_modifying(keep);
+        Step::Feather { width, side, falloff } => {
+            ui.heading("Feather the selection");
+            ui.add_space(4.0);
+            egui::Grid::new("feather").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                ui.label("Width");
+                ui.add(lengths::length_field(width, scope, 0.0..=MAX_DISTANCE, 2).remember("select.feather"));
+                ui.end_row();
+                let sides = [(Side::Inward, "Inward"), (Side::Outward, "Outward"), (Side::Centered, "Centered")];
+                choice(ui, "Falls off", "feather-side", side, &sides);
+                choice(
+                    ui,
+                    "Falloff",
+                    "feather-falloff",
+                    falloff,
+                    &[(Falloff::Gaussian, "Gaussian"), (Falloff::Linear, "Linear")],
+                );
+            });
+        }
+        _ => {}
     }
 }
 
