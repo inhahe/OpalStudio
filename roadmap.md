@@ -462,6 +462,10 @@ comes first.
 - *(new)* Dimensions: measurements kept as annotation objects (lengths, angles, radii), their
   ends attached to what they measure (by expressions), updated as it moves, shown and
   exported or not, as chosen; with the solver, a dimension edited drives the geometry.
+- *(new)* Relations inferred from what is drawn (as CAD sketches infer them): lines nearly
+  parallel, perpendicular, equal or tangent, and points nearly together, made exactly so as
+  constraints the geometry solver keeps, each shown on the canvas and removable; within a
+  tolerance, a setting, and off if wanted.
 - Kept expressions: *keep linked* by a field, and `linked` in the API, turn an expression
   into a constraint. It uses the same syntax and parser as milestone E's expressions,
   which the solver differentiates. A placement's remembered expression can be made one
@@ -508,6 +512,10 @@ In this order:
   its patches) and live blends (the shapes between two, their geometry, color, opacity and
   angle in between, spaced along a path, kept editable). Then diffusion curves: curves giving
   colors to either side, spread smoothly between them.
+- *(new)* QuickShape, learned: symbols drawn in one stroke or several (a star, a cloud, an
+  arrow, a heart; a rectangle drawn side by side) recognized by a small classifier, trained on
+  drawings whose terms allow it (the Quick, Draw! dataset is CC BY 4.0), and the shape
+  library's match offered in their place, editable as any shape.
 - *(new)* Data sets (Photoshop's Variables): text, images and visibility bound to the columns
   of a CSV file or spreadsheet, an image exported for each row.
 - Channels: the Channels panel, split and merge, calculations and Apply Image between
