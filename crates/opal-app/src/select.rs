@@ -209,21 +209,17 @@ impl AppState {
         let measure = crate::memory::Measure::here();
         PREVIEWS.run(
             move || {
-                use opal_core::modify::{Bounds, Halt};
                 let stop = || generation.load(Ordering::SeqCst) != ours;
                 // Asked for after another, it may not be wanted by the time it begins.
                 if stop() {
                     return None;
                 }
                 // What is free, measured as the work begins.
-                let admission = crate::memory::Admission::new(measure.now());
-                let admit = |n| admission.admit(n);
-                match before.then_within(step, Bounds { stop: &stop, admit: &admit }) {
+                match crate::memory::Admission::within(measure.now(), &stop, |b| before.then_within(step, b)) {
                     Ok(made) => Some(Ok(Arc::new(made))),
                     // Not wanted any more: nothing to tell, whatever held it back.
                     Err(_) if stop() => None,
-                    Err(Halt::Stopped) => None,
-                    Err(Halt::NoMemory) => Some(Err(admission.refused())),
+                    Err(why) => Some(Err(why)),
                 }
             },
             move |result| {
@@ -331,18 +327,13 @@ impl AppState {
     /// interface thread (see `edits`); refused, saying why, if there is not memory enough for
     /// it, measured as it goes.
     pub(crate) fn add_modifier(&mut self, step: Step) {
-        use opal_core::modify::{Bounds, Halt};
         let d = self.active().expect("available");
         let before = d.pixel_selection().expect("available").clone();
         let label = modifier_label(&step);
         let measure = crate::memory::Measure::here();
         let work = move |doc: &mut Document, _: &mut opal_core::document::IdGen, progress: &opal_io::Progress| {
-            let admission = crate::memory::Admission::new(measure.now());
-            let (stop, admit) = (|| progress.is_cancelled(), |n| admission.admit(n));
-            let made = before.then_within(step, Bounds { stop: &stop, admit: &admit }).map_err(|halt| match halt {
-                Halt::Stopped => crate::edits::CANCELLED.to_owned(),
-                Halt::NoMemory => admission.refused(),
-            })?;
+            let stop = || progress.is_cancelled();
+            let made = crate::memory::Admission::within(measure.now(), &stop, |b| before.then_within(step, b))?;
             doc.selection = (!made.is_empty()).then(|| Arc::new(made));
             Ok(())
         };

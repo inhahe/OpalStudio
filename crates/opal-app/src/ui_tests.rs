@@ -2110,6 +2110,42 @@ fn a_save_is_written_off_the_interface_thread_and_marks_the_image_clean() {
 }
 
 #[test]
+fn quitting_waits_for_an_edit_under_way() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 64, 64);
+    let st = h.state_mut().state_mut();
+    st.edit_wait = std::time::Duration::ZERO;
+    let doc = st.active_doc.unwrap();
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let work =
+        move |doc: &mut opal_core::document::Document, _: &mut opal_core::document::IdGen, _: &opal_io::Progress| {
+            let _ = wait.recv();
+            std::sync::Arc::make_mut(&mut doc.layers[0]).name = "Edited".into();
+            Ok(())
+        };
+    st.edit_later(doc, "Rename", crate::memory::Allowance::now(), work, |_, _, ()| {});
+    st.queue.push(Cmd::Exit);
+    h.run();
+    let st = h.state().state();
+    assert!(!st.exit_confirmed && st.confirm.is_none(), "quit, or asked, while an edit was under way");
+    assert!(st.exit_after_work);
+    // Done: applied, so the image has changes, and the quit asks about them.
+    drop(go);
+    for _ in 0..200 {
+        h.run();
+        if !h.state().state().editing() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    h.run();
+    let st = h.state().state();
+    assert_eq!(st.active().unwrap().doc().layers[0].name, "Edited");
+    assert!(matches!(st.confirm, Some(crate::state::Confirm::Exit(_))), "the quit went on without asking");
+}
+
+#[test]
 fn quitting_waits_for_the_files_being_written() {
     let _gpu = gpu_lock();
     let mut h = harness();
@@ -2123,7 +2159,7 @@ fn quitting_waits_for_the_files_being_written() {
     h.run();
     let st = h.state().state();
     assert!(!st.exit_confirmed, "quit while a file was being written");
-    assert!(st.exit_after_writes);
+    assert!(st.exit_after_work);
     drop(release);
     until_written(&mut h);
     h.run();
@@ -2186,7 +2222,7 @@ fn saving_all_then_quitting(fails: bool) {
         st.writer.write(written, crate::writer::Then::Nothing, job, &ctx);
     }
     // As "Save all" in the quit question leaves it.
-    st.exit_after_writes = true;
+    st.exit_after_work = true;
     drop(release_first);
     for _ in 0..50 {
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -2328,7 +2364,7 @@ fn a_write_under_way_shows_how_far_it_has_got_and_can_be_cancelled() {
             let d = st.doc(id).expect("closed though its save was cancelled");
             assert_eq!((d.path.as_ref(), &d.title), (Some(&before), &title), "the file it had was not given back");
             assert!(d.is_dirty());
-            assert!(!st.exit_confirmed && !st.exit_after_writes && st.confirm.is_none(), "went on quitting");
+            assert!(!st.exit_confirmed && !st.exit_after_work && st.confirm.is_none(), "went on quitting");
         }
     }
 }
@@ -2444,7 +2480,7 @@ fn a_failure_reported_with_the_last_save_stops_saving_all_then_quitting() {
         st.writer.write(written, crate::writer::Then::Nothing, job, &ctx);
         releases.push(release);
     }
-    st.exit_after_writes = true;
+    st.exit_after_work = true;
     // Both done before the next frame looks.
     drop(releases);
     std::thread::sleep(std::time::Duration::from_millis(200));

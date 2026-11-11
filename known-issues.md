@@ -11,15 +11,6 @@ its colors are off; the user is warned when the image opens. Whether a profile i
 judged from its description text. **Fix:** color management with lcms2 in milestone 5:
 convert from the embedded profile into the working space on import.
 
-## The transform box's Apply, and Clear and Cut, run on the interface thread
-
-`transform.rs` (`finish_transform`: a layer of pixels turned a quarter or flipped is drawn
-into pixels again, `image_ops::on_grid`) and `select.rs` (`clear_within`). Unlike the edits
-in `edits` (design.md, *Edits that take long*), they are worked out where they are asked
-for, so a very large layer freezes the window while they are. **Fix:** the same as those:
-`AppState::edit_later` with their work, the box's session ended first (its pending document
-the one worked from), Cut's copy waiting for its clear as it waits now.
-
 ## GPU memory is only reported on Windows
 
 `crates/opal-app/src/gpu_memory.rs`. **Fix:** query `VK_EXT_memory_budget` through wgpu's

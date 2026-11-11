@@ -184,13 +184,8 @@ pub fn transform_all(
     // What is selected goes with what it was selected on (its modifiers worked out again,
     // within what is left of the memory).
     if let Some(s) = doc.selection.take() {
-        use opal_core::modify::{Bounds, Halt};
-        let admission = crate::memory::Admission::new(to.memory);
-        let (stop, admit) = (|| progress.is_cancelled(), |n| admission.admit(n));
-        let carried = s.transformed_within(m, Bounds { stop: &stop, admit: &admit }).map_err(|halt| match halt {
-            Halt::Stopped => crate::edits::CANCELLED.to_owned(),
-            Halt::NoMemory => admission.refused(),
-        })?;
+        let stop = || progress.is_cancelled();
+        let carried = crate::memory::Admission::within(to.memory, &stop, |b| s.transformed_within(m, b))?;
         doc.selection = Some(Arc::new(carried)).filter(|s| !s.is_empty());
     }
     Ok(to.clipped)
@@ -335,8 +330,9 @@ impl AppState {
             let sy = f64::from(spec.height) / f64::from(c.height);
             let m = Affine::scale(sx, sy).about(x, y);
             let canvas = Canvas { width: spec.width, height: spec.height, ..c };
-            let to = (resample.then_some(sampling), sampling, &canvas.rect(), measure.now());
-            let clipped = transform_all(doc, &m, to.0, to.1, to.2, to.3, progress)?;
+            let memory = measure.now();
+            let resampled = resample.then_some(sampling);
+            let clipped = transform_all(doc, &m, resampled, sampling, &canvas.rect(), memory, progress)?;
             doc.canvas = canvas;
             Ok(clipped)
         };

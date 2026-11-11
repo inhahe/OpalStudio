@@ -450,9 +450,10 @@ take the least time for the tiles to work out (larger blocks repeat less of thei
 fewer fit at once, and may cover more far from the outline), by as many workers as their
 windows fit in half a gigabyte, the other threads left free. The memory it takes is asked
 for as it goes (`modify::Bounds`, which also stop it when it is not wanted): the windows
-before it begins, then each block's tiles as they are kept, at the size they take (a row of
-levels a tile, for a straight edge), against what was free when it began, measured on its
-own thread (`memory::Admission`). Refused, it stops: the dialog says why, a script's call is
+before it begins (given back once it is done, so that the next step of a recipe may have
+them), then each block's tiles as they are kept, at the size they take (a row of levels a
+tile, for a straight edge), against what was free when it began, measured on its own thread
+(`memory::Admission`). Refused, it stops: the dialog says why, a script's call is
 refused, and Rotate, Flip or Resize Image working a carried recipe out again fail, saying
 why.
 Distances go to 1000 pixels at most (`modify::MAX_DISTANCE`).
@@ -680,9 +681,12 @@ changed nothing). Their memory is checked before they begin, as before.
   its commands are unavailable, saying why ("Merge down is under way: wait for it to
   finish, or cancel it in the status bar"), and so are undo and redo, saving and exporting
   it; its tools are the hand (and the zoom), its keys change nothing, and its Layers and
-  History panels are greyed. Looking at it, copying from it, closing it (which gives the
-  edit up) and every other image stay free; a paste into it waits for the edit, and so do
-  scripts' calls. Changing the image would make the edit's result wrong, and refusing the
+  History panels are greyed. Looking at it, copying from it, closing it (the edit given up
+  as it goes, not when closing is asked, so that answering Cancel to the question keeps it)
+  and every other image stay free; a paste into it waits for the edit, and so do scripts'
+  calls, the next call in the same pass too (`Server::serve` asks again after each).
+  Quitting waits for it, as it waits for files being written, and then asks about the
+  image's changes. Changing the image would make the edit's result wrong, and refusing the
   result then would throw away work the user asked for. Should it change anyway, the
   result is not applied, and the user is told.
 - **Shown only if it takes a while.** The interface waits 60 ms for an edit as it begins:
@@ -692,7 +696,13 @@ changed nothing). Their memory is checked before they begin, as before.
   it cannot tell) and Cancel, which frees the image at once and leaves it as it was (the
   work stops as soon as it next looks); its tab is marked, and the greyed panels say why.
 - **A script's call** that begins one is answered once it is applied, with what it would
-  have been answered with at once, and what was said meanwhile as its notes or its failure.
+  have been answered with at once, of the image the edit was of (whichever is active by
+  then), and what applying it said as its notes or its failure. If the edit fails then,
+  the user's view is put back as the call found it, as for a call refused at once, unless
+  another image has been made active since.
+- Edits that read as long but are not stay where they are asked for: measured on 67
+  megapixels, a quarter turn applied by the transform box takes 50 ms, Clear 8 to 14 ms,
+  and a paste turned and drawn into the active layer 0.3 s.
 - A failure, or a panic, in the work is told, the image left as it was.
 
 ### Look

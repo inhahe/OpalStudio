@@ -145,6 +145,20 @@ impl Allowance {
         Ok(())
     }
 
+    /// Gives back `need`, set aside before and no longer held (the cap on tiles stays as it
+    /// was lowered).
+    pub fn give_back(&mut self, need: Need) {
+        self.taken = Need {
+            at_once: self.taken.at_once.saturating_sub(need.at_once),
+            tiles: self.taken.tiles.saturating_sub(need.tiles),
+        };
+        if need.at_once > 0
+            && let (Some(hold), Some(free)) = (&mut self.hold, &self.free)
+        {
+            hold.lower(free.cap(self.taken.at_once), self.taken.at_once);
+        }
+    }
+
     /// Sets aside `bytes` more of tiles ([`take`](Self::take)).
     pub fn take_tiles(&mut self, bytes: u64) -> Result<(), String> {
         self.take(Need::tiles(bytes))
@@ -156,9 +170,8 @@ impl Allowance {
     }
 }
 
-/// What a selection modifier's work (`opal_core::modify::Bounds::admit`, asked from its
-/// workers) may take as it goes, set aside from an allowance, and why it was refused, once it
-/// was.
+/// What a selection modifier's work (`opal_core::modify::Bounds`, asked from its workers) may
+/// take as it goes, set aside from an allowance, and why it was refused, once it was.
 pub struct Admission {
     memory: std::sync::Mutex<Allowance>,
     refused: std::sync::Mutex<Option<String>>,
@@ -169,8 +182,30 @@ impl Admission {
         Admission { memory: std::sync::Mutex::new(memory), refused: Default::default() }
     }
 
+    /// What `work` makes, given bounds that stop it when `stop` says to and admit what it takes
+    /// from `memory` as it goes; or why it did not: `edits::CANCELLED` if it was stopped, else
+    /// why there was not memory enough.
+    pub fn within<T>(
+        memory: Allowance,
+        stop: &(dyn Fn() -> bool + Sync),
+        work: impl FnOnce(opal_core::modify::Bounds) -> Result<T, opal_core::modify::Halt>,
+    ) -> Result<T, String> {
+        use opal_core::modify::{Bounds, Halt};
+        let admission = Admission::new(memory);
+        let (admit, give_back) = (|n| admission.admit(n), |n| admission.give_back(n));
+        work(Bounds { stop, admit: &admit, give_back: &give_back }).map_err(|halt| match halt {
+            Halt::Stopped => crate::edits::CANCELLED.to_owned(),
+            Halt::NoMemory => admission.refused(),
+        })
+    }
+
+    /// Gives back `bytes` taken before.
+    fn give_back(&self, bytes: u64) {
+        self.memory.lock().expect("not poisoned").give_back(Need::at_once(bytes));
+    }
+
     /// Whether `bytes` more may be taken, all of them in memory (set aside if so).
-    pub fn admit(&self, bytes: u64) -> bool {
+    fn admit(&self, bytes: u64) -> bool {
         match self.memory.lock().expect("not poisoned").take(Need::at_once(bytes)) {
             Ok(()) => true,
             Err(why) => {
@@ -181,7 +216,7 @@ impl Admission {
     }
 
     /// Why it was refused.
-    pub fn refused(&self) -> String {
+    fn refused(&self) -> String {
         let why = self.refused.lock().expect("not poisoned").clone();
         why.unwrap_or_else(|| "There was not memory enough for it.".into())
     }

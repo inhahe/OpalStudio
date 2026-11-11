@@ -578,6 +578,10 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
     })
 }
 
+/// The user's view, as a call that changes it found it: the active image, and each image's
+/// active and selected layers.
+pub type View = (Option<DocId>, Vec<(DocId, (Option<LayerId>, std::collections::HashSet<LayerId>))>);
+
 /// The queries: what the API tells of the editor and its images.
 const QUERIES: &[(&str, &str, &[Param])] = &[
     (
@@ -1762,7 +1766,7 @@ impl AppState {
             None if method.name == "pixels" => self.pixels_by_args(&args, ctx),
             None if method.name == "put_pixels" => self.put_pixels_by_args(&args, ctx),
             None if method.name == "crop" => match self.crop_by_args(&args) {
-                Ok(()) => self.reply_when_done("crop", |st| st.canvas_json()),
+                Ok(()) => self.reply_when_done("crop", |st, id| st.canvas_json_of(id)),
                 Err(why) => Reply::Now(Err(why)),
             },
             None if method.name == "select_rectangle" => {
@@ -1780,19 +1784,31 @@ impl AppState {
             Reply::Now(Ok(value)) if !notes.is_empty() => Reply::Now(Ok(with_notes(value, notes))),
             other => other,
         };
-        if let Some((active, selections)) = view
-            && matches!(reply, Reply::Now(Err(_)))
-        {
-            for (id, s) in selections {
-                if let Some(d) = self.doc_mut(id) {
-                    d.set_layer_selection_state(s);
+        match (view, &reply) {
+            (Some(view), Reply::Now(Err(_))) => self.restore_view(view),
+            // Answered once its edit is applied, which may fail then.
+            (Some(view), Reply::Later(n)) => {
+                let a = self.docs.iter_mut().find_map(|d| d.busy.as_mut()?.answer.as_mut().filter(|a| a.n == *n));
+                if let Some(a) = a {
+                    a.view = Some(view);
                 }
             }
-            if let Some(id) = active.filter(|id| self.doc(*id).is_some()) {
-                self.show_doc(id);
-            }
+            _ => {}
         }
         reply
+    }
+
+    /// Puts the user's view back as `view` had it: the active image, and each image's
+    /// selected and active layers.
+    pub(crate) fn restore_view(&mut self, (active, selections): View) {
+        for (id, s) in selections {
+            if let Some(d) = self.doc_mut(id) {
+                d.set_layer_selection_state(s);
+            }
+        }
+        if let Some(id) = active.filter(|id| self.doc(*id).is_some()) {
+            self.show_doc(id);
+        }
     }
 
     /// [`call`](Self::call), made in `groups` (the script run the connection is, the step
@@ -1846,16 +1862,18 @@ impl AppState {
     }
 
     /// The reply to call `name`, which may have begun an edit of the active image (see
-    /// `edits`): once that is applied, what `answer` gives then; at once, if it began none.
-    fn reply_when_done(&mut self, name: &str, answer: impl FnOnce(&AppState) -> Value + 'static) -> Reply {
-        let begun = self.active().and_then(|d| d.busy.as_ref()).is_some_and(|b| b.answer.is_none());
+    /// `edits`): once that is applied, what `answer` gives of that image then; at once, if it
+    /// began none (nothing, with no image open).
+    fn reply_when_done(&mut self, name: &str, answer: impl FnOnce(&AppState, DocId) -> Value + 'static) -> Reply {
+        let Some(id) = self.active_doc else { return Reply::Now(Ok(json!({}))) };
+        let begun = self.doc(id).and_then(|d| d.busy.as_ref()).is_some_and(|b| b.answer.is_none());
         if !begun {
-            return Reply::Now(Ok(answer(self)));
+            return Reply::Now(Ok(answer(self, id)));
         }
         self.next_answer += 1;
         let n = self.next_answer;
-        let b = self.active_mut().and_then(|d| d.busy.as_mut()).expect("checked above");
-        b.answer = Some(crate::edits::Answer { n, name: name.to_owned(), with: Box::new(answer) });
+        let b = self.doc_mut(id).and_then(|d| d.busy.as_mut()).expect("checked above");
+        b.answer = Some(crate::edits::Answer { n, name: name.to_owned(), with: Box::new(answer), view: None });
         Reply::Later(n)
     }
 
@@ -2022,7 +2040,7 @@ impl AppState {
                 let spec = ResizeImage { width, height, keep_aspect: false, resolution, keep_print_size: false };
                 let resample = args.flag("resample").unwrap_or_else(|| self.prefs.bool("resize.resample"));
                 self.resize_image(&spec, resample);
-                self.reply_when_done("resize_image", |st| st.canvas_json())
+                self.reply_when_done("resize_image", |st, id| st.canvas_json_of(id))
             }
             Cmd::ResizeCanvas => {
                 let c = self.active().expect("available").doc().canvas;
@@ -2050,7 +2068,7 @@ impl AppState {
                 if degrees != 0.0 {
                     self.rotate_by(&RotateBy { degrees, grow: args.flag("grow").unwrap_or(true) });
                 }
-                self.reply_when_done("rotate_by", |st| st.canvas_json())
+                self.reply_when_done("rotate_by", |st, id| st.canvas_json_of(id))
             }
             Cmd::RotateCw | Cmd::RotateCcw | Cmd::Rotate180 | Cmd::FlipHorizontal | Cmd::FlipVertical => {
                 self.turn(match cmd {
@@ -2060,7 +2078,7 @@ impl AppState {
                     Cmd::FlipHorizontal => Turn::FlipHorizontal,
                     _ => Turn::FlipVertical,
                 });
-                self.reply_when_done(&snake(&format!("{cmd:?}")), |st| st.canvas_json())
+                self.reply_when_done(&snake(&format!("{cmd:?}")), |st, id| st.canvas_json_of(id))
             }
             Cmd::ToggleVisible | Cmd::ToggleLock => {
                 let visibility = cmd == Cmd::ToggleVisible;
@@ -2169,7 +2187,8 @@ impl AppState {
                     },
                 };
                 self.add_modifier(step);
-                self.reply_when_done(&snake(&format!("{cmd:?}")), |st| selection_json(st.active().expect("available")))
+                let name = snake(&format!("{cmd:?}"));
+                self.reply_when_done(&name, |st, id| selection_json(st.doc(id).expect("its edit was applied")))
             }
             Cmd::SelectAll | Cmd::Deselect | Cmd::InvertSelection => {
                 self.run(cmd, ctx);
@@ -2179,7 +2198,7 @@ impl AppState {
             _ => {
                 // The rest take no more than the image and layers set above.
                 self.run(cmd, ctx);
-                self.reply_when_done(&snake(&format!("{cmd:?}")), |st| st.selected_layers_json())
+                self.reply_when_done(&snake(&format!("{cmd:?}")), |st, id| st.selected_layers_json_of(id))
             }
         }
     }
@@ -2709,13 +2728,23 @@ impl AppState {
     }
 
     fn canvas_json(&self) -> Value {
-        let d = self.active().expect("available").doc();
+        self.canvas_json_of(self.active_doc.expect("available"))
+    }
+
+    /// Image `id`'s canvas and resolution, as the calls that change them answer.
+    fn canvas_json_of(&self, id: DocId) -> Value {
+        let d = self.doc(id).expect("open").doc();
         json!({ "width": d.canvas.width, "height": d.canvas.height, "resolution": d.resolution })
     }
 
     /// The active image's selected layers, and its active layer, as many calls answer.
     fn selected_layers_json(&self) -> Value {
-        match self.active() {
+        self.active_doc.map_or_else(|| json!({}), |id| self.selected_layers_json_of(id))
+    }
+
+    /// Image `id`'s selected layers and its active layer (nothing, if it is closed).
+    fn selected_layers_json_of(&self, id: DocId) -> Value {
+        match self.doc(id) {
             Some(d) => json!({
                 "layers": d.selected_layers().iter().map(|l| l.0).collect::<Vec<_>>(),
                 "active": d.active_layer().map(|l| l.0),
@@ -3216,10 +3245,48 @@ mod tests {
             panic!("answered before the merge was done")
         };
         assert!(st.scripts_wait(false), "the next call would not wait for it");
+        // Another image made active meanwhile: the answer is still about the merged one.
+        let merged = st.active_doc.unwrap();
+        st.create_image(&crate::state::NewImage {
+            width: 10,
+            height: 10,
+            background: crate::state::Background::White,
+            resolution: 72.0,
+        });
+        // (Its selected layer's id another than the merged image's: ids are each image's own.)
+        for _ in 0..2 {
+            now(&mut st, "new_layer", json!({})).unwrap();
+        }
         drop(held);
         let layers = later(&mut st, n).unwrap();
-        assert_eq!(layers["layers"].as_array().map(Vec::len), Some(1), "{layers}");
-        assert_eq!(st.active().unwrap().history.undo_label(), Some("Merge down"));
+        let d = st.doc(merged).unwrap();
+        let ids: Vec<u64> = d.selected_layers().iter().map(|l| l.0).collect();
+        assert_eq!(layers["layers"], json!(ids), "answered about the image active then");
+        assert_eq!(d.history.undo_label(), Some("Merge down"));
+    }
+
+    #[test]
+    fn a_call_whose_edit_fails_once_under_way_puts_the_view_back() {
+        let _windows = crate::ui_tests::gpu_lock();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 40, "height": 20 })).unwrap();
+        let first = st.active_doc.unwrap();
+        now(&mut st, "select_rectangle", json!({ "x": 5, "y": 5, "width": 10, "height": 10 })).unwrap();
+        now(&mut st, "new", json!({ "width": 30, "height": 30 })).unwrap();
+        let second = st.active_doc.unwrap();
+        st.edit_wait = std::time::Duration::ZERO;
+        // Under way when answered, and refused memory once it runs.
+        let held = crate::background::testing::hold(Some(crate::background::pool()));
+        let _pretend = crate::memory::testing::pretend_free(Some(1000));
+        let call = args(json!({ "document": first.0, "by": 5 }));
+        let Reply::Later(n) = st.call("grow_selection", &call, &egui::Context::default()) else {
+            panic!("answered before the grow was done")
+        };
+        assert_eq!(st.active_doc, Some(first), "the call did not make its image active");
+        drop(held);
+        let why = later(&mut st, n).unwrap_err();
+        assert!(why.starts_with("grow_selection: This would need about"), "{why}");
+        assert_eq!(st.active_doc, Some(second), "the view was not put back");
     }
 
     #[test]

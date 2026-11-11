@@ -483,12 +483,21 @@ impl OpalApp {
             }
             return;
         }
+        // An edit under way is finished first, then the image's question asked.
+        if self.st.editing() {
+            if window_close {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            }
+            self.st.exit_after_work = true;
+            self.st.notify("Quitting once the edit under way is done (Cancel in the status bar gives it up).");
+            return;
+        }
         // Files still being written are finished first.
         if self.st.writer.busy() {
             if window_close {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             }
-            self.st.exit_after_writes = true;
+            self.st.exit_after_work = true;
             self.st.notify("Quitting once the files being written are done.");
             return;
         }
@@ -1065,8 +1074,7 @@ impl eframe::App for OpalApp {
             if std::mem::take(&mut self.st.let_scripts_in) {
                 server.let_in();
             }
-            let busy = self.st.scripts_wait(ctx.input(|i| i.pointer.any_down()));
-            server.serve(&mut self.st, &ctx, busy);
+            server.serve(&mut self.st, &ctx, ctx.input(|i| i.pointer.any_down()));
         } else if self.server_waits {
             self.take_over_serving(&ctx);
         }

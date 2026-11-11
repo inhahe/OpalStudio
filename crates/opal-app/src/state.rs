@@ -217,8 +217,9 @@ pub struct AppState {
     /// Saves and exports, written off the interface thread.
     pub writer: crate::writer::Writer,
     /// Quitting waits for files being written ("Save all" in the quit question, or quitting
-    /// while they were): it goes ahead when they are, unless one fails.
-    pub exit_after_writes: bool,
+    /// while they were) and for an edit under way: it goes ahead when they are done, unless a
+    /// write fails.
+    pub exit_after_work: bool,
     /// Documents to ask about closing once the question on screen is answered.
     pub close_queue: VecDeque<DocId>,
     /// When settings last changed and have not been written to disk yet.
@@ -366,7 +367,7 @@ impl AppState {
             exit_confirmed: false,
             exit_requested: false,
             writer: crate::writer::Writer::default(),
-            exit_after_writes: false,
+            exit_after_work: false,
             close_queue: VecDeque::new(),
             settings_changed: None,
             cursor_canvas: None,
@@ -912,7 +913,7 @@ impl AppState {
         // A failure stops a quit waiting for the writes, so that it is seen (but not one a
         // script asked for, which only the script is told of).
         if finished.iter().any(|f| f.result.is_err() && !matches!(f.then, Then::Answer(_))) {
-            self.exit_after_writes = false;
+            self.exit_after_work = false;
         }
         let mut finished = VecDeque::from(finished);
         while let Some(f) = finished.pop_front() {
@@ -982,8 +983,8 @@ impl AppState {
                 },
             }
         }
-        if self.exit_after_writes && !self.writer.busy() {
-            self.exit_after_writes = false;
+        if self.exit_after_work && !self.writer.busy() && !self.editing() {
+            self.exit_after_work = false;
             self.exit_requested = true;
         }
         while !self.dialog_open()
@@ -1081,8 +1082,6 @@ impl AppState {
     /// Closes a document, first asking about unsaved changes (after the question on screen,
     /// if one is). One already to close once its save is written just waits.
     pub fn request_close(&mut self, id: DocId) {
-        // An edit under way on it is given up: it was never part of the image.
-        self.cancel_edit(id);
         if self.writer.closing(id) {
             let title = self.doc(id).map(|d| d.title.clone()).unwrap_or_default();
             return self.notify(format!("\"{title}\" closes once it is saved."));
@@ -1101,6 +1100,8 @@ impl AppState {
     }
 
     pub fn close_now(&mut self, id: DocId) {
+        // An edit under way on it is given up, as it was never part of the image.
+        self.give_up_edit(id, "the image was closed");
         // A question about it goes with it.
         match &mut self.confirm {
             Some(Confirm::Close(c)) if *c == id => self.confirm = None,

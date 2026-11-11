@@ -128,7 +128,7 @@ fn confirm(ctx: &egui::Context, st: &mut AppState) {
         (Confirm::Close(id), Answer::Discard) => st.close_now(id),
         (Confirm::Exit(ids), Answer::Save) => {
             // Quits once they are written (see `poll_writes`), unless one is not saved.
-            st.exit_after_writes = ids.iter().all(|&id| st.save(id, false, Then::Nothing, ctx));
+            st.exit_after_work = ids.iter().all(|&id| st.save(id, false, Then::Nothing, ctx));
         }
         (Confirm::Exit(_), Answer::Discard) => {
             st.exit_confirmed = true;

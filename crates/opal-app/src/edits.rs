@@ -33,12 +33,17 @@ type Then = Box<dyn FnOnce(&mut AppState, DocId) + Send>;
 /// once it is applied; or why it could not be made.
 type Made = Result<(Document, IdGen, Then), String>;
 
+/// What a script's call is answered with once its edit is applied, given the image it was of.
+pub type AnswerWith = Box<dyn FnOnce(&AppState, DocId) -> Value>;
+
 /// A script's call answered once its edit is applied: its number, its name (for an error),
-/// and what it is answered with.
+/// what it is answered with (given the image the edit was of), and the user's view as it was
+/// before the call, put back if the edit fails and nothing has changed it since.
 pub struct Answer {
     pub n: u64,
     pub name: String,
-    pub with: Box<dyn FnOnce(&AppState) -> Value>,
+    pub with: AnswerWith,
+    pub view: Option<crate::api::View>,
 }
 
 /// An edit under way on an image.
@@ -196,7 +201,7 @@ impl AppState {
         };
         match (b.answer, result) {
             (Some(a), Ok(())) => {
-                let value = (a.with)(self);
+                let value = (a.with)(self, id);
                 let (refusals, notes) = self.told_since(told, notice);
                 let answer = if refusals.is_empty() {
                     Ok(crate::api::with_notes(value, notes))
@@ -205,7 +210,13 @@ impl AppState {
                 };
                 self.answered.push((a.n, answer));
             }
-            (Some(a), Err(why)) => self.answered.push((a.n, Err(format!("{}: {why}", a.name)))),
+            (Some(a), Err(why)) => {
+                self.answered.push((a.n, Err(format!("{}: {why}", a.name))));
+                // As a call refused at once has it put back, unless the user has moved on.
+                if let Some(view) = a.view.filter(|_| self.active_doc == Some(id)) {
+                    self.restore_view(view);
+                }
+            }
             (None, Err(why)) => self.message(MessageKind::Error, b.label, why),
             (None, Ok(())) => {}
         }
@@ -214,14 +225,22 @@ impl AppState {
     /// Cancels the edit under way on image `doc`, if there is one: the image is left as it
     /// was, free at once (the work stops as soon as it next looks).
     pub fn cancel_edit(&mut self, doc: DocId) {
-        let Some(d) = self.doc_mut(doc) else { return };
-        let Some(b) = d.busy.take() else { return };
+        if let Some(label) = self.give_up_edit(doc, "cancelled") {
+            self.notify(format!("{label} was cancelled; the image is as it was."));
+        }
+    }
+
+    /// Stops the edit under way on image `doc`, if there is one, and tells the script whose
+    /// call began it that it was `why` (cancelled, or closed); what it was, if there was one.
+    pub(crate) fn give_up_edit(&mut self, doc: DocId, why: &str) -> Option<String> {
+        let d = self.doc_mut(doc)?;
+        let b = d.busy.take()?;
         b.progress.cancel();
         d.revision += 1;
         if let Some(a) = b.answer {
-            self.answered.push((a.n, Err(format!("{}: cancelled.", a.name))));
+            self.answered.push((a.n, Err(format!("{}: {why}.", a.name))));
         }
-        self.notify(format!("{} was cancelled; the image is as it was.", b.label));
+        Some(b.label)
     }
 
     /// Whether an edit is under way on any image.
@@ -248,6 +267,7 @@ mod tests {
     use super::*;
     use crate::commands::{Cmd, availability};
     use crate::state::{Background, NewImage};
+    use eframe::egui;
 
     fn app() -> AppState {
         let mut st = AppState::new();
@@ -306,6 +326,25 @@ mod tests {
         assert_eq!(d.history.undo_label(), Some("Rename it"));
         assert_eq!(heard.try_recv(), Ok(7));
         assert!(availability(&st, Cmd::NewLayer).is_ok());
+    }
+
+    #[test]
+    fn an_edit_is_given_up_when_its_image_closes_not_when_closing_it_is_asked() {
+        let mut st = app();
+        st.edit_wait = Duration::ZERO;
+        let doc = st.active_doc.unwrap();
+        // Changes to save, so that closing asks.
+        st.run(Cmd::NewLayer, &egui::Context::default());
+        let (_go, wait) = mpsc::channel();
+        let (told, _heard) = mpsc::channel();
+        waiting_edit(&mut st, "Renamed", wait, told);
+        st.request_close(doc);
+        assert!(matches!(st.confirm, Some(crate::state::Confirm::Close(_))));
+        // Answered Cancel: the image stays, and so does its edit.
+        st.confirm = None;
+        assert!(st.editing(), "asking gave the edit up");
+        st.close_now(doc);
+        assert!(!st.editing() && st.doc(doc).is_none());
     }
 
     #[test]

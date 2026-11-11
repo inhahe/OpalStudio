@@ -397,11 +397,12 @@ impl Server {
     /// A frame that carries out a request goes on with those that arrive meanwhile, for a
     /// few milliseconds ([`SERVE_FOR`]): a script calling one method after another then
     /// makes many calls a frame, not one.
-    pub fn serve(&mut self, st: &mut AppState, ctx: &egui::Context, busy: bool) {
-        let quitting = st.exit_requested || st.exit_after_writes;
+    pub fn serve(&mut self, st: &mut AppState, ctx: &egui::Context, pointer_held: bool) {
+        let quitting = st.exit_requested || st.exit_after_work;
         // Told to those saying hello, which are refused meanwhile.
         self.shared.quitting.store(quitting, Ordering::Relaxed);
-        if !busy || quitting {
+        let busy = |st: &AppState| st.scripts_wait(pointer_held);
+        if !busy(st) || quitting {
             let generation = self.shared.clients.lock().expect("not poisoned").generation;
             let until = Instant::now() + SERVE_FOR;
             let mut next = self.waiting.take().or_else(|| self.requests.try_recv().ok());
@@ -425,11 +426,15 @@ impl Server {
                         }
                     }
                 }
+                // A call may have begun an edit, which the next waits for.
+                if busy(st) && !quitting {
+                    break;
+                }
                 next = self.next_before(until);
             }
             // Any left for the next frame asked for it as they came (pass_on).
         }
-        for (n, result) in st.answers_while(busy, quitting) {
+        for (n, result) in st.answers_while(busy(st), quitting) {
             if let Some(answer) = self.later.remove(&n) {
                 let _ = answer.send(result);
             }
@@ -907,6 +912,55 @@ mod tests {
         assert!(flood.send(&"x".repeat(STRANGER_LINE * 4)).is_none(), "an endless line was read");
         drop(server);
         assert!(!file.exists());
+    }
+
+    #[test]
+    fn a_call_waits_for_an_edit_the_call_before_it_began() {
+        // The background threads held below, which the windows tests' views need.
+        let _windows = crate::ui_tests::gpu_lock();
+        let file = std::env::temp_dir().join(format!("opal-api-edit-{}.json", std::process::id()));
+        let mut server = Server::start(file.clone(), egui::Context::default()).unwrap();
+        let (pipe, token) = info(&file);
+        let ctx = egui::Context::default();
+        let mut st = AppState::new();
+        st.edit_wait = Duration::ZERO;
+        st.create_image(&crate::state::NewImage {
+            width: 40,
+            height: 20,
+            background: crate::state::Background::White,
+            resolution: 72.0,
+        });
+        st.run(crate::commands::Cmd::NewLayer, &ctx);
+        // A merge, still under way as it is held, then a selection, asked one after the other.
+        let held = crate::background::testing::hold(Some(crate::background::pool()));
+        let mut calls = Vec::new();
+        for line in [
+            r#"{"jsonrpc":"2.0","id":2,"method":"merge_down","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"select_rectangle","params":{"width":10,"height":10}}"#,
+        ] {
+            let mut client = Client::connect(&pipe);
+            client.send(&hello_line(&token)).unwrap();
+            calls.push(std::thread::spawn(move || client.send(line)));
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        server.serve(&mut st, &ctx, false);
+        assert!(st.editing(), "the merge did not begin");
+        assert!(st.active().unwrap().pixel_selection().is_none(), "the selection did not wait for the merge");
+        drop(held);
+        let mut served = 0;
+        while !calls.iter().all(|c| c.is_finished()) {
+            assert!(served < 2000, "never answered");
+            // As the window does each frame: the edit applied once done.
+            st.between_frames(false);
+            server.serve(&mut st, &ctx, false);
+            std::thread::sleep(Duration::from_millis(5));
+            served += 1;
+        }
+        for c in calls {
+            assert!(c.join().unwrap().is_some_and(|r| r.get("result").is_some()));
+        }
+        let d = st.active().unwrap();
+        assert!(d.doc().layers.len() == 1 && d.pixel_selection().is_some());
     }
 
     #[test]

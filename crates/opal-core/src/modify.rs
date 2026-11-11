@@ -111,15 +111,19 @@ fn coverage(d: f64) -> u16 {
 /// What may hold a modifier's work back, asked as it goes: `stop`, between the pieces of it,
 /// whether it is wanted no longer; `admit`, before it takes memory of note (the windows it works
 /// out at once, then each block's tiles as it keeps them), whether it may take that many bytes
-/// more, all of them in memory.
+/// more, all of them in memory; `give_back`, told the bytes it no longer holds once done (its
+/// windows), so that the steps after it may have them.
 #[derive(Clone, Copy)]
 pub struct Bounds<'a> {
     pub stop: &'a (dyn Fn() -> bool + Sync),
     pub admit: &'a (dyn Fn(u64) -> bool + Sync),
+    pub give_back: &'a (dyn Fn(u64) + Sync),
 }
 
 /// Bounds that never hold the work back.
-pub const UNBOUNDED: Bounds<'static> = Bounds { stop: &never, admit: &always };
+pub const UNBOUNDED: Bounds<'static> = Bounds { stop: &never, admit: &always, give_back: &forget };
+
+fn forget(_: u64) {}
 
 fn never() -> bool {
     false
@@ -298,7 +302,8 @@ fn by_distance(
     }
     let (b, workers) = layout(band.most(), rayon::current_num_threads(), &near);
     let band = band.most();
-    if !(bounds.admit)((workers * window_side(b, band).pow(2) * WINDOW_PIXEL) as u64) {
+    let windows = (workers * window_side(b, band).pow(2) * WINDOW_PIXEL) as u64;
+    if !(bounds.admit)(windows) {
         return Err(Halt::NoMemory);
     }
     let mut blocks: std::collections::HashMap<(i32, i32), Vec<TileCoord>> = std::collections::HashMap::new();
@@ -345,6 +350,8 @@ fn by_distance(
             });
         }
     });
+    // The windows are gone, however it ended.
+    (bounds.give_back)(windows);
     if let Some(why) = halted.into_inner().expect("not poisoned") {
         return Err(why);
     }
@@ -626,6 +633,35 @@ mod tests {
         assert_eq!(asked(&large, 5.0, 0).0, Some(Halt::NoMemory), "the windows were not asked for");
         // A step that changes nothing asks for nothing.
         assert_eq!(asked(&large, 0.0, 0), (None, Vec::new()));
+    }
+
+    #[test]
+    fn a_modifier_gives_its_windows_back_so_that_the_next_step_may_have_them() {
+        use crate::selection::{Selection, Step};
+        use std::sync::Mutex;
+        // Held now, and the most held at once, as the steps of a recipe are worked out.
+        let held = Mutex::new((0i64, 0i64));
+        let admit = |n: u64| {
+            let mut h = held.lock().unwrap();
+            h.0 += n as i64;
+            h.1 = h.1.max(h.0);
+            true
+        };
+        let give_back = |n: u64| held.lock().unwrap().0 -= n as i64;
+        let bounds = Bounds { admit: &admit, give_back: &give_back, ..UNBOUNDED };
+        let steps = vec![
+            Step::Shape {
+                shape: Shape::rectangle(&crate::geom::FRect::new(0.0, 0.0, 3000.0, 3000.0), true),
+                combine: crate::mask::Combine::Replace,
+            },
+            Step::Grow { by: 40.0, corners: Reach::Round },
+            Step::Feather { width: 30.0, side: Side::Centered, falloff: Falloff::Gaussian },
+        ];
+        Selection::of_within(steps, bounds).unwrap();
+        let (now, most) = *held.lock().unwrap();
+        // Each step's windows given back: held at the end, only the tiles kept, far less than
+        // the most held at once (a step's windows and the tiles so far).
+        assert!(now > 0 && now * 4 < most, "held {now} of {most} at the end");
     }
 
     #[test]
