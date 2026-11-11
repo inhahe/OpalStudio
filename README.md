@@ -92,7 +92,8 @@ cargo test --workspace                     # all tests, interface tests included
   all to fully, and everything acting on it acts on each pixel that much. So far: the Select
   tool (M), dragging rectangles and ellipses on whole pixels, Shift adding to the selection
   and Alt taking away; Select All, Deselect and Invert Selection; Clear, Cut and Copy within
-  it; Crop to Selection; marching ants round it. Selections are part of history.
+  it; Crop to Selection; marching ants round it. Selections are part of history, and turn, flip
+  and resize with the image.
 - **Layers and groups.** Add, duplicate, delete, group, reorder (buttons or dragging,
   into and out of groups), rename, hide, lock, change opacity; select several with Ctrl
   and Shift; merge down, merge selected, merge visible, merge a group, stamp visible,

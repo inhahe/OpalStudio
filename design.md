@@ -333,6 +333,12 @@ On the Select tab (and for scripts, by the same names):
   too) copies, then clears.
 - **Crop to Selection** makes the canvas the rectangle round the selection (refused for one
   that reaches past every edge).
+- **Rotate**, **Flip**, **Resize Image** and the Crop tool's straightening carry what is
+  selected with the layers (`Selection::transformed`). Its shapes are carried exactly, so a
+  rectangle on the grid turned a quarter is one on the grid again; a turned rectangle
+  stretched along another way, no longer a rectangle, cannot be, so the selection up to it
+  becomes a *mask* step: its mask, carried pixel by pixel (exactly through quarter turns and
+  flips, read between pixels otherwise), the steps after it carried as before.
 - The `selection` query tells a script the rectangle round what is selected (or that
   nothing is, or that it is unbounded) and the steps that made it.
 - The canvas shows the outline as marching ants: white, with black dashes moving along it a

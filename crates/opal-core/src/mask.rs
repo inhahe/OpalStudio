@@ -17,7 +17,7 @@
 //! Every operation limited to a selection goes through one step, [`blend`]: the pixel it would
 //! make, weighed against the one there by the mask's level.
 
-use crate::geom::{FRect, IRect};
+use crate::geom::{Affine, FRect, IRect};
 use crate::raster::RasterImage;
 use crate::tile::{PixelF32, TILE_PIXELS, TILE_SIZE, Tile, TileCoord, pixel_from_f32};
 use rayon::prelude::*;
@@ -456,6 +456,78 @@ impl Mask {
             .filter(|(_, r)| !r.is_empty())
             .collect();
         Mask { rows: rows.into_iter().collect(), outside }
+    }
+
+    /// The rectangle round every tile kept, if any is.
+    fn kept_area(&self) -> Option<IRect> {
+        let (&y0, _) = self.rows.first_key_value()?;
+        let (&y1, _) = self.rows.last_key_value()?;
+        let x0 = self.rows.values().map(|r| r[0].x0).min()?;
+        let x1 = self.rows.values().map(|r| r[r.len() - 1].x1).max()?;
+        let (a, b) = (TileCoord::new(x0, y0).rect(0), TileCoord::new(x1, y1 + 1).rect(0));
+        Some(IRect::new(a.x0, a.y0, b.x0, b.y0))
+    }
+
+    /// The mask `m` carries this one to: each pixel's level read where `m` takes it from,
+    /// exactly where `m` moves the pixel grid onto itself (a quarter turn, a flip), else between
+    /// the four pixels nearest. A map that flattens the plane leaves only the level outside.
+    pub fn transformed(&self, m: &Affine) -> Mask {
+        let Some(inverse) = m.inverse() else {
+            return Mask { rows: BTreeMap::new(), outside: self.outside };
+        };
+        let Some(area) = self.kept_area() else { return self.clone() };
+        let exact = m.grid_map().is_some();
+        // Reading between pixels reaches a pixel past what the kept tiles are carried to.
+        let target = IRect::covering(&m.bounds(&area.to_f())).expand(1);
+        let first = TileCoord::containing(target.x0, target.y0);
+        let last = TileCoord::containing(target.x1 - 1, target.y1 - 1);
+        let tile = |c: TileCoord| -> MaskTile {
+            let r = c.rect(0);
+            // What it is read from, and the pixels round that reading between them reaches.
+            let from = IRect::covering(&inverse.bounds(&r.to_f())).expand(1);
+            if let Some(l) = self.uniform_in(&from) {
+                return MaskTile::Level(l);
+            }
+            let source = self.levels_in(&from);
+            let w = from.width() as usize;
+            let at = |x: i64, y: i64| -> f32 {
+                f32::from(if from.contains(x, y) {
+                    source[(y - from.y0) as usize * w + (x - from.x0) as usize]
+                } else {
+                    self.outside
+                })
+            };
+            let mut levels = vec![0u16; TILE_PIXELS];
+            for (i, l) in levels.iter_mut().enumerate() {
+                let (px, py) = (r.x0 + (i % SIDE) as i64, r.y0 + (i / SIDE) as i64);
+                let [x, y] = inverse.apply([px as f64 + 0.5, py as f64 + 0.5]);
+                *l = if exact {
+                    at(x.floor() as i64, y.floor() as i64) as u16
+                } else {
+                    let (fx, fy) = (x - 0.5, y - 0.5);
+                    let (x0, y0) = (fx.floor(), fy.floor());
+                    let (tx, ty) = ((fx - x0) as f32, (fy - y0) as f32);
+                    let (x0, y0) = (x0 as i64, y0 as i64);
+                    let top = at(x0, y0) * (1.0 - tx) + at(x0 + 1, y0) * tx;
+                    let bottom = at(x0, y0 + 1) * (1.0 - tx) + at(x0 + 1, y0 + 1) * tx;
+                    (top * (1.0 - ty) + bottom * ty).round() as u16
+                };
+            }
+            MaskTile::from_levels(levels)
+        };
+        let rows: Vec<(i32, Vec<Run>)> = (first.y..=last.y)
+            .into_par_iter()
+            .map(|y| {
+                let tiles: Vec<MaskTile> = (first.x..=last.x).into_par_iter().map(|x| tile(TileCoord::new(x, y))).collect();
+                let mut row = Vec::new();
+                for (x, t) in (first.x..).zip(tiles) {
+                    push(&mut row, x, x + 1, t, self.outside);
+                }
+                (y, row)
+            })
+            .filter(|(_, r)| !r.is_empty())
+            .collect();
+        Mask { rows: rows.into_iter().collect(), outside: self.outside }
     }
 
     /// The levels of the pixels of `area`, row by row.
@@ -902,7 +974,44 @@ pub enum ShapeKind {
     Ellipse,
 }
 
+/// The size and angle (in degrees) of a rectangle or an ellipse `size` wide and high turned
+/// by `angle`, as those of the same shape turned by an eighth or less either way: a quarter
+/// turn more or less is its sides swapped. Within a billionth of a degree of a quarter turn
+/// counts as one, so that a shape on the grid turned by a quarter is on it again.
+fn upright(size: [f64; 2], angle: f64) -> ([f64; 2], f64) {
+    let quarters = (angle / 90.0).round();
+    let rest = angle - quarters * 90.0;
+    let size = if (quarters as i64).rem_euclid(2) == 1 { [size[1], size[0]] } else { size };
+    (size, if rest.abs() < 1e-9 { 0.0 } else { rest })
+}
+
 impl Shape {
+    /// The shape `m` carries this one to, if it is one: an ellipse always is, a rectangle
+    /// only while `m` keeps its sides at right angles (not once a turned one is stretched
+    /// along another way). It is turned by an eighth or less (see [`upright`]).
+    pub fn transformed(&self, m: &Affine) -> Option<Shape> {
+        let (s, c) = self.angle.to_radians().sin_cos();
+        let [w, h] = self.size.map(|v| v.abs() / 2.0);
+        let linear = |[x, y]: [f64; 2]| [m.a * x + m.c * y, m.b * x + m.d * y];
+        // Its half-width and half-height, as the arrows from its middle along its sides.
+        let (u, v) = (linear([c * w, s * w]), linear([-s * h, c * h]));
+        let (lu, lv) = (u[0].hypot(u[1]), v[0].hypot(v[1]));
+        let (size, angle) = if (u[0] * v[0] + u[1] * v[1]).abs() <= 1e-9 * lu * lv {
+            ([2.0 * lu, 2.0 * lv], u[1].atan2(u[0]).to_degrees())
+        } else if self.kind == ShapeKind::Ellipse {
+            // The ellipse [u v] carries the unit circle to: its semi-axes are the square roots
+            // of the eigenvalues of [u v][u v]ᵀ, the longer along the first eigenvector.
+            let (p, q, r) = (u[0] * u[0] + v[0] * v[0], u[0] * u[1] + v[0] * v[1], u[1] * u[1] + v[1] * v[1]);
+            let (mid, apart) = ((p + r) / 2.0, ((p - r) / 2.0).hypot(q));
+            let (long, short) = ((mid + apart).sqrt(), (mid - apart).max(0.0).sqrt());
+            ([2.0 * long, 2.0 * short], (0.5 * (2.0 * q).atan2(p - r)).to_degrees())
+        } else {
+            return None;
+        };
+        let (size, angle) = upright(size, angle);
+        Some(Shape { center: m.apply(self.center), size, angle, ..*self })
+    }
+
     /// `(x, y)` in the shape's own frame: from its middle, along its sides.
     fn local(&self, x: f64, y: f64) -> [f64; 2] {
         let (s, c) = self.angle.to_radians().sin_cos();

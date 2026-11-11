@@ -103,10 +103,10 @@ impl Turn {
     }
 }
 
-/// Carries every object of `doc` through `m`. Pixel objects stay pixels where `m` is exact
-/// on the grid; otherwise they are resampled with `resample` if given, else become image
-/// objects drawn with `sampling`. Resampling keeps only the part within `keep` of what
-/// would reach too far (see `layer_ops::drawable`); returns whether it had to, or why
+/// Carries every object of `doc`, and its selection, through `m`. Pixel objects stay pixels
+/// where `m` is exact on the grid; otherwise they are resampled with `resample` if given, else
+/// become image objects drawn with `sampling`. Resampling keeps only the part within `keep` of
+/// what would reach too far (see `layer_ops::drawable`); returns whether it had to, or why
 /// nothing could be done: the pixels drawn would need more memory than is free.
 pub fn transform_all(
     doc: &mut Document,
@@ -169,6 +169,10 @@ pub fn transform_all(
     }
     for l in &mut doc.layers {
         walk(Arc::make_mut(l), m, resample, sampling, &mut to)?;
+    }
+    // What is selected goes with what it was selected on.
+    if let Some(s) = doc.selection.take() {
+        doc.selection = Some(Arc::new(s.transformed(m))).filter(|s| !s.is_empty());
     }
     Ok(to.clipped)
 }
@@ -517,6 +521,38 @@ mod tests {
         st.resize_image(&spec, false);
         let d = st.active().unwrap().doc();
         assert_eq!((d.canvas.width, d.resolution), (60, 150.0));
+    }
+
+    #[test]
+    fn what_is_selected_is_turned_flipped_and_resized_with_the_image() {
+        use crate::state::{Background, NewImage};
+        use opal_core::mask::{Combine, Extent, Shape, ShapeKind};
+        use opal_core::selection::{Selection, Step};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let shape =
+            Shape { kind: ShapeKind::Rectangle, center: [60.0, 45.0], size: [100.0, 50.0], angle: 0.0, smooth: true };
+        let d = st.active_mut().unwrap();
+        d.set_pixel_selection(Some(Selection::new(Step::Shape { shape, combine: Combine::Replace })), "Select");
+        let selected = |st: &AppState| st.active().unwrap().pixel_selection().unwrap().mask().extent();
+        // (10, 20)-(110, 70), turned right on a canvas 200 high: (u, v) goes to (200 - v, u).
+        st.turn(Turn::Clockwise);
+        assert_eq!(selected(&st), Extent::Within(IRect::new(130, 10, 180, 110)));
+        // Flipped across the canvas, now 200 wide.
+        st.turn(Turn::FlipHorizontal);
+        assert_eq!(selected(&st), Extent::Within(IRect::new(20, 10, 70, 110)));
+        // Halved, about the canvas's corner.
+        let spec = ResizeImage { width: 100, height: 150, keep_aspect: true, resolution: 72.0, keep_print_size: false };
+        st.resize_image(&spec, false);
+        assert_eq!(selected(&st), Extent::Within(IRect::new(10, 5, 35, 55)));
+        // Still the rectangle it was, on the grid.
+        let steps = st.active().unwrap().pixel_selection().unwrap().steps().to_vec();
+        assert!(matches!(steps[..], [Step::Shape { shape: Shape { angle: 0.0, size: [25.0, 50.0], .. }, .. }]), "{steps:?}");
+        // Undone, back where it was.
+        for _ in 0..3 {
+            st.active_mut().unwrap().undo();
+        }
+        assert_eq!(selected(&st), Extent::Within(IRect::new(10, 20, 110, 70)));
     }
 
     #[test]
