@@ -37,26 +37,36 @@ pub struct Variants {
     pub icons: &'static [char],
 }
 
+impl Variants {
+    /// The setting that chooses among them, in `settings` (their tool's), and the variants
+    /// by id and name.
+    pub fn options(&self, settings: &crate::settings::Settings) -> Option<(&'static Def, &'static [(&'static str, &'static str)])> {
+        let d = settings.defs().iter().find(|d| d.key == self.key)?;
+        match d.kind {
+            Kind::Choice(options) => Some((d, options)),
+            _ => None,
+        }
+    }
+
+    /// The variant `settings` (their tool's) choose: its place among them, and its name.
+    pub fn chosen(&self, settings: &crate::settings::Settings) -> Option<(usize, &'static str)> {
+        let (_, options) = self.options(settings)?;
+        let chosen = settings.choice(self.key);
+        options.iter().position(|(id, _)| *id == chosen).map(|i| (i, options[i].1))
+    }
+}
+
 impl ToolId {
     /// The icon of the variant `settings` (the tool's) choose, or the tool's own.
     pub fn icon_with(self, settings: &crate::settings::Settings) -> char {
         let info = self.info();
-        let Some(v) = &info.variants else { return info.icon };
-        let chosen = settings.choice(v.key);
-        let options = settings.defs().iter().find(|d| d.key == v.key).map_or(&[][..], |d| match d.kind {
-            Kind::Choice(options) => options,
-            _ => &[],
-        });
-        options.iter().position(|(id, _)| *id == chosen).and_then(|i| v.icons.get(i)).copied().unwrap_or(info.icon)
+        let chosen = info.variants.as_ref().and_then(|v| v.icons.get(v.chosen(settings)?.0).copied());
+        chosen.unwrap_or(info.icon)
     }
 
     /// The name of the variant `settings` (the tool's) choose, if the tool has variants.
     pub fn variant_with(self, settings: &crate::settings::Settings) -> Option<&'static str> {
-        let v = self.info().variants.as_ref()?;
-        let chosen = settings.choice(v.key);
-        let d = settings.defs().iter().find(|d| d.key == v.key)?;
-        let Kind::Choice(options) = d.kind else { return None };
-        options.iter().find(|(id, _)| *id == chosen).map(|(_, label)| *label)
+        self.info().variants.as_ref()?.chosen(settings).map(|(_, name)| name)
     }
 
     /// Every tool, in toolbar order.

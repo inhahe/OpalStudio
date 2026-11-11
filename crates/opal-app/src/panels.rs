@@ -621,8 +621,7 @@ pub fn heading(ui: &mut egui::Ui, glyph: char, name: &str, does: &str) {
 /// marked.
 fn variant_row(ui: &mut egui::Ui, st: &mut AppState, tool: crate::tools::ToolId, v: &crate::tools::Variants) {
     let settings = st.tool_settings.get_mut(&tool).expect("every tool has settings");
-    let Some(def) = settings.defs().iter().find(|d| d.key == v.key) else { return };
-    let crate::settings::Kind::Choice(options) = def.kind else { return };
+    let Some((def, options)) = v.options(settings) else { return };
     let chosen = settings.choice(v.key);
     let mut picked = None;
     ui.horizontal_wrapped(|ui| {
