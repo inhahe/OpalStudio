@@ -14,12 +14,13 @@
 //!
 //! Copies share their tiles until one changes, as the history's states share images'.
 //!
-//! Every operation limited to a selection goes through one step, [`blend`]: the pixel it would
-//! make, weighed against the one there by the mask's level.
+//! Operations limited to a selection weigh what they make against what is there by the mask's
+//! level (design.md, *The mask*): so far, Clear ([`clear_selected`]) and Copy
+//! ([`keep_selected`]).
 
 use crate::geom::{Affine, FRect, IRect};
 use crate::raster::RasterImage;
-use crate::tile::{PixelF32, TILE_PIXELS, TILE_SIZE, Tile, TileCoord, pixel_from_f32};
+use crate::tile::{TILE_PIXELS, TILE_SIZE, Tile, TileCoord, pixel_from_f32};
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
@@ -529,8 +530,9 @@ impl Mask {
         };
         let Some(area) = self.kept_area() else { return self.clone() };
         let exact = m.grid_map().is_some();
-        // Reading between pixels reaches a pixel past what the kept tiles are carried to.
-        let target = IRect::covering(&m.bounds(&area.to_f())).expand(1);
+        // Reading between pixels reaches a pixel past the kept tiles, however far that is
+        // carried (several pixels, grown).
+        let target = IRect::covering(&m.bounds(&area.expand(1).to_f())).expand(1);
         let first = TileCoord::containing(target.x0, target.y0);
         let last = TileCoord::containing(target.x1 - 1, target.y1 - 1);
         let tile = |c: TileCoord| -> MaskTile {
@@ -740,45 +742,24 @@ fn edge_tile(shape: &impl Coverage, c: TileCoord) -> MaskTile {
     MaskTile::from_levels(levels)
 }
 
-/// `before` with each pixel `p` made `p × (1 − m) + changed(p) × m`, `m` the level of `mask`
-/// there: the step every operation limited to a selection goes through (design.md, *The
-/// mask*). `before` is a pixel object's bitmap, its pixel `(0, 0)` at `offset` in the document.
-/// `changed` must leave a transparent pixel transparent (only the tiles `before` has are
-/// changed); tiles the mask leaves alone, and those it covers but `changed` would not alter,
-/// stay as they were, shared.
-pub fn blend(
-    before: &RasterImage,
-    offset: [i64; 2],
-    mask: &Mask,
-    changed: impl Fn(PixelF32) -> PixelF32 + Sync,
-) -> RasterImage {
-    blend_by(before, offset, mask, fraction, Some(&changed))
-}
-
-/// `before` (a pixel object's bitmap at `offset`, as for [`blend`]) with what `mask` selects
-/// erased, as much of each pixel as it selects it: what Clear does.
+/// `before`, a pixel object's bitmap (its pixel `(0, 0)` at `offset` in the document), with
+/// what `mask` selects erased, as much of each pixel as it selects it: what Clear does. Tiles
+/// the mask leaves alone stay as they were, shared.
 pub fn clear_selected(before: &RasterImage, offset: [i64; 2], mask: &Mask) -> RasterImage {
-    blend_by(before, offset, mask, fraction, None)
+    erase_by(before, offset, mask, fraction)
 }
 
-/// `before` (a pixel object's bitmap at `offset`, as for [`blend`]) with only what `mask`
-/// selects kept, as much of each pixel as it selects it: what copying within a selection
-/// copies.
+/// `before` (a pixel object's bitmap at `offset`, as for [`clear_selected`]) with only what
+/// `mask` selects kept, as much of each pixel as it selects it: what copying within a
+/// selection copies.
 pub fn keep_selected(before: &RasterImage, offset: [i64; 2], mask: &Mask) -> RasterImage {
-    blend_by(before, offset, mask, |l| 1.0 - fraction(l), None)
+    erase_by(before, offset, mask, |l| 1.0 - fraction(l))
 }
 
-/// [`blend`], with `weight` giving `m` from each level, and `changed` making every pixel
-/// transparent where it is `None`. Tiles where `m` is 0 throughout are left alone, and where
-/// it is 1 throughout and `changed` is `None`, dropped, without looking at their pixels.
-fn blend_by(
-    before: &RasterImage,
-    offset: [i64; 2],
-    mask: &Mask,
-    weight: impl Fn(u16) -> f32 + Sync,
-    changed: Option<&(dyn Fn(PixelF32) -> PixelF32 + Sync)>,
-) -> RasterImage {
-    debug_assert!(changed.is_none_or(|f| f([0.0; 4]) == [0.0; 4]), "a transparent pixel changed");
+/// `before` (as for [`clear_selected`]) with each pixel erased by `m`, which `weight` gives
+/// from the mask's level there (`p × (1 − m)`). Tiles where `m` is 0 throughout are left
+/// alone, and where it is 1 throughout, dropped, without looking at their pixels.
+fn erase_by(before: &RasterImage, offset: [i64; 2], mask: &Mask, weight: impl Fn(u16) -> f32 + Sync) -> RasterImage {
     let coords: Vec<TileCoord> = before.tiles().map(|(c, _)| c).collect();
     let done: Vec<(TileCoord, Option<Arc<Tile>>)> = coords
         .into_par_iter()
@@ -787,7 +768,7 @@ fn blend_by(
             let uniform = mask.uniform_in(&area).map(&weight);
             match uniform {
                 Some(0.0) => return None,
-                Some(m) if m == 1.0 && changed.is_none() => return Some((c, None)),
+                Some(1.0) => return Some((c, None)),
                 _ => {}
             }
             let weights: Option<Vec<f32>> =
@@ -804,8 +785,7 @@ fn blend_by(
                 if m == 0.0 {
                     continue;
                 }
-                let c = changed.map_or([0.0; 4], |f| f(*p));
-                let new = [0, 1, 2, 3].map(|i| p[i] * (1.0 - m) + c[i] * m);
+                let new = p.map(|v| v * (1.0 - m));
                 if new != *p {
                     same = false;
                     *p = new;
@@ -1279,6 +1259,16 @@ mod tests {
     }
 
     #[test]
+    fn a_mask_grown_eightfold_keeps_its_soft_edge_past_its_last_tile() {
+        // Selected up to the end of its tile, at x = 256: grown, read between the last pixel
+        // in and the first out, the edge fades out a few pixels past where it is carried.
+        let m = Mask::of(&rect(0.0, 0.0, 256.0, 10.0));
+        let big = m.transformed(&Affine::scale(7.99, 7.99));
+        let fading = big.level_at(2048, 40);
+        assert!(fading > 0 && fading < FULL, "{fading}");
+    }
+
+    #[test]
     fn a_mask_shrunk_a_hundredfold_is_read_only_where_its_pixels_come_from() {
         // A turned square 30,000 pixels a side, no longer one once stretched: carried pixel by
         // pixel, each read from the four it lies between.
@@ -1443,13 +1433,12 @@ mod tests {
     }
 
     #[test]
-    fn blending_through_a_mask_changes_what_it_selects_as_much_as_it_selects_it() {
+    fn clearing_through_a_mask_erases_what_it_selects_as_much_as_it_selects_it() {
         let red = crate::tile::pixel_from_f32([1.0, 0.0, 0.0, 1.0]);
         let image = RasterImage::filled(&IRect::new(0, 0, 600, 100), red);
         // The left half selected, pixel 299 half; the image 1000 to the right of the origin.
         let mask = Mask::of(&rect(1000.0, 0.0, 1299.5, 100.0));
         let cleared = clear_selected(&image, [1000, 0], &mask);
-        assert_eq!(blend(&image, [1000, 0], &mask, |_| [0.0; 4]).pixel(299, 50), cleared.pixel(299, 50));
         assert_eq!(cleared.pixel(10, 50), crate::tile::pixel_from_f32([0.0; 4]));
         assert_eq!(cleared.pixel(400, 50), red);
         let half = crate::tile::pixel_to_f32(cleared.pixel(299, 50));

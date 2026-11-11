@@ -19,9 +19,12 @@ impl crate::doc::DocState {
     }
 
     /// Makes `selection` what is selected (nothing, if it is `None` or selects nothing), as a
-    /// history state labeled `label`.
+    /// history state labeled `label`; none if it is what is selected already.
     pub fn set_pixel_selection(&mut self, selection: Option<Selection>, label: &str) {
         let selection = selection.filter(|s| !s.is_empty()).map(Arc::new);
+        if selection.as_deref() == self.pixel_selection().map(|s| &**s) {
+            return;
+        }
         let _ = self.apply(label, |doc, _| {
             doc.selection = selection;
             Ok::<(), ()>(())
@@ -178,9 +181,9 @@ fn cleared(d: &crate::doc::DocState) -> Vec<&Layer> {
 }
 
 /// Why the selected layers cannot be cleared within the selection, if they cannot: none is
-/// selected, or one (or a group) is hidden, or one it would clear (or a group it is in) is
-/// locked, or holds a placed image (whose pixels are its own, drawn through a transform:
-/// rasterize it first).
+/// selected, or one (or a group, selected or holding one) is hidden, or one it would clear
+/// (or a group it is in) is locked, or holds a placed image (whose pixels are its own, drawn
+/// through a transform: rasterize it first).
 pub(crate) fn clear_refused(d: &crate::doc::DocState) -> Result<(), String> {
     if d.pixel_selection().is_none() {
         return Err("Select an area first (the Select tool, or Select All).".into());
@@ -190,11 +193,14 @@ pub(crate) fn clear_refused(d: &crate::doc::DocState) -> Result<(), String> {
     if selected.is_empty() {
         return Err("Select a layer in the Layers panel first.".into());
     }
-    if let Some(l) = selected.iter().find(|l| !l.visible) {
+    // Each selected layer, after the groups it is in.
+    let around: Vec<&Layer> =
+        selected.iter().flat_map(|l| crate::commands::groups_above(doc, l.id).into_iter().chain([*l])).collect();
+    if let Some(l) = around.iter().find(|l| !l.visible) {
         return Err(format!("\"{}\" is hidden: clearing it would change nothing you can see. Show it first.", l.name));
     }
     let layers = cleared(d);
-    if let Some(l) = layers.iter().find(|l| l.locked) {
+    if let Some(l) = around.iter().chain(&layers).find(|l| l.locked) {
         return Err(format!("\"{}\" is locked. Unlock it first.", l.name));
     }
     if let Some(l) = layers.iter().find(|l| !l.is_group() && crate::layer_ops::has_image_object(l)) {
@@ -270,5 +276,16 @@ mod tests {
         // A locked: refused.
         flag(&mut st, a, |l| l.locked = true);
         assert!(refused(&st).contains("\"A\" is locked"), "{}", refused(&st));
+        // A selected itself, in G locked: refused, as are Transform and the Move tool.
+        flag(&mut st, a, |l| l.locked = false);
+        flag(&mut st, g, |l| l.locked = true);
+        st.active_mut().unwrap().select_only(a);
+        assert!(refused(&st).contains("\"G\" is locked"), "{}", refused(&st));
+        let transform = crate::commands::availability(&st, crate::commands::Cmd::Transform).unwrap_err();
+        assert!(transform.contains("\"G\" is locked"), "{transform}");
+        assert_eq!(crate::move_tool::locked_in_selected_layers(st.active().unwrap()).as_deref(), Some("G"));
+        // In G hidden: refused.
+        flag(&mut st, g, |l| (l.locked, l.visible) = (false, false));
+        assert!(refused(&st).contains("\"G\" is hidden"), "{}", refused(&st));
     }
 }

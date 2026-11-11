@@ -3014,6 +3014,41 @@ fn the_box_round_the_last_shape_moves_it_sizes_it_and_takes_its_numbers() {
 }
 
 #[test]
+fn a_select_drag_given_up_elsewhere_or_changing_nothing_leaves_no_history_state() {
+    use egui::Modifiers;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    let states = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().history.nodes().count();
+    // With nothing selected, a drag that takes away leaves nothing selected, and no state.
+    let before = states(&h);
+    select_drag(&mut h, [100.0, 50.0], [200.0, 120.0], Modifiers::ALT, Modifiers::ALT);
+    assert_eq!((selected(&h), states(&h)), (None, before), "a state that changed nothing");
+    // A drag begun on one image and let go while another is shown is given up.
+    let first = h.state().state().active_doc;
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Select);
+    h.run();
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let at = |x: f32, y: f32| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    h.hover_at(at(100.0, 50.0));
+    h.run();
+    h.drag_at(at(100.0, 50.0));
+    h.run();
+    h.hover_at(at(200.0, 120.0));
+    h.run();
+    assert!(h.state().state().active().unwrap().select_drag.is_some(), "no drag begun");
+    image_of(&mut h, 50, 50);
+    assert_ne!(h.state().state().active_doc, first);
+    h.drop_at(at(20.0, 20.0));
+    h.run();
+    h.state_mut().state_mut().show_doc(first.unwrap());
+    h.run();
+    assert_eq!(h.state().state().active_doc, first);
+    assert_eq!((selected(&h), states(&h)), (None, before), "the drag was finished on coming back");
+}
+
+#[test]
 fn the_select_tool_selects_a_rectangle_dragged_on_whole_pixels_and_combines_by_the_keys() {
     use egui::Modifiers;
     use opal_core::geom::IRect;

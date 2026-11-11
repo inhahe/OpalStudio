@@ -330,8 +330,8 @@ On the Select tab (and for scripts, by the same names):
   selected. Each is a history state.
 - **Clear** (Delete) erases what is selected on the selected layers, as much of each pixel
   as it is selected; inside a selected group, on the layers shown (a hidden one is left as it
-  is). It is refused, saying why, when a selected layer or group is hidden, when a layer it
-  would clear, or a group that layer is in, is locked, and on a layer holding a placed image,
+  is). It is refused, saying why, when a selected layer or group, or a group one is in, is
+  hidden, when a layer it would clear, or a group that layer is in, is locked, and on a layer holding a placed image,
   whose pixels are its own, drawn through its transform (rasterize it first).
 - **Copy** and **Copy Merged** copy within the selection; **Cut** (Ctrl+X, on the Home tab
   too) copies, then clears what it copied: within the canvas, so that what lies past it,
@@ -348,7 +348,8 @@ On the Select tab (and for scripts, by the same names):
   rectangle on the grid turned a quarter is one on the grid again; a turned rectangle
   stretched along another way, no longer a rectangle, cannot be, so the selection up to it
   becomes a *mask* step: its mask, carried pixel by pixel (exactly through quarter turns and
-  flips, read between pixels otherwise), the steps after it carried as before.
+  flips, read between pixels otherwise), the steps after it carried as before. A mask step
+  is told (to scripts) without its mask, and so is never read back as one.
 - The `selection` query tells a script the rectangle round what is selected (or that
   nothing is, or that it is unbounded) and the steps that made it, positions counted from the
   canvas's corner as everywhere in the API; Select All, Deselect and Invert Selection answer
@@ -369,7 +370,9 @@ ants. How it combines with what is selected is the tool's *Combine* setting (rep
 default), or the keys held as it begins: Shift adds, Alt takes away, both keep what is in
 both. Shift pressed once it has begun makes it a square or a circle, and Alt draws it from
 its middle (the keys held from its beginning count only once let go and pressed again). Esc
-gives a drag up; a click with no keys held selects nothing. *Smooth edges* (on by default)
+gives a drag up, as does showing another image before it is let go; a click with no keys
+held selects nothing, and a drag that would change nothing (taking away with nothing
+selected) makes no history state. *Smooth edges* (on by default)
 selects a pixel the edge crosses as much as the shape covers it. Each selection is a history
 state, *Rectangle selection* or *Ellipse selection*.
 
@@ -646,7 +649,8 @@ curve editors.
 
 - **Merge Down** and **Flatten Image** bake layers into one pixel layer (built).
 - **Locks:** a locked layer cannot be changed, merged or deleted, and neither can a group
-  with a locked layer inside; locked layers can still be moved up and down the stack.
+  with a locked layer inside, nor a layer inside a locked group (what a group holds is part
+  of it: `commands::locked_for`); locked layers can still be moved up and down the stack.
 - **Merge Selected** merges the selected layers into one, where the topmost of them was.
   Selected layers that do not show (hidden, at 0% opacity, or in a hidden group) are left
   as they are, and hidden layers inside a selected group stay, just below the result.

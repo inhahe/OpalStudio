@@ -65,10 +65,11 @@ pub fn pick(d: &DocState, p: [f64; 2], min_alpha: f32, group: bool) -> Option<La
     if group { doc.position(hit).and_then(|pos| pos.parent).or(Some(hit)) } else { Some(hit) }
 }
 
-/// The name of a locked layer among the selected layers (or inside a selected group), if any.
+/// The name of a locked layer among the selected layers (or inside a selected group, or a
+/// locked group one is in), if any.
 pub fn locked_in_selected_layers(d: &DocState) -> Option<String> {
     let doc = d.doc();
-    d.selected_layers().iter().find_map(|&id| crate::commands::first_locked(doc.layer(id)?)).map(|l| l.name.clone())
+    d.selected_layers().iter().find_map(|&id| crate::commands::locked_for(doc, doc.layer(id)?)).map(|l| l.name.clone())
 }
 
 impl DocState {

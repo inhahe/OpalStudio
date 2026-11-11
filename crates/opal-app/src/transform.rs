@@ -897,7 +897,7 @@ impl DocState {
         for component in components(&deps) {
             if let [i] = component[..] {
                 let layer = sets[i][0];
-                if let Some(l) = sets[i].iter().filter_map(|&l| doc.layer(l)).find_map(crate::commands::first_locked) {
+                if let Some(l) = sets[i].iter().filter_map(|&l| doc.layer(l)).find_map(|l| crate::commands::locked_for(&doc, l)) {
                     let why =
                         if l.id == layer { "it is locked".to_owned() } else { format!("“{}” is locked", l.name) };
                     out.left.push((layer, why));

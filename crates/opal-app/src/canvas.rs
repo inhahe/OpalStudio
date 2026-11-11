@@ -112,6 +112,14 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let chosen = st.tool();
     let tool = if space { ToolId::Hand } else { chosen };
     let mut notice = None;
+    // A Select tool drag on an image no longer shown is given up: its button may be let go
+    // over another, and it would be finished on coming back.
+    for other in st.docs.iter_mut().filter(|o| o.id != id) {
+        other.select_drag = None;
+        if let Some(s) = other.shape_drag.take() {
+            other.discard_pending(crate::select_tool::ShapeDrag::label(s.drag.part));
+        }
+    }
     let Some(d) = st.doc_mut(id) else { return };
     // While the transform box is open, it takes the pointer (Space and the middle button
     // still scroll the view, and the box stays, waiting).

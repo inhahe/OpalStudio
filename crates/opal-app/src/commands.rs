@@ -963,7 +963,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             }
             // It moves every layer placed with it.
             let (_, layers) = crate::transform::placement_group(d.doc(), layer)?;
-            if let Some(l) = layers.iter().filter_map(|&l| d.doc().layer(l)).find_map(first_locked) {
+            if let Some(l) = layers.iter().filter_map(|&l| d.doc().layer(l)).find_map(|l| locked_for(d.doc(), l)) {
                 return Err(format!("\"{}\" is locked. Unlock it first.", l.name));
             }
             Ok(())
@@ -983,7 +983,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         Transform | Rasterize => {
             let (d, sel) = selected_layers(st)?;
             let layers: Vec<&opal_core::document::Layer> = sel.iter().filter_map(|&l| d.doc().layer(l)).collect();
-            if let Some(l) = layers.iter().find_map(|l| first_locked(l)) {
+            if let Some(l) = layers.iter().find_map(|l| locked_for(d.doc(), l)) {
                 return Err(format!("\"{}\" is locked. Unlock it first.", l.name));
             }
             if cmd == Rasterize && !layers.iter().any(|l| crate::layer_ops::has_image_object(l)) {
@@ -1002,7 +1002,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             if shown.len() < 2 {
                 return Err("Select two or more visible layers (Ctrl+click in the Layers panel).".into());
             }
-            match shown.iter().find_map(|l| first_locked(l)) {
+            match shown.iter().find_map(|l| locked_for(doc, l)) {
                 Some(l) => Err(format!("\"{}\" is locked. Unlock it first.", l.name)),
                 None => Ok(()),
             }
@@ -1023,7 +1023,8 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             if !l.is_group() {
                 return Err(format!("\"{}\" is not a group.", l.name));
             }
-            match first_locked(l) {
+            let doc = st.active().expect("one with an active layer").doc();
+            match locked_for(doc, l) {
                 Some(l) => Err(format!("\"{}\" is locked. Unlock it first.", l.name)),
                 None => Ok(()),
             }
@@ -1061,7 +1062,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         Duplicate => selected_layers(st).map(|_| ()),
         DeleteLayer => {
             let (d, sel) = selected_layers(st)?;
-            match sel.iter().filter_map(|&l| d.doc().layer(l)).find_map(first_locked) {
+            match sel.iter().filter_map(|&l| d.doc().layer(l)).find_map(|l| locked_for(d.doc(), l)) {
                 Some(l) => Err(format!("\"{}\" is locked. Unlock it first.", l.name)),
                 None => Ok(()),
             }
@@ -1092,7 +1093,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
                 ))
             } else if !l.visible || !below.visible {
                 Err("Both layers must be visible to merge them.".into())
-            } else if let Some(locked) = first_locked(l).or(first_locked(below)) {
+            } else if let Some(locked) = locked_for(d.doc(), l).or(first_locked(below)) {
                 Err(format!("\"{}\" is locked. Unlock it first.", locked.name))
             } else {
                 Ok(())
@@ -1104,6 +1105,27 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
 /// The name of a layer of `doc` that is locked, or holds one that is, if any.
 pub fn locked_layer(doc: &opal_core::document::Document) -> Option<String> {
     doc.layers.iter().find_map(|l| first_locked(l)).map(|l| l.name.clone())
+}
+
+/// The groups `layer` of `doc` is in, the one holding it first.
+pub(crate) fn groups_above(doc: &opal_core::document::Document, layer: opal_core::document::LayerId) -> Vec<&opal_core::document::Layer> {
+    let mut out = Vec::new();
+    let mut above = doc.position(layer).and_then(|p| p.parent);
+    while let Some(g) = above.and_then(|g| doc.layer(g)) {
+        out.push(g);
+        above = doc.position(g.id).and_then(|p| p.parent);
+    }
+    out
+}
+
+/// What keeps `layer` of `doc` from being changed, if anything: a locked group it is in
+/// (what a group holds is part of it), the layer itself if locked, or a locked layer inside
+/// it.
+pub(crate) fn locked_for<'a>(
+    doc: &'a opal_core::document::Document,
+    layer: &'a opal_core::document::Layer,
+) -> Option<&'a opal_core::document::Layer> {
+    groups_above(doc, layer.id).into_iter().find(|g| g.locked).or_else(|| first_locked(layer))
 }
 
 /// The layer itself if it is locked, or else the first locked layer inside it.

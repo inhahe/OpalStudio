@@ -16,7 +16,9 @@ pub enum Step {
     /// The opposite of the selection so far: selected where it was not.
     Invert,
     /// A mask as it is, which replaces the selection so far: what a selection carried through
-    /// a transform its shapes could not follow becomes (see [`Selection::transformed`]).
+    /// a transform its shapes could not follow becomes (see [`Selection::transformed`]). It
+    /// is told without its mask, and so cannot be read back.
+    #[serde(skip_deserializing)]
     Mask {
         #[serde(skip)]
         mask: Arc<Mask>,
@@ -65,8 +67,12 @@ impl Selection {
     pub fn of(steps: Vec<Step>) -> Selection {
         let first = steps.iter().rposition(Step::starts_over).unwrap_or(0);
         let steps = steps[first..].to_vec();
-        let mask = steps.iter().fold(Mask::none(), |m, s| s.apply(&m));
-        Selection { steps, mask: Arc::new(mask) }
+        // A mask step alone is the mask: shared, not copied.
+        let mask = match &steps[..] {
+            [Step::Mask { mask }] => mask.clone(),
+            _ => Arc::new(steps.iter().fold(Mask::none(), |m, s| s.apply(&m))),
+        };
+        Selection { steps, mask }
     }
 
     /// This selection with `step` after its steps (worked out from its mask, not again from
@@ -241,6 +247,16 @@ mod tests {
             let off = carried.distance(q[0], q[1]);
             assert!(off.abs() < 1e-6, "{q:?} is {off} from the edge of {carried:?}");
         }
+    }
+
+    #[test]
+    fn a_mask_step_alone_is_the_selection_s_mask_and_is_not_read_back() {
+        let m = Arc::new(Mask::of(&rect(0.0, 0.0, 300.0, 100.0)));
+        let s = Selection::of(vec![Step::Mask { mask: m.clone() }]);
+        assert!(Arc::ptr_eq(s.mask(), &m), "the mask was copied");
+        let told = serde_json::to_string(&s.steps()[0]).unwrap();
+        assert_eq!(told, r#"{"step":"mask"}"#);
+        assert!(serde_json::from_str::<Step>(&told).is_err(), "read back as no mask at all");
     }
 
     #[test]
