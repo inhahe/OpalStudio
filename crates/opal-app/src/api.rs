@@ -632,8 +632,9 @@ const QUERIES: &[(&str, &str, &[Param])] = &[
         "What is selected in an image: the rectangle round it, as [x, y, width, height] from the canvas's \
          corner (null if nothing is; \"unbounded\" where it reaches past every edge, inverted), and the \
          steps that made it, in order: shapes (rectangles and ellipses, by their middle, size and angle, \
-         and how each combines), inversions, grow steps (by, corners) and feather steps (width, side, \
-         falloff), as grow_selection and feather_selection take them, and masks (a \"mask\" step is a layer's \
+         and how each combines), inversions, grow steps (by, corners), feather steps (width, side, \
+         falloff), smooth steps (radius) and border steps (width, side), as grow_selection, \
+         feather_selection, smooth_selection and border_selection take them, and masks (a \"mask\" step is a layer's \
          pixels, from select_layer_pixels, or stands for the steps before it, which Rotate, Flip or Resize \
          Image could not carry exactly, as the mask they came to; it gives no numbers, only how it combines). \
          select_all, deselect, reselect, invert_selection and select_layer_pixels answer with it too.",
