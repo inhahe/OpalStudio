@@ -349,6 +349,55 @@ impl AppState {
         self.edit_later(d.id, label, crate::memory::Allowance::unlimited(), work, |_, _, ()| {});
     }
 
+    /// Layer via Copy, or (`cut`) Layer via Cut: what the selected layers show within the
+    /// selection, as much of each pixel as it is selected, past the canvas too, on a new layer
+    /// just above the topmost of them, which becomes the one selected; cut, it is erased from
+    /// them, as Clear erases. With nothing selected, Layer via Copy duplicates the layers.
+    /// Worked out off the interface thread (see `edits`).
+    pub(crate) fn layer_via(&mut self, cut: bool) {
+        let d = self.active().expect("available");
+        let Some(selection) = d.pixel_selection() else {
+            return self.duplicate_layers();
+        };
+        let mask = selection.mask().clone();
+        let doc = d.doc();
+        let selected = d.selected_layers();
+        let top = *selected.last().expect("available");
+        let name = format!("{} copy", doc.layer(top).map_or("Layer", |l| l.name.as_str()));
+        // As they look, hidden or not: they were chosen.
+        let layers: Vec<Arc<Layer>> = selected
+            .iter()
+            .filter_map(|&l| doc.layer(l))
+            .map(|l| Arc::new(Layer { visible: true, ..l.clone() }))
+            .collect();
+        let erased: Vec<LayerId> =
+            if cut { cleared(d).iter().filter(|l| !l.is_group()).map(|l| l.id).collect() } else { Vec::new() };
+        let mut memory = crate::memory::Allowance::now();
+        if let Err(why) = memory.take_tiles(opal_core::composite::composite_cost(&layers, None)) {
+            return self.message(MessageKind::Info, if cut { "Layer via Cut" } else { "Layer via Copy" }, why);
+        }
+        let work = move |doc: &mut Document, ids: &mut opal_core::document::IdGen, progress: &opal_io::Progress| {
+            let flat = crate::edits::composited(&layers, progress)?;
+            let kept = opal_core::mask::keep_selected(&flat, [0, 0], &mask);
+            if kept.content_bounds().is_none() {
+                return Err("The selected layers show nothing within the selection.".to_owned());
+            }
+            if cut {
+                clear(doc, &erased, &mask);
+            }
+            let id = ids.layer();
+            let pos = crate::layer_ops::above(doc, top).ok_or("The layer is gone.")?;
+            doc.insert(pos, Layer::new_raster(id, ids.object(), name, kept)).map_err(|e| e.to_string())?;
+            Ok(id)
+        };
+        let label = if cut { "Layer via cut" } else { "Layer via copy" };
+        self.edit_later(d.id, label, memory, work, |st, doc, id| {
+            if let Some(d) = st.doc_mut(doc) {
+                d.select_only(id);
+            }
+        });
+    }
+
     /// Erases what is selected on the selected layers (as much of each pixel as it is
     /// selected), past the canvas too.
     pub(crate) fn clear_selected(&mut self) {
@@ -522,6 +571,46 @@ mod tests {
         // Once the edit is done, nothing is selected: one way of having nothing.
         d.commit_pending();
         assert!(d.pixel_selection().is_none());
+    }
+
+    #[test]
+    fn layer_via_copy_and_cut_put_what_is_selected_on_a_layer_of_its_own() {
+        use crate::commands::Cmd;
+        use opal_core::mask::{Combine, Shape};
+        use opal_core::selection::{Selection, Step};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let alpha = |st: &AppState, layer: usize, x: i64, y: i64| {
+            let LayerContent::Objects(o) = &st.active().unwrap().doc().layers[layer].content else { panic!("a group") };
+            o.first().map_or(0.0, |o| match &o.kind {
+                ObjectKind::Pixels(p) => {
+                    opal_core::tile::pixel_to_f32(p.image.pixel(x - p.offset[0], y - p.offset[1]))[3]
+                }
+                ObjectKind::Image(_) => panic!("an image object"),
+            })
+        };
+        // Nothing selected: the layer duplicated, as Ctrl+J did before.
+        st.run(Cmd::LayerViaCopy, &eframe::egui::Context::default());
+        assert_eq!(st.active().unwrap().doc().layers.len(), 2);
+        st.active_mut().unwrap().undo();
+        // A rectangle reaching past the canvas: copied there too, on a layer just above, which
+        // becomes the selected one; the original as it was.
+        let shape = Shape::rectangle(&IRect::new(250, 50, 400, 150).to_f(), false);
+        let d = st.active_mut().unwrap();
+        d.set_pixel_selection(Some(Selection::new(Step::Shape { shape, combine: Combine::Replace })), "Select");
+        let states = d.history.nodes().count();
+        st.run(Cmd::LayerViaCopy, &eframe::egui::Context::default());
+        let d = st.active().unwrap();
+        assert_eq!(d.history.nodes().count(), states + 1);
+        assert_eq!(d.history.undo_label(), Some("Layer via copy"));
+        assert_eq!(d.doc().layers.len(), 2);
+        assert_eq!(d.selected_layers(), [d.doc().layers[1].id], "the new layer not selected");
+        assert_eq!([alpha(&st, 1, 275, 100), alpha(&st, 1, 200, 100), alpha(&st, 0, 275, 100)], [1.0, 0.0, 1.0]);
+        // Cut from the background: erased there too.
+        st.active_mut().unwrap().undo();
+        st.run(Cmd::LayerViaCut, &eframe::egui::Context::default());
+        assert_eq!(st.active().unwrap().history.undo_label(), Some("Layer via cut"));
+        assert_eq!([alpha(&st, 1, 275, 100), alpha(&st, 0, 275, 100), alpha(&st, 0, 200, 100)], [1.0, 0.0, 1.0]);
     }
 
     #[test]

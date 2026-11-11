@@ -92,7 +92,7 @@ cargo test --workspace                     # all tests, interface tests included
   all to fully, and everything acting on it acts on each pixel that much. So far: the Select
   tool (M), dragging rectangles and ellipses on whole pixels, Shift adding to the selection
   and Alt taking away; Select All, Deselect and Invert Selection; Clear, Cut and Copy within
-  it; Crop to Selection; marching ants round it. The last shape keeps a box whose handles
+  it; Layer via Copy (Ctrl+J) and Layer via Cut; Crop to Selection; marching ants round it. The last shape keeps a box whose handles
   move, size and turn it, and whose numbers button gives its exact position, size and angle,
   in any unit; scripts select shapes so too (`select_rectangle`, `select_ellipse`). View ›
   Selection Overlay shows what is not selected under red, fading with a soft selection. Grow

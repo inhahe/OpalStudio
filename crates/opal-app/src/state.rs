@@ -651,6 +651,8 @@ impl AppState {
             Cmd::NewLayer => self.new_layer(false),
             Cmd::NewGroup => self.new_layer(true),
             Cmd::Duplicate => self.duplicate_layers(),
+            Cmd::LayerViaCopy => self.layer_via(false),
+            Cmd::LayerViaCut => self.layer_via(true),
             Cmd::GroupLayers => self.group_layers(),
             Cmd::DeleteLayer => self.delete_layers(),
             Cmd::MoveUp => self.move_layer(true),

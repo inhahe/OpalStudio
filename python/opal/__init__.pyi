@@ -196,6 +196,18 @@ class Editor:
         document: The image, by id. Default: the active image.
         layers: The layers, by id. Default: the selected layers.
         """
+    def layer_via_copy(self, *, document: int | None = None, layers: list[int] | None = None) -> Any:
+        """Put what is selected on the selected layers on a layer of its own (Ctrl+J).
+
+        document: The image, by id. Default: the active image.
+        layers: The layers, by id. Default: the selected layers.
+        """
+    def layer_via_cut(self, *, document: int | None = None, layers: list[int] | None = None) -> Any:
+        """Move what is selected on the selected layers onto a layer of its own.
+
+        document: The image, by id. Default: the active image.
+        layers: The layers, by id. Default: the selected layers.
+        """
     def group_layers(self, *, document: int | None = None, layers: list[int] | None = None) -> Any:
         """Put the selected layers into a new group.
 

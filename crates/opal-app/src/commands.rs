@@ -34,6 +34,8 @@ pub enum Cmd {
     NewLayer,
     NewGroup,
     Duplicate,
+    LayerViaCopy,
+    LayerViaCut,
     GroupLayers,
     DeleteLayer,
     MoveUp,
@@ -116,7 +118,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 71] = [
+    pub const ALL: [Cmd; 73] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -141,6 +143,8 @@ impl Cmd {
         Cmd::NewLayer,
         Cmd::NewGroup,
         Cmd::Duplicate,
+        Cmd::LayerViaCopy,
+        Cmd::LayerViaCut,
         Cmd::GroupLayers,
         Cmd::DeleteLayer,
         Cmd::MoveUp,
@@ -397,7 +401,24 @@ impl Cmd {
                 "Copy the selected layers.",
                 "Each copy goes just above its original. It shares the original's pixels until \
                  one of them is changed, so duplicating is instant and costs no memory.",
+                &[],
+            ),
+            Cmd::LayerViaCopy => i(
+                "Layer via Copy",
+                icons::LAYER_ADD,
+                "Put what is selected on the selected layers on a layer of its own (Ctrl+J).",
+                "What the selected layers show within the selection, as much of each pixel as it is \
+                 selected (past the canvas too), becomes a new layer just above the topmost of them. \
+                 With nothing selected, the layers are duplicated.",
                 const { &[ctrl(Key::J)] },
+            ),
+            Cmd::LayerViaCut => i(
+                "Layer via Cut",
+                icons::CUT,
+                "Move what is selected on the selected layers onto a layer of its own.",
+                "As Layer via Copy, and what it took is erased from the layers it came from, as \
+                 much of each pixel as it is selected.",
+                const { &[ctrl_shift(Key::J)] },
             ),
             Cmd::GroupLayers => i(
                 "Group Layers",
@@ -892,7 +913,7 @@ pub static RIBBON: &[Tab] = &[
                 name: "Selected",
                 description: "Acting on what is selected, as much of each pixel as it is selected.",
                 large: 1,
-                cmds: &[Cmd::Clear, Cmd::Cut, Cmd::CropToSelection],
+                cmds: &[Cmd::Clear, Cmd::Cut, Cmd::CropToSelection, Cmd::LayerViaCopy, Cmd::LayerViaCut],
             },
         ],
     },
@@ -903,7 +924,7 @@ pub static RIBBON: &[Tab] = &[
                 name: "New",
                 description: "Adding layers and groups.",
                 large: 2,
-                cmds: &[Cmd::NewLayer, Cmd::NewGroup, Cmd::Duplicate, Cmd::GroupLayers],
+                cmds: &[Cmd::NewLayer, Cmd::NewGroup, Cmd::Duplicate, Cmd::LayerViaCopy, Cmd::GroupLayers],
             },
             Group {
                 name: "Arrange",
@@ -1176,7 +1197,8 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             }
         }
         ToggleVisible | ToggleLock | Rename => active_layer(st).map(|_| ()),
-        Duplicate => selected_layers(st).map(|_| ()),
+        Duplicate | LayerViaCopy => selected_layers(st).map(|_| ()),
+        LayerViaCut => crate::select::clear_refused(st.active().ok_or("Open or create an image first.")?),
         DeleteLayer => {
             let (d, sel) = selected_layers(st)?;
             match sel.iter().filter_map(|&l| d.doc().layer(l)).find_map(|l| locked_for(d.doc(), l)) {

@@ -262,6 +262,24 @@ Copy the selected layers.
 | `document` | document | The image, by id. Default: the active image. |
 | `layers` | layers | The layers, by id. Default: the selected layers. |
 
+### `layer_via_copy`
+
+Put what is selected on the selected layers on a layer of its own (Ctrl+J).
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `layers` | layers | The layers, by id. Default: the selected layers. |
+
+### `layer_via_cut`
+
+Move what is selected on the selected layers onto a layer of its own.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `layers` | layers | The layers, by id. Default: the selected layers. |
+
 ### `group_layers`
 
 Put the selected layers into a new group.

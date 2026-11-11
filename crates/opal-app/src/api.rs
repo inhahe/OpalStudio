@@ -407,7 +407,9 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             DOCUMENT,
             Param { name: "name", kind: Kind::Text, help: "Its name.", otherwise: Otherwise::Now("a numbered one") },
         ],
-        Duplicate | GroupLayers | DeleteLayer | MergeSelected | Rasterize => &[DOCUMENT, LAYERS],
+        Duplicate | LayerViaCopy | LayerViaCut | GroupLayers | DeleteLayer | MergeSelected | Rasterize => {
+            &[DOCUMENT, LAYERS]
+        }
         MoveUp | MoveDown | MergeDown | MergeGroup | ReapplyPlacement => &[DOCUMENT, LAYER],
         ResizeImage => &[
             DOCUMENT,

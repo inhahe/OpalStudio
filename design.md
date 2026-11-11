@@ -346,6 +346,13 @@ On the Select tab (and for scripts, by the same names):
   dropped if it was undone meanwhile, so that no redo cuts without the copy), or, if
   something was made from it since (or a script's run it was part of was joined into one
   state), the user is told to undo it.
+- **Layer via Copy** (Ctrl+J; on the Layer tab too) and **Layer via Cut** (Ctrl+Shift+J):
+  what Copy would take from the selected layers, as much of each pixel as it is selected,
+  but past the canvas too, on a new layer just above the topmost of them (above a locked
+  group it is in, as new layers go), named for it and selected; Layer via Cut then erases
+  it, as Clear does (refused as Clear is). One history state, worked out off the interface
+  thread (*Edits that take long*). With nothing selected, Layer via Copy duplicates the
+  layers, as Ctrl+J does in Photoshop (Duplicate Layer keeps its button, without a key).
 - **Crop to Selection** makes the canvas the rectangle round the selection (refused for one
   that reaches past every edge).
 - **Rotate**, **Flip**, **Resize Image** and the Crop tool's straightening carry what is
