@@ -500,6 +500,21 @@ pub fn draw_reshaping(
 /// The history state a drag on the outline edited makes.
 pub const EDIT: &str = "Edit outline";
 
+/// Gives up what the tool is doing on `d`: an outline being drawn, a drag on the outline
+/// edited or on its symmetry (its history state, pending, discarded), a redrawing.
+pub fn give_up(d: &mut DocState) {
+    if d.outlining.take().is_some() {
+        d.revision += 1;
+    }
+    if d.outline_drag.take().is_some() {
+        d.discard_pending(EDIT);
+    }
+    d.reshaping = None;
+    if d.symmetry_drag.take().is_some() {
+        d.discard_pending(MOVE_SYMMETRY);
+    }
+}
+
 /// The selection's last step, if it is an outline, and how it combines: the outline the tool
 /// edits while none is being drawn.
 pub fn edited(d: &DocState) -> Option<(&Outline, Combine)> {
@@ -985,6 +1000,61 @@ fn shown(o: &Outlining) -> Vec<[f64; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_not_drawn_has_the_tool_s_drags_given_up_their_edits_with_them() {
+        use crate::state::{AppState, Background, NewImage};
+        use opal_core::selection::Selection;
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let lines = vec![Segment::Line { to: [100.0, 10.0] }, Segment::Line { to: [100.0, 100.0] }];
+        let o = Outline::new([10.0, 10.0], lines, false);
+        let replace = Combine::Replace;
+        let d = st.active_mut().unwrap();
+        d.set_pixel_selection(Some(Selection::new(Step::Outline { outline: o.clone(), combine: replace })), "Outline");
+        let s = d.pixel_selection().unwrap();
+        let (before, of) = (s.before_last(), Arc::downgrade(s));
+        // A point's drag, its edit pending, and a redrawing; the image drawn in pass 10.
+        let moved = Step::Outline { outline: o.moved(&[0], [5.0, 0.0]), combine: replace };
+        crate::select_tool::reshape_with(d, &before, moved, EDIT);
+        let (start, picked) = (o.clone(), vec![0]);
+        d.outline_drag = Some(EditDrag {
+            part: Part::Point(0),
+            from: [10.0, 10.0],
+            start,
+            combine: replace,
+            before: before.clone(),
+            picked,
+            alt: false,
+        });
+        d.reshaping = Some(Reshaping {
+            start: o.clone(),
+            combine: replace,
+            before: before.clone(),
+            from: (0, 0.5),
+            line: Vec::new(),
+            other: false,
+            button: PointerButton::Secondary,
+            near: 7.0,
+            of,
+        });
+        d.drawn = 10;
+        // Drawn in the pass before: kept.
+        st.leave_undrawn(11);
+        assert!(st.active().unwrap().outline_drag.is_some());
+        // Not: given up, the edit with them.
+        st.leave_undrawn(12);
+        let d = st.active_mut().unwrap();
+        assert!(d.outline_drag.is_none() && d.reshaping.is_none(), "the drags were left");
+        assert_eq!((d.pending_label(), edited(d).map(|(e, _)| e.clone())), (None, Some(o.clone())));
+        // The symmetry's drag, its edit pending: the same.
+        let turned = Step::Outline { outline: o.moved(&[1], [0.0, 5.0]), combine: replace };
+        crate::select_tool::reshape_with(d, &before, turned, MOVE_SYMMETRY);
+        d.symmetry_drag = Some(SymmetryDrag { center: true, edited: None });
+        st.leave_undrawn(13);
+        let d = st.active().unwrap();
+        assert!(d.symmetry_drag.is_none() && d.pending_label().is_none(), "the drag was left");
+    }
 
     #[test]
     fn a_press_on_a_point_is_on_it_though_a_handle_lies_there_and_on_a_side_only_if_it_would_not_combine() {

@@ -256,13 +256,14 @@ impl crate::doc::DocState {
 }
 
 impl AppState {
-    /// Leaves the images not drawn in the pass before `pass` (shown in no pane): a Select tool
-    /// drag on one is given up, as on Esc (its button may have been let go over another, and a
-    /// call acting on it would commit its edit), and the textures of its selection overlay go.
+    /// Leaves the images not drawn in the pass before `pass` (shown in no pane): a Select or
+    /// Outline tool drag on one is given up, as on Esc (its button may have been let go over
+    /// another, and a call acting on it would commit its edit), as is an outline being drawn,
+    /// and the textures of its selection overlay go.
     pub(crate) fn leave_undrawn(&mut self, pass: u64) {
         for d in self.docs.iter_mut().filter(|d| d.drawn + 1 < pass) {
             d.select_drag = None;
-            d.outlining = None;
+            crate::outline_tool::give_up(d);
             if let Some(s) = d.shape_drag.take() {
                 d.discard_pending(crate::select_tool::ShapeDrag::label(s.drag.part));
             }

@@ -268,16 +268,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     } else if chosen != ToolId::Outline || boxed || frozen {
         // The tool changed, a box opened, or an edit began on the image while one was drawn
         // or dragged: given up. While Space makes the tool the hand, to scroll, it waits.
-        if d.outlining.take().is_some() {
-            d.revision += 1;
-        }
-        if d.outline_drag.take().is_some() {
-            d.discard_pending(crate::outline_tool::EDIT);
-        }
-        d.reshaping = None;
-        if d.symmetry_drag.take().is_some() {
-            d.discard_pending(crate::outline_tool::MOVE_SYMMETRY);
-        }
+        crate::outline_tool::give_up(d);
     }
     if tool == ToolId::Zoom && !boxed {
         let alt = ctx.input(|i| i.modifiers.alt);

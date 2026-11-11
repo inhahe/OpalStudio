@@ -658,7 +658,10 @@ outline left with fewer than three points goes, and what the steps before it sel
 selected. Tool settings shows its points, how many are picked, and buttons for them: Smooth,
 Sharp, Delete, All. Each edit is a history state (a drag, *Edit outline*, pending while it
 goes, as a box's; *Add point*, *Delete points*, *Smooth points*, *Sharp points*), the
-selection worked out again within the memory free. The points picked are kept with the
+selection worked out again within the memory free. Whatever the tool is doing (an outline
+being drawn, a drag on the outline or its symmetry, a redrawing) is given up, its pending
+state discarded, when another tool is chosen, a box opens, an edit begins on the image, or
+the image is not drawn (`outline_tool::give_up`, as the Select tool's drag is). The points picked are kept with the
 selection they were picked on (by a weak pointer, compared by address), and none are once it
 is another (after an undo, say); a drag keeps those it began with while the selection it makes
 changes. An outline whose last point lies on its first keeps that point (its side back to the
