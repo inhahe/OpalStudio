@@ -428,7 +428,9 @@ impl Mask {
     /// with pixels on either), found run by run, so in time with the outline's length, not the
     /// area.
     pub(crate) fn edge_tiles(&self) -> std::collections::HashSet<TileCoord> {
-        let side = |t: &MaskTile| t.side_of(HALF);
+        // Each tile's side worked out once (a tile of levels of its own reads them all).
+        let mut sides: HashMap<usize, Option<bool>> = HashMap::new();
+        let mut side = |t: &MaskTile| *sides.entry(std::ptr::from_ref(t) as usize).or_insert_with(|| t.side_of(HALF));
         let outside = MaskTile::Level(self.outside);
         let mut out = std::collections::HashSet::new();
         let mut ys: Vec<i32> = self.rows.keys().flat_map(|&y| [y, y + 1]).collect();
@@ -474,7 +476,7 @@ impl Mask {
                 // What the run's tiles not worked become: those the outline may cross are always
                 // worked, so these are wholly on one side of half, as their first pixel is.
                 let level = || {
-                    debug_assert!(r.tile.side_of(HALF).is_some(), "a tile the outline crosses not worked out");
+                    assert!(r.tile.side_of(HALF).is_some(), "a tile the outline crosses was not worked out");
                     far(r.tile.get(0, 0))
                 };
                 let mut from = r.x0;

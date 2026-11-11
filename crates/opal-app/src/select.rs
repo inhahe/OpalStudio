@@ -23,13 +23,22 @@ pub struct Modifying {
     pub step: Step,
     pub before: Arc<Selection>,
     shown: Option<Step>,
-    /// The step of the job last asked for.
-    asked: Option<Step>,
-    /// Counts the jobs asked for (and the dialog's end): a job that is not the last asked
-    /// for stops, between the pieces of its work.
+    /// The number of the job last asked for (jobs are numbered from 1).
+    asked: u64,
+    /// The job wanted: one asked for after it, or the dialog's end, makes it another, and a
+    /// job not wanted stops, before it begins or between the pieces of its work.
     generation: Arc<std::sync::atomic::AtomicU64>,
+    /// The number of the last job that has ended, however (done, stopped, or failed).
+    ended: Arc<std::sync::atomic::AtomicU64>,
     /// What a job made, for the step it was asked for.
     made: Arc<std::sync::Mutex<Option<Preview>>>,
+}
+
+impl Modifying {
+    /// The image the dialog acts on.
+    pub fn doc(&self) -> DocId {
+        self.doc
+    }
 }
 
 /// A step a modifier dialog was set to, and what it makes.
@@ -141,8 +150,9 @@ impl AppState {
             step,
             before,
             shown: None,
-            asked: None,
+            asked: 0,
             generation: Default::default(),
+            ended: Default::default(),
             made: Default::default(),
         });
         self.preview_modifying(ctx);
@@ -173,12 +183,18 @@ impl AppState {
     pub(crate) fn preview_modifying(&mut self, ctx: &eframe::egui::Context) {
         use std::sync::atomic::Ordering;
         let Some(m) = self.modifying.as_mut() else { return };
-        m.asked = Some(m.step.clone());
-        let ours = m.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        m.asked += 1;
+        let ours = m.asked;
+        m.generation.store(ours, Ordering::SeqCst);
         let (step, before, generation, made) = (m.step.clone(), m.before.clone(), m.generation.clone(), m.made.clone());
+        let ended = m.ended.clone();
         PREVIEWS.lock().expect("not poisoned").run(
             move || {
                 let stop = || generation.load(Ordering::SeqCst) != ours;
+                // Asked for after another, it may not be wanted by the time it begins.
+                if stop() {
+                    return None;
+                }
                 let selection = before.then_unless(step.clone(), &stop)?;
                 Some((step, Arc::new(selection)))
             },
@@ -186,39 +202,41 @@ impl AppState {
                 if let Ok(Some(result)) = result {
                     *made.lock().expect("not poisoned") = Some(result);
                 }
+                // Ended, whatever came of it (a panic included), so that no one waits on.
+                ended.fetch_max(ours, Ordering::SeqCst);
             },
             ctx,
         );
     }
 
     /// Shows what a job made for the open modifier dialog, if it is done and for the step it
-    /// has now; whether it is waiting for one still.
+    /// has now; whether the last job asked for is still under way.
     pub(crate) fn poll_modifying(&mut self) -> bool {
+        use std::sync::atomic::Ordering;
         let Some(m) = self.modifying.clone() else { return false };
         if let Some((step, made)) = m.made.lock().expect("not poisoned").take()
             && step == m.step
         {
             self.show_made(step, made);
         }
-        self.modifying.as_ref().is_some_and(|m| m.shown.as_ref() != Some(&m.step))
+        m.ended.load(Ordering::SeqCst) < m.asked
     }
 
-    /// Ends the open modifier dialog: what it makes a history state of its own if `keep` (if
-    /// its preview is not shown yet, waited for if it is being worked out, else worked out
-    /// now), else given up. The jobs it asked for stop.
+    /// Ends the open modifier dialog: what it makes a history state of its own if `keep` (its
+    /// preview waited for if under way, and worked out here if it did not come, as when its
+    /// job failed), else given up. The jobs it asked for stop.
     pub(crate) fn end_modifying(&mut self, keep: bool) {
-        let Some(m) = self.modifying.clone() else { return };
-        if keep && m.shown.as_ref() != Some(&m.step) {
-            if m.asked.as_ref() == Some(&m.step) {
-                while self.poll_modifying() {
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                }
-            } else {
+        if keep {
+            while self.poll_modifying() {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            if self.modifying.as_ref().is_some_and(|m| m.shown.as_ref() != Some(&m.step)) {
                 self.show_modifying();
             }
         }
         let Some(m) = self.modifying.take() else { return };
-        m.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // No job is wanted now.
+        m.generation.store(0, std::sync::atomic::Ordering::SeqCst);
         let Some(d) = self.doc_mut(m.doc) else { return };
         if keep {
             d.commit_pending();
@@ -453,6 +471,15 @@ mod tests {
         st.end_modifying(false);
         assert_eq!(selected(&st), Extent::Within(IRect::new(100, 50, 200, 150)));
         assert_eq!(st.active().unwrap().history.nodes().count(), states);
+        // A job that ends without what it was to make (stopped here; failed, it ends so too):
+        // OK does not wait on for it, but works the step out itself.
+        st.modify_selection(true, &ctx);
+        st.modifying.as_ref().unwrap().generation.store(0, std::sync::atomic::Ordering::SeqCst);
+        st.end_modifying(true);
+        assert_eq!(st.active().unwrap().history.undo_label(), Some("Grow selection"));
+        st.active_mut().unwrap().undo();
+        // (Its state stays, to be redone: counted from here.)
+        let states = st.active().unwrap().history.nodes().count();
         // Set twice before either is shown: the last shown until the later is done, the
         // earlier never.
         st.modify_selection(true, &ctx);
@@ -474,12 +501,23 @@ mod tests {
         assert!(st.active().unwrap().pending_label().is_none(), "the other image took the preview");
         assert_eq!(st.doc(first).unwrap().pending_label(), Some("Grow selection"));
         // Saved meanwhile (the quit confirmation's Save all), the preview, which changes nothing
-        // saved, stays a preview.
+        // saved, stays a preview. (The file goes however the test ends.)
+        struct Gone(std::path::PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
         let path = std::env::temp_dir().join(format!("opal-modify-{}.opal", std::process::id()));
+        let _gone = Gone(path.clone());
         st.save_to(first, path.clone(), crate::writer::Then::Nothing, &ctx);
         assert_eq!(st.doc(first).unwrap().pending_label(), Some("Grow selection"), "the save committed it");
         st.end_modifying(false);
         assert_eq!(st.doc(first).unwrap().history.nodes().count(), states, "cancelled, a state was left");
+        // A box open, though, a save applies it, as before.
+        assert!(st.doc_mut(first).unwrap().begin_transform(opal_core::resample::Sampling::default()));
+        st.save_to(first, path.clone(), crate::writer::Then::Nothing, &ctx);
+        assert!(st.doc(first).unwrap().transform.is_none(), "the box stayed open through a save");
         st.show_doc(first);
         // Feathered, OK at once: waited for, a state of its own, the feather a step of the recipe.
         st.modify_selection(false, &ctx);
@@ -487,12 +525,14 @@ mod tests {
         let d = st.active().unwrap();
         assert_eq!(d.history.undo_label(), Some("Feather selection"));
         assert!(matches!(d.pixel_selection().unwrap().steps(), [_, Step::Feather { .. }]));
-        // The file saved goes, once written.
+        // The file saved is written before it goes.
+        let mut waited = 0;
         while st.writer.busy() {
+            assert!(waited < 2000, "the save never ended");
             st.poll_writes(false);
             std::thread::sleep(std::time::Duration::from_millis(5));
+            waited += 1;
         }
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

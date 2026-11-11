@@ -10,7 +10,6 @@
 use crate::geom::IRect;
 use crate::mask::{FULL, HALF, Mask, MaskTile, level};
 use crate::tile::{TILE_PIXELS, TILE_SIZE, TileCoord};
-use rayon::prelude::*;
 use std::collections::HashSet;
 
 /// The farthest a selection is grown, shrunk or feathered (in pixels), by a dialog, a call,
@@ -163,53 +162,29 @@ impl Mask {
     }
 }
 
-/// A count of what may be held at once: taking one waits until one is free.
-struct Permits {
-    free: std::sync::Mutex<usize>,
-    freed: std::sync::Condvar,
-}
-
-impl Permits {
-    fn new(n: usize) -> Permits {
-        Permits { free: std::sync::Mutex::new(n), freed: std::sync::Condvar::new() }
-    }
-
-    /// Runs `f` holding one.
-    fn with<R>(&self, f: impl FnOnce() -> R) -> R {
-        let mut free = self.free.lock().expect("not poisoned");
-        while *free == 0 {
-            free = self.freed.wait(free).expect("not poisoned");
-        }
-        *free -= 1;
-        drop(free);
-        let r = f();
-        *self.free.lock().expect("not poisoned") += 1;
-        self.freed.notify_one();
-        r
-    }
-}
-
-/// How many tiles a side the blocks worked out in one window have for `band`: those that do
-/// the most work a thread for the memory (a larger block repeats less of its margin, but
-/// fewer fit in [`WINDOWS_MEMORY`] at once to keep the threads busy).
-fn block_tiles(band: f64) -> i32 {
-    let threads = rayon::current_num_threads().max(1) as f64;
+/// How many tiles a side the blocks worked out in one window have for `band`, with `threads`
+/// to work them out on and the tiles `near` to work out: those that should take the least
+/// time. A larger block repeats less of its margin, but fewer fit in [`WINDOWS_MEMORY`] at
+/// once to keep the threads busy, and it works out the whole block's tiles however few of them
+/// are near the outline. Of two alike, the smaller.
+fn block_tiles(band: f64, threads: usize, near: &[TileCoord]) -> i32 {
     let margin = 2.0 * (band.ceil() + 1.0);
     let side = f64::from(TILE_SIZE);
-    let pace = |b: i32| {
+    let time = |b: i32| {
         let window = (f64::from(b) * side + margin).powi(2);
-        let at_once = (WINDOWS_MEMORY as f64 / (window * WINDOW_PIXEL as f64)).floor().max(1.0);
-        // Tiles done a thread's pixel worked, by the threads kept busy.
-        at_once.min(threads) * f64::from(b * b) / window
+        let workers = (WINDOWS_MEMORY as f64 / (window * WINDOW_PIXEL as f64)).floor().clamp(1.0, threads.max(1) as f64);
+        let blocks: HashSet<(i32, i32)> = near.iter().map(|c| (c.x.div_euclid(b), c.y.div_euclid(b))).collect();
+        (blocks.len() as f64 / workers).ceil() * window
     };
-    (1..=MOST_BLOCK).max_by(|&a, &b| pace(a).total_cmp(&pace(b))).expect("one at least")
+    (1..=MOST_BLOCK).min_by(|&a, &b| time(a).total_cmp(&time(b))).expect("one at least")
 }
 
 /// `mask` with each pixel's level what `level_of` makes of its distance to the outline, as
 /// `reach` measures it (less than 0 inside), worked out within `band` pixels of it: farther,
 /// as `level_of` says at the band's edge. The tiles within the band are worked out in blocks,
-/// a window each (the block and a margin of the band round it), in parallel, as many at once
-/// as fit in [`WINDOWS_MEMORY`]; `stop` is asked before each, and if it says so, none.
+/// a window each (the block and a margin of the band round it), by as many workers as their
+/// windows fit in [`WINDOWS_MEMORY`] (no more of the threads taken); `stop` is asked before
+/// each, and if it says so, none.
 fn by_distance(
     mask: &Mask,
     band: f64,
@@ -232,7 +207,9 @@ fn by_distance(
             }
         }
     }
-    let b = block_tiles(band);
+    let near: Vec<TileCoord> = near.into_iter().collect();
+    let threads = rayon::current_num_threads().max(1);
+    let b = block_tiles(band, threads, &near);
     let mut blocks: std::collections::HashMap<(i32, i32), Vec<TileCoord>> = std::collections::HashMap::new();
     for c in near {
         blocks.entry((c.x.div_euclid(b), c.y.div_euclid(b))).or_default().push(c);
@@ -242,24 +219,37 @@ fn by_distance(
         IRect::new(a.x0, a.y0, z.x1, z.y1).expand(band.ceil() as i64 + 1)
     };
     let bytes = (window((0, 0)).width() as usize).pow(2) * WINDOW_PIXEL;
-    let permits = Permits::new((WINDOWS_MEMORY / bytes).max(1));
+    let workers = (WINDOWS_MEMORY / bytes).clamp(1, threads);
     let blocks: Vec<((i32, i32), Vec<TileCoord>)> = blocks.into_iter().collect();
-    let worked: Vec<Vec<(TileCoord, MaskTile)>> = blocks
-        .par_iter()
-        .map(|(at, tiles)| {
-            let w = window(*at);
-            // No outline within reach of the block: each tile as its side ends.
-            if let Some(inside) = mask.side_in(&w, HALF) {
-                return Some(tiles.iter().map(|&c| (c, MaskTile::Level(far(if inside { FULL } else { 0 })))).collect());
-            }
-            if stop() {
-                return None;
-            }
-            permits.with(|| (!stop()).then(|| block_by_distance(mask, &w, tiles, band, reach, &level_of)))
-        })
-        .collect::<Option<Vec<_>>>()?;
+    // Each worker takes the next block not taken, until none is left or `stop` says so.
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let stopped = std::sync::atomic::AtomicBool::new(false);
+    let worked = std::sync::Mutex::new(Vec::with_capacity(blocks.len()));
+    rayon::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|_| {
+                use std::sync::atomic::Ordering;
+                while let Some((at, tiles)) = blocks.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    if stopped.load(Ordering::Relaxed) || stop() {
+                        stopped.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                    let w = window(*at);
+                    // No outline within reach of the block: each tile as its side ends.
+                    let made = match mask.side_in(&w, HALF) {
+                        Some(inside) => tiles.iter().map(|&c| (c, MaskTile::Level(far(if inside { FULL } else { 0 })))).collect(),
+                        None => block_by_distance(mask, &w, tiles, band, reach, &level_of),
+                    };
+                    worked.lock().expect("not poisoned").extend(made);
+                }
+            });
+        }
+    });
+    if stopped.into_inner() {
+        return None;
+    }
     // Farther, each tile is as its side ends.
-    Some(mask.rebuilt(worked.into_iter().flatten().collect(), far, outside))
+    Some(mask.rebuilt(worked.into_inner().expect("not poisoned"), far, outside))
 }
 
 /// The tiles `tiles` of [`by_distance`]'s mask, worked out over `window` (theirs, and the
@@ -460,10 +450,16 @@ mod tests {
 
     #[test]
     fn blocks_are_as_large_as_keep_the_threads_busy_in_the_memory_and_the_work_stops_when_asked() {
-        // A small band: blocks of several tiles a side, which repeat less of their margin than
-        // a tile alone would (how many depends on the threads there are to keep busy).
-        assert!(block_tiles(7.0) > 1);
-        assert!((1..=MOST_BLOCK).contains(&block_tiles(1002.0)));
+        // Near tiles covering an area, a small band, threads to keep busy: blocks of several
+        // tiles a side, which repeat less of their margin than a tile alone would.
+        let area: Vec<TileCoord> = (0..100).flat_map(|y| (0..100).map(move |x| TileCoord::new(x, y))).collect();
+        assert!(block_tiles(7.0, 16, &area) > 1);
+        // A line of tiles, or one alone: a tile at a time, rather than blocks mostly far from
+        // the outline.
+        let line: Vec<TileCoord> = (0..2000).map(|x| TileCoord::new(x, 0)).collect();
+        assert_eq!(block_tiles(7.0, 16, &line), 1);
+        assert_eq!(block_tiles(7.0, 16, &[TileCoord::new(3, 3)]), 1);
+        assert!((1..=MOST_BLOCK).contains(&block_tiles(1002.0, 16, &area)));
         let m = rect(0.0, 0.0, 3000.0, 3000.0);
         assert!(m.grown_unless(40.0, Reach::Round, &|| true).is_none(), "not stopped");
         // Worked out in blocks, the same as tile by tile would give: a corner and a side.

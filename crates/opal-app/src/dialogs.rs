@@ -651,7 +651,7 @@ fn modifying(ctx: &egui::Context, st: &mut AppState) {
     use opal_core::selection::Step;
     let Some(m) = st.modifying.clone() else { return };
     let palette = st.palette;
-    let doc = st.active().map(|d| d.doc());
+    let doc = st.doc(m.doc()).map(|d| d.doc());
     let ppi = doc.map_or(opal_core::units::DEFAULT_PPI, |d| d.resolution);
     let scope = lengths::image_scope(doc, st.unit(), ppi);
     use opal_core::modify::{Falloff, MAX_DISTANCE, Reach, Side};

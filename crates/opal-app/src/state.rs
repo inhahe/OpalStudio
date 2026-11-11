@@ -855,8 +855,8 @@ impl AppState {
     pub fn save_to(&mut self, id: DocId, path: PathBuf, then: Then, ctx: &egui::Context) {
         let Some(d) = self.doc_mut(id) else { return };
         // An edit in progress that changes nothing a file keeps (a selection's, as the
-        // modifier dialogs' previews are) stays in progress.
-        if d.pending.as_ref().is_some_and(|p| !p.doc.saves_as(d.history.doc())) {
+        // modifier dialogs' previews are) stays in progress; an open box is applied.
+        if d.transform.is_some() || d.pending.as_ref().is_some_and(|p| !p.doc.saves_as(d.history.doc())) {
             d.commit_pending();
         }
         let before = (d.path.replace(path.clone()), std::mem::replace(&mut d.title, file_title(&path)));
