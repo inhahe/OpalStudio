@@ -2,11 +2,11 @@
 
 What each milestone delivers is specified in `design.md`: for milestone 5's adjustments and
 F's filters, down to each one's settings (*The adjustments and their settings*, *Filters*);
-the rest added from the tool and command lists (N, T and L, and the items marked *(new)*)
-get their sections there as each begins. Status: milestones 0, 1, S and E are done; everything after them is
-planned.
+the rest added from the tool and command lists (N, T, P and L, and the items marked *(new)*)
+get their sections there as each begins (P's decisions so far: *Photographs*). Status:
+milestones 0, 1, S and E are done; everything after them is planned.
 
-**Order:** 0, 1, S, E, 2, N, A, 3, 4, 5, F, 6, T, 7, L, 8, 9, 10, 11, then *Later*. Within a
+**Order:** 0, 1, S, E, 2, N, A, 3, 4, 5, F, 6, T, P, 7, L, 8, 9, 10, 11, then *Later*. Within a
 milestone, items are in the order to build them. Photo editing comes first, with vector
 shapes taken early (milestone 4), because by then the outline tool has built most of the
 curve editing they need. Scripting (S) comes right after milestone 1 so commands take
@@ -17,7 +17,10 @@ extraction (A) comes right after the selection core it builds on. Filters (F) co
 after adjustments (5), whose non-destructive layers they are built on, and before
 retouching (6), as blurring, sharpening and noise are used more often. Transforms beyond the
 box's (T) come once painting and retouching are done; layer effects (L) right after text,
-which they are most used on.
+which they are most used on. Photographs (P: raw files, lens profiles, depth, people and their
+parts, and the Photo tab's one-click commands) come once the things they are made of exist
+(Develop, filters, AI selection, healing, perspective), and before text, as photo editing
+comes first.
 
 ## 0. Foundation (done)
 - Cargo workspace; window with egui and dockable panels.
@@ -139,6 +142,18 @@ which they are most used on.
 - Transform Again (the last transform, on the layers selected now) and Transform Again as a
   Copy (a copy each time, so that a few presses make a ring or a row of them).
 - Open as Layers: several files into one image, a layer each.
+- *(new)* Metadata kept: a file's EXIF, IPTC and XMP kept from opening, through the native
+  file, to export (the orientation and size made true to the image exported). Image › File
+  Info shows the capture (camera, lens, settings, date, place) and edits what describes the
+  image (title, caption, creator, copyright, keywords). Export chooses what it writes: all;
+  all but the place and the camera's serial numbers; copyright and contact only; or none (the
+  default a preference). Templates (creator and copyright) to fill in at once. Scripts read
+  and write all of it, which is how a folder's capture times are shifted or its files
+  renamed by their metadata.
+- *(new)* Comparing: images side by side (two to four panes), their zoom and position
+  locked together or matched once; a reference image pinned beside the one being edited, to
+  match its look; before and after: the image beside any state of its history (the one it
+  was opened as, by default), or split with it by a line dragged across the view.
 - Rotate the view (not the image), by a drag or a typed angle, back with one key; painting
   needs it most.
 - Crop to Content by color: trim borders of the corners' color, within a tolerance (as well
@@ -222,7 +237,9 @@ which they are most used on.
   plus offsets in a chosen color model, curves in place of weights, presets). Each as an
   adjustment layer or applied once to the selection.
 - *(new)* The Histogram panel (each channel, or luminosity; of the image, the layer or the
-  selection; with statistics), and its histogram in Levels and Curves.
+  selection; with statistics), and its histogram in Levels and Curves. Clipping shown: while
+  an adjustment is previewed, a key shows the pixels it clips to black or white (in any
+  channel) in color on the image, and the histogram's ends say how many there are.
 - *(new)* Fill layers: a solid color, a gradient or a pattern, kept editable.
 - *(new)* More adjustments, in this order: brightness and contrast; exposure (stops, offset,
   gamma); black and white (a weight for each range of hues; tint); vibrance; color balance
@@ -232,8 +249,17 @@ which they are most used on.
   (local contrast at a chosen scale); equalize; solarize; selective color.
 - *(new)* Develop: the photographic controls in one adjustment layer, as raw developers have
   them: white balance (temperature and tint), exposure, contrast, highlights, shadows,
-  whites and blacks, texture, clarity, dehaze, vibrance and saturation, a tone curve, hue,
-  saturation and lightness by color, split toning, grain and vignette.
+  whites and blacks, texture, clarity, dehaze (both ways: haze added too), vibrance and
+  saturation, a tone curve (by regions, darks, shadows, lights and highlights with movable
+  splits, as well as by points, each channel), hue, saturation and lightness by color, color
+  grading (shadows, midtones, highlights and the whole, a wheel each, with blending and
+  balance), point color (colors picked on the image, each shifted in hue, saturation and
+  lightness, with its range's width and softness, the range shown), a black-and-white
+  treatment (Black & White's weights), grain and vignette (kept centered on the canvas as it
+  is cropped). Auto: the tone and the white balance worked out from the image. Its detail
+  section (sharpening with its mask, shown while its slider is dragged with Alt; noise
+  reduction) once milestone F's filters exist. Dragging on the Histogram panel's regions
+  changes Develop's blacks, shadows, exposure, highlights and whites.
 - Expression layers (`design.md`, *Expression layers*): each pixel filled by an expression
   per component of a chosen color model, and one for alpha, of its place (`x`, `y`; `u`, `v`
   across the selection; distance and angle from its center), noise, and the pixels beneath it
@@ -246,6 +272,17 @@ which they are most used on.
   Vector masks from paths. Paste Into (into the selection, through a mask made of it).
   Clipping a layer to the one below (its shape the other's). Fill opacity apart from the
   layer's; which channels a layer blends into.
+- *(new)* Masks that keep their recipe: a mask made from a selection keeps the recipe it came
+  from (`design.md`, *Photographs*), worked out again when asked, and when its layer is
+  copied into another image (its AI and color steps finding what they find there, its shapes
+  carried to the new canvas). A gradient selection step (fully selected on one side of a
+  band, not at all on the other, falling off across it), so that a graduated adjustment is a
+  layer masked by one, as a radial one is by a feathered ellipse.
+- *(new)* Copying adjustments: the adjustment layers chosen (filter layers too, once
+  milestone F has them), from one image into others, their masks worked out again in each.
+  Looks: such layers saved together as one preset, applied with an amount (every setting
+  moved that far from neutral, past 100% too), previewed on the image while hovered in the
+  list.
 - Blend If: curves over channels of a chosen color model, for this layer and for the pixels
   beneath it.
 - Color management with ICC profiles (embedded profiles honored on import); the
@@ -263,8 +300,9 @@ which they are most used on.
 - In this order: Gaussian blur; unsharp mask and smart sharpen (radius, amount, threshold,
   halos suppressed); high pass; add noise and film grain; reduce noise (luminance and color
   apart); median, despeckle and dust and scratches; motion blur; radial blur (spin and zoom);
-  surface blur (edges kept); vignette; lens correction (barrel and pincushion, chromatic
-  aberration, vignetting); lens blur (bokeh, with a depth map or a gradient); tilt-shift,
+  surface blur (edges kept); vignette; *(new)* glow (the Orton effect: a blurred, brightened
+  copy blended over); lens correction (barrel and pincushion, chromatic aberration,
+  vignetting; *(new)* purple and green fringes taken out by their hues); lens blur (bokeh, with a depth map or a gradient); tilt-shift,
   iris and field blur; box blur and average; clouds (the noise expression layers have);
   offset (the image shifted, wrapped round at the edges, for seamless textures); minimum
   and maximum (shrinking or spreading light areas); a custom convolution kernel.
@@ -281,9 +319,16 @@ which they are most used on.
   scale and flip.
 - Heal: picked source (gradient-domain blending); Automatic (spot healing: nearby texture,
   PatchMatch). *(new)* Patch: a selection healed from another place, dragged to.
+- *(new)* Spots: a view in which dust and spots stand out (the image as edges in black and
+  white, its threshold a slider) while healing; Find Spots, which finds them (small,
+  soft-edged, darker than what is round them, up to a size and down to a strength) and heals
+  each as a spot of its own, to look over, move or delete.
 - *(new)* Red eye: a click on a pupil finds the red and darkens it.
 - History brush: from any state on any branch, or a named snapshot. *(new)* Fill from a
   state, in Edit › Fill.
+- *(new)* Versions: named snapshots kept in the file, as versions of the image to switch
+  between, compare side by side (milestone N) and export each; and the whole history kept in
+  the file, when chosen (`design.md`, *Undo history tree*).
 - Mix: wet paint and smudge; linear, OKLab and pigment (Kubelka–Munk) mixing.
 - Adjust brush: lighten, darken, saturate, desaturate, and any adjustment from milestone 5
   (the channel matrix included); tonal-range curve; option to paint into an adjustment
@@ -295,11 +340,58 @@ which they are most used on.
 - Distort and perspective: the box's corners moved freely, the image drawn through the
   projective map they make; the Crop tool's perspective variant (a crop whose corners are
   placed on something seen at an angle, straightened as it is cropped).
+- *(new)* Upright: the perspective corrected from lines drawn on the image that should be
+  vertical or horizontal (two to four), or from the lines found in it (level, upright, or
+  both); Auto Straighten (the horizon or the verticals found, the image turned to them). After
+  either, and as an option of any transform and of the Crop tool: the crop constrained to the
+  image, the largest rectangle (of the aspect ratio chosen, if one is) with nothing empty in
+  it.
 - Warp: a grid of Bézier patches, and its presets (arc, arch, bulge, flag, wave, fish,
   rise, squeeze, twist).
 - Liquify: push, twirl, pucker, bloat, reconstruct; masks to freeze areas.
 - Puppet warp: pins on a mesh over the layer.
 - Content-aware scale: seam carving, with areas to protect.
+
+## P. Photographs *(new)*
+- Raw files, as raw objects (`design.md`, *Photographs*): read by rawler (DNGLab's,
+  LGPL-2.1) and developed from the raw data the object keeps, in the native file too, so that
+  every raw setting stays editable: demosaicing (RCD by default; AMaZE, AHD and VNG, and
+  Markesteijn for X-Trans sensors, ported from darktable and RawTherapee, GPL as Opal Studio
+  is; a quick one while a setting is dragged); white balance on the sensor's own channels (as
+  shot, the camera's presets, temperature and tint, picked on something neutral, automatic);
+  highlights rebuilt from the channels not clipped; the camera's color (the file's matrices,
+  DCP camera profiles, the primaries calibrated); DNG's own corrections. What comes out is
+  linear floating point, with a Develop layer clipped to it, whose starting settings may
+  differ by camera and by ISO. Thumbnails from the files' own previews.
+- Lens profiles: the lensfun database (CC-BY-SA 3.0), read by code of our own, correcting the
+  distortion, chromatic aberration and vignetting of the camera and lens the metadata names;
+  in Lens Correction and in raw objects.
+- Depth from a photograph (moved from *Later*): Depth Anything V2 Small (Apache-2.0; its larger
+  sizes are non-commercial), making a depth layer for Lens Blur, refined by painting on it;
+  Select by Depth, a range from near to far, feathered.
+- People and their parts: each person found (a detector whose license allows it, each box
+  refined by SAM 2.1), one or all; for each, face skin, body skin, hair and clothes
+  (MediaPipe's multiclass segmenter, Apache-2.0), and eyes, irises, eye whites, eyebrows,
+  lips and teeth (from the points of MediaPipe's Face Landmarker, as outline steps; the teeth
+  by their color within the lips): Select › People. Then a landscape's parts beside the sky
+  (water, plants, mountains, ground, buildings), by SAM 3's words or a model whose terms
+  allow it.
+- The Photo tab: one-click commands made of ordinary layers, each a Develop or filter layer
+  named for what it does, masked by a recipe that finds what it acts on, its settings the
+  command's defaults; all editable afterwards, and found again in another image. In order:
+  Auto (Develop's Auto, as a layer); Subject (Brighten Subject, Darken Background, Desaturate
+  Background, Blur Background, by depth); Sky (Darken Sky, Deepen Blue, Warm Sunset);
+  Portrait, for each person or the one chosen (Brighten Face, Smooth Skin, Whiten Teeth,
+  Brighten Eye Whites, Enhance Irises, Lip Color, Define Hair); Cleanup (Find Spots, Remove
+  People: the people besides the subject taken out by LaMa, a layer each); Geometry (Lens
+  Profile, Upright, Auto Straighten); Landscape (Enhance Foliage, Clear Water, Define
+  Mountains). The user's own: layers with recipe masks saved as a command, in a group of the
+  user's.
+- Many images at once: a look, copied adjustments or a Photo-tab command applied to the images
+  open or chosen, the masks found in each; to a folder of files by *Later*'s batches.
+- Print: one image, at a size, fitted to the paper or at its print size, placed on the page;
+  color managed (the printer's profile, the rendering intent, black point compensation) and
+  soft-proofed first; the file's name and caption beneath it, if wanted.
 
 ## 7. Text
 - Area text and point text; editable permanently, even inside an existing layer.
@@ -325,6 +417,8 @@ which they are most used on.
 - Edge snapping in the outline tool (live-wire), with adjustable edge-cost weights.
 - Color-range selection: curves per channel, weights, strictness slider, eyedropper start,
   distance mode.
+- *(new)* Luminosity masks: Select › Lights, Darks and Midtones, each at a few strictnesses,
+  one command each (a color-range step on lightness, adjustable after).
 - Color match (sampling, extent, matching, protected colors), and the tools that use it:
   magic wand; Replace color (Brush variant); Background and Click erasers, with edge color
   decontamination.
@@ -347,16 +441,29 @@ which they are most used on.
 In this order:
 - Recording: what is done, written as a script to run again (an action), the commands being
   parameterized already; batches: a script or recording run over a folder of files, with
-  their output's format, size and color profile (as Image Processor does).
+  their output's format, size and color profile (as Image Processor does). *(new)* The
+  output's names made from a pattern (the original name, the capture date, the camera, a
+  number counting up); a watched folder, each file processed as it arrives (with a camera's
+  own tethering software saving into it, a tethered workflow).
+- *(new)* The Browse panel: a folder's images as thumbnails (raw files by their own previews),
+  sorted and filtered by name, date, capture settings, rating and label; opened, opened as
+  layers, compared side by side, or handed to a batch or a merge; ratings, flags and labels
+  kept in the files' XMP (beside raw files), where Lightroom, Bridge, digiKam and darktable
+  read them. Not a catalog: the folders are what it shows. And Opal Studio as the external
+  editor those catalogs open a photograph in (TIFF in and out, the metadata kept).
 - Content-aware fill by PatchMatch (LaMa's arrives with milestone A), with its own
   workspace (where to sample from, how much to rotate and scale); LaMa as a method for
   automatic healing; content-aware move and extend.
 - PSD import; TIFF, WebP and AVIF.
 - AI upscaling and AI noise reduction; JPEG artifact removal; colorizing black-and-white
-  photographs; restoring damaged ones and faces; depth from a photograph (for lens blur
-  without a depth map); skin smoothing; color and style transfer.
+  photographs; restoring damaged ones and faces; skin retouched by a model (beyond P's Smooth
+  Skin, a masked Develop layer); color and style transfer.
 - Merging photographs: aligning layers by their content, panoramas, HDR, focus stacking,
-  stacking for less noise.
+  stacking for less noise. *(new)* Ghosts taken out (what moved between exposures taken from
+  one of them); a panorama's projection chosen (spherical, cylindrical, perspective) and its
+  empty edges filled (LaMa) or cropped; HDR panoramas; the result kept in floating point.
+- *(new)* HDR images: shown on HDR displays with their highlights above white; JPEGs and
+  AVIFs with gain maps (Ultra HDR, ISO 21496-1, as phones take them) read and written.
 - Generative fill and expand (a diffusion model run locally), if one fits the model manager's
   terms and the computer.
 - Linked and embedded objects (a group, or a file, kept as one object, replaced in place).
@@ -382,4 +489,11 @@ Not planned: slices (for web pages cut into images, which nobody makes any more)
 tool, the frame tool (placements and clipping masks do its work), the render filters for
 trees, flames and picture frames; 3D; video (the timeline, video layers and the video
 filters); contact sheets and picture packages; AI that changes faces (age, expression,
-gaze), which needs large models for little use in an editor like this one.
+gaze), which needs large models for little use in an editor like this one. *(new)* A photo
+catalog, as Lightroom's Library is: a database of photographs across drives, collections
+and smart collections, keyword hierarchies, stacks, maps and GPS tracks, previews to edit
+offline, publishing services and cloud sync, books, slideshows, and print layouts of many
+photographs. That is another application, which digiKam (GPL) and darktable already are;
+Opal Studio works beside them (the Browse panel, ratings in XMP, editing what they open in
+it). Tethered capture of its own (a watched folder serves); AI demosaicing and reflection
+removal, until models whose terms allow them do them well.

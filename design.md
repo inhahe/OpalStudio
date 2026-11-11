@@ -717,8 +717,8 @@ pages are all generated from it, so a command looks and behaves the same everywh
 ### Ribbon
 
 - Tabs of grouped command buttons, each with an icon and a short label: File, Home, Image,
-  Layer, Select, Adjust and View to begin with; Filter, Vector and others as features
-  arrive.
+  Layer, Select, Adjust and View to begin with; Filter, Vector, Photo (shortcuts made of
+  ordinary layers: *Photographs*) and others as features arrive.
 - **Tabs that apply only to some objects** (Text, Shape, and later others) are always
   present. They are dimmed while nothing they apply to is selected, and light up when
   something is. A dimmed tab can still be opened to browse its commands, which are disabled
@@ -1401,9 +1401,12 @@ was); Trace Contour (level, the edge above or below it); Solarize (see Adjustmen
 and seed added); Fibers (variance, strength, seed). Lighting Effects and Lens Flare come
 later; flames, trees and picture frames are not planned.
 
-**Photographic:** Vignette (amount, midpoint, roundness, feather, highlights kept); Lens
-Correction (barrel and pincushion, chromatic aberration, vignetting; by hand, or from lens
-profiles later).
+**Photographic:** Vignette (amount, midpoint, roundness, feather, highlights kept; its center
+the canvas's center by default, an expression, so that it stays centered when the image is
+cropped); Glow (the Orton effect: a blurred, brightened copy blended over; amount, size,
+brightness); Lens Correction (barrel and pincushion, chromatic aberration, vignetting; purple
+and green fringes, each by its range of hues and an amount; by hand, or from lens profiles,
+milestone P's: *Photographs*).
 
 **Other:** Custom (a convolution matrix, 5×5 or larger, its scale and offset, saved and
 loaded); Minimum and Maximum (radius, keeping squareness or roundness); Offset (across,
@@ -1422,6 +1425,64 @@ size, border, light), Mosaic Tiles (tile size, grout width and lightness), Craqu
 Note Paper, Plaster, Reticulation, Stamp, Torn Edges, Water Paper, Conte Crayon, Chalk &
 Charcoal, the remaining Brush Strokes and Artistic ones, Patchwork, Extrude) are not
 carried, nor the video filters (de-interlacing, NTSC colors).
+
+## Photographs
+
+What a raw developer such as Lightroom offers, built as Opal Studio's own pieces rather than as
+a second application inside it: milestone P in `roadmap.md`, and items of N, 5, F, 6, T and
+*Later* (metadata, comparing, Develop's sections, masks that keep their recipe, looks, spots,
+versions, Upright, the Browse panel). Decided so far; the rest is settled when P begins.
+
+- **Not a catalog.** Opal Studio edits images and keeps no database of photographs. Choosing
+  among many, rating them and finding them again is a catalog's work (digiKam, darktable,
+  Lightroom), and Opal Studio works beside one: the Browse panel (*Later*) shows folders as
+  they are, keeps ratings and labels in XMP where those programs read them, and Opal Studio
+  can be the external editor they open a photograph in.
+- **The Photo tab's commands are made of ordinary things.** Brighten Subject, Whiten Teeth,
+  Darken Sky and the rest are shortcuts: each adds what could be made by hand, an adjustment
+  or filter layer named for the command, its settings the command's defaults, masked by a
+  recipe whose maker step finds what it acts on (the subject, the sky, a person's teeth).
+  Nothing is hidden (Principle 2): what a command made is edited as any layer is, and the
+  defaults it uses are a preset to change (Principle 5). They have a tab of their own so that
+  they read as shortcuts and leave Adjust, Select and Filter to the regular commands; command
+  search and scripts find them as they find any other. A user's own are made the same way:
+  layers whose masks keep their recipes, saved as a command.
+- **Masks that keep their recipe.** A mask made from a selection keeps the recipe it came
+  from beside its pixels. When asked, and when its layer is copied into another image, it is
+  worked out again: an AI step finds the new image's subject (or sky, or teeth), a color or
+  lightness step reads the new pixels, and a shape is carried to the new canvas. This is what
+  lets a look, copied adjustments or a Photo-tab command work on a second photograph as they
+  did on the first (Lightroom's adaptive presets). What a painted step (Quick Mask's,
+  milestone 3) becomes in another image is **TBD**.
+- **Raw objects.** A raw file opens as a raw object: an image object whose pixels are
+  developed from the raw data it keeps, in the native file too (the file grows by the raw
+  file's tens of megabytes). What needs the sensor's own data belongs to the object and stays
+  editable at any time (Principle 1): demosaicing, white balance on the sensor's channels,
+  highlights rebuilt, the camera's color and profile, the lens profile. Everything after it
+  (tone, color, detail, effects) is a Develop layer clipped to it, the same Develop that works
+  on any layer, so that a JPEG and a raw file are edited alike. The object gives linear
+  floating point in the working space, nothing clipped. Settings a camera or an ISO range
+  starts with: Preferences.
+- **Develop is one adjustment layer**, Lightroom's sections in one panel, each of which can be
+  turned off; its presets keep all of them or the ones chosen. A look's amount moves each
+  setting from its neutral value toward the look's, or past it.
+- **Metadata** is kept as it was read (EXIF, IPTC and XMP kept whole, and read for showing
+  and editing), and written on export as export's choice says. The orientation is written as
+  upright, since the pixels already are; the size is the exported one; an embedded thumbnail
+  is remade or dropped. The choice names what gives away the place and the camera.
+- **Lens profiles:** lensfun's library is LGPL-3.0 and needs GLib, so its database (XML,
+  CC-BY-SA 3.0) is read by code of our own. Its models are few and documented (distortion:
+  poly3, poly5, PTLens; chromatic aberration: linear, poly3; vignetting: pa). The database
+  ships as data, credited with the licenses.
+- **Demosaicing** methods are ported from darktable and RawTherapee (GPL-3.0, as Opal Studio
+  is); rawler (LGPL-2.1) reads the files.
+- **Models**, downloaded and shown as milestone A's are (*AI object and paint-the-area
+  selection*): Depth Anything V2 Small (Apache-2.0; its base and large sizes are CC-BY-NC, so
+  not used); MediaPipe's multiclass selfie segmenter (background, hair, body skin, face skin,
+  clothes, accessories) and Face Landmarker (478 points, the irises included), Apache-2.0 by
+  their model cards, converted from TFLite to ONNX; a person detector (RT-DETR and D-FINE are
+  candidates); SAM 3, optional, for a landscape's parts. Each license, and its training
+  data's terms, checked when P begins.
 
 ## Painting and retouching tools
 
@@ -2194,7 +2255,8 @@ replace-when-complete write as documents.
 
 ## Out of scope
 
-Multi-page desktop publishing: pages, and text flowing between frames.
+Multi-page desktop publishing: pages, and text flowing between frames. A photo catalog
+(*Photographs*; what it would hold is listed under *Not planned* in `roadmap.md`).
 
 ## Prior art
 
