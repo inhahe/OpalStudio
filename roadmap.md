@@ -212,16 +212,34 @@ comes first.
 - Pen tool reusing the outline tool's curve editing (milestone 2's editing of outlines
   included); rectangle, ellipse, polygon, star. *(new)* The Curvature pen (points placed on
   the curve, its handles worked out), as a variant of the Pen; the Line tool, with
-  arrowheads; rounded corners kept editable on rectangles and polygons.
+  arrowheads; rounded corners kept editable on rectangles and polygons. *(new)* Each node
+  sharp, smooth (its handles in line), symmetric (in line, and as long) or smart (its
+  handles worked out from its neighbors), its place and handles typed exactly (expressions,
+  in any unit); curvature combs along a path, showing where it bends unevenly.
+- *(new)* QuickShape: a freehand stroke held still at its end (a brush's, the pencil's, the
+  Pen's freehand) becomes the line, arc, ellipse, rectangle or polygon it looks like, an
+  editable shape of that kind.
 - *(new)* Paths to selections and selections to paths; filling a path, and stroking it with
   any brush of milestone 3.
 - Paths' nodes as points the boxes' positions can count from (`box_fields::Base`), beside
   the canvas and layers, from the fields and from scripts, and that expressions can name
   (`Outline.node(3).x`). Nodes get names you can see, backed by stable ids, so renaming or
   deleting another node never redirects an expression.
-- Fill and stroke; editable brush strokes on vector shapes.
+- Fill and stroke; editable brush strokes on vector shapes. *(new)* Views: wireframe (every
+  path a thin line, nothing filled) and X-ray (fills faint, the paths drawn over them).
+- *(new)* Painting into a shape: pixels painted on a vector shape kept as its texture, inside
+  it, the shape still editable (moved, reshaped, its texture going with it).
+- *(new)* Vector brushes along a path: art (a shape stretched along it), pattern (tiles
+  repeated along it, with pieces for its corners and ends) and scatter; the stroke kept as
+  its path and its brush. Expand Stroke: a stroke (a brush's, a calligraphic one's) turned
+  into the filled outline it draws.
 - SVG import and export.
-- Boolean operations on paths.
+- Boolean operations on paths, *(new)* kept live: a compound shape, its parts still editable
+  (added, subtracted, intersected or excluded, in their order), expanded into one path when
+  wanted. Then the Shape builder: a drag across the regions overlapping shapes make merges
+  them into one shape, and with Alt deletes them; Region fill: a click inside an area that
+  paths enclose makes it a shape of its own. Contour: a shape grown or shrunk by a distance
+  (round, mitered or beveled corners), kept as a setting, expanded when wanted.
 - *(new)* A library of shapes, to add to and draw from.
 - Symmetric shapes: order n, with or without a mirror, about a movable center and axis;
   edited as one slice, the seams kept smooth; Expand symmetry; the center named in
@@ -301,7 +319,9 @@ comes first.
   Previewed at screen resolution first. Several stacked make a chain to reorder. Repeat the
   last filter, with its settings (Ctrl+F) or showing them.
 - In this order: Gaussian blur; unsharp mask and smart sharpen (radius, amount, threshold,
-  halos suppressed); high pass; add noise and film grain; reduce noise (luminance and color
+  halos suppressed); high pass; *(new)* wavelet scales (the image split into a layer of
+  detail at each scale and the rest, for frequency separation and retouching scale by
+  scale; noise reduced and detail sharpened scale by scale); add noise and film grain; reduce noise (luminance and color
   apart); median, despeckle and dust and scratches; motion blur; radial blur (spin and zoom);
   surface blur (edges kept); vignette; *(new)* glow (the Orton effect: a blurred, brightened
   copy blended over); lens correction (barrel and pincushion, chromatic aberration,
@@ -350,7 +370,8 @@ comes first.
   image, the largest rectangle (of the aspect ratio chosen, if one is) with nothing empty in
   it.
 - Warp: a grid of Bézier patches, and its presets (arc, arch, bulge, flag, wave, fish,
-  rise, squeeze, twist).
+  rise, squeeze, twist). *(new)* On vector shapes and text, kept live, as an envelope: what
+  is inside it stays editable, drawn warped, and is expanded into warped paths when wanted.
 - Liquify: push, twirl, pucker, bloat, reconstruct; masks to freeze areas.
 - Puppet warp: pins on a mesh over the layer.
 - Content-aware scale: seam carving, with areas to protect.
@@ -408,6 +429,8 @@ comes first.
   found and replaced.
 - Text boxes' corners as points the boxes' positions can count from and expressions can
   name, as paths' nodes are.
+- *(new)* Paragraph and character styles: named, document-wide, each based on another if
+  wanted, applied to text in any layer; changing one changes all the text using it.
 - Shaping, bidirectional text, line breaking, font fallback.
 
 ## L. Layer effects *(new)*
@@ -433,7 +456,12 @@ comes first.
 - Gradient editor from the palette editor; harmony, history, collections; 3D view.
 
 ## 11. Constraints
+- *(new)* A layer's constraints to its group (as interface designers use them): pinned to
+  the group's edges or center, or scaled with it, as the group is resized.
 - Units; the geometry solver; degrees-of-freedom display; conflict flags; springs.
+- *(new)* Dimensions: measurements kept as annotation objects (lengths, angles, radii), their
+  ends attached to what they measure (by expressions), updated as it moves, shown and
+  exported or not, as chosen; with the solver, a dimension edited drives the geometry.
 - Kept expressions: *keep linked* by a field, and `linked` in the API, turn an expression
   into a constraint. It uses the same syntax and parser as milestone E's expressions,
   which the solver differentiates. A placement's remembered expression can be made one
@@ -465,11 +493,23 @@ In this order:
   stacking for less noise. *(new)* Ghosts taken out (what moved between exposures taken from
   one of them); a panorama's projection chosen (spherical, cylindrical, perspective) and its
   empty edges filled (LaMa) or cropped; HDR panoramas; the result kept in floating point.
+  *(new)* Astrophotography: calibration frames (darks, flats, bias) taken out of the
+  exposures, the stars aligned, what strays rejected as they are stacked (sigma clipping);
+  stretches that bring out faint detail without bleaching the stars' colors (arcsinh,
+  generalized hyperbolic); a background's gradient taken out; stars made smaller.
 - *(new)* HDR images: shown on HDR displays with their highlights above white; JPEGs and
   AVIFs with gain maps (Ultra HDR, ISO 21496-1, as phones take them) read and written.
 - Generative fill and expand (a diffusion model run locally), if one fits the model manager's
   terms and the computer.
 - Linked and embedded objects (a group, or a file, kept as one object, replaced in place).
+  *(new)* Symbols: one object placed many times, every instance changing as it is edited,
+  each with its own transform (and its colors overridden, if wanted).
+- *(new)* Mesh gradients (colors at the nodes of a mesh laid over a shape, blended across
+  its patches) and live blends (the shapes between two, their geometry, color, opacity and
+  angle in between, spaced along a path, kept editable). Then diffusion curves: curves giving
+  colors to either side, spread smoothly between them.
+- *(new)* Data sets (Photoshop's Variables): text, images and visibility bound to the columns
+  of a CSV file or spreadsheet, an image exported for each row.
 - Channels: the Channels panel, split and merge, calculations and Apply Image between
   channels and images, saved selections as alpha channels.
 - Image modes: grayscale, bitmap, indexed color and palettes (and GIF export), duotone;
@@ -477,7 +517,9 @@ In this order:
   (the image itself is floating point). Match color; HDR toning.
 - Stacks: layers combined by mean, median, minimum or maximum.
 - Lighting effects and lens flare.
-- Artboards; notes on the image; customizing which tools the tool strip shows.
+- Artboards; notes on the image; customizing which tools the tool strip shows. *(new)*
+  Workspaces: the panels' places, the tool strip's tools and the ribbon's size, saved by
+  name, switched between, and shared as a file.
 - Importing from a scanner or camera (WIA); frame animation, with GIF and APNG export.
 - The artistic gallery's chosen few (`design.md`, *Filters*): watercolor, colored pencil,
   charcoal, ink outlines, sumi-e, cutout, poster edges, graphic pen, halftone pattern, bas
@@ -499,4 +541,9 @@ offline, publishing services and cloud sync, books, slideshows, and print layout
 photographs. That is another application, which digiKam (GPL) and darktable already are;
 Opal Studio works beside them (the Browse panel, ratings in XMP, editing what they open in
 it). Tethered capture of its own (a watched folder serves); AI demosaicing and reflection
-removal, until models whose terms allow them do them well.
+removal, until models whose terms allow them do them well. *(new)* Page layout, as
+InDesign's and Affinity's publishing are: pages and spreads, master pages, text linked
+across frames and reflowed, footnotes and endnotes, preflight, InDesign and Publisher
+import (design.md, *Out of scope*); data kept live from Canva Sheets (a CSV file or a
+spreadsheet serves data sets); plate solving (it needs star catalogs of many gigabytes,
+which Siril and astrometry.net already have); 3D models from layers or prompts.

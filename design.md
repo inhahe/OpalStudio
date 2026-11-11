@@ -1669,6 +1669,36 @@ A limit shared by Replace color, the Background and Click erasers, and the magic
 generated strokes, like Photoshop's Art History Brush; style, area, tolerance and stroke
 length adjustable.
 
+## Vector shapes
+
+Milestone 4 in `roadmap.md`, with the vector items of T, 11 and *Later*. Decided so far; the
+rest is settled when milestone 4 begins.
+
+- **What is made from shapes stays editable** (Principle 1). Boolean operations make a
+  compound shape whose parts stay where they were, editable, combined in their order (added,
+  subtracted, intersected, excluded); a contour (a shape grown or shrunk) and an envelope
+  warp are settings of the shape they act on; a vector brush keeps the stroke's path and
+  its brush. Each can be expanded into plain paths when wanted, never by itself.
+- **Nodes:** sharp, smooth (handles in line), symmetric (in line and as long), or smart
+  (handles worked out from the neighbors); every node's place and handles can be typed, in
+  any unit and as expressions, and named, as milestone 4's nodes are. Curvature combs show
+  where a path bends unevenly.
+- **The Shape builder and Region fill** work on the regions the paths divide the plane
+  into, found by the same kernel as the Boolean operations: a drag across regions merges
+  them into one shape (Alt deletes them); a click inside an enclosed area makes it a shape.
+- **QuickShape** recognizes a stroke held still at its end by fitting the primitives (a line,
+  an arc, an ellipse, a rectangle, a polygon of corners found along it) and keeping the
+  closest within a tolerance (a setting): no learned model.
+- **Painting into a shape** keeps the pixels as the shape's texture, clipped to it and
+  carried with it as it moves or is reshaped (a brush on the shape itself still makes an
+  editable stroke, as Principle 1 says; painting into it is the choice of the brush's
+  *Paint into shapes* setting).
+- **Geometry:** curves, offsets and stroke expansion from kurbo (MIT or Apache-2.0); Boolean
+  operations on curves from linesweeper or i_overlay (MIT or Apache-2.0), to be chosen by
+  their robustness on overlapping and touching curves when milestone 4 begins.
+- **Views:** wireframe (every path a thin line, nothing filled) and X-ray (fills faint,
+  paths over them), per pane, as screen modes are.
+
 ## Calligraphy
 
 A **Calligraphy** tool draws strokes the way a nib does: the stroke's width comes from the
@@ -2288,8 +2318,11 @@ replace-when-complete write as documents.
 
 ## Out of scope
 
-Multi-page desktop publishing: pages, and text flowing between frames. A photo catalog
-(*Photographs*; what it would hold is listed under *Not planned* in `roadmap.md`).
+Multi-page desktop publishing: pages and spreads, master pages, text flowing between linked
+frames, footnotes, preflight, and importing InDesign's and Publisher's documents. Opal
+Studio makes single images (and, later, artboards), with text in them; paragraph and
+character styles come with milestone 7's text. A photo catalog (*Photographs*; what it would
+hold is listed under *Not planned* in `roadmap.md`).
 
 ## Prior art
 
