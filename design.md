@@ -660,8 +660,13 @@ through transforms and files; the edits are made on the outline seen as its poin
 round (`Ring`), the side back to its start kept as a segment only when it is a curve.
 
 Scripts:
-`select_outline(points, combine, smooth)`, points `[x, y]` from the canvas's corner (as far
-as a box's may be put, 1e7 pixels; at most a million of them) joined by straight sides; the `selection` query tells an outline step's start and segments.
+`select_outline(points | outline, combine, smooth)`: points `[x, y]` from the canvas's corner
+(as far as a box's may be put, 1e7 pixels; three to a million of them) joined by straight
+sides, or an outline in the form the `selection` query tells an outline step (its start, its
+segments, lines and curves, and, if given, a join for each point), whatever was told given
+back as it was; `edit_selection_step(index, outline=…)` puts another outline in an outline
+step's place, its smoothing kept unless it says, as the tool's editing does (any outline step,
+not only the last).
 
 **What an outline selects** (`outline::Filled`): what it encloses by the nonzero rule (a loop
 crossing itself selects each lobe; loops one inside another going the same way select all of

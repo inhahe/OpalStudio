@@ -210,6 +210,39 @@ fn made_tools() -> Value {
                             "maxItems": opal_core::selection::MOST_POINTS,
                         })
                     }
+                    "outline" => {
+                        let far = crate::box_fields::FAR;
+                        let point = json!({
+                            "type": "array",
+                            "items": { "type": "number", "minimum": -far, "maximum": far },
+                            "minItems": 2,
+                            "maxItems": 2,
+                        });
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "start": point,
+                                "segments": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "kind": { "type": "string", "enum": ["line", "curve"] },
+                                            "to": point, "c1": point, "c2": point,
+                                        },
+                                        "required": ["kind", "to"],
+                                    },
+                                    "minItems": 2,
+                                },
+                                "joins": {
+                                    "type": "array",
+                                    "items": { "type": "string", "enum": ["sharp", "smooth", "symmetric"] },
+                                },
+                                "smooth": { "type": "boolean" },
+                            },
+                            "required": ["start", "segments"],
+                        })
+                    }
                     other => unreachable!("a parameter of kind {other}"),
                 };
                 let mut help = p["help"].as_str().expect("helped").to_owned();

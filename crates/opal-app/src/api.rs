@@ -73,6 +73,8 @@ pub enum Kind {
     Points {
         min: usize,
     },
+    /// An outline, as the `selection` query tells an outline step (see [`given_outline`]).
+    Outline,
     /// Any value: one a preference takes.
     Any,
 }
@@ -804,6 +806,36 @@ pub fn role_of(name: &str) -> Option<Role> {
 
 /// Whether `given` are arguments method `name` takes (as every call's are checked): why
 /// not, if they are not.
+/// The outline `value` gives, as the `selection` query tells an outline step (its `start`, its
+/// `segments`, lines and curves, and, if wanted, its `joins`, sharp, smooth or symmetric, one
+/// for each point; in pixels from the canvas's corner), smoothed as it says or else as
+/// `smooth` does, if it is one a script may give: its points and handles each within
+/// [`FAR`] of the canvas's corner, three to a million points.
+fn given_outline(value: &Value, smooth: bool) -> Option<opal_core::outline::Outline> {
+    use opal_core::outline::{Join, Outline, Segment};
+    #[derive(serde::Deserialize)]
+    struct Given {
+        start: [f64; 2],
+        segments: Vec<Segment>,
+        #[serde(default)]
+        joins: Vec<Join>,
+        #[serde(default)]
+        smooth: Option<bool>,
+    }
+    let g: Given = serde_json::from_value(value.clone()).ok()?;
+    let near = |p: &[f64; 2]| p.iter().all(|v| v.is_finite() && v.abs() <= FAR);
+    let handles = g.segments.iter().flat_map(|s| match s {
+        Segment::Line { to } => vec![to],
+        Segment::Curve { c1, c2, to } => vec![c1, c2, to],
+    });
+    if !near(&g.start) || !handles.into_iter().all(near) || g.segments.len() >= opal_core::selection::MOST_POINTS {
+        return None;
+    }
+    let o = Outline { start: g.start, segments: g.segments, smooth: g.smooth.unwrap_or(smooth), joins: g.joins };
+    let n = o.points().len();
+    (n >= 3 && (o.joins.is_empty() || o.joins.len() == n)).then_some(o)
+}
+
 pub fn check_args(name: &str, given: &Map<String, Value>) -> Result<(), String> {
     let method = method(name).ok_or_else(|| format!("There is no method \"{name}\"."))?;
     Args::check(method.params, given).map(|_| ()).map_err(|why| format!("{name}: {why}."))
@@ -896,7 +928,14 @@ const STEP_SETTINGS: &[Param] = &[
     Param {
         name: "combine",
         kind: Kind::Choice(&opal_core::mask::Combine::NAMES),
-        help: "A shape's or a mask's: how it combines with the steps before it.",
+        help: "A shape's, an outline's or a mask's: how it combines with the steps before it.",
+        otherwise: Otherwise::Now("as it is"),
+    },
+    Param {
+        name: "outline",
+        kind: Kind::Outline,
+        help: "An outline's: the outline it becomes, as select_outline takes one (its points, curves and \
+               joins, from the canvas's top-left corner; its smoothing as it was, unless it says).",
         otherwise: Otherwise::Now("as it is"),
     },
     Param {
@@ -943,16 +982,29 @@ const STEP_SETTINGS: &[Param] = &[
 const CHANGES: &[(&str, &str, &[Param])] = &[
     (
         "select_outline",
-        "Selects what an outline encloses, as the outline tool does: its points joined by straight sides, \
-         the last back to the first (a loop crossing itself selects each of its lobes). Answers with what is \
-         selected then, as the selection query does.",
+        "Selects what an outline encloses, as the outline tool does: points joined by straight sides, or an \
+         outline with curves, as the selection query tells one; the last point back to the first (a loop \
+         crossing itself selects each of its lobes). Give points or outline, one of them. Answers with what \
+         is selected then, as the selection query does.",
         &[
             DOCUMENT,
             Param {
                 name: "points",
                 kind: Kind::Points { min: 3 },
-                help: "The outline's points, in order, each [x, y] in pixels from the canvas's top-left corner.",
-                otherwise: Otherwise::Required,
+                help: "The outline's points, in order, each [x, y] in pixels from the canvas's top-left corner, \
+                       joined by straight sides.",
+                otherwise: Otherwise::Now("outline, given instead"),
+            },
+            Param {
+                name: "outline",
+                kind: Kind::Outline,
+                help: "The outline, as the selection query tells an outline step: its start [x, y]; its \
+                       segments, each a line ({\"kind\": \"line\", \"to\": [x, y]}) or a curve ({\"kind\": \
+                       \"curve\", \"c1\": [x, y], \"c2\": [x, y], \"to\": [x, y]}, pulled toward c1 and c2); \
+                       and, if wanted, how its line goes through each point (joins: \"sharp\", \"smooth\" or \
+                       \"symmetric\", one for each, its start first). In pixels from the canvas's top-left \
+                       corner.",
+                otherwise: Otherwise::Now("points, given instead"),
             },
             COMBINE,
             Param {
@@ -980,7 +1032,8 @@ const CHANGES: &[(&str, &str, &[Param])] = &[
     (
         "edit_selection_step",
         "Changes a step of the recipe of what is selected, by its number among the selection query's steps: \
-         a shape's or a mask's combine; a grow's by and corners; a feather's width, side and falloff; a \
+         a shape's or a mask's combine; an outline's combine and outline (its points, curves and joins); a \
+         grow's by and corners; a feather's width, side and falloff; a \
          smooth's radius; a border's width and side (what is not given stays as it is; what the step does not \
          take is refused). The selection is worked out again with it changed (as the selection panel does). \
          Answers with what is selected then.",
@@ -1899,6 +1952,7 @@ fn check_value(p: &Param, value: &Value) -> Result<(), String> {
             let point = |p: &Value| p.as_array().is_some_and(|xy| xy.len() == 2 && xy.iter().all(near));
             (min..=opal_core::selection::MOST_POINTS).contains(&a.len()) && a.iter().all(point)
         }),
+        Kind::Outline => given_outline(value, true).is_some(),
     };
     if ok { Ok(()) } else { Err(format!("\"{name}\" must be {}, not {value}", kind_text(p.kind))) }
 }
@@ -1908,6 +1962,10 @@ pub fn kind_text(kind: Kind) -> std::borrow::Cow<'static, str> {
     let text = match kind {
         Kind::Points { min } => {
             return format!("a list of {min} to a million points, each [x, y] within 1e7 pixels").into();
+        }
+        Kind::Outline => {
+            "an outline as the selection query tells one (start, segments, and joins if wanted), of 3 to a \
+             million points, each [x, y] within 1e7 pixels, a join for each point if any"
         }
         Kind::Bool => "true or false",
         Kind::Int { .. } => "a whole number, or an expression",
@@ -2693,7 +2751,8 @@ impl AppState {
         if remove {
             self.remove_selection_step(index);
         } else {
-            let changed = match changed_step(step, args) {
+            let canvas = self.doc(id).expect("found").doc().canvas;
+            let changed = match changed_step(step, args, canvas) {
                 Ok(changed) => changed,
                 Err(why) => return Reply::Now(Err(format!("{name}: {why}"))),
             };
@@ -2716,15 +2775,17 @@ impl AppState {
         let combine = args.text("combine").and_then(opal_core::mask::Combine::named).unwrap_or_default();
         let d = self.doc_mut(id).expect("found");
         let c = d.doc().canvas;
+        let outline = match (args.get("points").and_then(Value::as_array), args.get("outline")) {
+            (Some(points), None) => {
+                let points: Vec<[f64; 2]> =
+                    points.iter().map(|p| [p[0].as_f64().expect("checked"), p[1].as_f64().expect("checked")]).collect();
+                Outline::new(points[0], points[1..].iter().map(|&to| Segment::Line { to }).collect(), smooth)
+            }
+            (None, Some(outline)) => given_outline(outline, smooth).expect("checked"),
+            _ => return Err("select_outline: Give points or an outline, one of them.".into()),
+        };
         // From the canvas's corner, as everywhere in the API.
-        let points: Vec<[f64; 2]> = args
-            .get("points")
-            .and_then(Value::as_array)
-            .expect("checked")
-            .iter()
-            .map(|p| [p[0].as_f64().expect("checked") + c.x as f64, p[1].as_f64().expect("checked") + c.y as f64])
-            .collect();
-        let outline = Outline::new(points[0], points[1..].iter().map(|&to| Segment::Line { to }).collect(), smooth);
+        let outline = outline.transformed(&opal_core::geom::Affine::translate(c.x as f64, c.y as f64));
         let step = opal_core::selection::Step::Outline { outline, combine };
         d.select_with(step, crate::outline_tool::LABEL).map_err(|why| format!("select_outline: {why}"))?;
         Ok(selection_json(d))
@@ -3084,15 +3145,19 @@ impl AppState {
     }
 }
 
-/// `step` changed as `args` say (see `edit_selection_step`), or why it cannot be: it does not
-/// take a setting they give.
-fn changed_step(step: opal_core::selection::Step, args: &Args) -> Result<opal_core::selection::Step, String> {
+/// `step` changed as `args` say (see `edit_selection_step`), an outline given from the corner of
+/// the image's canvas `canvas`; or why it cannot be: it does not take a setting they give.
+fn changed_step(
+    step: opal_core::selection::Step,
+    args: &Args,
+    canvas: opal_core::document::Canvas,
+) -> Result<opal_core::selection::Step, String> {
     use opal_core::mask::Combine;
     use opal_core::modify::{Falloff, Reach, Side};
     use opal_core::selection::Step;
     let (kind, takes): (&str, &[&str]) = match &step {
         Step::Shape { .. } => ("A shape", &["combine"]),
-        Step::Outline { .. } => ("An outline", &["combine"]),
+        Step::Outline { .. } => ("An outline", &["combine", "outline"]),
         Step::Mask { .. } => ("A mask", &["combine"]),
         Step::Invert => ("An inverting step", &[]),
         Step::Grow { .. } => ("A grow", &["by", "corners"]),
@@ -3100,7 +3165,7 @@ fn changed_step(step: opal_core::selection::Step, args: &Args) -> Result<opal_co
         Step::Smooth { .. } => ("A smooth", &["radius"]),
         Step::Border { .. } => ("A border", &["width", "side"]),
     };
-    let given = ["combine", "by", "corners", "width", "side", "falloff", "radius"];
+    let given = ["combine", "outline", "by", "corners", "width", "side", "falloff", "radius"];
     if let Some(wrong) = given.iter().find(|&&g| args.get(g).is_some() && !takes.contains(&g)) {
         return Err(match takes {
             [] => format!("{kind} has nothing to change."),
@@ -3111,7 +3176,14 @@ fn changed_step(step: opal_core::selection::Step, args: &Args) -> Result<opal_co
     let side = |s: Side| args.text("side").and_then(Side::named).unwrap_or(s);
     Ok(match step {
         Step::Shape { shape, combine: c } => Step::Shape { shape, combine: combine(c) },
-        Step::Outline { outline, combine: c } => Step::Outline { outline, combine: combine(c) },
+        Step::Outline { outline, combine: c } => {
+            let to_doc = opal_core::geom::Affine::translate(canvas.x as f64, canvas.y as f64);
+            let outline = match args.get("outline") {
+                Some(v) => given_outline(v, outline.smooth).expect("checked").transformed(&to_doc),
+                None => outline,
+            };
+            Step::Outline { outline, combine: combine(c) }
+        }
         Step::Mask { mask, combine: c, of } => Step::Mask { mask, combine: combine(c), of },
         Step::Invert => Step::Invert,
         Step::Grow { by, corners } => Step::Grow {
@@ -3343,6 +3415,7 @@ fn kind_name(kind: Kind) -> &'static str {
         Kind::Layer => "layer",
         Kind::Layers => "layers",
         Kind::Points { .. } => "points",
+        Kind::Outline => "outline",
     }
 }
 
@@ -3367,6 +3440,7 @@ mod tests {
             "path" => "str | os.PathLike[str]".into(),
             "layers" => "list[int]".into(),
             "points" => "list[tuple[float, float]]".into(),
+            "outline" => "dict[str, Any]".into(),
             "choice" => {
                 let words: Vec<String> = p["choices"].as_array().unwrap().iter().map(|w| format!("{w}")).collect();
                 format!("Literal[{}]", words.join(", "))
@@ -3772,6 +3846,57 @@ mod tests {
         let left = now(&mut st, "delete_saved_selection", json!({ "name": " CORNER " })).unwrap();
         assert_eq!(left.as_array().unwrap().len(), 1);
         assert_eq!(left[0]["name"], json!("Other"));
+    }
+
+    #[test]
+    fn a_script_makes_and_edits_curved_outlines_as_the_selection_query_tells_them() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 400, "height": 300 })).unwrap();
+        // The canvas's corner moved off the document's origin, which what scripts give counts from.
+        now(&mut st, "crop", json!({ "x": 10, "y": 20, "width": 300, "height": 200 })).unwrap();
+        // A square whose top bulges up.
+        let bulging = json!({
+            "start": [100, 100],
+            "segments": [
+                { "kind": "curve", "c1": [130, 70], "c2": [170, 70], "to": [200, 100] },
+                { "kind": "line", "to": [200, 180] },
+                { "kind": "line", "to": [100, 180] },
+            ],
+        });
+        let s = now(&mut st, "select_outline", json!({ "outline": bulging })).unwrap();
+        assert_eq!(s["bounds"], json!([100, 77, 100, 103]), "{s}");
+        // As the query tells it, given back: the same.
+        let told = s["steps"][0]["outline"].clone();
+        assert_eq!(
+            (told["start"].clone(), told["segments"][0]["c1"].clone()),
+            (json!([100.0, 100.0]), json!([130.0, 70.0]))
+        );
+        let again = now(&mut st, "select_outline", json!({ "outline": told })).unwrap();
+        assert_eq!(again["steps"], s["steps"], "{again}");
+        // Edited: its top made straight, its joins given.
+        let flat = json!({
+            "start": [100, 100],
+            "segments": [{ "kind": "line", "to": [200, 100] }, { "kind": "line", "to": [200, 180] }, { "kind": "line", "to": [100, 180] }],
+            "joins": ["sharp", "sharp", "sharp", "sharp"],
+        });
+        let s = now(&mut st, "edit_selection_step", json!({ "index": 0, "outline": flat })).unwrap();
+        assert_eq!(s["bounds"], json!([100, 100, 100, 80]), "{s}");
+        assert_eq!(s["steps"][0]["outline"]["joins"], json!(["sharp", "sharp", "sharp", "sharp"]));
+        // Refused: points and an outline both, or neither; a join short; a handle far off; an
+        // outline given to a step that is not one.
+        let why = now(&mut st, "select_outline", json!({ "points": [[0, 0], [5, 0], [5, 5]], "outline": bulging }))
+            .unwrap_err();
+        assert!(why.contains("one of them"), "{why}");
+        assert!(now(&mut st, "select_outline", json!({})).unwrap_err().contains("one of them"));
+        let short = json!({ "start": [0, 0], "segments": [{ "kind": "line", "to": [9, 0] }, { "kind": "line", "to": [9, 9] }], "joins": ["sharp"] });
+        assert!(
+            now(&mut st, "select_outline", json!({ "outline": short })).unwrap_err().contains("a join for each point")
+        );
+        let far = json!({ "start": [0, 0], "segments": [{ "kind": "curve", "c1": [2e7, 0], "c2": [9, 0], "to": [9, 0] }, { "kind": "line", "to": [9, 9] }] });
+        assert!(now(&mut st, "select_outline", json!({ "outline": far })).unwrap_err().contains("within 1e7 pixels"));
+        now(&mut st, "select_rectangle", json!({ "x": 10, "y": 10, "width": 40, "height": 30 })).unwrap();
+        let wrong = now(&mut st, "edit_selection_step", json!({ "index": 0, "outline": flat })).unwrap_err();
+        assert!(wrong.contains("A shape takes combine, not outline"), "{wrong}");
     }
 
     #[test]

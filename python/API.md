@@ -636,12 +636,13 @@ Give the active layer a new name.
 
 ### `select_outline`
 
-Selects what an outline encloses, as the outline tool does: its points joined by straight sides, the last back to the first (a loop crossing itself selects each of its lobes). Answers with what is selected then, as the selection query does.
+Selects what an outline encloses, as the outline tool does: points joined by straight sides, or an outline with curves, as the selection query tells one; the last point back to the first (a loop crossing itself selects each of its lobes). Give points or outline, one of them. Answers with what is selected then, as the selection query does.
 
 | Parameter | Kind | |
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
-| `points` (required) | points | The outline's points, in order, each [x, y] in pixels from the canvas's top-left corner. |
+| `points` | points | The outline's points, in order, each [x, y] in pixels from the canvas's top-left corner, joined by straight sides. Default: outline, given instead. |
+| `outline` | outline | The outline, as the selection query tells an outline step: its start [x, y]; its segments, each a line ({"kind": "line", "to": [x, y]}) or a curve ({"kind": "curve", "c1": [x, y], "c2": [x, y], "to": [x, y]}, pulled toward c1 and c2); and, if wanted, how its line goes through each point (joins: "sharp", "smooth" or "symmetric", one for each, its start first). In pixels from the canvas's top-left corner. Default: points, given instead. |
 | `combine` | `replace`, `add`, `subtract`, `intersect` | How it combines with what is selected: in its place, added to it, taken away from it, or keeping only what is in both. Default: "replace". |
 | `smooth` | bool | Select a pixel the outline crosses as much as it encloses it; else all or nothing, by the pixel's middle. Default: the outline tool's Smooth edges. |
 
@@ -665,13 +666,14 @@ Takes a step away from the recipe of what is selected, by its number among the s
 
 ### `edit_selection_step`
 
-Changes a step of the recipe of what is selected, by its number among the selection query's steps: a shape's or a mask's combine; a grow's by and corners; a feather's width, side and falloff; a smooth's radius; a border's width and side (what is not given stays as it is; what the step does not take is refused). The selection is worked out again with it changed (as the selection panel does). Answers with what is selected then.
+Changes a step of the recipe of what is selected, by its number among the selection query's steps: a shape's or a mask's combine; an outline's combine and outline (its points, curves and joins); a grow's by and corners; a feather's width, side and falloff; a smooth's radius; a border's width and side (what is not given stays as it is; what the step does not take is refused). The selection is worked out again with it changed (as the selection panel does). Answers with what is selected then.
 
 | Parameter | Kind | |
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 | `index` (required) | int | Which step: its number among the selection query's steps, from 0. From 0 to 1048576. |
-| `combine` | `replace`, `add`, `subtract`, `intersect` | A shape's or a mask's: how it combines with the steps before it. Default: as it is. |
+| `combine` | `replace`, `add`, `subtract`, `intersect` | A shape's, an outline's or a mask's: how it combines with the steps before it. Default: as it is. |
+| `outline` | outline | An outline's: the outline it becomes, as select_outline takes one (its points, curves and joins, from the canvas's top-left corner; its smoothing as it was, unless it says). Default: as it is. |
 | `by` | length | A grow's: how far it grows the selection (shrinks it, less than 0). From -1000.0 to 1000.0 pixels. Default: as it is. |
 | `corners` | `round`, `square`, `diamond` | A grow's: how its corners grow. Default: as it is. |
 | `width` | length | A feather's or a border's: how wide its falloff or its band is. From 0.0 to 1000.0 pixels. Default: as it is. |
