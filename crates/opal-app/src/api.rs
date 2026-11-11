@@ -819,15 +819,28 @@ fn given_outline(value: &Value, smooth: bool) -> Option<opal_core::outline::Outl
         joins: Vec<Join>,
         #[serde(default)]
         smooth: Option<bool>,
+        #[serde(default)]
+        symmetry: Option<opal_core::symmetry::Symmetry>,
     }
     let g: Given = serde_json::from_value(value.clone()).ok()?;
-    let o = Outline { start: g.start, segments: g.segments, smooth: g.smooth.unwrap_or(smooth), joins: g.joins };
+    let o = Outline {
+        start: g.start,
+        segments: g.segments,
+        smooth: g.smooth.unwrap_or(smooth),
+        joins: g.joins,
+        symmetry: g.symmetry,
+    };
     let near = |v: f64| v.is_finite() && v.abs() <= FAR;
-    if !o.coordinates().flatten().all(near) || o.segments.len() >= opal_core::selection::MOST_POINTS {
+    let center = o.symmetry.map_or([0.0; 2], |s| s.center);
+    let all_near = o.coordinates().flatten().chain(center).all(near);
+    let step = opal_core::selection::Step::Outline { outline: o, combine: Default::default() };
+    if !all_near || step.refused().is_some() {
         return None;
     }
-    let n = o.point_count();
-    (n >= 3 && (o.joins.is_empty() || o.joins.len() == n)).then_some(o)
+    let opal_core::selection::Step::Outline { outline: o, .. } = step else { unreachable!("made one") };
+    // (A symmetric outline's slice, two points at least; else three.)
+    let (n, least) = (o.point_count(), if o.symmetry.is_some() { 2 } else { 3 });
+    (n >= least && (o.joins.is_empty() || o.joins.len() == n)).then_some(o)
 }
 
 /// Whether `given` are arguments method `name` takes (as every call's are checked): why
@@ -998,8 +1011,10 @@ const CHANGES: &[(&str, &str, &[Param])] = &[
                        segments, each a line ({\"kind\": \"line\", \"to\": [x, y]}) or a curve ({\"kind\": \
                        \"curve\", \"c1\": [x, y], \"c2\": [x, y], \"to\": [x, y]}, pulled toward c1 and c2); \
                        and, if wanted, how its line goes through each point (joins: \"sharp\", \"smooth\" or \
-                       \"symmetric\", one for each, its start first). In pixels from the canvas's top-left \
-                       corner.",
+                       \"symmetric\", one for each, its start first), and its symmetry (symmetry: {\"order\": \
+                       copies round, \"mirror\": true or false, \"center\": [x, y], \"angle\": the axis's, in \
+                       degrees clockwise from up}; then start and segments are one slice, not closed, which \
+                       its copies complete). In pixels from the canvas's top-left corner.",
                 otherwise: Otherwise::Now("points, given instead"),
             },
             COMBINE,
@@ -1960,8 +1975,9 @@ pub fn kind_text(kind: Kind) -> std::borrow::Cow<'static, str> {
             return format!("a list of {min} to a million points, each [x, y] within 1e7 pixels").into();
         }
         Kind::Outline => {
-            "an outline as the selection query tells one (start, segments, and joins if wanted), of 3 to a \
-             million points, each [x, y] within 1e7 pixels, a join for each point if any"
+            "an outline as the selection query tells one (start, segments, and joins and symmetry if wanted), \
+             of 3 to a million points (a symmetric outline's slice, 2), each [x, y] within 1e7 pixels, a join for \
+             each point if any"
         }
         Kind::Bool => "true or false",
         Kind::Int { .. } => "a whole number, or an expression",
@@ -3887,6 +3903,20 @@ mod tests {
         let s = now(&mut st, "edit_selection_step", json!({ "index": 0, "outline": flat })).unwrap();
         assert_eq!(s["bounds"], json!([100, 100, 100, 80]), "{s}");
         assert_eq!(s["steps"][0]["outline"]["joins"], json!(["sharp", "sharp", "sharp", "sharp"]));
+        // A quarter of a diamond and its symmetry, from the canvas's corner: the whole diamond,
+        // told as given.
+        let quarter = json!({
+            "start": [150, 100],
+            "segments": [{ "kind": "line", "to": [200, 150] }],
+            "symmetry": { "order": 4, "mirror": false, "center": [150, 150], "angle": 0.0 },
+        });
+        let s = now(&mut st, "select_outline", json!({ "outline": quarter })).unwrap();
+        assert_eq!(s["bounds"], json!([100, 100, 100, 100]), "{s}");
+        assert_eq!(s["steps"][0]["outline"]["symmetry"]["center"], json!([150.0, 150.0]), "{s}");
+        // Of an order past what the editor makes: refused.
+        let mut many = quarter.clone();
+        many["symmetry"]["order"] = json!(opal_core::symmetry::MOST_ORDER + 1);
+        assert!(now(&mut st, "select_outline", json!({ "outline": many })).is_err());
         // Refused: points and an outline both, or neither; a join short; a handle far off; an
         // outline given to a step that is not one.
         let why = now(&mut st, "select_outline", json!({ "points": [[0, 0], [5, 0], [5, 5]], "outline": bulging }))

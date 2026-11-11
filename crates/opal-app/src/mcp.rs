@@ -241,8 +241,19 @@ fn made_tools() -> Value {
                                             },
                                         ],
                                     },
-                                    "minItems": 2,
+                                    // (A symmetric outline's slice may have one.)
+                                    "minItems": 1,
                                     "maxItems": opal_core::selection::MOST_POINTS - 1,
+                                },
+                                "symmetry": {
+                                    "type": "object",
+                                    "properties": {
+                                        "order": { "type": "integer", "minimum": 1, "maximum": opal_core::symmetry::MOST_ORDER },
+                                        "mirror": { "type": "boolean" },
+                                        "center": point,
+                                        "angle": { "type": "number" },
+                                    },
+                                    "required": ["order", "mirror", "center", "angle"],
                                 },
                                 "joins": {
                                     "type": "array",

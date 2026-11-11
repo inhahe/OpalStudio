@@ -3753,6 +3753,58 @@ fn the_outline_tool_edits_the_last_outline_point_by_point() {
 }
 
 #[test]
+fn the_outline_tool_draws_symmetric_outlines_about_a_center_moved_and_turned_on_the_canvas() {
+    use crate::tools::ToolId;
+    use opal_core::geom::IRect;
+    use opal_core::mask::Extent;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    let st = h.state_mut().state_mut();
+    st.set_tool(ToolId::Outline);
+    st.tool_settings.get_mut(&ToolId::Outline).unwrap().set("outline.symmetry", crate::settings::Value::Float(4.0));
+    h.run();
+    let none = egui::Modifiers::NONE;
+    // A quarter, from up the axis to the next seam, round the canvas's middle (200, 150): a
+    // diamond, its step a slice of two points.
+    click_image(&mut h, [200.0, 100.0], none);
+    click_image(&mut h, [250.0, 150.0], none);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(150, 100, 250, 200))));
+    let slice = crate::outline_tool::edited(h.state().state().active().unwrap()).unwrap().0.clone();
+    assert_eq!((slice.point_count(), slice.symmetry.map(|s| s.order)), (2, Some(4)));
+    // Its slice's point dragged out: each of its copies goes with it.
+    click_image(&mut h, [250.0, 150.0], none);
+    drag_image(&mut h, &[[250.0, 150.0], [260.0, 150.0], [270.0, 150.0]], none);
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(130, 80, 270, 220))));
+    // Its center dragged from the canvas's middle to (100, 150), not beginning an outline.
+    drag_image(&mut h, &[[200.0, 150.0], [150.0, 150.0], [100.0, 150.0]], none);
+    let d = h.state().state().active().unwrap();
+    assert_eq!((d.symmetry_center, d.outlining.is_none()), (Some([100.0, 150.0]), true));
+    // Its axis's handle (60 points up from the center on screen) turned to the right, with
+    // Shift: a quarter turn, to the degree.
+    let v = d.view;
+    let ppp = h.ctx.pixels_per_point();
+    let center = v.screen_rect.min + v.to_screen(egui::vec2(100.0, 150.0)) / ppp;
+    let handle = center + egui::vec2(0.0, -60.0);
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    h.hover_at(handle);
+    h.run();
+    h.drag_at(handle);
+    h.run();
+    for p in [center + egui::vec2(40.0, -40.0), center + egui::vec2(60.0, 3.0)] {
+        h.hover_at(p);
+        h.run();
+    }
+    h.drop_at(center + egui::vec2(60.0, 3.0));
+    h.run();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().symmetry_angle, 90.0);
+}
+
+#[test]
 fn the_selection_panel_lists_the_steps_and_takes_one_away() {
     let _gpu = gpu_lock();
     let mut h = harness();

@@ -14,6 +14,7 @@
 use crate::geom::{Affine, IRect};
 use crate::mask::{Class, Coverage, FULL, MASK_REACH, MaskTile, world};
 use crate::modify::{Bounds, Halt, UNBOUNDED};
+use crate::symmetry::Symmetry;
 use crate::tile::{TILE_PIXELS, TILE_SIZE, TileCoord};
 use std::collections::HashMap;
 
@@ -70,11 +71,24 @@ pub struct Outline {
     /// they were kept).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub joins: Vec<Join>,
+    /// Its symmetry, if it has one: then `start` and `segments` are one slice of it, not
+    /// closed, and the outline is the slice with its copies (see [`whole`](Self::whole)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symmetry: Option<Symmetry>,
 }
 
 impl Outline {
     /// The outline `m` carries this one to.
     pub fn transformed(&self, m: &Affine) -> Outline {
+        // A symmetry a map does not keep (a stretch one way more than the other): the whole
+        // outline carried, as an ordinary one.
+        let symmetry = match self.symmetry {
+            Some(s) => match s.transformed(m) {
+                Some(s) => Some(s),
+                None => return self.whole().transformed(m),
+            },
+            None => None,
+        };
         // (A map keeps lines straight and the ratios along them: a smooth join stays smooth,
         // a symmetric one symmetric.)
         Outline {
@@ -82,12 +96,45 @@ impl Outline {
             segments: self.segments.iter().map(|s| s.transformed(m)).collect(),
             smooth: self.smooth,
             joins: self.joins.clone(),
+            symmetry,
         }
     }
 
-    /// The polygon it comes to (see [`flattened`]), closed (the last point joined to the first).
+    /// The outline it is, whole: itself, or, with a symmetry, its slice and the slice's copies,
+    /// one after another, each joined to the next by a straight side (none, where one ends
+    /// where the next begins). With a mirror, the slice comes after its mirror image run back,
+    /// so that one drawn from the axis to the next seam is joined to its copies exactly; the
+    /// copies are turned the way round that puts the next one's start nearest where the last
+    /// ends.
+    pub fn whole(&self) -> std::borrow::Cow<'_, Outline> {
+        let Some(s) = self.symmetry.filter(Symmetry::is_on) else { return std::borrow::Cow::Borrowed(self) };
+        let (mut start, mut unit) = (self.start, self.segments.clone());
+        if s.mirror {
+            let m = s.reflection();
+            let mirrored: Vec<Segment> = self.segments.iter().map(|seg| seg.transformed(&m)).collect();
+            (start, unit) = reversed(m.apply(self.start), &mirrored);
+            unit.push(Segment::Line { to: self.start });
+            unit.extend(self.segments.iter().copied());
+        }
+        let end = unit.last().map_or(start, Segment::end);
+        let far = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]);
+        let order = i64::from(s.order.max(1));
+        let way =
+            if order > 2 && far(s.turn(-1).apply(start), end) < far(s.turn(1).apply(start), end) { -1 } else { 1 };
+        let mut segments = unit.clone();
+        for k in 1..order {
+            let t = s.turn(way * k);
+            segments.push(Segment::Line { to: t.apply(start) });
+            segments.extend(unit.iter().map(|seg| seg.transformed(&t)));
+        }
+        std::borrow::Cow::Owned(Outline { start, segments, smooth: self.smooth, joins: Vec::new(), symmetry: None })
+    }
+
+    /// The polygon it comes to, whole (see [`whole`](Self::whole) and [`flattened`]), closed
+    /// (the last point joined to the first).
     pub fn polygon(&self) -> Vec<[f64; 2]> {
-        flattened(self.start, &self.segments)
+        let whole = self.whole();
+        flattened(whole.start, &whole.segments)
     }
 
     /// What it covers, to make a mask of (`Mask::of`).
@@ -99,7 +146,8 @@ impl Outline {
     /// flattened to, then its edges and their lists by row of tiles, admitted before they are
     /// made. What it then holds is [`Filled::bytes`], to give back once its mask is made.
     pub fn filled_within(&self, bounds: Bounds) -> Result<Filled, Halt> {
-        let points = (flattened_len(self.start, &self.segments) * std::mem::size_of::<[f64; 2]>()) as u64;
+        let whole = self.whole();
+        let points = (flattened_len(whole.start, &whole.segments) * std::mem::size_of::<[f64; 2]>()) as u64;
         if !(bounds.admit)(points) {
             return Err(Halt::NoMemory);
         }
@@ -172,6 +220,9 @@ struct Ring {
     sides: Vec<Side>,
     joins: Vec<Join>,
     smooth: bool,
+    /// A symmetric outline's symmetry: then the points are its slice's, not closed (no side
+    /// from the last back to the first).
+    symmetry: Option<Symmetry>,
 }
 
 fn add(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
@@ -218,13 +269,16 @@ impl Ring {
             });
             points.push(s.end());
         }
-        // Closed by a side of its own back to its start: that point is its first, once.
-        if points.len() > 1 && points.last() == Some(&o.start) {
-            points.pop();
-        } else {
-            sides.push(Side::Line);
+        // Closed by a side of its own back to its start: that point is its first, once. (A
+        // symmetric outline's slice is not closed.)
+        if o.symmetry.is_none() {
+            if points.len() > 1 && points.last() == Some(&o.start) {
+                points.pop();
+            } else {
+                sides.push(Side::Line);
+            }
         }
-        let mut ring = Ring { points, sides, joins: Vec::new(), smooth: o.smooth };
+        let mut ring = Ring { points, sides, joins: Vec::new(), smooth: o.smooth, symmetry: o.symmetry };
         ring.joins = if o.joins.len() == ring.points.len() {
             o.joins.clone()
         } else {
@@ -238,49 +292,76 @@ impl Ring {
         let mut segments: Vec<Segment> = (1..n).map(|i| self.sides[i - 1].to(self.points[i])).collect();
         // The side back to the first point is kept only if it is a curve (a straight one is
         // implied), or if the last point lies on the first: its last segment would then seem
-        // the side back, and the point be lost.
-        if matches!(self.sides[n - 1], Side::Curve { .. }) || (n > 1 && self.points[n - 1] == self.points[0]) {
+        // the side back, and the point be lost. (A slice has none.)
+        if self.closed()
+            && (matches!(self.sides[n - 1], Side::Curve { .. }) || (n > 1 && self.points[n - 1] == self.points[0]))
+        {
             segments.push(self.sides[n - 1].to(self.points[0]));
         }
-        Outline { start: self.points[0], segments, smooth: self.smooth, joins: self.joins }
+        Outline { start: self.points[0], segments, smooth: self.smooth, joins: self.joins, symmetry: self.symmetry }
     }
 
+    /// Whether it goes round, from its last point back to its first (not a symmetric
+    /// outline's slice).
+    fn closed(&self) -> bool {
+        self.symmetry.is_none()
+    }
+
+    /// The point after point `i`, round to the first after the last.
     fn next(&self, i: usize) -> usize {
         (i + 1) % self.points.len()
     }
 
-    fn prev(&self, i: usize) -> usize {
-        (i + self.points.len() - 1) % self.points.len()
+    /// The side into point `i` (from the point before it), if it has one: not the first of a
+    /// slice.
+    fn side_into(&self, i: usize) -> Option<usize> {
+        let n = self.points.len();
+        if self.closed() { Some((i + n - 1) % n) } else { i.checked_sub(1) }
+    }
+
+    /// The side out of point `i` (to the point after it), if it has one: not the last of a
+    /// slice.
+    fn side_out(&self, i: usize) -> Option<usize> {
+        (i < self.sides.len()).then_some(i)
+    }
+
+    /// The point before point `i` and the point after it, each itself where it has none (at
+    /// a slice's ends).
+    fn neighbors(&self, i: usize) -> [[f64; 2]; 2] {
+        let before = self.side_into(i).map_or(self.points[i], |s| self.points[s]);
+        let after = self.side_out(i).map_or(self.points[i], |s| self.points[self.next(s)]);
+        [before, after]
     }
 
     /// Point `i`'s handles: into it (the side before it bends by it) and out of it (the side
-    /// after), each `None` where that side is straight.
+    /// after), each `None` where that side is straight, or there is none.
     fn handles(&self, i: usize) -> [Option<[f64; 2]>; 2] {
-        let into = match self.sides[self.prev(i)] {
+        let into = self.side_into(i).and_then(|s| match self.sides[s] {
             Side::Curve { c2, .. } => Some(c2),
             Side::Line => None,
-        };
-        let out = match self.sides[i] {
+        });
+        let out = self.side_out(i).and_then(|s| match self.sides[s] {
             Side::Curve { c1, .. } => Some(c1),
             Side::Line => None,
-        };
+        });
         [into, out]
     }
 
     /// Puts point `i`'s handle at `end` at `to`, a straight side becoming a curve (its other
-    /// end's handle at that end).
+    /// end's handle at that end); nothing, where it has no side there (a slice's end).
     fn set_handle(&mut self, i: usize, end: End, to: [f64; 2]) {
         match end {
             End::In => {
-                let p = self.prev(i);
+                let Some(p) = self.side_into(i) else { return };
                 self.sides[p] = match self.sides[p] {
                     Side::Curve { c1, .. } => Side::Curve { c1, c2: to },
                     Side::Line => Side::Curve { c1: self.points[p], c2: to },
                 };
             }
             End::Out => {
-                let at = self.points[self.next(i)];
-                self.sides[i] = match self.sides[i] {
+                let Some(s) = self.side_out(i) else { return };
+                let at = self.points[self.next(s)];
+                self.sides[s] = match self.sides[s] {
                     Side::Curve { c2, .. } => Side::Curve { c1: to, c2 },
                     Side::Line => Side::Curve { c1: to, c2: at },
                 };
@@ -373,7 +454,7 @@ impl Outline {
     /// An outline from `start` along `segments` and back, sharp if not `smooth`, the joins at
     /// its points told from their handles.
     pub fn new(start: [f64; 2], segments: Vec<Segment>, smooth: bool) -> Outline {
-        Outline { start, segments, smooth, joins: Vec::new() }
+        Outline { start, segments, smooth, joins: Vec::new(), symmetry: None }
     }
 
     /// Its points as they go round, the first its start (once, if its last segment comes back
@@ -384,7 +465,9 @@ impl Outline {
 
     /// How many points it has (as [`points`](Self::points) counts them), worked out at once.
     pub fn point_count(&self) -> usize {
-        self.segments.len() + 1 - usize::from(self.segments.last().is_some_and(|s| s.end() == self.start))
+        // (A symmetric outline's slice is not closed: its points are its start and its ends.)
+        let closing = self.symmetry.is_none() && self.segments.last().is_some_and(|s| s.end() == self.start);
+        self.segments.len() + 1 - usize::from(closing)
     }
 
     /// Point `i`'s handles: into it and out of it, each `None` where that side is straight.
@@ -423,16 +506,15 @@ impl Outline {
     }
 
     /// Its side nearest `p`, how far along it (0 to 1) the nearest point is, and how far that
-    /// point is from `p`.
-    pub fn nearest(&self, p: [f64; 2]) -> (usize, f64, f64) {
+    /// point is from `p`; none, if it has no side (a slice of one point).
+    pub fn nearest(&self, p: [f64; 2]) -> Option<(usize, f64, f64)> {
         let ring = Ring::of(self);
-        (0..ring.points.len())
+        (0..ring.sides.len())
             .map(|i| {
                 let t = ring.nearest_on(i, p);
                 (i, t, len(sub(ring.along(i, t), p)))
             })
             .min_by(|a, b| a.2.total_cmp(&b.2))
-            .expect("an outline has a point")
     }
 
     /// The outline with points `which` moved by `by`, their handles with them.
@@ -489,27 +571,36 @@ impl Outline {
     }
 
     /// The outline without points `which`, the sides either side of each made one (a curve, if
-    /// either was); `None` if fewer than three points would be left.
+    /// either was; at a slice's end, its one side going with it); `None` if fewer than three
+    /// points would be left (two, of a slice).
     pub fn without(&self, which: &[usize]) -> Option<Outline> {
         let mut ring = Ring::of(self);
         let mut which = which.to_vec();
         which.sort_unstable();
         which.dedup();
-        if ring.points.len() < which.len() + 3 {
+        let least = if ring.closed() { 3 } else { 2 };
+        if ring.points.len() < which.len() + least {
             return None;
         }
         for &i in which.iter().rev() {
-            let p = ring.prev(i);
-            let (from, to) = (ring.points[p], ring.points[ring.next(i)]);
-            ring.sides[p] = match (ring.sides[p], ring.sides[i]) {
-                (Side::Line, Side::Line) => Side::Line,
-                (into, out) => Side::Curve {
-                    c1: if let Side::Curve { c1, .. } = into { c1 } else { from },
-                    c2: if let Side::Curve { c2, .. } = out { c2 } else { to },
-                },
+            let gone = match (ring.side_into(i), ring.side_out(i)) {
+                (Some(p), Some(o)) => {
+                    let (from, to) = (ring.points[p], ring.points[ring.next(o)]);
+                    ring.sides[p] = match (ring.sides[p], ring.sides[o]) {
+                        (Side::Line, Side::Line) => Side::Line,
+                        (into, out) => Side::Curve {
+                            c1: if let Side::Curve { c1, .. } = into { c1 } else { from },
+                            c2: if let Side::Curve { c2, .. } = out { c2 } else { to },
+                        },
+                    };
+                    o
+                }
+                (None, Some(o)) => o,
+                (Some(p), None) => p,
+                (None, None) => unreachable!("two points are left at least"),
             };
             ring.points.remove(i);
-            ring.sides.remove(i);
+            ring.sides.remove(gone);
             ring.joins.remove(i);
         }
         Some(ring.outline())
@@ -522,7 +613,7 @@ impl Outline {
     pub fn joined(&self, which: &[usize], join: Join) -> Outline {
         let mut ring = Ring::of(self);
         for &i in which {
-            let (p, a, b) = (ring.points[i], ring.points[ring.prev(i)], ring.points[ring.next(i)]);
+            let (p, [a, b]) = (ring.points[i], ring.neighbors(i));
             let [into, out] = ring.handles(i);
             match join {
                 Join::Sharp => {
@@ -531,7 +622,7 @@ impl Outline {
                             ring.set_handle(i, end, p);
                         }
                     }
-                    for s in [ring.prev(i), i] {
+                    for s in [ring.side_into(i), ring.side_out(i)].into_iter().flatten() {
                         let (from, to) = (ring.points[s], ring.points[ring.next(s)]);
                         if ring.sides[s] == (Side::Curve { c1: from, c2: to }) {
                             ring.sides[s] = Side::Line;
@@ -578,6 +669,21 @@ impl Outline {
         ring.follow(next, End::In);
         ring.outline()
     }
+}
+
+/// The line from `start` along `segments`, run back: where it begins, and its segments.
+fn reversed(start: [f64; 2], segments: &[Segment]) -> ([f64; 2], Vec<Segment>) {
+    let ends: Vec<[f64; 2]> = std::iter::once(start).chain(segments.iter().map(Segment::end)).collect();
+    let back = segments
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(i, s)| match *s {
+            Segment::Line { .. } => Segment::Line { to: ends[i] },
+            Segment::Curve { c1, c2, .. } => Segment::Curve { c1: c2, c2: c1, to: ends[i] },
+        })
+        .collect();
+    (*ends.last().expect("its start at least"), back)
 }
 
 /// How many pieces each of `segments` (from `start`) is flattened to before the share
@@ -1399,9 +1505,92 @@ mod tests {
         // A straight side dragged: moved with its two ends.
         assert_eq!(b.bent(1, 0.5, [10.0, 0.0]).points()[1..3], [[110.0, 0.0], [110.0, 100.0]]);
         // The side nearest a point, how far along, how far away.
-        let (side, t, far) = b.nearest([103.0, 40.0]);
+        let (side, t, far) = b.nearest([103.0, 40.0]).expect("it has sides");
         assert_eq!(side, 1);
         assert!((t - 0.4).abs() < 1e-9 && (far - 3.0).abs() < 1e-9, "{t} {far}");
+    }
+
+    #[test]
+    fn a_symmetric_outline_is_its_slice_and_the_slice_s_copies() {
+        use crate::selection::Step;
+        // A diamond round (100, 100): drawn whole, and as a slice of each symmetry that makes it.
+        let diamond = polygon(&[[100.0, 50.0], [150.0, 100.0], [100.0, 150.0], [50.0, 100.0]], true);
+        let sym = |order, mirror| Symmetry { order, mirror, center: [100.0, 100.0], angle: 0.0 };
+        let slice = |points: &[[f64; 2]], s: Symmetry| Outline { symmetry: Some(s), ..polygon(points, true) };
+        let made = [
+            // A quarter, turned four times.
+            slice(&[[100.0, 50.0], [150.0, 100.0]], sym(4, false)),
+            // A half, from the axis back to it, mirrored.
+            slice(&[[100.0, 50.0], [150.0, 100.0], [100.0, 150.0]], sym(1, true)),
+            // A quarter, from the axis to the next seam, mirrored and turned twice.
+            slice(&[[100.0, 50.0], [150.0, 100.0]], sym(2, true)),
+            // The quarter drawn the other way round: turned the other way.
+            slice(&[[150.0, 100.0], [100.0, 50.0]], sym(4, false)),
+        ];
+        let want = Mask::of(&diamond.filled());
+        // (The copies joined end to end, no side across the middle: as long round as the
+        // diamond, 4 × 50√2. A side across would still fill it, by the nonzero rule.)
+        let round = |o: &Outline| {
+            let p = o.polygon();
+            (0..p.len()).map(|i| len(sub(p[(i + 1) % p.len()], p[i]))).sum::<f64>()
+        };
+        for o in &made {
+            assert_eq!(Mask::of(&o.filled()), want, "{:?}", o.symmetry);
+            assert!((round(o) - 200.0 * std::f64::consts::SQRT_2).abs() < 1e-6, "{:?}: {}", o.symmetry, round(o));
+        }
+        // Its points: the slice's, not closed.
+        assert_eq!((made[1].point_count(), made[1].whole().symmetry), (3, None));
+        // Carried by a turn: still symmetric; by a stretch, the whole outline carried.
+        let turned = made[0].transformed(&Affine::rotate(std::f64::consts::FRAC_PI_2).about(100.0, 100.0));
+        assert!(turned.symmetry.is_some());
+        assert_eq!(Mask::of(&turned.filled()), want, "a diamond turned a quarter is itself");
+        let stretched = made[0].transformed(&Affine::scale(2.0, 1.0));
+        assert_eq!(stretched.symmetry, None);
+        assert_eq!(Mask::of(&stretched.filled()), Mask::of(&diamond.transformed(&Affine::scale(2.0, 1.0)).filled()));
+        // Kept through a file's words; one past what the editor makes refused.
+        let read: Outline = serde_json::from_str(&serde_json::to_string(&made[2]).unwrap()).unwrap();
+        assert_eq!(read, made[2]);
+        let too_many = slice(&[[100.0, 50.0], [150.0, 100.0]], sym(crate::symmetry::MOST_ORDER + 1, false));
+        assert!(Step::Outline { outline: too_many, combine: crate::mask::Combine::Replace }.refused().is_some());
+    }
+
+    #[test]
+    fn a_symmetric_outline_s_slice_is_edited_as_a_line_not_closed() {
+        // A half of a diamond, from the axis back to it, mirrored.
+        let sym = Symmetry { order: 1, mirror: true, center: [100.0, 100.0], angle: 0.0 };
+        let half = Outline { symmetry: Some(sym), ..polygon(&[[100.0, 50.0], [150.0, 100.0], [100.0, 150.0]], true) };
+        // Its ends have a side on one hand only; its points are its own three.
+        assert_eq!(half.points().len(), 3);
+        assert_eq!(half.nodes()[0].into, None);
+        // No side from the last back to the first: the nearest side to a point between them is
+        // another.
+        let (side, _, far) = half.nearest([100.0, 100.0]).expect("it has sides");
+        assert!(side < 2 && far > 30.0, "{side} {far}");
+        // A point added, moved, made smooth: still a slice, its symmetry kept.
+        let split = half.split(1, 0.5);
+        assert_eq!((split.point_count(), split.symmetry), (4, Some(sym)));
+        let moved = split.moved(&[2], [10.0, 0.0]);
+        assert_eq!(moved.points()[2], [135.0, 125.0]);
+        let smooth = moved.joined(&[0, 2], Join::Smooth);
+        assert_eq!(smooth.join(2), Join::Smooth);
+        assert!(smooth.handles(0)[0].is_none(), "a handle into the slice's first point");
+        // Its ends taken away: their sides go with them; two points at least are left.
+        let cut = smooth.without(&[0]).expect("three left");
+        assert_eq!((cut.start, cut.point_count()), ([150.0, 100.0], 3));
+        assert_eq!(smooth.without(&[3]).unwrap().points().last(), Some(&[135.0, 125.0]));
+        assert!(half.without(&[0, 1]).is_none(), "a slice of one point");
+        // Every edit kept its whole outline symmetric: its mask is its own mirror image (to a
+        // level, where reflecting a curve rounds).
+        for (k, o) in [&split, &moved, &smooth, &cut].into_iter().enumerate() {
+            let (m, flipped) = (Mask::of(&o.filled()), Mask::of(&o.transformed(&sym.reflection()).filled()));
+            let worst = (0..200)
+                .flat_map(|y| (0..200).map(move |x| (x, y)))
+                .map(|(x, y)| m.level_at(x, y).abs_diff(flipped.level_at(x, y)))
+                .max()
+                .unwrap();
+            assert!(worst <= 1, "edit {k}: {worst} apart");
+            assert!(m.level_at(100, 100) == FULL, "edit {k}: its middle not selected");
+        }
     }
 
     #[test]

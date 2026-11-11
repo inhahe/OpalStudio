@@ -45,6 +45,7 @@ pub mod raster;
 pub mod resample;
 pub mod selection;
 pub mod store;
+pub mod symmetry;
 pub mod tile;
 pub mod units;
 

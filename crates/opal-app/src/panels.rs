@@ -638,9 +638,10 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
     if settings::settings_ui(ui, settings, show, &palette, info.id) {
         st.settings_touched();
     }
-    // The outline edited (the selection's last step), its points picked.
+    // The outline edited (the selection's last step), its points picked; the symmetry's place.
     if tool == crate::tools::ToolId::Outline {
         outline_points(ui, st);
+        symmetry_place(ui, st);
     }
     // The crop box, in numbers.
     if tool == crate::tools::ToolId::Crop
@@ -649,6 +650,29 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
         ui.separator();
         ui.label(RichText::new("Box").strong());
         crate::box_fields::crop(ui, st, id, "crop-panel");
+    }
+}
+
+/// While the outline tool draws with a symmetry: where its center and axis are, and a button
+/// putting them back (the canvas's middle, straight up).
+fn symmetry_place(ui: &mut egui::Ui, st: &mut AppState) {
+    let options = crate::outline_tool::Options::of(st.tool_settings(crate::tools::ToolId::Outline));
+    let weak = st.palette.weak_text;
+    let Some(d) = st.active_mut() else { return };
+    let Some(s) = crate::outline_tool::symmetry(d, options) else { return };
+    ui.label(
+        RichText::new(format!("Centered at {:.0}, {:.0}, its axis turned {:.0}°", s.center[0], s.center[1], s.angle))
+            .color(weak)
+            .small(),
+    );
+    let moved = d.symmetry_center.is_some() || d.symmetry_angle != 0.0;
+    if ui
+        .add_enabled(moved, egui::Button::new("Center on canvas"))
+        .on_hover_text("Put the center back in the canvas's middle, its axis straight up")
+        .clicked()
+    {
+        d.symmetry_center = None;
+        d.symmetry_angle = 0.0;
     }
 }
 

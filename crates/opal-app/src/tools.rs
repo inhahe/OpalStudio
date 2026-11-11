@@ -185,6 +185,33 @@ pub static OUTLINE_SETTINGS: &[Def] = &[
         default: Init::Bool(true),
         advanced: false,
     },
+    Def {
+        key: "outline.symmetry",
+        label: "Symmetry",
+        help: "How many copies of what is drawn are turned round the symmetry's center (1 for none): an \
+               outline drawn then is one slice of the whole, which its copies complete. The center and its \
+               axis are shown on the image, and dragged to move and turn them.",
+        section: "Symmetry",
+        kind: Kind::Float {
+            min: 1.0,
+            max: opal_core::symmetry::MOST_ORDER as f64,
+            decimals: 0,
+            suffix: "",
+            log: false,
+        },
+        default: Init::Float(1.0),
+        advanced: false,
+    },
+    Def {
+        key: "outline.mirror",
+        label: "Mirror",
+        help: "What is drawn is mirrored across the symmetry's axis too (with Symmetry above 1, a kaleidoscope \
+               of twice as many parts): draw from the axis to the next seam.",
+        section: "Symmetry",
+        kind: Kind::Bool,
+        default: Init::Bool(false),
+        advanced: false,
+    },
 ];
 
 static OUTLINE: ToolInfo = ToolInfo {

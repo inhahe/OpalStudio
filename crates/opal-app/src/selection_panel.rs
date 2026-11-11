@@ -188,10 +188,20 @@ fn describe(step: &Step, origin: [f64; 2], unit: Unit, ppi: f64) -> String {
             let curves =
                 outline.segments.iter().filter(|s| matches!(s, opal_core::outline::Segment::Curve { .. })).count();
             let n = outline.point_count();
-            match curves {
+            let mut s = match curves {
                 0 => format!("Outline of {n} points"),
                 _ => format!("Outline of {n} points, {curves} of its sides curves"),
+            };
+            // A symmetric one's points are its slice's.
+            if let Some(sym) = outline.symmetry.filter(opal_core::symmetry::Symmetry::is_on) {
+                s = s.replacen("Outline of", "Slice of", 1);
+                s.push_str(&match (sym.order, sym.mirror) {
+                    (1, _) => ", mirrored".to_owned(),
+                    (k, false) => format!(", turned {k} times round"),
+                    (k, true) => format!(", mirrored and turned {k} times round"),
+                });
             }
+            s
         }
         Step::Invert => "Inverted".to_owned(),
         Step::Grow { by, corners } => {

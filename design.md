@@ -1883,8 +1883,27 @@ kaleidoscope of 2n parts.
 - **Painting (milestone 3).** A stroke is repeated as the symmetry says while it is
   painted, about a center and an axis shown on the canvas and moved by dragging them. Every
   tool built on the brush engine takes it, the retouching tools too.
-- **The outline tool (milestone 2).** An outline drawn with symmetry is made and closed as
-  a shape's is: symmetric selections.
+- **The outline tool (milestone 2, built).** *Symmetry* (the order, 1 for none) and *Mirror*
+  are its settings; the center and the axis are the image's (`DocState::symmetry_center`,
+  `symmetry_angle`: the canvas's middle and straight up until moved; not part of its history,
+  nor kept in its file), shown while the tool is chosen and symmetry is on (`draw_symmetry`):
+  each seam a faint ray from the center (the axis turned round, and with a mirror the mirror
+  lines between), the axis stronger, a handle at the center to drag it and one on the axis to
+  turn it (Shift: by 15 degrees); *Center on canvas* in Tool settings puts them back. An
+  outline drawn then is one slice (`opal_core::symmetry`, `Outline::symmetry`): not closed,
+  two points enough; the whole outline (`Outline::whole`) is the slice and its copies, one
+  after another, each joined to the next by a straight side (none where one ends where the
+  next begins: draw from the axis to the next seam), with a mirror the slice after its mirror
+  image run back, the copies turned the way that puts the next one's start nearest where the
+  last ends. It shows whole as it is drawn. The slice is what is edited (its points, sides
+  and handles as any outline's, its ends with one side each; an outline left with fewer than
+  two points goes), the copies following; moving it whole moves its center too. A transform
+  that keeps shapes alike (turns, moves, flips, scales alike both ways) carries the slice
+  and its center and axis; one that stretches one way more than another makes it the
+  ordinary outline of the whole, carried. The selection panel calls it a slice ("Slice of 2
+  points, turned 4 times round"). Scripts give it as an outline's `symmetry` (order, mirror,
+  center, angle), the selection query tells it so, and a file keeps it; an order past
+  `MOST_ORDER` (32), or a whole outline of more than a million points, is refused.
 
 ## Expressions
 

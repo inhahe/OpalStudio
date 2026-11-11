@@ -91,7 +91,11 @@ impl Step {
                 shape.center.iter().chain(&shape.size).all(|&v| within(v)) && shape.angle.is_finite()
             }
             Step::Outline { outline, .. } => {
-                outline.segments.len() < MOST_POINTS && outline.coordinates().flatten().all(within)
+                // (Its copies counted, as its whole outline has them.)
+                let copies = outline.symmetry.map_or(1, |s| s.copies());
+                outline.segments.len().saturating_mul(copies) < MOST_POINTS
+                    && outline.coordinates().flatten().all(within)
+                    && outline.symmetry.is_none_or(|s| s.refused().is_none())
             }
             Step::Grow { by, .. } => distance(*by),
             Step::Feather { width, .. } | Step::Smooth { radius: width } | Step::Border { width, .. } => {

@@ -146,6 +146,13 @@ pub struct DocState {
     pub picked: Option<crate::outline_tool::Picked>,
     /// A drag on the outline the outline tool edits.
     pub outline_drag: Option<crate::outline_tool::EditDrag>,
+    /// Where the symmetry the outline tool draws with is centered, once moved (the canvas's
+    /// middle until then), and its axis's angle (degrees clockwise from up); not part of the
+    /// image's history, nor kept in its file.
+    pub symmetry_center: Option<[f64; 2]>,
+    pub symmetry_angle: f64,
+    /// A drag moving the symmetry's center (`true`) or turning its axis (`false`).
+    pub symmetry_drag: Option<bool>,
     /// The rectangle the transform box's fields fit it into (its top-left corner from the
     /// canvas's, and its size), once one has been typed; the canvas, whatever it is then,
     /// until then.
@@ -228,6 +235,9 @@ impl DocState {
             outlining: None,
             picked: None,
             outline_drag: None,
+            symmetry_center: None,
+            symmetry_angle: 0.0,
+            symmetry_drag: None,
             shape_drag: None,
             told_dropped: false,
             groups: Vec::new(),
