@@ -52,7 +52,8 @@ pub fn tab_keytips() -> Vec<char> {
 /// the tab: the first free initial of the name's words, else any free letter of the name,
 /// else a digit.
 pub fn button_keytips(tab: usize) -> Vec<(Cmd, char)> {
-    let mut out: Vec<(Cmd, char)> = Vec::new();
+    let mut out: Vec<(Cmd, char)> =
+        RIBBON[tab].groups.iter().flat_map(|g| g.cmds).filter_map(|&c| Some((c, own_keytip(c)?))).collect();
     for g in RIBBON[tab].groups {
         for &cmd in g.cmds {
             if out.iter().any(|(c, _)| *c == cmd) {
@@ -71,6 +72,15 @@ pub fn button_keytips(tab: usize) -> Vec<(Cmd, char)> {
         }
     }
     out
+}
+
+/// The keytip a command has whatever comes before it on its tab, where one is usual: Cut's
+/// X, as in Ctrl+X and Office's ribbon, which leaves Copy its C.
+fn own_keytip(cmd: Cmd) -> Option<char> {
+    match cmd {
+        Cmd::Cut => Some('X'),
+        _ => None,
+    }
 }
 
 fn single_line(st: &AppState) -> bool {
@@ -730,6 +740,10 @@ mod tests {
             assert_eq!(k.len(), keys.len(), "tab {}", tab.name);
             assert!(!keys.contains(&'?'));
         }
+        // On the Home tab, the clipboard's as in Office (and their shortcuts), Cut before Copy.
+        let home = button_keytips(RIBBON.iter().position(|t| t.name == "Home").expect("a Home tab"));
+        let key = |cmd| home.iter().find(|(c, _)| *c == cmd).map(|(_, k)| *k);
+        assert_eq!([key(Cmd::Paste), key(Cmd::Cut), key(Cmd::Copy)], [Some('P'), Some('X'), Some('C')]);
     }
 
     #[test]

@@ -510,8 +510,10 @@ pages are all generated from it, so a command looks and behaves the same everywh
   help page for its group, at that button; over a tool, the Tools page. A small ? appears while the pointer is over a group's label and opens the same
   page. Help pages ship with the application and work offline.
 - **Keytips:** pressing Alt shows a letter on every tab and button, so everything can be
-  reached from the keyboard without memorized shortcuts. Tools get none: their own single
-  keys (H, Z) already work without Alt.
+  reached from the keyboard without memorized shortcuts. A button's is the first of its
+  name's initials, then of its letters, not taken by one before it on its tab; a few have
+  their own whatever comes before (Cut's X, as in Office, so that Copy keeps C). Tools get
+  none: their own single keys (H, Z) already work without Alt.
 - **Command search:** a search box at the ribbon's right end finds any command by name.
 - **Sizes:** full (icons and labels) or a single line. As the window narrows, groups shrink
   in steps: large buttons become small ones, then a whole group collapses into a dropdown.
