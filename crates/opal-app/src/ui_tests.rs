@@ -2849,6 +2849,24 @@ fn the_ants_march_while_seen_and_focused_and_keep_no_selection_gone() {
     let next = |h: &Harness<'static, OpalApp>| h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
     let step = std::time::Duration::from_millis(crate::canvas::ANTS_STEP_MS);
     assert!(next(&h) <= step, "the ants did not march: {:?}", next(&h));
+    // A new shape's, while it is dragged and the pointer stays still, with nothing selected.
+    command(&mut h, Cmd::Deselect);
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Select);
+    h.run();
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let at = |x: f32, y: f32| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    h.hover_at(at(150.0, 100.0));
+    h.run();
+    h.drag_at(at(150.0, 100.0));
+    h.run();
+    h.hover_at(at(200.0, 150.0));
+    h.run();
+    assert!(h.state().state().active().unwrap().select_drag.is_some());
+    assert!(next(&h) <= step, "the drag's ants did not march: {:?}", next(&h));
+    h.drop_at(at(200.0, 150.0));
+    h.run();
+    select_rect(&mut h, [10.0, 20.0, 110.0, 70.0]);
     // Scrolled far from the outline, they stop.
     let offset = h.state().state().active().unwrap().view.offset;
     h.state_mut().state_mut().active_mut().unwrap().view.offset = offset + egui::vec2(100_000.0, 0.0);

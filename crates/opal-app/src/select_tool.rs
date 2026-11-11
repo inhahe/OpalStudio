@@ -279,5 +279,6 @@ pub fn draw(ui: &egui::Ui, drag: &SelectDrag, options: Options, rect: Rect, to_s
             })
             .collect(),
     };
-    crate::canvas::draw_ants(ui, &[line], rect, to_screen, ui.ctx().input(|i| i.time));
+    let seen = crate::canvas::draw_ants(ui, &[line], rect, to_screen, ui.ctx().input(|i| i.time));
+    crate::canvas::march(ui.ctx(), seen);
 }

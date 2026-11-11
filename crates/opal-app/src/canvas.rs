@@ -431,10 +431,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     // What is selected: its outline, the marching ants. They march while they are seen and
     // the window has the focus: each step is a frame of the whole window.
     if let Some(lines) = d.selection_outline() {
-        let seen = draw_ants(ui, &lines, rect, &to_screen, ctx.input(|i| i.time));
-        if seen && ctx.input(|i| i.focused) {
-            ctx.request_repaint_after(std::time::Duration::from_millis(ANTS_STEP_MS));
-        }
+        march(&ctx, draw_ants(ui, &lines, rect, &to_screen, ctx.input(|i| i.time)));
     }
     if let Some(drag) = &d.select_drag {
         crate::select_tool::draw(ui, drag, select, rect, &to_screen);
@@ -498,6 +495,14 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
 
 /// How often the marching ants move on, in milliseconds.
 pub(crate) const ANTS_STEP_MS: u64 = 100;
+
+/// Asks for the frame in which marching ants drawn this frame take their next step, if
+/// they were `seen` and the window has the focus: each step is a frame of the whole window.
+pub(crate) fn march(ctx: &egui::Context, seen: bool) {
+    if seen && ctx.input(|i| i.focused) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(ANTS_STEP_MS));
+    }
+}
 
 /// The selection's outline (`lines`, closed, in document coordinates), as marching ants:
 /// black dashes on white, moving along it as `time` (seconds) goes on. Each line is drawn
