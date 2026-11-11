@@ -1812,14 +1812,14 @@ impl AppState {
         let view = (method.role == Role::Command).then(|| {
             (self.active_doc, self.docs.iter().map(|d| (d.id, d.layer_selection_state())).collect::<Vec<_>>())
         });
-        self.calling = Some(Calling { name: name.to_owned(), heard, view: view.clone() });
+        self.calling = Some(Calling { name: name.to_owned(), heard, view });
         let reply = match method.cmd {
             Some(cmd) => self.carry_out(cmd, method.params, &args, ctx),
             None if method.name == "image" => self.image_by_args(&args, ctx),
             None if method.name == "pixels" => self.pixels_by_args(&args, ctx),
             None if method.name == "put_pixels" => self.put_pixels_by_args(&args, ctx),
             None if method.name == "crop" => match self.crop_by_args(&args) {
-                Ok(()) => self.reply_when_done("crop", |st, id| st.canvas_json_of(id)),
+                Ok(()) => self.reply_when_done(|st, id| st.canvas_json_of(id)),
                 Err(why) => Reply::Now(Err(why)),
             },
             None if method.name == "select_rectangle" => {
@@ -1831,7 +1831,7 @@ impl AppState {
             None if method.name == "set_preference" => Reply::Now(self.set_preference(&args, ctx)),
             None => Reply::Now(self.answer(&method.name, &args)),
         };
-        self.calling = None;
+        let view = self.calling.take().expect("set above").view;
         let (refusals, notes) = self.told_since(told, notice);
         let reply = match reply {
             Reply::Now(Ok(_)) if !refusals.is_empty() => Reply::Now(Err(refusals.join("\n"))),
@@ -1907,10 +1907,10 @@ impl AppState {
         (refusals, notes)
     }
 
-    /// The reply to call `name`, which may have begun an edit of the active image (see
-    /// `edits`): once that is applied, what `answer` gives of that image then; at once, if it
-    /// began none (nothing, with no image open).
-    fn reply_when_done(&mut self, name: &str, answer: impl FnOnce(&AppState, DocId) -> Value + 'static) -> Reply {
+    /// The reply to the call being carried out (`calling`), which may have begun an edit of the
+    /// active image (see `edits`): once that is applied, what `answer` gives of that image then;
+    /// at once, if it began none (nothing, with no image open).
+    fn reply_when_done(&mut self, answer: impl FnOnce(&AppState, DocId) -> Value + 'static) -> Reply {
         let Some(id) = self.active_doc else { return Reply::Now(Ok(json!({}))) };
         let begun = self.doc(id).and_then(|d| d.busy.as_ref()).is_some_and(|b| b.answer.is_none());
         if !begun {
@@ -1918,7 +1918,7 @@ impl AppState {
         }
         self.next_answer += 1;
         let n = self.next_answer;
-        let call = self.calling.clone().unwrap_or(Calling { name: name.to_owned(), heard: true, view: None });
+        let call = self.calling.clone().expect("a call's reply");
         let b = self.doc_mut(id).and_then(|d| d.busy.as_mut()).expect("checked above");
         b.answer = Some(crate::edits::Answer { n, call, with: Box::new(answer) });
         Reply::Later(n)
@@ -2087,7 +2087,7 @@ impl AppState {
                 let spec = ResizeImage { width, height, keep_aspect: false, resolution, keep_print_size: false };
                 let resample = args.flag("resample").unwrap_or_else(|| self.prefs.bool("resize.resample"));
                 self.resize_image(&spec, resample);
-                self.reply_when_done("resize_image", |st, id| st.canvas_json_of(id))
+                self.reply_when_done(|st, id| st.canvas_json_of(id))
             }
             Cmd::ResizeCanvas => {
                 let c = self.active().expect("available").doc().canvas;
@@ -2115,7 +2115,7 @@ impl AppState {
                 if degrees != 0.0 {
                     self.rotate_by(&RotateBy { degrees, grow: args.flag("grow").unwrap_or(true) });
                 }
-                self.reply_when_done("rotate_by", |st, id| st.canvas_json_of(id))
+                self.reply_when_done(|st, id| st.canvas_json_of(id))
             }
             Cmd::RotateCw | Cmd::RotateCcw | Cmd::Rotate180 | Cmd::FlipHorizontal | Cmd::FlipVertical => {
                 self.turn(match cmd {
@@ -2125,7 +2125,7 @@ impl AppState {
                     Cmd::FlipHorizontal => Turn::FlipHorizontal,
                     _ => Turn::FlipVertical,
                 });
-                self.reply_when_done(&snake(&format!("{cmd:?}")), |st, id| st.canvas_json_of(id))
+                self.reply_when_done(|st, id| st.canvas_json_of(id))
             }
             Cmd::ToggleVisible | Cmd::ToggleLock => {
                 let visibility = cmd == Cmd::ToggleVisible;
@@ -2229,7 +2229,7 @@ impl AppState {
                 }
                 let id = d.id;
                 self.commit_box(id);
-                self.reply_when_done("transform_selection", |st, id| selection_json(st.doc(id).expect("its image")))
+                self.reply_when_done(|st, id| selection_json(st.doc(id).expect("its image")))
             }
             Cmd::Rename => {
                 let id = self.active().and_then(|d| d.active_layer()).expect("available");
@@ -2257,14 +2257,13 @@ impl AppState {
                     },
                 };
                 self.add_modifier(step);
-                let name = snake(&format!("{cmd:?}"));
-                self.reply_when_done(&name, |st, id| selection_json(st.doc(id).expect("its edit was applied")))
+                self.reply_when_done(|st, id| selection_json(st.doc(id).expect("its edit was applied")))
             }
             Cmd::SelectLayerPixels => {
                 let combine = args.text("combine").and_then(opal_core::mask::Combine::named).unwrap_or_default();
                 let layer = self.active().and_then(|d| d.active_layer()).expect("available");
                 self.select_layer_pixels(layer, combine);
-                self.reply_when_done("select_layer_pixels", |st, id| selection_json(st.doc(id).expect("open")))
+                self.reply_when_done(|st, id| selection_json(st.doc(id).expect("open")))
             }
             Cmd::SelectAll | Cmd::Deselect | Cmd::Reselect | Cmd::InvertSelection => {
                 self.run(cmd, ctx);
@@ -2274,7 +2273,7 @@ impl AppState {
             _ => {
                 // The rest take no more than the image and layers set above.
                 self.run(cmd, ctx);
-                self.reply_when_done(&snake(&format!("{cmd:?}")), |st, id| st.selected_layers_json_of(id))
+                self.reply_when_done(|st, id| st.selected_layers_json_of(id))
             }
         }
     }
@@ -3369,6 +3368,21 @@ mod tests {
         now(&mut st, "invert_selection", json!({})).unwrap();
         let why = now(&mut st, "transform_selection", json!({ "x": 0 })).unwrap_err();
         assert!(why.contains("no box"), "{why}");
+    }
+
+    #[test]
+    fn what_reselect_brings_back_turns_and_resizes_with_the_image() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 40, "height": 20 })).unwrap();
+        let rect = json!({ "x": 0, "y": 0, "width": 10, "height": 5, "smooth": false });
+        now(&mut st, "select_rectangle", rect).unwrap();
+        now(&mut st, "deselect", json!({})).unwrap();
+        now(&mut st, "rotate_cw", json!({})).unwrap();
+        now(&mut st, "resize_image", json!({ "width": 40, "height": 80 })).unwrap();
+        // A quarter turn clockwise: the top-left corner's 10 x 5 is the top-right's 5 x 10 of
+        // the 20 x 40 canvas; twice the size, 10 x 20.
+        let s = now(&mut st, "reselect", json!({})).unwrap();
+        assert_eq!(s["bounds"], json!([30, 0, 10, 20]), "{s}");
     }
 
     #[test]

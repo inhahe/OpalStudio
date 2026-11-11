@@ -1148,6 +1148,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         Clear | Cut => crate::select::clear_refused(st.active().ok_or("Open or create an image first.")?),
         Reselect => {
             let d = st.active().ok_or("Open or create an image first.")?;
+            let d = d.doc();
             d.deselected.as_ref().map(|_| ()).ok_or_else(|| "Nothing has been deselected in this image.".to_owned())
         }
         SelectLayerPixels => active_layer(st).map(|_| ()),

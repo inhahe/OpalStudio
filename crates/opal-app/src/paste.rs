@@ -138,8 +138,10 @@ impl AppState {
                 self.answered.push((a.n, Err("Another paste was asked for before this one was placed.".into())));
             }
         }
-        match self.clipboard.read_image() {
-            Read::Ready(result) => self.paste_read(*result, in_place, target, answer),
+        let (rx, result) = match self.clipboard.read_image() {
+            // Read at once (a copy made here): placed now, unless it must wait as one read
+            // later would (see `poll_paste`).
+            Read::Ready(result) => (std::sync::mpsc::channel().1, Some(*result)),
             Read::Later(work) => {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let ctx = ctx.clone();
@@ -149,20 +151,26 @@ impl AppState {
                     let _ = tx.send(work());
                     ctx.request_repaint();
                 });
-                let d = target.and_then(|t| self.doc(t));
-                let notice = self.reading_notice().to_string();
-                self.reading = Some(Reading {
-                    rx,
-                    result: None,
-                    in_place,
-                    target,
-                    box_then: d.and_then(|d| d.transform.as_ref()).map(|s| s.serial),
-                    crop_then: d.and_then(|d| d.crop),
-                    notice: notice.clone(),
-                    answer,
-                });
-                self.notify(notice);
+                (rx, None)
             }
+        };
+        let ready = result.is_some();
+        let d = target.and_then(|t| self.doc(t));
+        let notice = if ready { String::new() } else { self.reading_notice().to_string() };
+        self.reading = Some(Reading {
+            rx,
+            result,
+            in_place,
+            target,
+            box_then: d.and_then(|d| d.transform.as_ref()).map(|s| s.serial),
+            crop_then: d.and_then(|d| d.crop),
+            notice: notice.clone(),
+            answer,
+        });
+        if ready {
+            self.poll_paste(false);
+        } else {
+            self.notify(notice);
         }
     }
 
@@ -445,7 +453,8 @@ impl AppState {
     pub(crate) fn transform(&mut self) {
         let sampling = prefs::sampling(&self.prefs, "transform");
         let d = self.active_mut().expect("available");
-        if !d.begin_transform(sampling) {
+        // (Refused while an edit is under way, the status bar says why.)
+        if !d.begin_transform(sampling) && d.busy.is_none() {
             self.message(MessageKind::Info, "Transform", "The selected layers hold nothing to transform.");
         }
     }

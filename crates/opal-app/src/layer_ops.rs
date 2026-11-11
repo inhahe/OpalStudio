@@ -216,14 +216,17 @@ impl AppState {
         let sel: Vec<LayerId> = d.selected_layers().into_iter().filter(|&l| shows_in(doc, l)).collect();
         let Some(&top) = sel.last() else { return };
         let layers: Vec<Arc<Layer>> = sel.iter().map(|&l| Arc::new(doc.layer(l).expect("selected").clone())).collect();
-        // What compositing the selected groups leaves out stays, just below the result.
-        let kept: Vec<Arc<Layer>> = layers.iter().flat_map(|l| hidden_inside(l)).collect();
         let memory = match check_size(&layers, &d.doc().canvas.rect()) {
             Ok(memory) => memory,
             Err(why) => return self.message(MessageKind::Info, "Merge Selected", why),
         };
         let adjacent = adjacent_siblings(doc, &sel);
+        // The layers as the edit finds them (a rename left open is finished as it begins).
         let work = move |doc: &mut Document, ids: &mut IdGen, progress: &Progress| {
+            let layers: Vec<Arc<Layer>> =
+                sel.iter().filter_map(|&l| doc.layer(l)).map(|l| Arc::new(l.clone())).collect();
+            // What compositing the selected groups leaves out stays, just below the result.
+            let kept: Vec<Arc<Layer>> = layers.iter().flat_map(|l| hidden_inside(l)).collect();
             let image = composited(&layers, None, progress)?;
             tree(|| {
                 let name = doc.layer(top).ok_or(TreeError::NoSuchLayer(top))?.name.clone();
@@ -288,13 +291,15 @@ impl AppState {
     pub(crate) fn merge_group(&mut self) {
         let d = self.active().expect("available");
         let id = d.active_layer().expect("available");
-        let group = d.doc().layer(id).expect("exists").clone();
-        let children = group.children().expect("a group").to_vec();
+        let children = d.doc().layer(id).and_then(|g| g.children()).expect("a group").to_vec();
         let memory = match check_size(&children, &d.doc().canvas.rect()) {
             Ok(memory) => memory,
             Err(why) => return self.message(MessageKind::Info, "Merge Group", why),
         };
+        // The group as the edit finds it (a rename left open is finished as it begins).
         let work = move |doc: &mut Document, ids: &mut IdGen, progress: &Progress| {
+            let group = doc.layer(id).ok_or_else(|| TreeError::NoSuchLayer(id).to_string())?.clone();
+            let children = group.children().ok_or_else(|| TreeError::NotAGroup(id).to_string())?.to_vec();
             let image = composited(&children, None, progress)?;
             tree(|| {
                 let pos = doc.position(id).ok_or(TreeError::NoSuchLayer(id))?;

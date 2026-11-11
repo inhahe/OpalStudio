@@ -267,7 +267,8 @@ pub const NOTICE_SHOWN: std::time::Duration = std::time::Duration::from_secs(6);
 /// A paste whose clipboard reading runs on a worker thread.
 pub struct Reading {
     pub rx: std::sync::mpsc::Receiver<crate::clipboard::ReadResult>,
-    /// What the reading gave, once it has come back, while the paste waits to be placed.
+    /// What the reading gave, once it has come back (at once, for a copy made here), while
+    /// the paste waits to be placed.
     pub result: Option<crate::clipboard::ReadResult>,
     pub in_place: bool,
     /// The document it goes to: the one active when it was asked for.

@@ -436,6 +436,44 @@ mod tests {
     }
 
     #[test]
+    fn a_paste_read_at_once_waits_for_the_edit_under_way_on_its_image() {
+        use crate::clipboard::{Pasted, TestClipboard};
+        let mut st = app();
+        st.edit_wait = Duration::ZERO;
+        let px = vec![opal_core::tile::pixel_from_f32([1.0; 4]); 4];
+        let image = opal_core::raster::RasterImage::from_pixels(2, 2, &px);
+        let pasted = Pasted { width: 2, height: 2, image, from: None, resolution: None, warnings: Vec::new() };
+        st.clipboard = Box::new(TestClipboard { image: Some(pasted), ..Default::default() });
+        let (go, wait) = mpsc::channel();
+        let (told, _heard) = mpsc::channel();
+        waiting_edit(&mut st, "Renamed", wait, told);
+        st.paste(false, &egui::Context::default());
+        assert!(st.active().unwrap().transform.is_none(), "a box opened on the busy image");
+        assert!(st.notice.as_ref().is_some_and(|(n, _)| n.contains("edit under way")), "{:?}", st.notice);
+        go.send(()).unwrap();
+        st.finish_edits();
+        st.poll_paste(false);
+        let d = st.active().unwrap();
+        assert!(d.transform.is_some(), "the paste was not placed once the edit was done");
+        assert_eq!(d.doc().layers[0].name, "Renamed", "the edit was lost");
+    }
+
+    #[test]
+    fn a_rename_left_open_as_a_merge_begins_is_kept_by_it() {
+        let mut st = app();
+        let ctx = egui::Context::default();
+        st.run(Cmd::NewGroup, &ctx);
+        let doc = st.active_doc.unwrap();
+        let group = st.active().unwrap().active_layer().unwrap();
+        st.renaming = Some((doc, group, "Named first".into()));
+        st.run(Cmd::MergeGroup, &ctx);
+        st.finish_edits();
+        let d = st.active().unwrap();
+        assert_eq!(d.history.undo_label(), Some("Merge group"));
+        assert_eq!(d.doc().layer(group).unwrap().name, "Named first");
+    }
+
+    #[test]
     fn a_cancelled_edit_frees_its_image_at_once_and_a_failed_one_says_why() {
         let mut st = app();
         st.edit_wait = Duration::ZERO;

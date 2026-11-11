@@ -468,6 +468,10 @@ pub struct Document {
     pub layers: Vec<Arc<Layer>>,
     /// What is selected, if anything: operations limited to it act through its mask.
     pub selection: Option<Arc<crate::selection::Selection>>,
+    /// What was selected when the selection was last taken away (Deselect), for Reselect to
+    /// bring back: carried as the selection is when the image is turned, flipped, resized or
+    /// cropped. Not saved.
+    pub deselected: Option<Arc<crate::selection::Selection>>,
 }
 
 impl Document {
@@ -477,6 +481,7 @@ impl Document {
             resolution: crate::units::DEFAULT_PPI,
             layers: Vec::new(),
             selection: None,
+            deselected: None,
         }
     }
 
@@ -493,7 +498,7 @@ impl Document {
     /// Whether it is `other` as far as an edit can tell: what saving it keeps, and what is
     /// selected.
     pub fn same_as(&self, other: &Document) -> bool {
-        self.saves_as(other) && self.selection == other.selection
+        self.saves_as(other) && self.selection == other.selection && self.deselected == other.deselected
     }
 
     /// Visits every layer depth first, bottom to top, with its depth (0 for top level).

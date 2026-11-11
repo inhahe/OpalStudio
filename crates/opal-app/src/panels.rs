@@ -229,31 +229,19 @@ fn layer_row(ui: &mut egui::Ui, cx: &mut RowCtx<'_>, layer: &Arc<Layer>, pos: Po
     } else if cx.thumb == 0.0 {
         row.label(icon(icons::LAYER, 15.0).color(cx.weak));
     }
+    let mut thumb = None;
     if cx.thumb > 0.0 {
         let ppp = row.ctx().pixels_per_point();
         let size = (cx.thumb * ppp).round() as u32;
         let texture = cx.thumbs.layer(row.ctx(), layer, cx.doc.canvas.rect(), size);
-        let (r, clicked) = row.allocate_exact_size(Vec2::splat(cx.thumb), Sense::click());
-        // Ctrl+click selects its pixels (Shift adding them, Alt taking them away, both keeping
-        // what is in both); a click as on the row.
-        let clicked = clicked.on_hover_text(
+        // Only hovered: the row takes its clicks (a right-click's menu, a double-click's
+        // rename), a Ctrl+click on it selecting its pixels (see below).
+        let (r, hovered) = row.allocate_exact_size(Vec2::splat(cx.thumb), Sense::hover());
+        hovered.on_hover_text(
             "Ctrl+click: select its pixels. With Shift, add them to what is selected; with Alt, take them \
              away; with both, keep only what is in both.",
         );
-        if clicked.clicked() {
-            let m = row.input(|i| i.modifiers);
-            cx.actions.push(if m.command {
-                let combine = match (m.shift, m.alt) {
-                    (false, false) => Combine::Replace,
-                    (true, false) => Combine::Add,
-                    (false, true) => Combine::Subtract,
-                    (true, true) => Combine::Intersect,
-                };
-                Action::SelectPixels(layer.id, combine)
-            } else {
-                Action::Click(layer.id, m)
-            });
-        }
+        thumb = Some(r);
         let fit = texture.size_vec2() / ppp;
         let shown = Rect::from_center_size(r.center(), fit);
         checkerboard(row.painter(), shown);
@@ -269,6 +257,8 @@ fn layer_row(ui: &mut egui::Ui, cx: &mut RowCtx<'_>, layer: &Arc<Layer>, pos: Po
         Some((id, name)) if *id == layer.id => {
             let mut text = name.clone();
             let r = row.add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY));
+            // It has no label of its own beside it: named for screen readers.
+            row.ctx().accesskit_node_builder(r.id, |b| b.set_label("Layer name"));
             if !r.has_focus() && !r.lost_focus() {
                 r.request_focus();
             }
@@ -290,8 +280,20 @@ fn layer_row(ui: &mut egui::Ui, cx: &mut RowCtx<'_>, layer: &Arc<Layer>, pos: Po
         }
     }
 
-    if response.clicked() {
-        cx.actions.push(Action::Click(layer.id, ui.input(|i| i.modifiers)));
+    // Ctrl+click on the thumbnail selects its pixels (Shift adding them, Alt taking them away,
+    // both keeping what is in both); elsewhere, or without Ctrl, a click on the row.
+    let on_thumb = |p: Option<egui::Pos2>| thumb.zip(p).is_some_and(|(r, p): (Rect, _)| r.contains(p));
+    let m = ui.input(|i| i.modifiers);
+    if response.clicked() && m.command && on_thumb(response.interact_pointer_pos()) {
+        let combine = match (m.shift, m.alt) {
+            (false, false) => Combine::Replace,
+            (true, false) => Combine::Add,
+            (false, true) => Combine::Subtract,
+            (true, true) => Combine::Intersect,
+        };
+        cx.actions.push(Action::SelectPixels(layer.id, combine));
+    } else if response.clicked() {
+        cx.actions.push(Action::Click(layer.id, m));
     } else if response.secondary_clicked() || response.drag_started() {
         cx.actions.push(Action::Touch(layer.id));
     }

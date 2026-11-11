@@ -168,8 +168,6 @@ pub struct DocState {
     /// An edit worked out off the interface thread, while one is (see `edits`): the image is
     /// not to be changed until it is applied or cancelled.
     pub busy: Option<crate::edits::Busy>,
-    /// What Deselect last took away, for Reselect.
-    pub deselected: Option<std::sync::Arc<opal_core::selection::Selection>>,
 }
 
 impl DocState {
@@ -207,7 +205,6 @@ impl DocState {
             made_by: HashMap::new(),
             named: HashSet::new(),
             busy: None,
-            deselected: None,
         }
     }
 
@@ -453,6 +450,11 @@ impl DocState {
     /// document is in now (as [`apply`](Self::apply) records it); a transform box in
     /// progress is applied first.
     pub fn commit_pending(&mut self) {
+        // Neither begins while the image is busy (see `refused`), and the edit commits both first.
+        debug_assert!(
+            self.busy.is_none() || (self.pending.is_none() && self.transform.is_none()),
+            "an edit in progress on an image busy with another"
+        );
         self.finish_transform();
         if let Some(mut p) = self.pending.take() {
             // A selection edited to nothing (kept while the edit went on, so that its box
@@ -486,7 +488,7 @@ impl DocState {
 
     /// Why nothing may change the image now, if nothing may: an edit is under way on it (see
     /// `edits`). Told in the status bar, then: what was asked is not done.
-    fn refused(&mut self) -> bool {
+    pub(crate) fn refused(&mut self) -> bool {
         let why = self.busy.as_ref().map(crate::edits::Busy::why);
         let refused = why.is_some();
         if why.is_some() {

@@ -286,8 +286,8 @@ pub fn canvas(
         && let Some(p) = response.interact_pointer_pos()
     {
         select(d, &SelectDrag::begun(point(p), combine, modifiers), options);
-    } else if !options.line() && response.clicked() && !modifiers.any() && d.pixel_selection().is_some() {
-        d.set_pixel_selection(None, "Deselect");
+    } else if !options.line() && response.clicked() && !modifiers.any() {
+        d.deselect_pixels();
     }
 }
 

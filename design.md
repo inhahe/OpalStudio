@@ -330,15 +330,19 @@ red, a preference.
 On the Select tab (and for scripts, by the same names):
 
 - **Select All** (Ctrl+A) selects the canvas, as Photoshop's does: what lies past it is
-  not selected. **Deselect** (Ctrl+D). **Reselect** (Ctrl+Shift+D) brings back what Deselect
-  last took away in the image, steps and all (`DocState::deselected`). **Invert Selection**
+  not selected. **Deselect** (Ctrl+D), or a click with the Select tool. **Reselect**
+  (Ctrl+Shift+D) brings back what either last took away in the image, steps and all
+  (`Document::deselected`: kept with each history state, carried as the selection is when the
+  image is turned, flipped, resized or cropped, not saved). **Invert Selection**
   (Ctrl+Shift+I): a partly selected pixel becomes as selected as it was not, and what lies
   past the canvas becomes selected. Each is a history state.
 - **Select Layer's Pixels** selects the active layer's pixels, each as much as it is opaque
   (a pixel half transparent selected half), as the layer holds them, whatever its opacity
   and visibility (`Mask::of_opacity`), past the canvas too. Ctrl+click on a layer's
   thumbnail does the same for that layer, Ctrl+Shift adding it to what is selected,
-  Ctrl+Alt taking it away, Ctrl+Shift+Alt keeping only what is in both. It is a step of the
+  Ctrl+Alt taking it away, Ctrl+Shift+Alt keeping only what is in both (the row takes the
+  click and tells it apart, so that the thumbnail's other clicks are the row's: a
+  right-click's menu, a double-click's rename). It is a step of the
   recipe, a mask step combined as a shape is (a mask step combines as its `combine` says;
   one replacing is what a carried selection becomes); worked out off the interface thread
   (*Edits that take long*).
@@ -487,12 +491,15 @@ with the outline's length (a tile wholly on one side of half is none of it), wor
 blocks of tiles, a window each (the block and the band round it), of the size that should
 take the least time for the tiles to work out (larger blocks repeat less of their margin, but
 fewer fit at once, and may cover more far from the outline), by as many workers as their
-windows fit in half a gigabyte, the other threads left free. The memory it takes is asked
-for as it goes (`modify::Bounds`, which also stop it when it is not wanted): the windows
-before it begins (given back once it is done, so that the next step of a recipe may have
-them), then each block's tiles as they are kept, at the size they take (a row of levels a
-tile, for a straight edge), against what was free when it began, measured on its own thread
-(`memory::Admission`). Refused, it stops: the dialog says why, a script's call is
+windows fit in half a gigabyte (and no more than it has blocks), the other threads left free.
+The memory it takes is asked for as it goes (`modify::Bounds`, which also stop it when it is
+not wanted): the windows before it begins (given back once it is done, so that the next step
+of a recipe may have them), then each block's tiles as they are kept, at the size they take (a
+row of levels a tile, for a straight edge; what alike tiles side by side save, once kept as
+one, given back), against what was free when it began, measured on its own thread
+(`memory::Admission`). A modifier's mask that goes once the next is made (a
+pass of Smooth, a step of a recipe worked out again but the last two, whose masks a selection
+keeps) gives back what it took. Refused, it stops: the dialog says why, a script's call is
 refused, and Rotate, Flip or Resize Image working a carried recipe out again fail, saying
 why.
 Distances go to 1000 pixels at most (`modify::MAX_DISTANCE`).

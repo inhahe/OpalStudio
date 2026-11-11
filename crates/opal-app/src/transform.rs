@@ -573,6 +573,10 @@ impl DocState {
     ) {
         let PasteAs { kind, name, print } = how;
         debug_assert!(kind != Kind::Transform, "a paste is placed, not transformed");
+        // A paste waits for the edit under way (`AppState::paste_waits`).
+        if self.refused() {
+            return;
+        }
         self.commit_pending();
         let was_selected = self.selected_layers_active_last();
         let (layer_id, object) = (self.ids.layer(), self.ids.object());
@@ -611,6 +615,9 @@ impl DocState {
     /// session, drawn with `sampling` (image objects keep their own). Returns whether there
     /// was anything to transform.
     pub fn begin_transform(&mut self, sampling: Sampling) -> bool {
+        if self.refused() {
+            return false;
+        }
         self.commit_pending();
         let was_selected = self.selected_layers_active_last();
         let mut doc = self.history.doc().clone();
@@ -669,15 +676,18 @@ impl DocState {
     /// Starts transforming the selection itself (Transform Selection): the box round what is
     /// selected moves, sizes and turns it as Rotate, Flip and Resize Image carry it
     /// ([`Selection::transformed`](opal_core::selection::Selection::transformed)), nothing else
-    /// changing. Refused, saying why, with nothing selected, or a selection reaching past every
-    /// edge, which no box goes round.
-    pub fn begin_selection_transform(&mut self) -> Result<(), &'static str> {
+    /// changing. Refused, saying why, with nothing selected, a selection reaching past every
+    /// edge, which no box goes round, or an edit under way on the image.
+    pub fn begin_selection_transform(&mut self) -> Result<(), String> {
+        if let Some(b) = &self.busy {
+            return Err(b.why());
+        }
         self.commit_pending();
         let extent = self.pixel_selection().map(|s| s.mask().extent());
         let frame = match extent {
             Some(opal_core::mask::Extent::Within(b)) => b.to_f(),
-            Some(opal_core::mask::Extent::Unbounded) => return Err(NO_BOX),
-            Some(opal_core::mask::Extent::Nothing) | None => return Err("Nothing is selected."),
+            Some(opal_core::mask::Extent::Unbounded) => return Err(NO_BOX.into()),
+            Some(opal_core::mask::Extent::Nothing) | None => return Err("Nothing is selected.".into()),
         };
         let was_selected = self.selected_layers_active_last();
         let doc = self.history.doc().clone();

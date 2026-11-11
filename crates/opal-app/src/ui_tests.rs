@@ -3293,6 +3293,9 @@ fn the_select_tool_selects_a_rectangle_dragged_on_whole_pixels_and_combines_by_t
     h.drop_at(at);
     h.run();
     assert_eq!(selected(&h), None, "a click did not deselect");
+    let ctx = h.ctx.clone();
+    h.state_mut().state_mut().run(crate::commands::Cmd::Reselect, &ctx);
+    assert!(selected(&h).is_some(), "Reselect did not bring back what the click took away");
 }
 
 #[test]
@@ -3343,6 +3346,51 @@ fn enter_applies_a_transform_selection_box_off_the_interface_thread_its_ants_mov
     h.run();
     assert!(off_thread, "worked out on the interface thread");
     assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 150, 300, 240))));
+}
+
+#[test]
+fn a_layer_s_thumbnail_takes_ctrl_click_and_leaves_its_row_the_other_clicks() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 200, 100);
+    h.state_mut().state_mut().prefs.set("ui.layer_thumbs", crate::settings::Value::Choice("large".into()));
+    h.run();
+    // The thumbnail: just left of the layer's name, 44 points square.
+    let name = h.get_by_label("Background").rect();
+    let spacing = h.ctx.global_style().spacing.item_spacing.x;
+    let at = egui::pos2(name.left() - spacing - 22.0, name.center().y);
+    let press = |h: &mut Harness<'static, OpalApp>, button, modifiers, times| {
+        h.hover_at(at);
+        h.run();
+        // All in one frame: the harness runs a frame for each event it queues, a quarter of a
+        // second apart, too far for a double-click.
+        for _ in 0..times {
+            for pressed in [true, false] {
+                h.input_mut().events.push(egui::Event::PointerButton { pos: at, button, pressed, modifiers });
+            }
+        }
+        h.step();
+        h.run();
+    };
+    // A double-click: its name to type.
+    press(&mut h, egui::PointerButton::Primary, egui::Modifiers::NONE, 2);
+    assert!(h.state().state().renaming.is_some(), "the rename did not start");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(h.state().state().renaming.is_none(), "the rename stayed open");
+    // Ctrl+click: its pixels selected.
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::COMMAND));
+    press(&mut h, egui::PointerButton::Primary, egui::Modifiers::COMMAND, 1);
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+    h.state_mut().state_mut().finish_edits();
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().history.undo_label(), Some("Select layer's pixels"));
+    // A right-click: the layer's menu.
+    let menus = |h: &Harness<'static, OpalApp>| h.query_all_by_label_contains("Duplicate").count();
+    let before = menus(&h);
+    press(&mut h, egui::PointerButton::Secondary, egui::Modifiers::NONE, 1);
+    assert!(menus(&h) > before, "no menu opened");
 }
 
 #[test]

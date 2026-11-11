@@ -121,10 +121,11 @@ pub fn transform_all(
     progress: &Progress,
 ) -> Result<bool, String> {
     let mut to = Drawing::new(*keep, memory);
-    // An object at a time, and the selection carried (its modifiers worked out again) last.
+    // An object at a time, and the selections carried (their modifiers worked out again) last.
     let mut objects = 0;
     doc.for_each_layer(&mut |l, _| objects += l.objects().len());
-    progress.begin(objects as u64 + u64::from(doc.selection.is_some()));
+    let selections = u64::from(doc.selection.is_some()) + u64::from(doc.deselected.is_some());
+    progress.begin(objects as u64 + selections);
     fn walk(
         layer: &mut Layer,
         m: &Affine,
@@ -137,7 +138,6 @@ pub fn transform_all(
             LayerContent::Objects(objects) => {
                 for o in objects {
                     crate::edits::go_on(progress)?;
-                    progress.advance(1);
                     o.kind = match &o.kind {
                         ObjectKind::Image(i) => {
                             let t = i.transform.then(*m);
@@ -169,6 +169,7 @@ pub fn transform_all(
                             }
                         }
                     };
+                    progress.advance(1);
                 }
             }
             LayerContent::Group(children) => {
@@ -183,13 +184,19 @@ pub fn transform_all(
         walk(Arc::make_mut(l), m, resample, sampling, &mut to, progress)?;
     }
     // What is selected goes with what it was selected on (its modifiers worked out again,
-    // within what is left of the memory).
-    if let Some(s) = doc.selection.take() {
-        let stop = || progress.is_cancelled();
-        let carried = crate::memory::Admission::within(to.memory, &stop, |b| s.transformed_within(m, b))?;
-        doc.selection = Some(Arc::new(carried)).filter(|s| !s.is_empty());
-        progress.advance(1);
-    }
+    // within what is left of the memory), and so does what Reselect would bring back.
+    let stop = || progress.is_cancelled();
+    let (selection, deselected) = (doc.selection.take(), doc.deselected.take());
+    (doc.selection, doc.deselected) = crate::memory::Admission::within(to.memory, &stop, |b| {
+        use opal_core::selection::Selection;
+        let carry = |s: Option<Arc<Selection>>| -> Result<Option<Arc<Selection>>, opal_core::modify::Halt> {
+            let Some(s) = s else { return Ok(None) };
+            let carried = s.transformed_within(m, b)?;
+            progress.advance(1);
+            Ok(Some(Arc::new(carried)).filter(|s| !s.is_empty()))
+        };
+        Ok((carry(selection)?, carry(deselected)?))
+    })?;
     Ok(to.clipped)
 }
 

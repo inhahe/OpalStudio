@@ -166,13 +166,18 @@ impl Mask {
     /// The mask with its outline smoothed over `radius` pixels: closed (grown, then shrunk
     /// back), so that pinholes and notches narrower than twice the radius fill and inward
     /// corners round, then opened (shrunk, then grown back), so that specks and spurs as thin
-    /// go and outward corners round; unless `bounds` hold it back.
+    /// go and outward corners round; unless `bounds` hold it back. Each pass's mask goes once
+    /// the next is made, and what it took is given back.
     pub fn smoothed_within(&self, radius: f64, bounds: Bounds) -> Result<Mask, Halt> {
         if radius <= 0.0 {
             return Ok(self.clone());
         }
-        let closed = self.grown_within(radius, Reach::Round, bounds)?.grown_within(-radius, Reach::Round, bounds)?;
-        closed.grown_within(-radius, Reach::Round, bounds)?.grown_within(radius, Reach::Round, bounds)
+        let mut mask = self.grown_within(radius, Reach::Round, bounds)?;
+        for by in [-radius, -radius, radius] {
+            let next = mask.grown_within(by, Reach::Round, bounds)?;
+            (bounds.give_back)(std::mem::replace(&mut mask, next).bytes());
+        }
+        Ok(mask)
     }
 
     /// The band `width` pixels wide along the mask's outline, on its `side` (inside it,
@@ -334,13 +339,15 @@ fn by_distance(
     }
     let (b, workers) = layout(band.most(), rayon::current_num_threads(), &near);
     let band = band.most();
-    let windows = (workers * window_side(b, band).pow(2) * WINDOW_PIXEL) as u64;
-    if !(bounds.admit)(windows) {
-        return Err(Halt::NoMemory);
-    }
     let mut blocks: std::collections::HashMap<(i32, i32), Vec<TileCoord>> = std::collections::HashMap::new();
     for c in near {
         blocks.entry((c.x.div_euclid(b), c.y.div_euclid(b))).or_default().push(c);
+    }
+    // No more workers than blocks: each works out a window only as it takes a block.
+    let workers = workers.min(blocks.len());
+    let windows = (workers * window_side(b, band).pow(2) * WINDOW_PIXEL) as u64;
+    if !(bounds.admit)(windows) {
+        return Err(Halt::NoMemory);
     }
     let window = |(bx, by): (i32, i32)| {
         let (a, z) = (TileCoord::new(bx * b, by * b).rect(0), TileCoord::new(bx * b + b - 1, by * b + b - 1).rect(0));
@@ -387,8 +394,13 @@ fn by_distance(
     if let Some(why) = halted.into_inner().expect("not poisoned") {
         return Err(why);
     }
-    // Farther, each tile is as its side ends.
-    Ok(mask.rebuilt(worked.into_inner().expect("not poisoned"), far, outside))
+    // Farther, each tile is as its side ends. Alike tiles side by side are kept as one: what
+    // that saves is given back, so that what it holds is what stays taken.
+    let worked = worked.into_inner().expect("not poisoned");
+    let admitted: u64 = worked.iter().map(|(_, t)| t.bytes()).sum();
+    let made = mask.rebuilt(worked, far, outside);
+    (bounds.give_back)(admitted.saturating_sub(made.bytes()));
+    Ok(made)
 }
 
 /// The tiles `tiles` of [`by_distance`]'s mask, worked out over `window` (theirs, and the
@@ -505,6 +517,7 @@ fn block_by_distance(
 mod tests {
     use super::*;
     use crate::mask::{Extent, Shape, ShapeKind};
+    use std::collections::HashSet;
 
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Mask {
         Mask::of(&Shape::rectangle(&crate::geom::FRect::new(x0, y0, x1, y1), true))
@@ -744,6 +757,59 @@ mod tests {
         assert_eq!(at(&border(Side::Centered)), [0, FULL, FULL, 0, 0]);
         // No width, nothing.
         assert!(square.bordered_within(0.0, Side::Centered, UNBOUNDED).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_band_asks_for_the_windows_of_no_more_workers_than_it_has_blocks() {
+        // A small square grown far: a few blocks, on a pool of more threads.
+        let m = rect(100.0, 100.0, 140.0, 140.0);
+        let band = grow_band(300.0);
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(64).build().unwrap();
+        let near = near_tiles(&m, band);
+        let (b, workers) = layout(band.most(), 64, &near);
+        let blocks: HashSet<(i32, i32)> = near.iter().map(|c| (c.x.div_euclid(b), c.y.div_euclid(b))).collect();
+        assert!(blocks.len() < workers, "as many blocks as workers: nothing to tell");
+        let first = std::sync::Mutex::new(None);
+        let admit = |n: u64| {
+            first.lock().unwrap().get_or_insert(n);
+            true
+        };
+        let bounds = Bounds { admit: &admit, ..UNBOUNDED };
+        pool.install(|| m.grown_within(300.0, Reach::Round, bounds)).unwrap();
+        let window = (window_side(b, band.most()).pow(2) * WINDOW_PIXEL) as u64;
+        assert_eq!(first.into_inner().unwrap(), Some(blocks.len() as u64 * window));
+    }
+
+    /// Bounds that count what is taken and given back, into `held`.
+    fn counting(held: &std::sync::atomic::AtomicI64) -> (impl Fn(u64) -> bool + Sync + '_, impl Fn(u64) + Sync + '_) {
+        use std::sync::atomic::Ordering::SeqCst;
+        (
+            move |n: u64| {
+                held.fetch_add(n as i64, SeqCst);
+                true
+            },
+            move |n: u64| {
+                held.fetch_sub(n as i64, SeqCst);
+            },
+        )
+    }
+
+    #[test]
+    fn what_each_smoothing_pass_took_is_given_back_once_the_next_is_made() {
+        let held = std::sync::atomic::AtomicI64::new(0);
+        let (admit, give_back) = counting(&held);
+        let bounds = Bounds { admit: &admit, give_back: &give_back, ..UNBOUNDED };
+        let circle = Mask::of(&Shape {
+            kind: ShapeKind::Ellipse,
+            center: [600.0, 600.0],
+            size: [1000.0, 1000.0],
+            angle: 0.0,
+            smooth: true,
+        });
+        let smoothed = circle.smoothed_within(8.0, bounds).unwrap();
+        // Four passes made, the last kept: what is still taken is what it holds.
+        let held = held.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(held > 0 && held as u64 <= smoothed.bytes(), "{held} taken for {}", smoothed.bytes());
     }
 
     #[test]

@@ -58,6 +58,13 @@ impl Step {
     }
 
     /// Whether the step makes a selection of its own, the steps before it no longer counting.
+    /// Whether it is a modifier at work (grow, feather, smooth or border): one whose mask takes
+    /// the memory `Bounds` admit as it is made.
+    fn modifies(&self) -> bool {
+        matches!(self, Step::Grow { .. } | Step::Feather { .. } | Step::Smooth { .. } | Step::Border { .. })
+            && !self.leaves_as_is()
+    }
+
     fn starts_over(&self) -> bool {
         matches!(self, Step::Shape { combine: Combine::Replace, .. } | Step::Mask { combine: Combine::Replace, .. })
     }
@@ -148,15 +155,34 @@ impl Selection {
         let first = steps.iter().rposition(Step::starts_over).unwrap_or(0);
         let steps = steps[first..].to_vec();
         let (mut mask, mut before) = (Arc::new(Mask::none()), None);
-        for s in &steps {
+        // Whether the mask before was a modifier's: what it took is given back once it goes.
+        let mut made_before = false;
+        for (i, s) in steps.iter().enumerate() {
             // A mask step's mask is shared, not copied.
             let next = match s {
                 Step::Mask { mask, combine: Combine::Replace } => mask.clone(),
                 _ => Arc::new(s.apply(&mask, bounds)?),
             };
-            before = Some(std::mem::replace(&mut mask, next));
+            let gone = before.replace(std::mem::replace(&mut mask, next));
+            if made_before && let Some(gone) = gone {
+                give_back(gone, bounds);
+            }
+            made_before = i > 0 && steps[i - 1].modifies();
         }
         Ok(Selection { steps, mask, before })
+    }
+
+    /// Its mask, the rest of what it holds let go: the mask before its last step, if a
+    /// modifier made it, given back to `bounds`.
+    fn into_mask(self, bounds: Bounds) -> Arc<Mask> {
+        let n = self.steps.len();
+        if let Some(before) = self.before
+            && n >= 2
+            && self.steps[n - 2].modifies()
+        {
+            give_back(before, bounds);
+        }
+        self.mask
     }
 
     /// This selection with `step` after its steps (worked out from its mask, not again from
@@ -245,17 +271,33 @@ impl Selection {
         let (mut steps, rest) = match stuck {
             None => (Vec::new(), &self.steps[..]),
             Some(last) => {
-                let up_to = match (&self.before, self.steps.len() - last) {
-                    (_, 1) => self.mask.clone(),
-                    (Some(before), 2) => before.clone(),
-                    _ => Selection::of_within(self.steps[..=last].to_vec(), bounds)?.mask,
+                // Worked out again, the mask up to it goes once carried (given back, if a
+                // modifier made it).
+                let (up_to, made) = match (&self.before, self.steps.len() - last) {
+                    (_, 1) => (self.mask.clone(), false),
+                    (Some(before), 2) => (before.clone(), false),
+                    _ => {
+                        let made = Selection::of_within(self.steps[..=last].to_vec(), bounds)?;
+                        (made.into_mask(bounds), self.steps[last].modifies())
+                    }
                 };
                 let carried = Step::Mask { mask: Arc::new(up_to.transformed(m)), combine: Combine::Replace };
+                if made {
+                    give_back(up_to, bounds);
+                }
                 (vec![carried], &self.steps[last + 1..])
             }
         };
         steps.extend(rest.iter().map(|s| s.transformed(m).expect("every step after the last stuck is carried")));
         Selection::of_within(steps, bounds)
+    }
+}
+
+/// Gives back to `bounds` what `mask`, a modifier's, took as it was made (see `Bounds`), if
+/// this was the last hold on it.
+fn give_back(mask: Arc<Mask>, bounds: Bounds) {
+    if let Some(mask) = Arc::into_inner(mask) {
+        (bounds.give_back)(mask.bytes());
     }
 }
 
@@ -313,6 +355,32 @@ mod tests {
         assert_eq!(d.steps().len(), 1);
         let all = Step::Shape { shape: rect(0.0, 0.0, 5.0, 5.0), combine: Combine::Replace };
         assert_eq!(Selection::of(vec![Step::Invert, all.clone()]).steps(), [all]);
+    }
+
+    #[test]
+    fn a_recipe_worked_out_keeps_taken_only_what_its_last_two_masks_hold() {
+        use crate::modify::{Bounds, UNBOUNDED};
+        use std::sync::atomic::{AtomicI64, Ordering::SeqCst};
+        let held = AtomicI64::new(0);
+        let admit = |n: u64| {
+            held.fetch_add(n as i64, SeqCst);
+            true
+        };
+        let give_back = |n: u64| {
+            held.fetch_sub(n as i64, SeqCst);
+        };
+        let bounds = Bounds { admit: &admit, give_back: &give_back, ..UNBOUNDED };
+        let steps = vec![
+            Step::Shape { shape: rect(100.0, 100.0, 900.0, 700.0), combine: Combine::Replace },
+            Step::Grow { by: 12.0, corners: Reach::Round },
+            Step::Grow { by: -5.0, corners: Reach::Round },
+            Step::Grow { by: 7.0, corners: Reach::Round },
+            Step::Grow { by: -3.0, corners: Reach::Round },
+        ];
+        let s = Selection::of_within(steps, bounds).unwrap();
+        let kept = s.mask().bytes() + s.before.as_ref().map_or(0, |b| b.bytes());
+        let held = held.into_inner();
+        assert!(held > 0 && held as u64 <= kept, "{held} taken for {kept}");
     }
 
     #[test]

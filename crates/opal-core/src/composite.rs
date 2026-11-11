@@ -970,11 +970,6 @@ fn signature(tokens: &[Token]) -> Option<Vec<u64>> {
     Some(out)
 }
 
-/// Composites every tile `layers` occupy into one bitmap (for merging and flattening).
-pub fn composite_all(layers: &[Arc<Layer>]) -> RasterImage {
-    composite_region(layers, None)
-}
-
 /// Composites what `layers` show within `range` into one bitmap.
 pub fn composite_within(layers: &[Arc<Layer>], range: &IRect) -> RasterImage {
     composite_region(layers, Some(range))
@@ -2111,7 +2106,7 @@ mod tests {
         add(&mut d, &mut ids, bg);
         let top = add(&mut d, &mut ids, shared(IRect::new(0, 0, 512, 1024), [1.0, 0.0, 0.0, 1.0]).0);
         d.layer_mut(top).unwrap().opacity = 0.5;
-        let out = composite_all(&d.layers);
+        let out = composite_region(&d.layers, None);
         // Under the top layer, one composite for 8 tiles; beside it, the background's tile.
         let distinct: HashSet<*const Tile> = out.tiles().map(|(_, t)| Arc::as_ptr(t)).collect();
         assert_eq!((out.tile_count(), distinct.len()), (16, 2));
@@ -2193,7 +2188,7 @@ mod tests {
         let object = Object { id: ids.object(), kind: ObjectKind::Image(image) };
         let index = d.layers.len();
         d.insert(Position { parent: None, index }, Layer::with_objects(ids.layer(), "image", vec![object])).unwrap();
-        let out = composite_all(&d.layers);
+        let out = composite_region(&d.layers, None);
         let coords = occupied_tiles(&d.layers, None);
         assert_eq!(out.tile_count(), coords.len());
         for c in coords {
@@ -2306,7 +2301,7 @@ mod tests {
             vec![Object { id: ids.object(), kind: ObjectKind::Image(image) }],
         );
         let layers = vec![Arc::new(layer)];
-        let got = composite_all(&layers);
+        let got = composite_region(&layers, None);
         assert_eq!(got.tile_count(), expected.tile_count());
         for (c, t) in expected.tiles() {
             assert_eq!(got.tile(c).map(|g| g.pixels() == t.pixels()), Some(true), "tile {c:?}");

@@ -710,16 +710,29 @@ impl Mask {
     /// The mask selecting each pixel of `image` (in document coordinates, its tiles on the
     /// grid) as much as it is opaque: what a layer's opacity selects.
     pub fn of_opacity(image: &crate::raster::RasterImage) -> Mask {
-        let mut at: Vec<TileCoord> = image.tiles().map(|(c, _)| c).collect();
-        at.sort_unstable_by_key(|c| (c.y, c.x));
-        let tiles: Vec<(TileCoord, MaskTile)> = at
+        // Each tile's levels once, however many places share it (a filled layer's all do).
+        let mut shared: HashMap<usize, (&Arc<crate::tile::Tile>, Vec<TileCoord>)> = HashMap::new();
+        for (c, t) in image.tiles() {
+            shared.entry(Arc::as_ptr(t) as usize).or_insert((t, Vec::new())).1.push(c);
+        }
+        let made: Vec<(MaskTile, Vec<TileCoord>)> = shared
+            .into_values()
+            .collect::<Vec<_>>()
             .into_par_iter()
-            .map(|c| {
-                let mut px = vec![[0.0f32; 4]; TILE_PIXELS];
-                image.tile(c).expect("listed").to_f32(&mut px);
-                (c, MaskTile::from_levels(px.iter().map(|p| level(p[3])).collect()))
-            })
+            .map_init(
+                || vec![[0.0f32; 4]; TILE_PIXELS],
+                |px, (t, at)| {
+                    if t.is_transparent() {
+                        return (MaskTile::Level(0), at);
+                    }
+                    t.to_f32(px);
+                    (MaskTile::from_levels(px.iter().map(|p| level(p[3])).collect()), at)
+                },
+            )
             .collect();
+        let mut tiles: Vec<(TileCoord, MaskTile)> =
+            made.into_iter().flat_map(|(t, at)| at.into_iter().map(move |c| (c, t.clone()))).collect();
+        tiles.sort_unstable_by_key(|(c, _)| (c.y, c.x));
         let mut rows: BTreeMap<i32, Vec<Run>> = BTreeMap::new();
         for (c, t) in tiles {
             push(rows.entry(c.y).or_default(), c.x, c.x + 1, t, 0);

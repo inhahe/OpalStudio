@@ -160,7 +160,7 @@ fn white(side: u32) -> (Document, IdGen) {
 #[test]
 #[ignore]
 fn huge_white_canvas() {
-    use opal_core::composite::{Projection, Quality, composite_all, composite_cost};
+    use opal_core::composite::{Projection, Quality, composite_cost, composite_until};
     let side = 300_000;
     let mut built = None;
     measure("New 300,000-pixel white canvas", || built = Some(white(side)));
@@ -199,7 +199,7 @@ fn huge_white_canvas() {
     measure("Cost of merging, found", || cost = composite_cost(&d.layers, None));
     eprintln!("  merging makes {} MB", cost >> 20);
     measure("Merged", || {
-        composite_all(&d.layers);
+        composite_until(&d.layers, None, &mut |_, _| true);
     });
     let path = temp("huge.opal");
     measure("Saved", || opal_io::native::save(&d, &ids2, &path, &opal_io::Progress::default()).unwrap());

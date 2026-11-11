@@ -97,6 +97,18 @@ impl crate::doc::DocState {
         });
     }
 
+    /// Selects nothing, as a history state labeled "Deselect", keeping what was selected for
+    /// Reselect (`Document::deselected`); with nothing selected, nothing happens.
+    pub fn deselect_pixels(&mut self) {
+        if self.pixel_selection().is_none() {
+            return;
+        }
+        let _ = self.apply("Deselect", |doc, _| {
+            doc.deselected = doc.selection.take();
+            Ok::<(), ()>(())
+        });
+    }
+
     /// The outline of what is selected (the marching ants' path, in document coordinates),
     /// round the pixels selected at least `threshold` (a level): worked out once for each
     /// selection's mask and threshold, and kept until another is asked for, or none (nothing
@@ -143,15 +155,13 @@ impl AppState {
     }
 
     pub(crate) fn deselect(&mut self) {
-        let d = self.active_mut().expect("available");
-        d.deselected = d.pixel_selection().cloned();
-        d.set_pixel_selection(None, "Deselect");
+        self.active_mut().expect("available").deselect_pixels();
     }
 
     /// Selects again what Deselect last took away in the active image.
     pub(crate) fn reselect(&mut self) {
         let d = self.active_mut().expect("available");
-        let again = d.deselected.as_deref().cloned();
+        let again = d.doc().deselected.as_deref().cloned();
         d.set_pixel_selection(again, "Reselect");
     }
 
@@ -162,10 +172,10 @@ impl AppState {
         let d = self.active().expect("available");
         let Some(layer) = d.doc().layer(id) else { return };
         let layer = Arc::new(Layer { visible: true, opacity: 1.0, ..layer.clone() });
-        let mut memory = crate::memory::Allowance::now();
-        if let Err(why) = memory.take_tiles(opal_core::composite::composite_cost(std::slice::from_ref(&layer), None)) {
-            return self.message(MessageKind::Info, "Select Layer's Pixels", why);
-        }
+        let memory = match crate::layer_ops::check_size(std::slice::from_ref(&layer), &d.doc().canvas.rect()) {
+            Ok(memory) => memory,
+            Err(why) => return self.message(MessageKind::Info, "Select Layer's Pixels", why),
+        };
         let work = move |doc: &mut Document, _: &mut opal_core::document::IdGen, progress: &opal_io::Progress| {
             let image = crate::edits::composited(&[layer], None, progress)?;
             let mask = Arc::new(Mask::of_opacity(&image));
