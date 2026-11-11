@@ -614,6 +614,32 @@ Give the active layer a new name.
 | `layer` | layer | The layer, by id. Default: the active layer. |
 | `name` (required) | text | Its new name. |
 
+### `remove_selection_step`
+
+Takes a step away from the recipe of what is selected, by its number among the selection query's steps; the selection is worked out again from the rest (as the selection panel does). Answers with what is selected then.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `index` (required) | int | Which step: its number among the selection query's steps, from 0. From 0 to 1048576. |
+
+### `edit_selection_step`
+
+Changes a step of the recipe of what is selected, by its number among the selection query's steps: a shape's or a mask's combine; a grow's by and corners; a feather's width, side and falloff; a smooth's radius; a border's width and side (what is not given stays as it is; what the step does not take is refused). The selection is worked out again with it changed (as the selection panel does). Answers with what is selected then.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `index` (required) | int | Which step: its number among the selection query's steps, from 0. From 0 to 1048576. |
+| `combine` | `replace`, `add`, `subtract`, `intersect` | A shape's or a mask's: how it combines with the steps before it. Default: as it is. |
+| `by` | length | A grow's: how far it grows the selection (shrinks it, less than 0). From -1000.0 to 1000.0 pixels. Default: as it is. |
+| `corners` | `round`, `square`, `diamond` | A grow's: how its corners grow. Default: as it is. |
+| `width` | length | A feather's or a border's: how wide its falloff or its band is. From 0.0 to 1000.0 pixels. Default: as it is. |
+| `side` | `inward`, `outward`, `centered` | A feather's or a border's: on which side of the outline it lies. Default: as it is. |
+| `falloff` | `gaussian`, `linear` | A feather's: the shape of its falloff. Default: as it is. |
+| `radius` | length | A smooth's: the radius it smooths over. From 0.0 to 1000.0 pixels. Default: as it is. |
+| `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
+
 ### `select_rectangle`
 
 Selects a rectangle, which may be turned, as the Select tool's box numbers give it: the canvas, unless the numbers say otherwise. Answers with what is selected then, as the selection query does.

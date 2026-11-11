@@ -646,10 +646,12 @@ fn rotate_by(ctx: &egui::Context, st: &mut AppState) {
     }
 }
 
-/// The Grow or Shrink, or Feather, dialog: what it sets shows at once, on the image.
+/// A modifier's dialog (Grow or Shrink, Feather, Smooth, Border), adding the step or, from the
+/// selection panel, changing one: what it sets shows at once, on the image.
 fn modifying(ctx: &egui::Context, st: &mut AppState) {
     let Some(m) = st.modifying.as_ref() else { return };
     let (set, keeping, failed) = (m.step.clone(), m.keeping(), m.failed().map(str::to_owned));
+    let ok = if m.changes_a_step() { "Change" } else { "OK" };
     let palette = st.palette;
     let doc = st.doc(m.doc()).map(|d| d.doc());
     let ppi = doc.map_or(opal_core::units::DEFAULT_PPI, |d| d.resolution);
@@ -672,7 +674,7 @@ fn modifying(ctx: &egui::Context, st: &mut AppState) {
                 done = Some(false);
             }
         } else {
-            done = ok_cancel(ui, "OK");
+            done = ok_cancel(ui, ok);
         }
     });
     st.answer_modifying(step, done, ctx);

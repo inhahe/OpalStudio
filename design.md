@@ -462,7 +462,20 @@ A selection is kept as an ordered list of steps, not only as its final mask:
   range, magic wand, painting on the mask.
 - **Modifiers** change the mask so far: feather, grow/shrink, smooth, invert, refine edge.
 
-The selection panel lists the steps. Editing any step recomputes the later ones. Outlines are
+The **selection panel** (a tab beside Layers; `selection_panel`) lists the steps of the active
+image's selection, in the order they were taken, each with what it does in a few words, its
+lengths in the user's unit ("Rectangle 100 × 70 px at 100 px, 50 px", "Grown by 5 px, square
+corners", "A layer's pixels"). A modifier's button opens its dialog on it, which shows what
+the selection then comes to, worked out again from its steps with that one changed, as it
+does when adding one (`Modifying::at`); a maker's menu changes how it combines; each step's
+button takes it away. Each is one history state (*Change selection step*, *Remove selection
+step*), the selection worked out again off the interface thread (`AppState::rework_selection`,
+an edit of `edits`, memory measured as it goes); taking every step away leaves nothing
+selected. A step made to replace what was before it leaves the earlier ones out, as one made
+so would. Scripts: `edit_selection_step` (a step by its number among the `selection` query's
+steps, and the settings of its kind: a maker's `combine`; a grow's `by` and `corners`; a
+feather's `width`, `side`, `falloff`; a smooth's `radius`; a border's `width`, `side`; others
+refused) and `remove_selection_step`, answering with what is selected then. Outlines are to be
 stored as Bézier curves; makers that produce pixels (AI, color range, painted masks) store
 their settings and their resulting mask. AI steps cache their result and rerun only when
 their own inputs change. Users who never open the panel just make selections as usual.

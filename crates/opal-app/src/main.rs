@@ -43,6 +43,7 @@ mod ribbon;
 mod rulers;
 mod select;
 mod select_tool;
+mod selection_panel;
 mod server;
 mod settings;
 mod shared_memory;

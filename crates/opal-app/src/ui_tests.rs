@@ -3394,6 +3394,48 @@ fn a_layer_s_thumbnail_takes_ctrl_click_and_leaves_its_row_the_other_clicks() {
 }
 
 #[test]
+fn the_selection_panel_lists_the_steps_and_takes_one_away() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    select_drag(&mut h, [100.0, 50.0], [200.0, 120.0], egui::Modifiers::NONE, egui::Modifiers::NONE);
+    select_drag(&mut h, [250.0, 50.0], [300.0, 120.0], egui::Modifiers::SHIFT, egui::Modifiers::SHIFT);
+    h.get_by_label(&format!("{}  Selection", crate::icons::SELECT_ALL)).click();
+    h.run();
+    let first = h.get_by_label_contains("Rectangle 100 × 70 px at 100 px, 50 px").rect();
+    assert!(
+        h.query_by_label_contains("Rectangle 50 × 70 px at 250 px, 50 px").is_some(),
+        "the second step is not listed"
+    );
+    // Its own row's button takes the first away: the second is all there is.
+    let remove = h
+        .query_all_by_label(&crate::icons::DELETE.to_string())
+        .map(|n| n.rect())
+        .find(|r| (r.center().y - first.center().y).abs() < 4.0)
+        .expect("no button to take it away");
+    h.hover_at(remove.center());
+    h.run();
+    h.input_mut().events.push(egui::Event::PointerButton {
+        pos: remove.center(),
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.input_mut().events.push(egui::Event::PointerButton {
+        pos: remove.center(),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    h.run();
+    use opal_core::geom::IRect;
+    use opal_core::mask::Extent;
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(250, 50, 300, 120))));
+    assert!(h.query_by_label_contains("Rectangle 100 × 70 px").is_none(), "the step taken away is still listed");
+}
+
+#[test]
 fn single_rows_and_columns_are_selected_the_canvas_across_by_a_click_or_a_drag() {
     use crate::tools::ToolId;
     use egui_kittest::kittest::by;

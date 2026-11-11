@@ -27,6 +27,8 @@ pub enum Pane {
     Welcome,
     Document(DocId),
     Layers,
+    /// The steps that make the active image's selection (`selection_panel`).
+    Selection,
     History,
     ToolSettings,
     /// What scripts run from the editor print.
@@ -1305,8 +1307,8 @@ fn work_area(_point: egui::Pos2) -> Option<egui::Rect> {
 /// The margin between the side panels' edges and what they show, in points.
 const PANE_INSET: i8 = 8;
 
-/// The starting layout: images in tabs on the left; Tool settings above Layers and History
-/// on the right.
+/// The starting layout: images in tabs on the left; Tool settings above Layers, Selection,
+/// History and Console on the right.
 fn default_tree(st: &AppState) -> egui_tiles::Tree<Pane> {
     let mut tiles = Tiles::default();
     let mut docs: Vec<TileId> = st.docs.iter().map(|d| tiles.insert_pane(Pane::Document(d.id))).collect();
@@ -1323,9 +1325,10 @@ fn default_tree(st: &AppState) -> egui_tiles::Tree<Pane> {
     let tool = tiles.insert_pane(Pane::ToolSettings);
     let tool_tabs = tiles.insert_tab_tile(vec![tool]);
     let layers = tiles.insert_pane(Pane::Layers);
+    let selection = tiles.insert_pane(Pane::Selection);
     let history = tiles.insert_pane(Pane::History);
     let console = tiles.insert_pane(Pane::Console);
-    let lh = tiles.insert_tab_tile(vec![layers, history, console]);
+    let lh = tiles.insert_tab_tile(vec![layers, selection, history, console]);
     // Halves: in a window maximized on a full-HD screen at 125%, so the tool settings show a box's
     // position and size without scrolling (the crop box's after the crop tool's own settings).
     let mut right = egui_tiles::Linear::new(egui_tiles::LinearDir::Vertical, vec![tool_tabs, lh]);
@@ -1362,6 +1365,7 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
                 None => "Closed".into(),
             },
             Pane::Layers => format!("{}  Layers", icons::LAYER).into(),
+            Pane::Selection => format!("{}  Selection", icons::SELECT_ALL).into(),
             Pane::History => format!("{}  History", icons::HISTORY).into(),
             Pane::ToolSettings => format!("{}  Tool settings", icons::OPTIONS).into(),
             Pane::Console => format!("{}  Console", icons::CONSOLE).into(),
@@ -1379,6 +1383,9 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
             Pane::Document(id) => canvas::canvas_ui(ui, self.st, id),
             Pane::Welcome => welcome(ui, self.st),
             Pane::Layers => inset(ui, &mut |ui| panels::unless_busy(ui, self.st, panels::layers_panel)),
+            Pane::Selection => {
+                inset(ui, &mut |ui| panels::unless_busy(ui, self.st, crate::selection_panel::selection_panel))
+            }
             Pane::History => inset(ui, &mut |ui| panels::unless_busy(ui, self.st, panels::history_panel)),
             Pane::ToolSettings => inset(ui, &mut |ui| {
                 // As wide as the pane, whatever it holds, so that its scroll bar is at its edge.

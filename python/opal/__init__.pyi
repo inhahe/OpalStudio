@@ -463,6 +463,26 @@ class Editor:
         """
     def preferences(self) -> Any:
         """Every preference: for each, its key, label, section, help, value and default, and what it takes (its range or choices). set_preference changes them."""
+    def remove_selection_step(self, *, document: int | None = None, index: int | str | Expr) -> Any:
+        """Takes a step away from the recipe of what is selected, by its number among the selection query's steps; the selection is worked out again from the rest (as the selection panel does). Answers with what is selected then.
+
+        document: The image, by id. Default: the active image.
+        index: Which step: its number among the selection query's steps, from 0. From 0 to 1048576.
+        """
+    def edit_selection_step(self, *, document: int | None = None, index: int | str | Expr, combine: Literal["replace", "add", "subtract", "intersect"] | None = None, by: float | str | Expr | None = None, corners: Literal["round", "square", "diamond"] | None = None, width: float | str | Expr | None = None, side: Literal["inward", "outward", "centered"] | None = None, falloff: Literal["gaussian", "linear"] | None = None, radius: float | str | Expr | None = None, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+        """Changes a step of the recipe of what is selected, by its number among the selection query's steps: a shape's or a mask's combine; a grow's by and corners; a feather's width, side and falloff; a smooth's radius; a border's width and side (what is not given stays as it is; what the step does not take is refused). The selection is worked out again with it changed (as the selection panel does). Answers with what is selected then.
+
+        document: The image, by id. Default: the active image.
+        index: Which step: its number among the selection query's steps, from 0. From 0 to 1048576.
+        combine: A shape's or a mask's: how it combines with the steps before it. Default: as it is.
+        by: A grow's: how far it grows the selection (shrinks it, less than 0). From -1000.0 to 1000.0 pixels. Default: as it is.
+        corners: A grow's: how its corners grow. Default: as it is.
+        width: A feather's or a border's: how wide its falloff or its band is. From 0.0 to 1000.0 pixels. Default: as it is.
+        side: A feather's or a border's: on which side of the outline it lies. Default: as it is.
+        falloff: A feather's: the shape of its falloff. Default: as it is.
+        radius: A smooth's: the radius it smooths over. From 0.0 to 1000.0 pixels. Default: as it is.
+        unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
+        """
     def select_rectangle(self, *, document: int | None = None, x: float | str | Expr | None = None, y: float | str | Expr | None = None, width: float | str | Expr | None = None, height: float | str | Expr | None = None, angle: float | str | Expr = 0, combine: Literal["replace", "add", "subtract", "intersect"] = "replace", smooth: bool | None = None, anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", from_layer: int | None = None, from_anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
         """Selects a rectangle, which may be turned, as the Select tool's box numbers give it: the canvas, unless the numbers say otherwise. Answers with what is selected then, as the selection query does.
 

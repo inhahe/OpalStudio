@@ -13,15 +13,19 @@ use std::sync::Arc;
 /// A selection's outline: closed lines, in document coordinates (see `Mask::outline`).
 pub type Outline = Arc<Vec<Vec<[f64; 2]>>>;
 
-/// The Grow or Shrink, or Feather, dialog, while it is open: the image it acts on, the step it
-/// adds, the selection it adds it to, and the step that image's pending edit shows. What a
-/// step set makes is worked out off the interface thread (`AppState::preview_modifying`), the
-/// latest only.
+/// A modifier's dialog (Grow or Shrink, Feather, Smooth, Border), while it is open: the image it
+/// acts on, the step it adds (or, from the selection panel, the step of the recipe it changes),
+/// the selection it acts on, and the step that image's pending edit shows. What a step set
+/// makes is worked out off the interface thread (`AppState::preview_modifying`), the latest
+/// only.
 #[derive(Debug)]
 pub struct Modifying {
     doc: DocId,
     pub step: Step,
     pub before: Arc<Selection>,
+    /// Which of `before`'s steps it changes, if it changes one rather than adds one: the
+    /// selection is worked out again from its steps with that one changed.
+    at: Option<usize>,
     shown: Option<Step>,
     /// Why what the step makes could not be worked out (not memory enough, say), if it could
     /// not: the dialog says so, and keeps nothing until another step is set.
@@ -56,7 +60,37 @@ impl Modifying {
     pub fn keeping(&self) -> bool {
         self.keeping
     }
+
+    /// Whether it changes a step of the recipe (from the selection panel) rather than adds one.
+    pub fn changes_a_step(&self) -> bool {
+        self.at.is_some()
+    }
+
+    /// The history state what it makes with `step` is: the step added, or a step changed.
+    fn label(&self, step: &Step) -> &'static str {
+        if self.at.is_some() { STEP_CHANGED } else { modifier_label(step) }
+    }
+
+    /// What it makes with `step` from its selection, unless `bounds` hold the work back.
+    fn make(
+        at: Option<usize>,
+        before: &Selection,
+        step: Step,
+        bounds: opal_core::modify::Bounds,
+    ) -> Result<Selection, opal_core::modify::Halt> {
+        match at {
+            Some(i) => {
+                let mut steps = before.steps().to_vec();
+                steps[i] = step;
+                Selection::of_within(steps, bounds)
+            }
+            None => before.then_within(step, bounds),
+        }
+    }
 }
+
+/// The history state a step of the recipe changed (in the selection panel, or by a script) is.
+pub const STEP_CHANGED: &str = "Change selection step";
 
 /// A step a modifier dialog was set to, and what it makes, or why that could not be made.
 type Preview = (Step, Result<Arc<Selection>, String>);
@@ -220,6 +254,7 @@ impl AppState {
             doc,
             step,
             before,
+            at: None,
             shown: None,
             failed: None,
             keeping: false,
@@ -231,18 +266,80 @@ impl AppState {
         self.preview_modifying(ctx);
     }
 
+    /// Opens the dialog of step `index` of the active image's selection, a modifier, to change
+    /// it (from the selection panel): what the selection then comes to, worked out again from
+    /// its steps with that one changed, shown at once, worked out off the interface thread.
+    pub(crate) fn edit_selection_step(&mut self, index: usize, ctx: &eframe::egui::Context) {
+        let d = self.active().expect("an image with a selection");
+        let before = d.pixel_selection().expect("a selection").clone();
+        let Some(step) = before.steps().get(index).cloned() else { return };
+        self.modifying = Some(Modifying {
+            doc: d.id,
+            step,
+            before,
+            at: Some(index),
+            shown: None,
+            failed: None,
+            keeping: false,
+            asked: 0,
+            ended: 0,
+            generation: Default::default(),
+            ends: std::sync::mpsc::channel(),
+        });
+        self.preview_modifying(ctx);
+    }
+
+    /// Takes step `index` away from the active image's selection, which is worked out again
+    /// from the rest (nothing selected, if none is left).
+    pub(crate) fn remove_selection_step(&mut self, index: usize) {
+        let d = self.active().expect("an image with a selection");
+        let mut steps = d.pixel_selection().expect("a selection").steps().to_vec();
+        if index < steps.len() {
+            steps.remove(index);
+            self.rework_selection(steps, "Remove selection step");
+        }
+    }
+
+    /// Makes step `index` of the active image's selection, a maker (a shape, or a mask), combine
+    /// with the steps before it as `combine` says; the selection is worked out again.
+    pub(crate) fn combine_selection_step(&mut self, index: usize, combine: Combine) {
+        let d = self.active().expect("an image with a selection");
+        let mut steps = d.pixel_selection().expect("a selection").steps().to_vec();
+        match steps.get_mut(index) {
+            Some(Step::Shape { combine: c, .. } | Step::Mask { combine: c, .. }) if *c != combine => *c = combine,
+            _ => return,
+        }
+        self.rework_selection(steps, STEP_CHANGED);
+    }
+
+    /// Makes `steps` the recipe of the active image's selection, the selection worked out again
+    /// from them off the interface thread (see `edits`), memory measured as it goes, as a
+    /// history state labeled `label`.
+    pub(crate) fn rework_selection(&mut self, steps: Vec<Step>, label: &'static str) {
+        let id = self.active_doc.expect("an image");
+        let measure = crate::memory::Measure::here();
+        let work = move |doc: &mut Document, _: &mut opal_core::document::IdGen, progress: &opal_io::Progress| {
+            let stop = || progress.is_cancelled();
+            let made = crate::memory::Admission::within(measure.now(), &stop, |b| Selection::of_within(steps, b))?;
+            doc.selection = (!made.is_empty()).then(|| Arc::new(made));
+            Ok(())
+        };
+        self.edit_later(id, label, crate::memory::Allowance::unlimited(), work, |_, _, ()| {});
+    }
+
     /// Shows `made`, what the open modifier dialog makes with `step`, as its image's pending
-    /// edit, named for what the step does (the edit named for the one shown before given up).
+    /// edit, named for what the dialog does (the edit named for the one shown before given up).
     fn show_made(&mut self, step: Step, made: Arc<Selection>) {
         let Some(m) = self.modifying.as_mut() else { return };
         m.failed = None;
         let before = m.shown.replace(step.clone());
-        let doc = m.doc;
+        let (doc, label) = (m.doc, m.label(&step));
+        let was = before.map(|b| m.label(&b));
         let Some(d) = self.doc_mut(doc) else { return };
-        if let Some(before) = before.filter(|b| modifier_label(b) != modifier_label(&step)) {
-            d.discard_pending(modifier_label(&before));
+        if let Some(was) = was.filter(|&b| b != label) {
+            d.discard_pending(was);
         }
-        d.edit_pending(modifier_label(&step), |doc| doc.selection = (!made.is_empty()).then_some(made));
+        d.edit_pending(label, |doc| doc.selection = (!made.is_empty()).then_some(made));
     }
 
     /// Has what the open modifier dialog makes with its step worked out off the interface
@@ -256,7 +353,7 @@ impl AppState {
         let ours = m.asked;
         m.generation.store(ours, Ordering::SeqCst);
         m.failed = None;
-        let (step, before, generation) = (m.step.clone(), m.before.clone(), m.generation.clone());
+        let (step, before, generation, at) = (m.step.clone(), m.before.clone(), m.generation.clone(), m.at);
         let (ends, asked) = (m.ends.0.clone(), m.step.clone());
         let measure = crate::memory::Measure::here();
         PREVIEWS.run(
@@ -267,7 +364,8 @@ impl AppState {
                     return None;
                 }
                 // What is free, measured as the work begins.
-                match crate::memory::Admission::within(measure.now(), &stop, |b| before.then_within(step, b)) {
+                match crate::memory::Admission::within(measure.now(), &stop, |b| Modifying::make(at, &before, step, b))
+                {
                     Ok(made) => Some(Ok(Arc::new(made))),
                     // Not wanted any more: nothing to tell, whatever held it back.
                     Err(_) if stop() => None,
@@ -342,9 +440,9 @@ impl AppState {
         let Some(m) = self.modifying.as_mut() else { return };
         m.failed = Some(why);
         m.keeping = false;
-        let (shown, doc) = (m.shown.take(), m.doc);
+        let (shown, doc) = (m.shown.take().map(|s| m.label(&s)), m.doc);
         if let (Some(shown), Some(d)) = (shown, self.doc_mut(doc)) {
-            d.discard_pending(modifier_label(&shown));
+            d.discard_pending(shown);
         }
     }
 
@@ -370,8 +468,8 @@ impl AppState {
         let Some(d) = self.doc_mut(m.doc) else { return };
         if keep {
             d.commit_pending();
-        } else if let Some(shown) = m.shown {
-            d.discard_pending(modifier_label(&shown));
+        } else if let Some(shown) = &m.shown {
+            d.discard_pending(m.label(shown));
         }
     }
 
@@ -767,6 +865,59 @@ mod tests {
         st.run(Cmd::InvertSelection, &ctx);
         let why = availability(&st, Cmd::TransformSelection).unwrap_err();
         assert!(why.contains("no box"), "{why}");
+    }
+
+    #[test]
+    fn the_selection_panel_takes_steps_away_and_changes_them_the_rest_worked_out_again() {
+        use crate::select::STEP_CHANGED;
+        use opal_core::mask::{Combine, Extent, Shape};
+        use opal_core::modify::Reach;
+        use opal_core::selection::{Selection, Step};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let ctx = eframe::egui::Context::default();
+        let selected = |st: &AppState| st.active().unwrap().pixel_selection().map(|s| s.mask().extent());
+        let steps = |st: &AppState| st.active().unwrap().pixel_selection().unwrap().steps().len();
+        let label = |st: &AppState| st.active().unwrap().history.undo_label().map(str::to_owned);
+        let rect = |x0, y0, x1, y1| Shape::rectangle(&IRect::new(x0, y0, x1, y1).to_f(), false);
+        // Two rectangles, the second added, grown by 5 with square corners.
+        let made = Selection::new(Step::Shape { shape: rect(20, 20, 120, 80), combine: Combine::Replace })
+            .then(Step::Shape { shape: rect(200, 20, 260, 80), combine: Combine::Add })
+            .then(Step::Grow { by: 5.0, corners: Reach::Square });
+        st.active_mut().unwrap().set_pixel_selection(Some(made), "Select");
+        assert_eq!(selected(&st), Some(Extent::Within(IRect::new(15, 15, 265, 85))));
+        // The second taken away rather than added: the first alone, grown.
+        st.combine_selection_step(1, Combine::Subtract);
+        assert_eq!(selected(&st), Some(Extent::Within(IRect::new(15, 15, 125, 85))));
+        assert_eq!((steps(&st), label(&st).as_deref()), (3, Some(STEP_CHANGED)));
+        st.active_mut().unwrap().undo();
+        // Taken away: the same, a step fewer.
+        st.remove_selection_step(1);
+        assert_eq!(selected(&st), Some(Extent::Within(IRect::new(15, 15, 125, 85))));
+        assert_eq!((steps(&st), label(&st).as_deref()), (2, Some("Remove selection step")));
+        st.active_mut().unwrap().undo();
+        // The grow changed in its dialog: by 10, both rectangles grown that far; the dialog
+        // shows what it makes before it is kept, as a step changed.
+        st.edit_selection_step(2, &ctx);
+        let m = st.modifying.as_ref().expect("no dialog");
+        assert!(m.changes_a_step());
+        assert_eq!(m.step, Step::Grow { by: 5.0, corners: Reach::Square });
+        st.answer_modifying(Step::Grow { by: 10.0, corners: Reach::Square }, Some(true), &ctx);
+        let mut waited = 0;
+        while st.modifying.is_some() {
+            assert!(waited < 1000, "the dialog never closed");
+            st.poll_modifying();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            waited += 1;
+        }
+        assert_eq!(selected(&st), Some(Extent::Within(IRect::new(10, 10, 270, 90))));
+        assert_eq!((steps(&st), label(&st).as_deref()), (3, Some(STEP_CHANGED)));
+        // The first taken away: the second, added to nothing, grown alone; then that, and the
+        // grow of nothing is nothing.
+        st.remove_selection_step(0);
+        assert_eq!(selected(&st), Some(Extent::Within(IRect::new(190, 10, 270, 90))));
+        st.remove_selection_step(0);
+        assert_eq!(selected(&st), None);
     }
 
     #[test]

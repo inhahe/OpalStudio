@@ -840,7 +840,79 @@ const SHAPE_PARAMS: &[Param] = &[
 
 /// The changes the API alone makes (no command of the interface makes them): their names,
 /// what they do, and their parameters.
+/// Which step of the selection's recipe: its number among the selection query's steps.
+const STEP_INDEX: Param = Param {
+    name: "index",
+    kind: Kind::Int { min: 0, max: 1 << 20 },
+    help: "Which step: its number among the selection query's steps, from 0.",
+    otherwise: Otherwise::Required,
+};
+/// What `edit_selection_step` may change in a step, each kind of step taking its own.
+const STEP_SETTINGS: &[Param] = &[
+    DOCUMENT,
+    STEP_INDEX,
+    Param {
+        name: "combine",
+        kind: Kind::Choice(&opal_core::mask::Combine::NAMES),
+        help: "A shape's or a mask's: how it combines with the steps before it.",
+        otherwise: Otherwise::Now("as it is"),
+    },
+    Param {
+        name: "by",
+        kind: Kind::Length { min: -opal_core::modify::MAX_DISTANCE, max: opal_core::modify::MAX_DISTANCE },
+        help: "A grow's: how far it grows the selection (shrinks it, less than 0).",
+        otherwise: Otherwise::Now("as it is"),
+    },
+    Param {
+        name: "corners",
+        kind: Kind::Choice(&opal_core::modify::Reach::NAMES),
+        help: "A grow's: how its corners grow.",
+        otherwise: Otherwise::Now("as it is"),
+    },
+    Param {
+        name: "width",
+        kind: Kind::Length { min: 0.0, max: opal_core::modify::MAX_DISTANCE },
+        help: "A feather's or a border's: how wide its falloff or its band is.",
+        otherwise: Otherwise::Now("as it is"),
+    },
+    Param {
+        name: "side",
+        kind: Kind::Choice(&opal_core::modify::Side::NAMES),
+        help: "A feather's or a border's: on which side of the outline it lies.",
+        otherwise: Otherwise::Now("as it is"),
+    },
+    Param {
+        name: "falloff",
+        kind: Kind::Choice(&opal_core::modify::Falloff::NAMES),
+        help: "A feather's: the shape of its falloff.",
+        otherwise: Otherwise::Now("as it is"),
+    },
+    Param {
+        name: "radius",
+        kind: Kind::Length { min: 0.0, max: opal_core::modify::MAX_DISTANCE },
+        help: "A smooth's: the radius it smooths over.",
+        otherwise: Otherwise::Now("as it is"),
+    },
+    UNIT,
+];
+
 const CHANGES: &[(&str, &str, &[Param])] = &[
+    (
+        "remove_selection_step",
+        "Takes a step away from the recipe of what is selected, by its number among the selection query's \
+         steps; the selection is worked out again from the rest (as the selection panel does). Answers with \
+         what is selected then.",
+        &[DOCUMENT, STEP_INDEX],
+    ),
+    (
+        "edit_selection_step",
+        "Changes a step of the recipe of what is selected, by its number among the selection query's steps: \
+         a shape's or a mask's combine; a grow's by and corners; a feather's width, side and falloff; a \
+         smooth's radius; a border's width and side (what is not given stays as it is; what the step does not \
+         take is refused). The selection is worked out again with it changed (as the selection panel does). \
+         Answers with what is selected then.",
+        STEP_SETTINGS,
+    ),
     (
         "select_rectangle",
         "Selects a rectangle, which may be turned, as the Select tool's box numbers give it: the canvas, \
@@ -1828,6 +1900,8 @@ impl AppState {
             None if method.name == "select_ellipse" => {
                 Reply::Now(self.select_by_args(opal_core::mask::ShapeKind::Ellipse, &args))
             }
+            None if method.name == "remove_selection_step" => self.selection_step_by_args(true, &args),
+            None if method.name == "edit_selection_step" => self.selection_step_by_args(false, &args),
             None if method.name == "set_preference" => Reply::Now(self.set_preference(&args, ctx)),
             None => Reply::Now(self.answer(&method.name, &args)),
         };
@@ -2475,6 +2549,40 @@ impl AppState {
         Ok(selection_json(d))
     }
 
+    /// Takes away (`remove`), or changes as `args` say, the step of the selection they name
+    /// (`remove_selection_step`, `edit_selection_step`): answered once the selection is worked
+    /// out again, with what is selected then.
+    fn selection_step_by_args(&mut self, remove: bool, args: &Args) -> Reply {
+        let name = if remove { "remove_selection_step" } else { "edit_selection_step" };
+        let id = match self.which(args) {
+            Ok(id) => id,
+            Err(why) => return Reply::Now(Err(why)),
+        };
+        self.show_doc(id);
+        let Some(selection) = self.doc(id).and_then(|d| d.pixel_selection()).cloned() else {
+            return Reply::Now(Err(format!("{name}: Nothing is selected.")));
+        };
+        let index = args.int("index") as usize;
+        let Some(step) = selection.steps().get(index).cloned() else {
+            let n = selection.steps().len();
+            return Reply::Now(Err(format!(
+                "{name}: The selection has {n} steps, numbered from 0: there is no step {index}."
+            )));
+        };
+        if remove {
+            self.remove_selection_step(index);
+        } else {
+            let changed = match changed_step(step, args) {
+                Ok(changed) => changed,
+                Err(why) => return Reply::Now(Err(format!("{name}: {why}"))),
+            };
+            let mut steps = selection.steps().to_vec();
+            steps[index] = changed;
+            self.rework_selection(steps, crate::select::STEP_CHANGED);
+        }
+        self.reply_when_done(|st, id| selection_json(st.doc(id).expect("its image")))
+    }
+
     /// Every preference, as the `preferences` query tells them.
     fn preferences_json(&self) -> Value {
         use crate::settings::Kind as Setting;
@@ -2832,6 +2940,50 @@ impl AppState {
 /// What image `d` has selected, as the `selection` query gives it: the rectangle round it and
 /// the steps that made it, positions counted from the canvas's corner, as everywhere in the
 /// API.
+/// `step` changed as `args` say (see `edit_selection_step`), or why it cannot be: it does not
+/// take a setting they give.
+fn changed_step(step: opal_core::selection::Step, args: &Args) -> Result<opal_core::selection::Step, String> {
+    use opal_core::mask::Combine;
+    use opal_core::modify::{Falloff, Reach, Side};
+    use opal_core::selection::Step;
+    let (kind, takes): (&str, &[&str]) = match &step {
+        Step::Shape { .. } => ("A shape", &["combine"]),
+        Step::Mask { .. } => ("A mask", &["combine"]),
+        Step::Invert => ("An inverting step", &[]),
+        Step::Grow { .. } => ("A grow", &["by", "corners"]),
+        Step::Feather { .. } => ("A feather", &["width", "side", "falloff"]),
+        Step::Smooth { .. } => ("A smooth", &["radius"]),
+        Step::Border { .. } => ("A border", &["width", "side"]),
+    };
+    let given = ["combine", "by", "corners", "width", "side", "falloff", "radius"];
+    if let Some(wrong) = given.iter().find(|&&g| args.get(g).is_some() && !takes.contains(&g)) {
+        return Err(match takes {
+            [] => format!("{kind} has nothing to change."),
+            _ => format!("{kind} takes {}, not {wrong}.", takes.join(" and ")),
+        });
+    }
+    let combine = |c: Combine| args.text("combine").and_then(Combine::named).unwrap_or(c);
+    let side = |s: Side| args.text("side").and_then(Side::named).unwrap_or(s);
+    Ok(match step {
+        Step::Shape { shape, combine: c } => Step::Shape { shape, combine: combine(c) },
+        Step::Mask { mask, combine: c } => Step::Mask { mask, combine: combine(c) },
+        Step::Invert => Step::Invert,
+        Step::Grow { by, corners } => Step::Grow {
+            by: args.opt_number("by").unwrap_or(by),
+            corners: args.text("corners").and_then(Reach::named).unwrap_or(corners),
+        },
+        Step::Feather { width, side: s, falloff } => Step::Feather {
+            width: args.opt_number("width").unwrap_or(width),
+            side: side(s),
+            falloff: args.text("falloff").and_then(Falloff::named).unwrap_or(falloff),
+        },
+        Step::Smooth { radius } => Step::Smooth { radius: args.opt_number("radius").unwrap_or(radius) },
+        Step::Border { width, side: s } => {
+            Step::Border { width: args.opt_number("width").unwrap_or(width), side: side(s) }
+        }
+    })
+}
+
 fn selection_json(d: &crate::doc::DocState) -> Value {
     use opal_core::selection::Step;
     let Some(s) = d.pixel_selection() else { return json!({ "bounds": Value::Null, "steps": [] }) };
@@ -3383,6 +3535,29 @@ mod tests {
         // the 20 x 40 canvas; twice the size, 10 x 20.
         let s = now(&mut st, "reselect", json!({})).unwrap();
         assert_eq!(s["bounds"], json!([30, 0, 10, 20]), "{s}");
+    }
+
+    #[test]
+    fn a_script_changes_and_takes_away_the_selection_s_steps() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 300, "height": 200 })).unwrap();
+        let rect = json!({ "x": 10, "y": 10, "width": 40, "height": 30, "smooth": false });
+        now(&mut st, "select_rectangle", rect).unwrap();
+        now(&mut st, "grow_selection", json!({ "by": 5, "corners": "square" })).unwrap();
+        let s = now(&mut st, "edit_selection_step", json!({ "index": 1, "by": 10 })).unwrap();
+        assert_eq!((s["bounds"].clone(), s["steps"][1]["by"].clone()), (json!([0, 0, 60, 50]), json!(10.0)), "{s}");
+        // A grow takes no radius; there is no step 5.
+        let wrong = now(&mut st, "edit_selection_step", json!({ "index": 1, "radius": 3 })).unwrap_err();
+        assert!(wrong.contains("A grow takes by and corners, not radius"), "{wrong}");
+        let missing = now(&mut st, "remove_selection_step", json!({ "index": 5 })).unwrap_err();
+        assert!(missing.contains("there is no step 5"), "{missing}");
+        // The first rectangle subtracted from nothing: nothing selected.
+        let s = now(&mut st, "edit_selection_step", json!({ "index": 0, "combine": "subtract" })).unwrap();
+        assert_eq!(s["bounds"], Value::Null, "{s}");
+        now(&mut st, "undo", json!({})).unwrap();
+        let s = now(&mut st, "remove_selection_step", json!({ "index": 1 })).unwrap();
+        assert_eq!(s["bounds"], json!([10, 10, 40, 30]), "{s}");
+        assert_eq!(st.active().unwrap().history.undo_label(), Some("Remove selection step"));
     }
 
     #[test]

@@ -100,7 +100,9 @@ cargo test --workspace                     # all tests, interface tests included
   Selection Overlay shows what is not selected under red, fading with a soft selection. Grow
   or Shrink (round, square or diamond corners), Feather (inward, outward or centered;
   Gaussian or straight), Smooth (pinholes, specks and jagged corners gone) and Border (a band
-  along the outline) change its edge, shown as you set them.
+  along the outline) change its edge, shown as you set them. The Selection panel lists the
+  steps that made the selection: change a modifier's settings, how a shape combines, or take a
+  step away, and the selection is worked out again from them.
   Selections are part of history, and turn, flip and resize with the image.
 - **Layers and groups.** Add, duplicate, delete, group, reorder (buttons or dragging,
   into and out of groups), rename, hide, lock, change opacity; select several with Ctrl
