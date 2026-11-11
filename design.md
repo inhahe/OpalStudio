@@ -326,9 +326,10 @@ On the Select tab (and for scripts, by the same names):
   selected pixel becomes as selected as it was not, and what lies past the canvas becomes
   selected. Each is a history state.
 - **Clear** (Delete) erases what is selected on the selected layers, as much of each pixel
-  as it is selected. It is refused, saying why, on a locked or hidden layer, and on one
-  holding a placed image, whose pixels are its own, drawn through its transform (rasterize
-  it first).
+  as it is selected; inside a selected group, on the layers shown (a hidden one is left as it
+  is). It is refused, saying why, when a selected layer or group is hidden, when a layer it
+  would clear, or a group that layer is in, is locked, and on a layer holding a placed image,
+  whose pixels are its own, drawn through its transform (rasterize it first).
 - **Copy** and **Copy Merged** copy within the selection; **Cut** (Ctrl+X, on the Home tab
   too) copies, then clears what it copied: within the canvas, so that what lies past it,
   which a copy leaves out, stays. The copy reaches the clipboard off the interface thread,
