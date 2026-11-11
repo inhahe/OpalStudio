@@ -149,6 +149,17 @@ impl MaskTile {
         }
     }
 
+    /// Whether every pixel of it is at `threshold` or above (`Some(true)`), every one below
+    /// (`Some(false)`), or some of each.
+    pub(crate) fn side_of(&self, threshold: u16) -> Option<bool> {
+        let levels: &[u16] = match self {
+            MaskTile::Level(l) => return Some(*l >= threshold),
+            MaskTile::Columns(l) | MaskTile::Rows(l) | MaskTile::Levels(l) => l,
+        };
+        let first = levels[0] >= threshold;
+        levels.iter().all(|&l| (l >= threshold) == first).then_some(first)
+    }
+
     /// The memory its levels take (none for a tile of one level).
     pub fn bytes(&self) -> u64 {
         match self {
@@ -412,14 +423,12 @@ impl Mask {
         self.rows.get(&y).map_or(NO_RUNS, Vec::as_slice)
     }
 
-    /// The tiles the outline (where the levels cross half) may cross: those with levels of
-    /// their own, and those of one level beside one on the other side of half (or with levels
-    /// of its own), found run by run, so in time with the outline's length, not the area.
+    /// The tiles the outline (where the levels cross half) may cross: those with pixels on
+    /// either side of half, and those wholly on one side beside one wholly on the other (or
+    /// with pixels on either), found run by run, so in time with the outline's length, not the
+    /// area.
     pub(crate) fn edge_tiles(&self) -> std::collections::HashSet<TileCoord> {
-        let side = |t: &MaskTile| match t {
-            MaskTile::Level(l) => Some(*l >= HALF),
-            _ => None,
-        };
+        let side = |t: &MaskTile| t.side_of(HALF);
         let outside = MaskTile::Level(self.outside);
         let mut out = std::collections::HashSet::new();
         let mut ys: Vec<i32> = self.rows.keys().flat_map(|&y| [y, y + 1]).collect();
@@ -462,21 +471,21 @@ impl Mask {
             at.sort_unstable();
             let segments = by_row.entry(y).or_default();
             for r in row {
-                // What the run's tiles not worked become: a tile with levels of its own is always
-                // worked (the outline may cross it), so this is a run's level.
-                let level = match &r.tile {
-                    MaskTile::Level(l) => far(*l),
-                    t => far(t.get(0, 0)),
+                // What the run's tiles not worked become: those the outline may cross are always
+                // worked, so these are wholly on one side of half, as their first pixel is.
+                let level = || {
+                    debug_assert!(r.tile.side_of(HALF).is_some(), "a tile the outline crosses not worked out");
+                    far(r.tile.get(0, 0))
                 };
                 let mut from = r.x0;
                 for &x in &at[at.partition_point(|&x| x < r.x0)..at.partition_point(|&x| x < r.x1)] {
                     if x > from {
-                        segments.push((from, x, MaskTile::Level(level)));
+                        segments.push((from, x, MaskTile::Level(level())));
                     }
                     from = x + 1;
                 }
                 if from < r.x1 {
-                    segments.push((from, r.x1, MaskTile::Level(level)));
+                    segments.push((from, r.x1, MaskTile::Level(level())));
                 }
             }
         }
@@ -721,6 +730,20 @@ impl Mask {
             }
         }
         out
+    }
+
+    /// Whether every pixel of `area` is at `threshold` or above (`Some(true)`), or every one
+    /// below (`Some(false)`), told from the tiles that reach into it.
+    pub(crate) fn side_in(&self, area: &IRect, threshold: u16) -> Option<bool> {
+        let outside = MaskTile::Level(self.outside);
+        let mut side = None;
+        for c in TileCoord::covering(area, 0) {
+            let s = self.tile(c).unwrap_or(&outside).side_of(threshold)?;
+            if *side.get_or_insert(s) != s {
+                return None;
+            }
+        }
+        side
     }
 
     /// The level of every pixel of `area`, if they all have the same (told from the tiles

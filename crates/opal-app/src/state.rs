@@ -594,8 +594,8 @@ impl AppState {
             Cmd::SelectAll => self.select_all(),
             Cmd::Deselect => self.deselect(),
             Cmd::InvertSelection => self.invert_selection(),
-            Cmd::GrowSelection => self.modify_selection(true),
-            Cmd::FeatherSelection => self.modify_selection(false),
+            Cmd::GrowSelection => self.modify_selection(true, ctx),
+            Cmd::FeatherSelection => self.modify_selection(false, ctx),
             Cmd::Clear => self.clear_selected(),
             Cmd::Cut => {
                 self.cut(None, ctx);
@@ -854,7 +854,11 @@ impl AppState {
     /// takes the file at once, so a save asked for before this one is written goes to it too.
     pub fn save_to(&mut self, id: DocId, path: PathBuf, then: Then, ctx: &egui::Context) {
         let Some(d) = self.doc_mut(id) else { return };
-        d.commit_pending();
+        // An edit in progress that changes nothing a file keeps (a selection's, as the
+        // modifier dialogs' previews are) stays in progress.
+        if d.pending.as_ref().is_some_and(|p| !p.doc.saves_as(d.history.doc())) {
+            d.commit_pending();
+        }
         let before = (d.path.replace(path.clone()), std::mem::replace(&mut d.title, file_title(&path)));
         // The document as it is now: it can be edited while this is written.
         let (doc, ids, at) = (d.history.doc().clone(), d.ids.clone(), d.history.current());

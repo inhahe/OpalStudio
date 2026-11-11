@@ -35,16 +35,22 @@ pub enum Step {
 impl Step {
     /// The selection `before` (its mask) becomes after the step.
     fn apply(&self, before: &Mask) -> Mask {
-        match self {
+        self.apply_unless(before, &|| false).expect("never stopped")
+    }
+
+    /// [`apply`](Self::apply), unless `stop` says to stop (asked between the pieces of a
+    /// modifier's work): then none.
+    fn apply_unless(&self, before: &Mask, stop: &(dyn Fn() -> bool + Sync)) -> Option<Mask> {
+        Some(match self {
             Step::Shape { shape, combine } => {
                 let made = Mask::of(shape);
                 before.combined(&made, *combine)
             }
             Step::Invert => before.inverted(),
-            Step::Grow { by, corners } => before.grown(*by, *corners),
-            Step::Feather { width, side, falloff } => before.feathered(*width, *side, *falloff),
+            Step::Grow { by, corners } => before.grown_unless(*by, *corners, stop)?,
+            Step::Feather { width, side, falloff } => before.feathered_unless(*width, *side, *falloff, stop)?,
             Step::Mask { mask } => (**mask).clone(),
-        }
+        })
     }
 
     /// Whether the step makes a selection of its own, the steps before it no longer counting.
@@ -128,17 +134,23 @@ impl Selection {
     /// the start; a step that starts over is the only one, and one that leaves it as it is,
     /// none).
     pub fn then(&self, step: Step) -> Selection {
+        self.then_unless(step, &|| false).expect("never stopped")
+    }
+
+    /// [`then`](Self::then), unless `stop` says to stop (asked between the pieces of a
+    /// modifier's work, which may be long): then none.
+    pub fn then_unless(&self, step: Step, stop: &(dyn Fn() -> bool + Sync)) -> Option<Selection> {
         // No step at all.
         if step.leaves_as_is() {
-            return self.clone();
+            return Some(self.clone());
         }
         if step.starts_over() {
-            return Selection::of(vec![step]);
+            return Some(Selection::of(vec![step]));
         }
-        let mask = step.apply(&self.mask);
+        let mask = step.apply_unless(&self.mask, stop)?;
         let mut steps = self.steps.clone();
         steps.push(step);
-        Selection { steps, mask: Arc::new(mask) }
+        Some(Selection { steps, mask: Arc::new(mask) })
     }
 
     /// The selection `step` alone makes.

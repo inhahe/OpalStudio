@@ -7,7 +7,8 @@
 //! Each works from the outline alone: a pixel selected less than half counts as out, at least
 //! half as in, so a soft selection grown or feathered loses its own softness.
 
-use crate::mask::{HALF, Mask, MaskTile, level};
+use crate::geom::IRect;
+use crate::mask::{FULL, HALF, Mask, MaskTile, level};
 use crate::tile::{TILE_PIXELS, TILE_SIZE, TileCoord};
 use rayon::prelude::*;
 use std::collections::HashSet;
@@ -17,13 +18,15 @@ use std::collections::HashSet;
 /// `Selection::transformed`). The memory a tile's working needs grows with its square.
 pub const MAX_DISTANCE: f64 = 1000.0;
 
-/// The memory the windows worked out at once may take: tiles are worked out in parallel in
-/// batches no larger.
+/// The memory the windows worked out at once may take (see [`by_distance`]).
 const WINDOWS_MEMORY: usize = 512 << 20;
 
 /// What a pixel of a window takes while it is worked out: its level, its nearest point of the
-/// outline, and how far that is.
-const WINDOW_PIXEL: usize = 2 + 8 + 4;
+/// outline (if one is found), and how far that is.
+const WINDOW_PIXEL: usize = 2 + std::mem::size_of::<Option<[f32; 2]>>() + 4;
+
+/// The most tiles a side a block worked out in one window has.
+const MOST_BLOCK: i32 = 8;
 
 /// The names of `ALL`'s values, as the recipe (serde), the API and the dialogs name them.
 macro_rules! named {
@@ -124,17 +127,29 @@ impl Mask {
     /// The mask grown by `by` pixels (shrunk, if less than 0), its corners growing as `reach`
     /// says.
     pub fn grown(&self, by: f64, reach: Reach) -> Mask {
-        if by == 0.0 {
-            return self.clone();
-        }
-        by_distance(self, by.abs() + 2.0, reach, |d| coverage(d - by))
+        self.grown_unless(by, reach, &|| false).expect("never stopped")
     }
 
     /// The mask feathered: its edge falling off over `width` pixels, on the `side` of its
     /// outline, along `falloff`.
     pub fn feathered(&self, width: f64, side: Side, falloff: Falloff) -> Mask {
+        self.feathered_unless(width, side, falloff, &|| false).expect("never stopped")
+    }
+
+    /// [`grown`](Self::grown), unless `stop` says to stop, which it is asked between the pieces
+    /// of the work: then none.
+    pub fn grown_unless(&self, by: f64, reach: Reach, stop: &(dyn Fn() -> bool + Sync)) -> Option<Mask> {
+        if by == 0.0 {
+            return Some(self.clone());
+        }
+        by_distance(self, by.abs() + 2.0, reach, |d| coverage(d - by), stop)
+    }
+
+    /// [`feathered`](Self::feathered), unless `stop` says to stop (see
+    /// [`grown_unless`](Self::grown_unless)).
+    pub fn feathered_unless(&self, width: f64, side: Side, falloff: Falloff, stop: &(dyn Fn() -> bool + Sync)) -> Option<Mask> {
         if width <= 0.0 {
-            return self.clone();
+            return Some(self.clone());
         }
         // Where the falloff begins, from the outline, out (more than 0) or in.
         let outer = match side {
@@ -144,14 +159,64 @@ impl Mask {
         };
         // Past the falloff's far side, each way, every pixel is as the falloff ends.
         let band = outer.max(width - outer) + 2.0;
-        by_distance(self, band, Reach::Round, move |d| level(falloff.at((outer - d) / width) as f32))
+        by_distance(self, band, Reach::Round, move |d| level(falloff.at((outer - d) / width) as f32), stop)
     }
+}
+
+/// A count of what may be held at once: taking one waits until one is free.
+struct Permits {
+    free: std::sync::Mutex<usize>,
+    freed: std::sync::Condvar,
+}
+
+impl Permits {
+    fn new(n: usize) -> Permits {
+        Permits { free: std::sync::Mutex::new(n), freed: std::sync::Condvar::new() }
+    }
+
+    /// Runs `f` holding one.
+    fn with<R>(&self, f: impl FnOnce() -> R) -> R {
+        let mut free = self.free.lock().expect("not poisoned");
+        while *free == 0 {
+            free = self.freed.wait(free).expect("not poisoned");
+        }
+        *free -= 1;
+        drop(free);
+        let r = f();
+        *self.free.lock().expect("not poisoned") += 1;
+        self.freed.notify_one();
+        r
+    }
+}
+
+/// How many tiles a side the blocks worked out in one window have for `band`: those that do
+/// the most work a thread for the memory (a larger block repeats less of its margin, but
+/// fewer fit in [`WINDOWS_MEMORY`] at once to keep the threads busy).
+fn block_tiles(band: f64) -> i32 {
+    let threads = rayon::current_num_threads().max(1) as f64;
+    let margin = 2.0 * (band.ceil() + 1.0);
+    let side = f64::from(TILE_SIZE);
+    let pace = |b: i32| {
+        let window = (f64::from(b) * side + margin).powi(2);
+        let at_once = (WINDOWS_MEMORY as f64 / (window * WINDOW_PIXEL as f64)).floor().max(1.0);
+        // Tiles done a thread's pixel worked, by the threads kept busy.
+        at_once.min(threads) * f64::from(b * b) / window
+    };
+    (1..=MOST_BLOCK).max_by(|&a, &b| pace(a).total_cmp(&pace(b))).expect("one at least")
 }
 
 /// `mask` with each pixel's level what `level_of` makes of its distance to the outline, as
 /// `reach` measures it (less than 0 inside), worked out within `band` pixels of it: farther,
-/// as `level_of` says at the band's edge.
-fn by_distance(mask: &Mask, band: f64, reach: Reach, level_of: impl Fn(f64) -> u16 + Sync) -> Mask {
+/// as `level_of` says at the band's edge. The tiles within the band are worked out in blocks,
+/// a window each (the block and a margin of the band round it), in parallel, as many at once
+/// as fit in [`WINDOWS_MEMORY`]; `stop` is asked before each, and if it says so, none.
+fn by_distance(
+    mask: &Mask,
+    band: f64,
+    reach: Reach,
+    level_of: impl Fn(f64) -> u16 + Sync,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> Option<Mask> {
     let far_in = level_of(-band);
     let far_out = level_of(band);
     let far = |l: u16| if l >= HALF { far_in } else { far_out };
@@ -167,27 +232,47 @@ fn by_distance(mask: &Mask, band: f64, reach: Reach, level_of: impl Fn(f64) -> u
             }
         }
     }
-    // Worked out in batches whose windows' memory stays within WINDOWS_MEMORY.
-    let side = TILE_SIZE as usize + 2 * (band.ceil() as usize + 1);
-    let at_once = (WINDOWS_MEMORY / (side * side * WINDOW_PIXEL)).max(1);
-    let near: Vec<TileCoord> = near.into_iter().collect();
-    let mut worked = Vec::with_capacity(near.len());
-    for batch in near.chunks(at_once) {
-        worked.par_extend(batch.par_iter().map(|&c| (c, tile_by_distance(mask, c, band, reach, &level_of))));
+    let b = block_tiles(band);
+    let mut blocks: std::collections::HashMap<(i32, i32), Vec<TileCoord>> = std::collections::HashMap::new();
+    for c in near {
+        blocks.entry((c.x.div_euclid(b), c.y.div_euclid(b))).or_default().push(c);
     }
+    let window = |(bx, by): (i32, i32)| {
+        let (a, z) = (TileCoord::new(bx * b, by * b).rect(0), TileCoord::new(bx * b + b - 1, by * b + b - 1).rect(0));
+        IRect::new(a.x0, a.y0, z.x1, z.y1).expand(band.ceil() as i64 + 1)
+    };
+    let bytes = (window((0, 0)).width() as usize).pow(2) * WINDOW_PIXEL;
+    let permits = Permits::new((WINDOWS_MEMORY / bytes).max(1));
+    let blocks: Vec<((i32, i32), Vec<TileCoord>)> = blocks.into_iter().collect();
+    let worked: Vec<Vec<(TileCoord, MaskTile)>> = blocks
+        .par_iter()
+        .map(|(at, tiles)| {
+            let w = window(*at);
+            // No outline within reach of the block: each tile as its side ends.
+            if let Some(inside) = mask.side_in(&w, HALF) {
+                return Some(tiles.iter().map(|&c| (c, MaskTile::Level(far(if inside { FULL } else { 0 })))).collect());
+            }
+            if stop() {
+                return None;
+            }
+            permits.with(|| (!stop()).then(|| block_by_distance(mask, &w, tiles, band, reach, &level_of)))
+        })
+        .collect::<Option<Vec<_>>>()?;
     // Farther, each tile is as its side ends.
-    mask.rebuilt(worked, far, outside)
+    Some(mask.rebuilt(worked.into_iter().flatten().collect(), far, outside))
 }
 
-/// Tile `c` of [`by_distance`]'s mask.
-fn tile_by_distance(mask: &Mask, c: TileCoord, band: f64, reach: Reach, level_of: &(impl Fn(f64) -> u16 + Sync)) -> MaskTile {
-    let margin = band.ceil() as i64 + 1;
-    let r = c.rect(0);
-    let window = r.expand(margin);
-    // No outline within reach: as its side ends.
-    if let Some(l) = mask.uniform_in(&window) {
-        return MaskTile::Level(level_of(if l >= HALF { -band } else { band }));
-    }
+/// The tiles `tiles` of [`by_distance`]'s mask, worked out over `window` (theirs, and the
+/// band round them).
+fn block_by_distance(
+    mask: &Mask,
+    window: &IRect,
+    tiles: &[TileCoord],
+    band: f64,
+    reach: Reach,
+    level_of: &(impl Fn(f64) -> u16 + Sync),
+) -> Vec<(TileCoord, MaskTile)> {
+    let window = *window;
     let (w, h) = (window.width() as usize, window.height() as usize);
     let levels = mask.levels_in(&window);
     let inside = |i: usize| levels[i] >= HALF;
@@ -221,6 +306,22 @@ fn tile_by_distance(mask: &Mask, c: TileCoord, band: f64, reach: Reach, level_of
             }
         }
     }
+    // Where a sharp edge turns (a pixel of four, all fully in or out, other than the rest),
+    // the outline goes through their shared corner: there too, or a rectangle's corner would
+    // be reached only through the points half a pixel along its sides.
+    let sharp = |i: usize| levels[i] == 0 || levels[i] == FULL;
+    for y in 0..h.saturating_sub(1) {
+        for x in 0..w.saturating_sub(1) {
+            let cell = [y * w + x, y * w + x + 1, (y + 1) * w + x, (y + 1) * w + x + 1];
+            let ins = cell.iter().filter(|&&i| inside(i)).count();
+            if (ins == 1 || ins == 3) && cell.iter().all(|&i| sharp(i)) {
+                let corner = [(x + 1) as f32, (y + 1) as f32];
+                for i in cell {
+                    offer(&mut nearest, &mut dist, i, corner);
+                }
+            }
+        }
+    }
     // Spread to every pixel from its neighbours' (Danielsson's two sweeps of eight).
     let take = |nearest: &mut Vec<Option<[f32; 2]>>, dist: &mut Vec<f32>, i: usize, from: Option<usize>| {
         if let Some(p) = from.and_then(|j| nearest[j]) {
@@ -251,23 +352,28 @@ fn tile_by_distance(mask: &Mask, c: TileCoord, band: f64, reach: Reach, level_of
         }
     }
     let side = TILE_SIZE as usize;
-    let (ox, oy) = ((r.x0 - window.x0) as usize, (r.y0 - window.y0) as usize);
-    let mut out = vec![0u16; TILE_PIXELS];
-    for y in 0..side {
-        for x in 0..side {
-            let i = (y + oy) * w + x + ox;
-            let d = f64::from(dist[i]).min(band);
-            out[y * side + x] = level_of(if inside(i) { -d } else { d });
-        }
-    }
-    MaskTile::from_levels(out)
+    tiles
+        .iter()
+        .map(|&c| {
+            let r = c.rect(0);
+            let (ox, oy) = ((r.x0 - window.x0) as usize, (r.y0 - window.y0) as usize);
+            let mut out = vec![0u16; TILE_PIXELS];
+            for y in 0..side {
+                for x in 0..side {
+                    let i = (y + oy) * w + x + ox;
+                    let d = f64::from(dist[i]).min(band);
+                    out[y * side + x] = level_of(if inside(i) { -d } else { d });
+                }
+            }
+            (c, MaskTile::from_levels(out))
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geom::IRect;
-    use crate::mask::{Extent, FULL, Shape, ShapeKind};
+    use crate::mask::{Extent, Shape, ShapeKind};
 
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Mask {
         Mask::of(&Shape::rectangle(&crate::geom::FRect::new(x0, y0, x1, y1), true))
@@ -350,6 +456,29 @@ mod tests {
         let grown = m.grown(3.0, Reach::Square);
         assert_eq!(grown.extent(), Extent::Within(IRect::new(-3, -3, 300_003, 300_003)));
         assert_eq!(grown.level_at(150_000, 150_000), FULL);
+    }
+
+    #[test]
+    fn blocks_are_as_large_as_keep_the_threads_busy_in_the_memory_and_the_work_stops_when_asked() {
+        // A small band: blocks of several tiles a side, which repeat less of their margin than
+        // a tile alone would (how many depends on the threads there are to keep busy).
+        assert!(block_tiles(7.0) > 1);
+        assert!((1..=MOST_BLOCK).contains(&block_tiles(1002.0)));
+        let m = rect(0.0, 0.0, 3000.0, 3000.0);
+        assert!(m.grown_unless(40.0, Reach::Round, &|| true).is_none(), "not stopped");
+        // Worked out in blocks, the same as tile by tile would give: a corner and a side.
+        let grown = m.grown(40.0, Reach::Square);
+        assert_eq!([grown.level_at(-40, -40), grown.level_at(-41, 1500), grown.level_at(1500, 3039)], [FULL, 0, FULL]);
+    }
+
+    #[test]
+    fn a_soft_tile_wholly_on_one_side_of_half_is_no_part_of_the_outline() {
+        // Inside a selected rectangle, a tile of levels from 60% to 90%: all above half, so the
+        // outline does not cross it, and growing leaves it fully selected (it is in).
+        let soft: std::sync::Arc<[u16]> = (0..TILE_PIXELS).map(|i| level(0.6 + 0.3 * (i % 256) as f32 / 255.0)).collect();
+        let m = rect(0.0, 0.0, 4096.0, 4096.0).rebuilt(vec![(TileCoord::new(8, 8), MaskTile::Levels(soft))], |l| l, 0);
+        assert!(!m.edge_tiles().contains(&TileCoord::new(8, 8)), "a tile wholly above half taken for the outline's");
+        assert_eq!(m.grown(4.0, Reach::Round).level_at(2100, 2100), FULL);
     }
 
     #[test]

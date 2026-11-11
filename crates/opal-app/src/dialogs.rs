@@ -702,10 +702,9 @@ fn modifying(ctx: &egui::Context, st: &mut AppState) {
         st.modifying.as_mut().expect("open").step = step;
         st.preview_modifying(ctx);
     }
-    // While what it makes is worked out, the image shows what it made last.
-    if st.poll_modifying() {
-        ctx.request_repaint_after(std::time::Duration::from_millis(30));
-    }
+    // While what it makes is worked out, the image shows what it made last (its job asks for
+    // a frame once done).
+    st.poll_modifying();
     if let Some(keep) = done {
         st.end_modifying(keep);
     }
