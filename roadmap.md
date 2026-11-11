@@ -121,6 +121,8 @@ which they are most used on.
   image, to load back, combine, and keep in the file.
 - *(new)* Transform Selection: the selection itself in a transform box, its shapes carried
   exactly where they can be (`Selection::transformed`).
+- *(new)* Layer via Copy (Ctrl+J) and Layer via Cut: what is selected, on a layer of its own
+  just above (as much of each pixel as it is selected).
 - Marching ants; the mask as a red overlay.
 - Selections in the history tree.
 - Diagnostics: "why nothing happened", starting with selection, hidden, locked, opacity and
@@ -131,10 +133,17 @@ which they are most used on.
   image alone.
 - Align and distribute layers: edges and centers, to the canvas, to the selection, or to a
   key layer; distributing spacing evenly. In the box's fields and from scripts too.
+- Arranging: Bring to Front and Send to Back (within the group), Reverse the selected
+  layers' order; Select All Layers and Deselect Layers.
+- Transform Again (the last transform, on the layers selected now) and Transform Again as a
+  Copy (a copy each time, so that a few presses make a ring or a row of them).
+- Open as Layers: several files into one image, a layer each.
 - Rotate the view (not the image), by a drag or a typed angle, back with one key; painting
   needs it most.
 - Crop to Content by color: trim borders of the corners' color, within a tolerance (as well
-  as transparent ones).
+  as transparent ones); and Reveal All, the canvas grown to all there is, hidden layers too.
+- Matting: Defringe (edge pixels given their neighbors' color), Remove Black Matte and Remove
+  White Matte (the color an edge was blended with taken back out).
 - The measuring tool: a distance and an angle between two points, in any unit, kept until
   the next measure; Straighten by the line measured.
 - Color samplers: points pinned on the image that show their color in chosen color models,
@@ -144,9 +153,10 @@ which they are most used on.
 - ONNX Runtime with DirectML; the model manager (download on first use, license shown,
   delete from Preferences).
 - Select subject (BiRefNet); the AI object and paint-the-area tool (SAM 2.1); matting
-  (ViTMatte) and color decontamination.
-- Copy to new layer, Cut to new layer; Lift out and Remove object, filled by LaMa on a layer
-  of their own. *(new)* Remove brush: paint over what should go, and LaMa fills it on a layer
+  (ViTMatte) and color decontamination. *(new)* Refining an edge as one step of the recipe:
+  smooth, feather, contrast and shifting it in or out, beside matting and decontamination;
+  Select sky; masks for the objects found in a layer.
+- Lift out and Remove object, filled by LaMa on a layer of their own. *(new)* Remove brush: paint over what should go, and LaMa fills it on a layer
   of its own. Remove background (Select subject, inverted, on a mask).
 - SAM 3 as an optional download.
 
@@ -170,6 +180,7 @@ which they are most used on.
   color, the secondary color, 50% gray, a pattern or a gradient, or its outline stroked
   (width; inside, centered or outside), with a blend mode and opacity.
 - *(new)* Primary and secondary colors, D to reset them to black and white, X to swap them.
+- *(new)* Define Brush (a brush tip from the selection) and Define Pattern.
 - Painting on masks. *(new)* Quick Mask (Q): the selection painted with any brush and
   eraser, kept as a step of its recipe.
 - Symmetric painting: each stroke repeated in mirror, in rotation of a chosen order, or
@@ -183,7 +194,8 @@ which they are most used on.
   included); rectangle, ellipse, polygon, star. *(new)* The Curvature pen (points placed on
   the curve, its handles worked out), as a variant of the Pen; the Line tool, with
   arrowheads; rounded corners kept editable on rectangles and polygons.
-- *(new)* Paths to selections and selections to paths.
+- *(new)* Paths to selections and selections to paths; filling a path, and stroking it with
+  any brush of milestone 3.
 - Paths' nodes as points the boxes' positions can count from (`box_fields::Base`), beside
   the canvas and layers, from the fields and from scripts, and that expressions can name
   (`Outline.node(3).x`). Nodes get names you can see, backed by stable ids, so renaming or
@@ -208,21 +220,31 @@ which they are most used on.
 - Adjustments: levels, curves, hue/saturation, gradient map, channel matrix (3×3 weights
   plus offsets in a chosen color model, curves in place of weights, presets). Each as an
   adjustment layer or applied once to the selection.
+- *(new)* The Histogram panel (each channel, or luminosity; of the image, the layer or the
+  selection; with statistics), and its histogram in Levels and Curves.
+- *(new)* Fill layers: a solid color, a gradient or a pattern, kept editable.
 - *(new)* More adjustments, in this order: brightness and contrast; exposure (stops, offset,
   gamma); black and white (a weight for each range of hues; tint); vibrance; color balance
   (shadows, midtones and highlights); shadows and highlights; color lookup tables (`.cube`
   and `.3dl`); photo filter (warming, cooling, any color, lightness kept); invert,
   threshold, posterize and desaturate; auto tone, auto contrast and auto color; clarity
   (local contrast at a chosen scale); equalize; solarize; selective color.
+- *(new)* Develop: the photographic controls in one adjustment layer, as raw developers have
+  them: white balance (temperature and tint), exposure, contrast, highlights, shadows,
+  whites and blacks, texture, clarity, dehaze, vibrance and saturation, a tone curve, hue,
+  saturation and lightness by color, split toning, grain and vignette.
 - Expression layers (`design.md`, *Expression layers*): each pixel filled by an expression
   per component of a chosen color model, and one for alpha, of its place (`x`, `y`; `u`, `v`
   across the selection; distance and angle from its center), noise, and the pixels beneath it
   (`below.L`, `below.h`); editable, worked out a tile at a time off the interface thread,
   compiled once. `let` and `if … then … else` added to expressions. Select › Fill with
   Expression makes one within the selection; scripts too (`fill_expression`).
-- Layer masks; the blend modes from milestone 3 on layers. *(new)* A mask's density, feather
-  and inversion kept as its settings; clipping a layer to the one below (its shape the
-  other's); fill opacity apart from the layer's.
+- Layer masks; the blend modes from milestone 3 on layers. *(new)* Masks in full: revealing
+  or hiding all, or the selection; turned off and on; applied, deleted, unlinked to move
+  apart; their density, feather and inversion kept as settings; a selection from a mask.
+  Vector masks from paths. Paste Into (into the selection, through a mask made of it).
+  Clipping a layer to the one below (its shape the other's). Fill opacity apart from the
+  layer's; which channels a layer blends into.
 - Blend If: curves over channels of a chosen color model, for this layer and for the pixels
   beneath it.
 - Color management with ICC profiles (embedded profiles honored on import); the
@@ -235,17 +257,21 @@ which they are most used on.
 ## F. Filters *(new)*
 - Filters as layers that act on what is beneath them, or on one layer, editable as
   adjustment layers are (milestone 5's machinery); or applied once to the selection.
-  Previewed at screen resolution first.
+  Previewed at screen resolution first. Several stacked make a chain to reorder. Repeat the
+  last filter, with its settings (Ctrl+F) or showing them.
 - In this order: Gaussian blur; unsharp mask and smart sharpen (radius, amount, threshold,
   halos suppressed); high pass; add noise and film grain; reduce noise (luminance and color
   apart); median, despeckle and dust and scratches; motion blur; radial blur (spin and zoom);
   surface blur (edges kept); vignette; lens correction (barrel and pincushion, chromatic
   aberration, vignetting); lens blur (bokeh, with a depth map or a gradient); tilt-shift,
-  iris and field blur; box blur and average; clouds (the noise expression layers have).
+  iris and field blur; box blur and average; clouds (the noise expression layers have);
+  offset (the image shifted, wrapped round at the edges, for seamless textures); minimum
+  and maximum (shrinking or spreading light areas); a custom convolution kernel.
 - Then distortions: twirl, pinch and spherize, wave, ripple and zigzag, polar coordinates,
-  displace (by a grayscale image), glass.
+  displace (by a grayscale image), glass, shear.
 - Then stylizing: emboss, find edges and glowing edges, pixelate (mosaic, crystallize,
-  pointillize), halftone, oil paint, diffuse glow.
+  pointillize, facet, fragment, mezzotint), color halftone, oil paint, diffuse glow, wind,
+  trace contour, tiles.
 
 ## 6. Retouching
 - *Sample from*: current, below, all visible, chosen and named sets.
@@ -275,8 +301,14 @@ which they are most used on.
 
 ## 7. Text
 - Area text and point text; editable permanently, even inside an existing layer.
-- *(new)* Vertical text (columns right to left, for Chinese and Japanese); text as a selection
-  (a maker step of the recipe); warped text; text to outlines.
+- *(new)* Vertical text (columns right to left, for Chinese and Japanese), and turning text
+  between horizontal and vertical; writing direction; point text to area text and back.
+- *(new)* Paragraphs: alignment and justification, hyphenation by language; OpenType
+  features; the antialiasing method; case changes (upper, lower, title, sentence).
+- *(new)* Text as a selection (a maker step of the recipe); warped text, with the warp
+  presets of milestone T; text to outlines, to a path, and to pixels.
+- *(new)* Spelling (by language); find and replace across the text layers; missing fonts
+  found and replaced.
 - Text boxes' corners as points the boxes' positions can count from and expressions can
   name, as paths' nodes are.
 - Shaping, bidirectional text, line breaking, font fallback.
@@ -311,25 +343,39 @@ which they are most used on.
 
 ## Later
 In this order:
-- Content-aware fill by PatchMatch (LaMa's arrives with milestone A); LaMa as a method for
+- Recording: what is done, written as a script to run again (an action), the commands being
+  parameterized already; batches: a script or recording run over a folder of files, with
+  their output's format, size and color profile (as Image Processor does).
+- Content-aware fill by PatchMatch (LaMa's arrives with milestone A), with its own
+  workspace (where to sample from, how much to rotate and scale); LaMa as a method for
   automatic healing; content-aware move and extend.
 - PSD import; TIFF, WebP and AVIF.
-- AI upscaling and AI noise reduction; JPEG artifact removal.
+- AI upscaling and AI noise reduction; JPEG artifact removal; colorizing black-and-white
+  photographs; restoring damaged ones and faces; depth from a photograph (for lens blur
+  without a depth map); skin smoothing; color and style transfer.
 - Merging photographs: aligning layers by their content, panoramas, HDR, focus stacking,
   stacking for less noise.
 - Generative fill and expand (a diffusion model run locally), if one fits the model manager's
   terms and the computer.
 - Linked and embedded objects (a group, or a file, kept as one object, replaced in place).
-- Channels: split and merge, calculations between channels and images, saved selections as
-  alpha channels.
-- Indexed color and palettes (and GIF export); duotone; match color.
+- Channels: the Channels panel, split and merge, calculations and Apply Image between
+  channels and images, saved selections as alpha channels.
+- Image modes: grayscale, bitmap, indexed color and palettes (and GIF export), duotone;
+  CMYK (soft proofing, separations, export) and Lab; 8, 16 and 32 bits a channel for export
+  (the image itself is floating point). Match color; HDR toning.
+- Stacks: layers combined by mean, median, minimum or maximum.
 - Lighting effects and lens flare.
 - Artboards; notes on the image; customizing which tools the tool strip shows.
+- Importing from a scanner or camera (WIA); frame animation, with GIF and APNG export.
+- The artistic gallery's chosen few: watercolor, colored pencil, charcoal, ink outlines,
+  cutout, stained glass, texturizer; and Photoshop-compatible filter plug-ins (8BF).
 - Auto-stroke brush (like Photoshop's Art History Brush).
 - Non-square pixels (separate horizontal and vertical resolutions, then showing pixels at
   their shape), as `todo.txt` describes.
 - Pen input on macOS and Linux.
 
 Not planned: slices (for web pages cut into images, which nobody makes any more), the count
-tool, the frame tool (placements and clipping masks do its work), and the render filters for
-trees and flames.
+tool, the frame tool (placements and clipping masks do its work), the render filters for
+trees, flames and picture frames; 3D; video (the timeline, video layers and the video
+filters); contact sheets and picture packages; AI that changes faces (age, expression,
+gaze), which needs large models for little use in an editor like this one.
