@@ -1,9 +1,9 @@
-//! The transform box: placing a paste, and transforming layers.
+//! The transform box: placing a paste, transforming layers, and transforming the selection.
 //!
 //! A session keeps the document being transformed as the document's pending edit, so the
-//! whole session becomes one history state ("Paste" or "Transform") when committed, and
-//! cancelling leaves the document as it was. Any other change to the document commits the
-//! session first (see [`DocState::commit_pending`]).
+//! whole session becomes one history state ("Paste", "Transform", "Transform selection") when
+//! committed, and cancelling leaves the document as it was. Any other change to the document
+//! commits the session first (see [`DocState::commit_pending`]).
 //!
 //! The box is a rectangle, `frame`, in its own coordinates, carried into the document by
 //! `current`. For one object, the frame is the object's own frame and `current` its
@@ -28,7 +28,26 @@ pub enum Kind {
     /// A paste of an image file (Place).
     Place,
     Transform,
+    /// The selection itself (Transform Selection): it has no objects; the selection is carried
+    /// by the box's change once it is applied.
+    Selection,
 }
+
+impl Kind {
+    /// The history state a session of this kind makes.
+    pub fn label(self) -> &'static str {
+        match self {
+            Kind::Paste => "Paste",
+            Kind::Place => "Place",
+            Kind::Transform => "Transform",
+            Kind::Selection => "Transform selection",
+        }
+    }
+}
+
+/// Why the selection cannot be put in a box: it reaches past every edge (inverted, say).
+pub const NO_BOX: &str =
+    "The selection reaches past every edge of the image (it was inverted, say), so there is no box to put round it.";
 
 /// An object the box moves.
 #[derive(Clone, Debug)]
@@ -196,12 +215,15 @@ fn next_serial() -> u64 {
 }
 
 impl Session {
+    /// The history state it makes, as its kind's.
     pub fn label(&self) -> &'static str {
-        match self.kind {
-            Kind::Paste => "Paste",
-            Kind::Place => "Place",
-            Kind::Transform => "Transform",
-        }
+        self.kind.label()
+    }
+
+    /// What the box has done since the session began: the map carrying where things were
+    /// then to where they are now.
+    pub fn delta(&self) -> Affine {
+        self.start.inverse().expect("a box always has a size (see `box_refused`)").then(self.current)
     }
 
     /// The box's corners in the document, clockwise from the frame's top-left.
@@ -644,6 +666,43 @@ impl DocState {
         true
     }
 
+    /// Starts transforming the selection itself (Transform Selection): the box round what is
+    /// selected moves, sizes and turns it as Rotate, Flip and Resize Image carry it
+    /// ([`Selection::transformed`](opal_core::selection::Selection::transformed)), nothing else
+    /// changing. Refused, saying why, with nothing selected, or a selection reaching past every
+    /// edge, which no box goes round.
+    pub fn begin_selection_transform(&mut self) -> Result<(), &'static str> {
+        self.commit_pending();
+        let extent = self.pixel_selection().map(|s| s.mask().extent());
+        let frame = match extent {
+            Some(opal_core::mask::Extent::Within(b)) => b.to_f(),
+            Some(opal_core::mask::Extent::Unbounded) => return Err(NO_BOX),
+            Some(opal_core::mask::Extent::Nothing) | None => return Err("Nothing is selected."),
+        };
+        let was_selected = self.selected_layers_active_last();
+        let doc = self.history.doc().clone();
+        self.pending = Some(Pending { doc, label: Kind::Selection.label().into() });
+        self.transform = Some(Session {
+            serial: next_serial(),
+            kind: Kind::Selection,
+            targets: Vec::new(),
+            frame,
+            start: Affine::IDENTITY,
+            current: Affine::IDENTITY,
+            sampling: Sampling::default(),
+            paste: None,
+            was_selected,
+            drag: None,
+            guides: Guides::default(),
+            draft: false,
+            sampling_changed: false,
+            given: Vec::new(),
+            placed: Vec::new(),
+        });
+        self.revision += 1;
+        Ok(())
+    }
+
     /// Why the box cannot be put at `m`, if it cannot: it would have no size, or put an
     /// object past what an image file can hold (see `ImageObject::transform_ok`).
     pub fn box_refused(&self, m: &Affine) -> Option<&'static str> {
@@ -979,6 +1038,9 @@ impl DocState {
     /// changed nothing is dropped instead, leaving no history state.
     pub(crate) fn finish_transform(&mut self) {
         let Some(s) = self.transform.as_ref() else { return };
+        if s.kind == Kind::Selection {
+            return self.finish_selection_transform();
+        }
         let before = self.history.doc();
         // How its layers were placed, to be placed so again.
         let placement = placement_made(s, before);
@@ -1041,6 +1103,30 @@ impl DocState {
                     self.notice =
                         Some(format!("The paste stays an image in the layer, not drawn into its pixels: {why}"))
                 }
+            }
+        }
+    }
+
+    /// A Transform Selection box applied at once, as [`finish_transform`](Self::finish_transform)
+    /// is: the selection carried in the pending document as far as the box moved it; if there
+    /// is not memory enough for that, nothing changes, the status bar saying why. A box left
+    /// where it was changes nothing. (`AppState::commit_box` works it out off the interface
+    /// thread instead, as Enter and the box's Apply do.)
+    fn finish_selection_transform(&mut self) {
+        let Some(s) = self.transform.take() else { return };
+        let before = self.pending.as_ref().and_then(|p| p.doc.selection.clone()).filter(|_| s.current != s.start);
+        let made = before.map(|before| {
+            let memory = Allowance::now();
+            crate::memory::Admission::within(memory, &|| false, |b| before.transformed_within(&s.delta(), b))
+        });
+        match (made, self.pending.as_mut()) {
+            (Some(Ok(made)), Some(p)) => p.doc.selection = (!made.is_empty()).then(|| Arc::new(made)),
+            (made, _) => {
+                if let Some(Err(why)) = made {
+                    self.notice = Some(why);
+                }
+                self.pending = None;
+                self.revision += 1;
             }
         }
     }

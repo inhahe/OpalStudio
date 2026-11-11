@@ -101,6 +101,7 @@ pub const INVERT_SELECTION: char = '\u{ea99}';
 pub const RESELECT: char = '\u{f19f}';
 pub const SMOOTH: char = '\u{f0398}';
 pub const BORDER_SELECTION: char = '\u{e1ac}';
+pub const TRANSFORM_SELECTION: char = '\u{ea88}';
 pub const LAYER_PIXELS: char = '\u{f697}';
 pub const CUT: char = '\u{f33a}';
 pub const CLEAR: char = '\u{e5e4}';

@@ -437,8 +437,11 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     if !boxed && !cropping {
         draw_outlines(ui, d, rect, &to_screen, palette.accent);
     }
+    // While a Transform Selection box is open, the selection as the box would carry it: its
+    // outline carried (the overlay, of the selection as it was, not shown).
+    let carried = d.transform.as_ref().filter(|s| s.kind == crate::transform::Kind::Selection).map(|s| s.delta());
     // What is not selected, under red, if asked for.
-    match overlay.zip(d.pixel_selection().cloned()) {
+    match overlay.filter(|_| carried.is_none()).zip(d.pixel_selection().cloned()) {
         Some((opacity, s)) => {
             let (view, canvas) = (d.view, d.doc().canvas.rect());
             crate::mask_view::draw(ui, s.mask(), &canvas, rect, view, ppp, opacity, &mut d.overlay);
@@ -449,7 +452,8 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     // What is selected: its outline, the marching ants. They march while they are seen and
     // the window has the focus: each step is a frame of the whole window.
     if let Some(lines) = d.selection_outline(threshold) {
-        march(&ctx, draw_ants(ui, &lines, rect, &to_screen, ctx.input(|i| i.time)));
+        let at = |p: [f64; 2]| to_screen(carried.map_or(p, |m| m.apply(p)));
+        march(&ctx, draw_ants(ui, &lines, rect, &at, ctx.input(|i| i.time)));
     }
     if let Some(drag) = &d.select_drag {
         crate::select_tool::draw(ui, drag, select, &d.doc().canvas.rect(), rect, &to_screen);

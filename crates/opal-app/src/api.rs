@@ -574,6 +574,19 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             INTO_ACTIVE,
             UNIT,
         ],
+        TransformSelection => &[
+            DOCUMENT,
+            BOX_X,
+            BOX_Y,
+            BOX_WIDTH,
+            BOX_HEIGHT,
+            BOX_ANGLE,
+            BOX_FIT,
+            BOX_ANCHOR,
+            FROM_LAYER,
+            FROM_ANCHOR,
+            UNIT,
+        ],
         Transform => &[
             DOCUMENT,
             LAYERS,
@@ -2200,6 +2213,24 @@ impl AppState {
                 }
                 now(self.apply_box(&place, false))
             }
+            Cmd::TransformSelection => {
+                let place = match BoxArgs::of(args, params, self.active().map(|d| d.history.doc())) {
+                    Ok(place) => place,
+                    Err(why) => return now(Err(format!("transform_selection: {why}"))),
+                };
+                self.transform_selection();
+                let Some(d) = self.active_mut().filter(|d| d.transform.is_some()) else {
+                    // Refused, and said why.
+                    return now(Ok(json!({})));
+                };
+                if let Err(why) = place_box(d, &place) {
+                    d.cancel_transform();
+                    return now(Err(why));
+                }
+                let id = d.id;
+                self.commit_box(id);
+                self.reply_when_done("transform_selection", |st, id| selection_json(st.doc(id).expect("its image")))
+            }
             Cmd::Rename => {
                 let id = self.active().and_then(|d| d.active_layer()).expect("available");
                 self.rename_layer(doc.expect("available"), id, args.text("name").expect("required").to_owned());
@@ -3318,6 +3349,26 @@ mod tests {
         let ids: Vec<u64> = d.selected_layers().iter().map(|l| l.0).collect();
         assert_eq!(layers["layers"], json!(ids), "answered about the image active then");
         assert_eq!(d.history.undo_label(), Some("Merge down"));
+    }
+
+    #[test]
+    fn a_script_transforms_the_selection_by_its_box_numbers() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 300, "height": 200 })).unwrap();
+        let rect = json!({ "x": 10, "y": 20, "width": 40, "height": 30, "smooth": false });
+        now(&mut st, "select_rectangle", rect).unwrap();
+        let s = now(&mut st, "transform_selection", json!({ "x": 100, "y": 50 })).unwrap();
+        assert_eq!(s["bounds"], json!([100, 50, 40, 30]), "{s}");
+        // A quarter turn about its middle: 30 wide and 40 tall about the same middle.
+        let s = now(&mut st, "transform_selection", json!({ "angle": 90, "anchor": "center" })).unwrap();
+        assert_eq!(s["bounds"], json!([105, 45, 30, 40]), "{s}");
+        let d = st.active().unwrap();
+        assert_eq!(d.history.undo_label(), Some("Transform selection"));
+        assert!(d.transform.is_none(), "the box was left open");
+        // Inverted: refused, saying why.
+        now(&mut st, "invert_selection", json!({})).unwrap();
+        let why = now(&mut st, "transform_selection", json!({ "x": 0 })).unwrap_err();
+        assert!(why.contains("no box"), "{why}");
     }
 
     #[test]

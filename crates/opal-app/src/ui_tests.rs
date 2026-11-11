@@ -3296,6 +3296,56 @@ fn the_select_tool_selects_a_rectangle_dragged_on_whole_pixels_and_combines_by_t
 }
 
 #[test]
+fn enter_applies_a_transform_selection_box_off_the_interface_thread_its_ants_moving_with_it() {
+    use opal_core::geom::{Affine, IRect};
+    use opal_core::mask::Extent;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    // Two rectangles: the second's top lies within the box, not along its edge, which the box
+    // is drawn over.
+    let none = egui::Modifiers::NONE;
+    select_drag(&mut h, [100.0, 50.0], [200.0, 120.0], none, none);
+    select_drag(&mut h, [250.0, 80.0], [300.0, 140.0], egui::Modifiers::SHIFT, egui::Modifiers::SHIFT);
+    let ctx = h.ctx.clone();
+    h.state_mut().state_mut().run(crate::commands::Cmd::TransformSelection, &ctx);
+    h.run();
+    // How many pixels along the second's top, at `y`, are black.
+    let ants = |h: &mut Harness<'static, OpalApp>, y: f32| {
+        let d = h.state().state().active().unwrap();
+        let (view, min) = (d.view, d.view.screen_rect.min);
+        let ppp = h.ctx.pixels_per_point();
+        let at = |x: f32| min + view.to_screen(egui::vec2(x, y)) / ppp;
+        let (a, b) = (at(255.0), at(295.0));
+        let img = render(h, "ants");
+        let row = (a.y * ppp).floor() as u32;
+        ((a.x * ppp) as u32..(b.x * ppp) as u32)
+            .filter(|&x| {
+                let p = img.get_pixel(x, row);
+                p[0] < 40 && p[1] < 40 && p[2] < 40
+            })
+            .count()
+    };
+    assert!(ants(&mut h, 80.0) > 10, "no ants along the second rectangle's top");
+    // Moved 100 down: the ants go with the box before it is applied.
+    h.state_mut().state_mut().active_mut().unwrap().set_box(Affine::translate(0.0, 100.0), None);
+    h.run();
+    assert!(ants(&mut h, 180.0) > 10, "the ants did not go with the box");
+    assert_eq!(ants(&mut h, 80.0), 0, "the ants stayed where the selection was");
+    // Enter applies it, worked out off the interface thread.
+    h.state_mut().state_mut().edit_wait = std::time::Duration::ZERO;
+    let held = crate::background::testing::hold(Some(crate::edits::pool()));
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let off_thread = h.state().state().editing();
+    drop(held);
+    h.state_mut().state_mut().finish_edits();
+    h.run();
+    assert!(off_thread, "worked out on the interface thread");
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 150, 300, 240))));
+}
+
+#[test]
 fn single_rows_and_columns_are_selected_the_canvas_across_by_a_click_or_a_drag() {
     use crate::tools::ToolId;
     use egui_kittest::kittest::by;

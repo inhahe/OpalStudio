@@ -341,6 +341,21 @@ class Editor:
         side: Where the band lies: inside the outline, outside it, or half each way. Default: "centered".
         unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
+    def transform_selection(self, *, document: int | None = None, x: float | str | Expr | None = None, y: float | str | Expr | None = None, width: float | str | Expr | None = None, height: float | str | Expr | None = None, angle: float | str | Expr | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", from_layer: int | None = None, from_anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+        """Move, size or turn the selection itself in a box.
+
+        document: The image, by id. Default: the active image.
+        x: Where the box's anchor point (its top-left corner, unless anchor says) goes, across from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        y: Where the box's anchor point (its top-left corner, unless anchor says) goes, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where the command puts it.
+        width: The box's width. From 0.01 to 1000000.0 pixels. Default: in proportion to the height given, or as it is.
+        height: The box's height. From 0.01 to 1000000.0 pixels. Default: in proportion to the width given, or as it is.
+        angle: The box's angle, in degrees clockwise, about its anchor point. From -360.0 to 360.0 degrees. Default: as it is.
+        fit: With both width and height given: stretch it to them (along its own sides, turned as it is); or keep its proportions and fit it, as it is turned, inside the rectangle they make on the canvas (placed by its anchor point at x and y), or make it cover that rectangle, centered on it. Default: "stretch".
+        anchor: Which point of the box x and y give, and what a size or angle given scales and turns it about (a rectangle given with width and height is placed by its same point). Default: "top-left".
+        from_layer: A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas.
+        from_anchor: Which point of the canvas (or of from_layer) x and y count from. Default: "top-left".
+        unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
+        """
     def crop_to_content(self, *, document: int | None = None) -> Any:
         """Shrink (or grow) the canvas to fit what the visible layers hold.
 

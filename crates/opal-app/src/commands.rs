@@ -58,6 +58,7 @@ pub enum Cmd {
     FeatherSelection,
     SmoothSelection,
     BorderSelection,
+    TransformSelection,
     CropToContent,
     ResizeImage,
     ResizeCanvas,
@@ -122,7 +123,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 77] = [
+    pub const ALL: [Cmd; 78] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -171,6 +172,7 @@ impl Cmd {
         Cmd::FeatherSelection,
         Cmd::SmoothSelection,
         Cmd::BorderSelection,
+        Cmd::TransformSelection,
         Cmd::CropToContent,
         Cmd::ResizeImage,
         Cmd::ResizeCanvas,
@@ -555,6 +557,17 @@ impl Cmd {
                 "Select a band along the selection's outline.",
                 "A band of the width you give along the outline, inside it, outside it, or half each \
                  way, in place of what was selected. A step of the selection's recipe.",
+                &[],
+            ),
+            Cmd::TransformSelection => i(
+                "Transform Selection",
+                icons::TRANSFORM_SELECTION,
+                "Move, size or turn the selection itself in a box.",
+                "Puts the transform box round what is selected: drag inside it to move the selection, \
+                 a corner or edge to size it, outside it to turn it, or type its numbers; Enter \
+                 applies, Esc cancels. Only the selection changes, not the pixels. Its shapes are \
+                 carried exactly, and its modifiers (grow, feather, smooth, border) are worked out \
+                 again where they are carried to.",
                 &[],
             ),
             Cmd::FeatherSelection => i(
@@ -948,9 +961,16 @@ pub static RIBBON: &[Tab] = &[
             },
             Group {
                 name: "Modify",
-                description: "Changing the selection's edge: moving it out or in, and softening it.",
+                description: "Changing the selection: its edge moved out or in, softened, smoothed or made \
+                              a band, or the whole of it moved, sized or turned in a box.",
                 large: 0,
-                cmds: &[Cmd::GrowSelection, Cmd::FeatherSelection, Cmd::SmoothSelection, Cmd::BorderSelection],
+                cmds: &[
+                    Cmd::GrowSelection,
+                    Cmd::FeatherSelection,
+                    Cmd::SmoothSelection,
+                    Cmd::BorderSelection,
+                    Cmd::TransformSelection,
+                ],
             },
             Group {
                 name: "Selected",
@@ -1110,8 +1130,13 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup | CopyMerged
         | StampVisible | ResizeCanvas | CropToContent | Place | SelectAll => needs_doc(),
         Deselect | InvertSelection | CropToSelection | GrowSelection | FeatherSelection | SmoothSelection
-        | BorderSelection => {
+        | BorderSelection | TransformSelection => {
             let d = st.active().ok_or("Open or create an image first.")?;
+            if cmd == TransformSelection
+                && d.pixel_selection().is_some_and(|s| s.mask().extent() == opal_core::mask::Extent::Unbounded)
+            {
+                return Err(crate::transform::NO_BOX.into());
+            }
             // The dialog shows what it makes as the image's pending edit: the box's first.
             if matches!(cmd, GrowSelection | FeatherSelection | SmoothSelection | BorderSelection)
                 && d.transform.is_some()

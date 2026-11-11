@@ -429,6 +429,26 @@ transform and crop boxes' do; what is typed edits the step at once, as one pendi
 `combine` and `smooth`, and the box's `x`, `y`, `width`, `height`, `angle`, `anchor`,
 `from_layer` and `from_anchor`, which take expressions.
 
+### Transform Selection
+
+Transform Selection (Select › Modify) puts the transform box (*Paste and transform*) round
+what is selected, as a session of its own (`transform::Kind::Selection`): its frame the
+rectangle round the selection; its handles, numbers, snapping, Fit and Fill as for layers;
+no drawing method, since nothing is drawn. Only the selection changes, not the pixels: it is
+carried by the box's change as Rotate, Flip and Resize Image carry it
+(`Selection::transformed`), its shapes exactly, its modifiers worked out again where they
+are carried to, a step that cannot be carried becoming a mask carried pixel by pixel. While
+the box is open, the marching ants go with it (the outline as it was, carried by the box's
+change; the selection overlay, of the selection as it was, is not shown), and the selection
+is worked out only once the box is applied: by Enter or the box's Apply, off the interface
+thread (`AppState::commit_box`, an edit of `edits`), memory measured as it goes; by any
+other change made meanwhile, which applies the box first (`DocState::commit_pending`), at
+once. Either way it is one history state, *Transform selection*, unless the box is left where
+it was; Esc gives it up. A selection reaching past every edge (inverted) has no box, and the
+command says so. Scripts: `transform_selection`, with the transform box's numbers (`x`, `y`,
+`width`, `height`, `angle`, `fit`, `anchor`, `from_layer`, `from_anchor`), answering with
+what is selected then.
+
 ### The recipe
 
 A selection is kept as an ordered list of steps, not only as its final mask:
@@ -900,7 +920,8 @@ layer; or off the canvas (kept, but not exported).
 ## Paste and transform
 
 Pasting opens the **transform box** instead of placing the pixels. The same box transforms
-existing layers: Transform (Ctrl+T) opens it on the selected layers.
+existing layers: Transform (Ctrl+T) opens it on the selected layers; Transform Selection, on
+the selection itself (see *Transform Selection*).
 
 - **Where a paste goes:** onto a new layer above the active one, as an image object. A
   button on the box puts it into the active layer instead, baked into that layer's pixels

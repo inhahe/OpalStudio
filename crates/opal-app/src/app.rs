@@ -384,7 +384,8 @@ impl OpalApp {
         }
         if d.transform.is_some() {
             if enter {
-                d.commit_pending();
+                let id = d.id;
+                self.st.commit_box(id);
             } else if escape {
                 d.cancel_transform();
             } else if arrows != [0, 0]

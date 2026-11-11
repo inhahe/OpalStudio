@@ -382,6 +382,39 @@ impl AppState {
         self.edit_later(d.id, label, crate::memory::Allowance::unlimited(), work, |_, _, ()| {});
     }
 
+    /// Transform Selection: the box round what is selected (see
+    /// [`DocState::begin_selection_transform`]), or why not.
+    pub(crate) fn transform_selection(&mut self) {
+        let d = self.active_mut().expect("available");
+        if let Err(why) = d.begin_selection_transform() {
+            self.message(MessageKind::Info, "Transform Selection", why);
+        }
+    }
+
+    /// Applies the box open on image `id`, as Enter and its Apply button do: a Transform
+    /// Selection box's selection worked out off the interface thread (see `edits`), since a
+    /// recipe's modifiers are worked out again where they are carried; any other box at once.
+    pub(crate) fn commit_box(&mut self, id: DocId) {
+        let Some(d) = self.doc_mut(id) else { return };
+        let Some(s) = d.transform.as_ref() else { return };
+        if s.kind != crate::transform::Kind::Selection || s.current == s.start {
+            return d.commit_pending();
+        }
+        let delta = s.delta();
+        let before = d.pixel_selection().expect("a box round the selection").clone();
+        d.cancel_transform();
+        let measure = crate::memory::Measure::here();
+        let work = move |doc: &mut Document, _: &mut opal_core::document::IdGen, progress: &opal_io::Progress| {
+            let stop = || progress.is_cancelled();
+            let made =
+                crate::memory::Admission::within(measure.now(), &stop, |b| before.transformed_within(&delta, b))?;
+            doc.selection = (!made.is_empty()).then(|| Arc::new(made));
+            Ok(())
+        };
+        let label = crate::transform::Kind::Selection.label();
+        self.edit_later(id, label, crate::memory::Allowance::unlimited(), work, |_, _, ()| {});
+    }
+
     /// Layer via Copy, or (`cut`) Layer via Cut: what the selected layers show within the
     /// selection, as much of each pixel as it is selected, past the canvas too, on a new layer
     /// just above the topmost of them, which becomes the one selected; cut, it is erased from
@@ -665,6 +698,65 @@ mod tests {
         st.run(Cmd::Deselect, &ctx);
         st.select_layer_pixels(id, Combine::Subtract);
         assert!(st.active().unwrap().pixel_selection().is_none());
+    }
+
+    #[test]
+    fn transform_selection_carries_the_selection_itself_worked_out_off_the_interface_thread() {
+        use crate::commands::{Cmd, availability};
+        use opal_core::geom::Affine;
+        use opal_core::mask::{Combine, Extent, Shape};
+        use opal_core::modify::Reach;
+        use opal_core::selection::{Selection, Step};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let ctx = eframe::egui::Context::default();
+        let selected = |st: &AppState| st.active().unwrap().pixel_selection().unwrap().mask().extent();
+        let shape = Shape::rectangle(&IRect::new(20, 20, 120, 80).to_f(), false);
+        let grown = Selection::new(Step::Shape { shape, combine: Combine::Replace })
+            .then(Step::Grow { by: 5.0, corners: Reach::Square });
+        let d = st.active_mut().unwrap();
+        d.set_pixel_selection(Some(grown), "Select");
+        let layers = d.doc().layers.clone();
+        st.run(Cmd::TransformSelection, &ctx);
+        let d = st.active_mut().unwrap();
+        assert_eq!(d.transform.as_ref().expect("no box").frame, IRect::new(15, 15, 125, 85).to_f());
+        // Twice the size, from the canvas's corner: the shape carried exactly, its grow worked
+        // out again, twice as far; nothing else changed.
+        d.set_box(Affine::scale(2.0, 2.0), None);
+        st.edit_wait = std::time::Duration::ZERO;
+        let held = crate::background::testing::hold(Some(crate::edits::pool()));
+        let id = st.active_doc.unwrap();
+        st.commit_box(id);
+        let off_thread = st.editing();
+        let closed = st.active().unwrap().transform.is_none();
+        drop(held);
+        st.finish_edits();
+        assert!(off_thread, "worked out on the interface thread");
+        assert!(closed, "the box stayed");
+        assert_eq!(selected(&st), Extent::Within(IRect::new(30, 30, 250, 170)));
+        let d = st.active().unwrap();
+        assert_eq!(d.history.undo_label(), Some("Transform selection"));
+        assert!(d.doc().layers.iter().zip(&layers).all(|(a, b)| std::sync::Arc::ptr_eq(a, b)), "a layer changed");
+        // Applied another way (as another change is made), at once.
+        st.run(Cmd::TransformSelection, &ctx);
+        let d = st.active_mut().unwrap();
+        d.set_box(Affine::translate(10.0, 0.0), None);
+        d.commit_pending();
+        assert_eq!(selected(&st), Extent::Within(IRect::new(40, 30, 260, 170)));
+        // Cancelled, or left where it was: nothing, and no history state.
+        let states = st.active().unwrap().history.nodes().count();
+        st.run(Cmd::TransformSelection, &ctx);
+        let d = st.active_mut().unwrap();
+        d.set_box(Affine::translate(10.0, 0.0), None);
+        d.cancel_transform();
+        st.run(Cmd::TransformSelection, &ctx);
+        st.commit_box(id);
+        assert_eq!(selected(&st), Extent::Within(IRect::new(40, 30, 260, 170)));
+        assert_eq!(st.active().unwrap().history.nodes().count(), states);
+        // Inverted, it reaches past every edge: no box goes round it.
+        st.run(Cmd::InvertSelection, &ctx);
+        let why = availability(&st, Cmd::TransformSelection).unwrap_err();
+        assert!(why.contains("no box"), "{why}");
     }
 
     #[test]

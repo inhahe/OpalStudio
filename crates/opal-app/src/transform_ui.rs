@@ -324,10 +324,10 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen
             st.prefs.set("transform.snapping", crate::settings::Value::Bool(!snapping));
             st.settings_touched();
         }
+        Action::Commit => st.commit_box(id),
         _ => {
             let Some(d) = st.doc_mut(id) else { return };
             match action {
-                Action::Commit => d.commit_pending(),
                 Action::Cancel => d.cancel_transform(),
                 Action::Fit(fill) => {
                     let canvas = d.doc().canvas.rect();
@@ -348,7 +348,7 @@ fn toolbar(ctx: &egui::Context, st: &mut AppState, id: DocId, rect: Rect, screen
                         (Ok(()), None) => {}
                     }
                 }
-                Action::Aspect | Action::Snap => {}
+                Action::Commit | Action::Aspect | Action::Snap => {}
             }
         }
     }
@@ -366,13 +366,16 @@ pub fn settings(ui: &mut egui::Ui, st: &mut AppState) {
     let Some(s) = st.doc(id).and_then(|d| d.transform.as_ref()) else { return };
     crate::panels::heading(ui, icons::TRANSFORM, s.label(), HINT);
     crate::box_fields::transform(ui, st, id, "transform-panel");
-    ui.add_space(6.0);
-    ui.label(RichText::new("Drawing").strong());
     let Some(d) = st.doc_mut(id) else { return };
     let Some(s) = d.transform.as_ref() else { return };
-    let mut sampling = s.sampling;
-    if sampling_ui(ui, &mut sampling, "transform") {
-        d.set_box_sampling(sampling);
+    // A selection is not drawn: its steps are carried exactly, or pixel by pixel as a mask.
+    if s.kind != crate::transform::Kind::Selection {
+        ui.add_space(6.0);
+        ui.label(RichText::new("Drawing").strong());
+        let mut sampling = s.sampling;
+        if sampling_ui(ui, &mut sampling, "transform") {
+            d.set_box_sampling(sampling);
+        }
     }
     ui.add_space(6.0);
     ui.label(

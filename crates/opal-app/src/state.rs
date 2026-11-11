@@ -620,6 +620,7 @@ impl AppState {
                 self.select_layer_pixels(layer, opal_core::mask::Combine::Replace);
             }
             Cmd::InvertSelection => self.invert_selection(),
+            Cmd::TransformSelection => self.transform_selection(),
             Cmd::GrowSelection | Cmd::FeatherSelection | Cmd::SmoothSelection | Cmd::BorderSelection => {
                 self.modify_selection(cmd, ctx)
             }
