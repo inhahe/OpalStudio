@@ -664,8 +664,10 @@ curve editors.
 - Screen modes (View › Screen Mode, F): standard; full screen (the window's title bar and the
   taskbar gone); and the image alone, full screen with only the active image in it, no
   ribbon, panels, tool strip or status bar, its tools and keys working as ever (while no
-  image is open, the window is shown as usual). A notice says how to go on or back. Not
-  kept between sessions (`AppState::screen`).
+  image is open, the window is shown as usual); what the status bar would show, a recent
+  notice and an edit under way with Cancel, shows over the image's foot. A notice says how
+  to go on or back. A window that leaves full screen another way (the system's key) is
+  shown as usual again. Not kept between sessions (`AppState::screen`).
 - Files dropped on it open as images, in the order dropped, but not while a dialog is open
   (one opened behind it would become the image the dialog acts on): they wait for it to
   close (`AppState::open_dropped`), in the frame its closing brings.
@@ -690,9 +692,11 @@ curve editors.
 Merging (Merge Down, Selected, Visible and Group), Stamp Visible, Flatten, Rasterize, Rotate
 and Flip, Rotate by Angle, Resize Image, Crop and straighten, and a script's
 `grow_selection` and `feather_selection` are worked out off the interface thread
-(`edits`), from the image as it was (an edit in progress committed first), their parallel
-parts on the background threads, and applied as one history state once done (none, if they
-changed nothing). Their memory is checked before they begin, as before.
+(`edits`), from the image as it was (an edit in progress committed first, and a rename left
+open in it finished), their parallel parts on threads of their own (`edits::pool`), so that
+they neither wait behind the background threads' work (the images' views, saves and exports)
+nor keep it waiting, and applied as one history state once done (none, if they changed
+nothing). Their memory is checked before they begin.
 
 - **The image stays as it was meanwhile, and nothing may change it** (`DocState::busy`):
   its commands are unavailable, saying why ("Merge down is under way: wait for it to
@@ -704,8 +708,11 @@ changed nothing). Their memory is checked before they begin, as before.
   calls, the next call in the same pass too (`Server::serve` asks again after each).
   Quitting waits for it, as it waits for files being written, and then asks about the
   image's changes. Changing the image would make the edit's result wrong, and refusing the
-  result then would throw away work the user asked for. Should it change anyway, the
-  result is not applied, and the user is told.
+  result then would throw away work the user asked for. Whatever would change it anyway
+  (a path the interface does not guard) is refused where history is changed
+  (`DocState::apply`, `edit_pending`, undo, redo, going to a state, taking one back), the
+  status bar saying why; should the image change all the same, the result is not applied,
+  and the user is told.
 - **Shown only if it takes a while.** The interface waits 60 ms for an edit as it begins:
   one done by then is applied at once, as if it had been worked out there (the image never
   busy, a script answered at once). One still under way after 300 ms shows in the status
@@ -716,7 +723,10 @@ changed nothing). Their memory is checked before they begin, as before.
   have been answered with at once, of the image the edit was of (whichever is active by
   then), and what applying it said as its notes or its failure. If the edit fails then,
   the user's view is put back as the call found it, as for a call refused at once, unless
-  another image has been made active since.
+  another image has been made active since. Its failure is named by the call however soon
+  it comes (`grow_selection: ...`), a refusal told as one (not memory enough, nothing
+  selected to copy), a panic as an error; a notification's, which no answer carries, is
+  told to the user (`api::Calling`, known to the edit as it begins).
 - Edits that read as long but are not stay where they are asked for: measured on 67
   megapixels, a quarter turn applied by the transform box takes 50 ms, Clear 8 to 14 ms,
   and a paste turned and drawn into the active layer 0.3 s.

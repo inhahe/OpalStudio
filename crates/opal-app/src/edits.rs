@@ -13,6 +13,21 @@ use serde_json::Value;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+/// The threads edits' parallel parts run on: a pool of their own, so that an edit neither
+/// waits behind the background pool's work (the images' views, saves and exports, answers
+/// made for scripts) nor keeps it waiting.
+pub fn pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let n = std::thread::available_parallelism().map_or(2, |n| n.get());
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .thread_name(|i| format!("edit {i}"))
+            .build()
+            .expect("starting the edits' threads")
+    })
+}
+
 /// How long an edit runs before it is shown under way (one done sooner shows nothing).
 pub const SHOWN_AFTER: Duration = Duration::from_millis(300);
 
@@ -36,14 +51,14 @@ type Made = Result<(Document, IdGen, Then), String>;
 /// What a script's call is answered with once its edit is applied, given the image it was of.
 pub type AnswerWith = Box<dyn FnOnce(&AppState, DocId) -> Value>;
 
-/// A script's call answered once its edit is applied: its number, its name (for an error),
-/// what it is answered with (given the image the edit was of), and the user's view as it was
-/// before the call, put back if the edit fails and nothing has changed it since.
+/// A script's call answered once its edit is applied: its number, the call (its name, for an
+/// error; whether it is answered at all; the user's view as it found it, put back if the edit
+/// fails and nothing has changed it since), and what it is answered with (given the image
+/// the edit was of).
 pub struct Answer {
     pub n: u64,
-    pub name: String,
+    pub call: crate::api::Calling,
     pub with: AnswerWith,
-    pub view: Option<crate::api::View>,
 }
 
 /// An edit under way on an image.
@@ -81,14 +96,16 @@ pub fn go_on(progress: &Progress) -> Result<(), String> {
     if progress.is_cancelled() { Err(CANCELLED.into()) } else { Ok(()) }
 }
 
-/// `layers` composited ([`composite_all`](opal_core::composite::composite_all)), telling
-/// `progress` how far it has got, and stopping if the edit was cancelled.
+/// `layers` composited within `range` (everywhere when `None`: see
+/// [`composite_until`](opal_core::composite::composite_until)), telling `progress` how far it
+/// has got, and stopping if the edit was cancelled.
 pub fn composited(
     layers: &[Arc<opal_core::document::Layer>],
+    range: Option<&opal_core::geom::IRect>,
     progress: &Progress,
 ) -> Result<opal_core::raster::RasterImage, String> {
     let (mut told, mut began) = (0, false);
-    opal_core::composite::composite_until(layers, None, &mut |placed, total| {
+    opal_core::composite::composite_until(layers, range, &mut |placed, total| {
         if !began && total > 0 {
             progress.begin(total as u64);
             began = true;
@@ -104,7 +121,8 @@ impl AppState {
     /// Starts an edit of image `doc` named `label`, as one history state: `work` is given the
     /// document as it is (an edit in progress committed first), the image's identifiers to
     /// give out, and the edit's progress, off the interface thread, its parallel parts on the
-    /// background threads; `memory`, set aside for it already, is kept while it runs. Once it
+    /// edits' own threads ([`pool`]); `memory`, set aside for it already, is kept while it
+    /// runs. A rename left open in the image is finished first, as an edit in progress is. Once it
     /// is done, what it made is the image's next state and `then` is given what else it gave;
     /// if it fails, the user is told why (or the script whose call began it). The image is
     /// busy meanwhile, unless it is done within [`edit_wait`](AppState::edit_wait).
@@ -117,6 +135,9 @@ impl AppState {
         then: impl FnOnce(&mut AppState, DocId, R) + Send + 'static,
     ) {
         let repaint = self.repaint.clone();
+        if self.renaming.as_ref().is_some_and(|r| r.0 == doc) {
+            self.finish_rename(true);
+        }
         let Some(d) = self.doc_mut(doc) else { return };
         assert!(d.busy.is_none(), "an edit begun on an image busy with another");
         d.commit_pending();
@@ -127,7 +148,7 @@ impl AppState {
         let started = std::thread::Builder::new().name("edit".into()).spawn(move || {
             let _memory = memory;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let out = crate::background::pool().install(|| work(&mut made, &mut ids, &theirs))?;
+                let out = pool().install(|| work(&mut made, &mut ids, &theirs))?;
                 Ok((made, ids, Box::new(move |st: &mut AppState, doc| then(st, doc, out)) as Then))
             }));
             // Not wanted any more if it was cancelled: then no one is listening.
@@ -182,6 +203,8 @@ impl AppState {
         d.revision += 1;
         let changed = d.history.current() != b.from;
         let (told, notice) = (self.messages.len(), self.notice.clone());
+        // What its work refused is told as a refusal; a panic as an error.
+        let kind = if outcome.is_err() { MessageKind::Error } else { MessageKind::Info };
         let result = match outcome {
             // The image cannot change while it is busy; if it did, the user's change stays.
             Ok(Ok(_)) if changed => {
@@ -200,6 +223,8 @@ impl AppState {
             Err(panic) => Err(format!("This went wrong: {}.", crate::background::panic_message(&*panic))),
         };
         match (b.answer, result) {
+            // A notification, which nobody hears the answer to: what it says goes to the user.
+            (Some(a), Err(why)) if !a.call.heard => self.message(kind, a.call.name, why),
             (Some(a), Ok(())) => {
                 let value = (a.with)(self, id);
                 let (refusals, notes) = self.told_since(told, notice);
@@ -211,13 +236,17 @@ impl AppState {
                 self.answered.push((a.n, answer));
             }
             (Some(a), Err(why)) => {
-                self.answered.push((a.n, Err(format!("{}: {why}", a.name))));
+                self.answered.push((a.n, Err(format!("{}: {why}", a.call.name))));
                 // As a call refused at once has it put back, unless the user has moved on.
-                if let Some(view) = a.view.filter(|_| self.active_doc == Some(id)) {
+                if let Some(view) = a.call.view.filter(|_| self.active_doc == Some(id)) {
                     self.restore_view(view);
                 }
             }
-            (None, Err(why)) => self.message(MessageKind::Error, b.label, why),
+            // Told under the name of the call carrying it out, if one is (as its refusal).
+            (None, Err(why)) => {
+                let title = self.calling.as_ref().map_or(b.label, |c| c.name.clone());
+                self.message(kind, title, why);
+            }
             (None, Ok(())) => {}
         }
     }
@@ -238,7 +267,7 @@ impl AppState {
         b.progress.cancel();
         d.revision += 1;
         if let Some(a) = b.answer {
-            self.answered.push((a.n, Err(format!("{}: {why}.", a.name))));
+            self.answered.push((a.n, Err(format!("{}: {why}.", a.call.name))));
         }
         Some(b.label)
     }
@@ -268,6 +297,7 @@ mod tests {
     use crate::commands::{Cmd, availability};
     use crate::state::{Background, NewImage};
     use eframe::egui;
+    use opal_core::document::{Document, IdGen};
 
     fn app() -> AppState {
         let mut st = AppState::new();
@@ -345,6 +375,64 @@ mod tests {
         assert!(st.editing(), "asking gave the edit up");
         st.close_now(doc);
         assert!(!st.editing() && st.doc(doc).is_none());
+    }
+
+    #[test]
+    fn an_edit_runs_on_threads_of_its_own_while_the_background_ones_are_busy() {
+        use rayon::prelude::*;
+        let mut st = app();
+        st.edit_wait = Duration::ZERO;
+        let held = crate::background::testing::hold(Some(crate::background::pool()));
+        let doc = st.active_doc.unwrap();
+        let work = |doc: &mut Document, _: &mut IdGen, _: &Progress| {
+            let sum: u64 = (0..100_000u64).into_par_iter().sum();
+            Arc::make_mut(&mut doc.layers[0]).name = format!("{sum}");
+            Ok(())
+        };
+        st.edit_later(doc, "Sum", crate::memory::Allowance::now(), work, |_, _, ()| {});
+        let mut waited = 0;
+        while st.editing() && waited < 400 {
+            st.poll_edits();
+            std::thread::sleep(Duration::from_millis(5));
+            waited += 1;
+        }
+        let ended = !st.editing();
+        drop(held);
+        st.finish_edits();
+        assert!(ended, "the edit waited for the background threads");
+        assert_eq!(st.active().unwrap().doc().layers[0].name, "4999950000");
+    }
+
+    #[test]
+    fn a_busy_image_refuses_what_would_change_it_and_a_rename_open_is_finished_first() {
+        let mut st = app();
+        st.edit_wait = Duration::ZERO;
+        let doc = st.active_doc.unwrap();
+        let layer = st.active().unwrap().doc().layers[0].id;
+        st.renaming = Some((doc, layer, "Named first".into()));
+        let (go, wait) = mpsc::channel();
+        let (told, _heard) = mpsc::channel();
+        waiting_edit(&mut st, "Renamed", wait, told);
+        assert!(st.renaming.is_none(), "the rename stayed open");
+        assert_eq!(st.active().unwrap().doc().layers[0].name, "Named first");
+        // While it runs: a change not made, the status bar saying why; the state before it not
+        // taken back, nor undone.
+        let d = st.active_mut().unwrap();
+        let states = d.history.nodes().count();
+        let _ = d.apply::<()>("Anything", |doc, _| {
+            doc.canvas.width = 1;
+            Ok(())
+        });
+        assert_eq!(d.history.nodes().count(), states, "a change was made");
+        assert!(d.notice.as_ref().is_some_and(|n| n.contains("under way")), "{:?}", d.notice);
+        let current = d.history.current();
+        let path = d.history.path_from_root(current);
+        let from = path[path.len() - 2];
+        assert!(!d.take_back(current, from), "taken back while busy");
+        assert!(!d.undo(), "undone while busy");
+        go.send(()).unwrap();
+        st.finish_edits();
+        assert_eq!(st.active().unwrap().doc().layers[0].name, "Renamed");
     }
 
     #[test]

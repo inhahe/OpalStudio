@@ -390,8 +390,10 @@ impl Server {
     }
 
     /// Carries out the requests passed on since the last frame, and answers those whose
-    /// files have been written. Called by the interface thread every frame; while the user
-    /// is `busy` with something (a dialog, a drag) that a request could change under them,
+    /// files have been written. Called by the interface thread every frame, `pointer_held`
+    /// saying whether the user holds a button down. While the user is busy with something a
+    /// request could change under them (a dialog, a drag, a transform box), or an edit is
+    /// under way (`AppState::scripts_wait`, asked before the first request and after each),
     /// the requests wait. Once the user has asked to quit, they are refused.
     ///
     /// A frame that carries out a request goes on with those that arrive meanwhile, for a
@@ -916,8 +918,6 @@ mod tests {
 
     #[test]
     fn a_call_waits_for_an_edit_the_call_before_it_began() {
-        // The background threads held below, which the windows tests' views need.
-        let _windows = crate::ui_tests::gpu_lock();
         let file = std::env::temp_dir().join(format!("opal-api-edit-{}.json", std::process::id()));
         let mut server = Server::start(file.clone(), egui::Context::default()).unwrap();
         let (pipe, token) = info(&file);
@@ -932,7 +932,7 @@ mod tests {
         });
         st.run(crate::commands::Cmd::NewLayer, &ctx);
         // A merge, still under way as it is held, then a selection, asked one after the other.
-        let held = crate::background::testing::hold(Some(crate::background::pool()));
+        let held = crate::background::testing::hold(Some(crate::edits::pool()));
         let mut calls = Vec::new();
         for line in [
             r#"{"jsonrpc":"2.0","id":2,"method":"merge_down","params":{}}"#,

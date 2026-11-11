@@ -81,6 +81,12 @@ pub fn serve_windowless(
         if done(server) {
             return;
         }
+        // While calls wait (for an edit under way), none could be carried out: a pause, rather
+        // than a wait that a call parked returns from at once.
+        if st.scripts_wait(false) {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            continue;
+        }
         let soon = st.work_under_way();
         server.wait(if soon { std::time::Duration::from_millis(1) } else { IDLE });
     }

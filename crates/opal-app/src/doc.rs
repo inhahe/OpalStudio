@@ -369,6 +369,9 @@ impl DocState {
         label: &str,
         f: impl FnOnce(&mut Document, &mut IdGen) -> Result<(), E>,
     ) -> Result<(), E> {
+        if self.refused() {
+            return Ok(());
+        }
         self.commit_pending();
         let mut d = self.history.doc().clone();
         let mut ids = self.ids.clone();
@@ -420,7 +423,9 @@ impl DocState {
     /// pending edit of another kind (a transform box, say) is committed first: two edits
     /// never merge into one state.
     pub fn edit_pending(&mut self, label: &str, f: impl FnOnce(&mut Document)) {
-        debug_assert!(self.busy.is_none(), "an edit begun while another was under way");
+        if self.refused() {
+            return;
+        }
         if self.pending.as_ref().is_some_and(|p| p.label != label) || self.transform.is_some() {
             self.commit_pending();
         }
@@ -468,10 +473,33 @@ impl DocState {
         }
     }
 
+    /// The selected layers as they look, hidden or not (they were chosen): what Copy and Layer
+    /// via Copy take.
+    pub(crate) fn selected_as_shown(&self) -> Vec<std::sync::Arc<opal_core::document::Layer>> {
+        let doc = self.doc();
+        self.selected_layers()
+            .iter()
+            .filter_map(|&l| doc.layer(l))
+            .map(|l| std::sync::Arc::new(opal_core::document::Layer { visible: true, ..l.clone() }))
+            .collect()
+    }
+
+    /// Why nothing may change the image now, if nothing may: an edit is under way on it (see
+    /// `edits`). Told in the status bar, then: what was asked is not done.
+    fn refused(&mut self) -> bool {
+        let why = self.busy.as_ref().map(crate::edits::Busy::why);
+        let refused = why.is_some();
+        if why.is_some() {
+            self.notice = why;
+        }
+        refused
+    }
+
     /// Takes back history state `id`, made from `from` (see [`History::take_back`]), unless it
-    /// is the current one with an edit in progress on it; whether it did.
+    /// is the current one with an edit in progress on it, or an edit is under way on the image;
+    /// whether it did.
     pub fn take_back(&mut self, id: NodeId, from: NodeId) -> bool {
-        if self.history.current() == id && (self.pending.is_some() || self.transform.is_some()) {
+        if self.busy.is_some() || self.history.current() == id && (self.pending.is_some() || self.transform.is_some()) {
             return false;
         }
         let before = self.history.doc().clone();
@@ -484,7 +512,9 @@ impl DocState {
     }
 
     pub fn undo(&mut self) -> bool {
-        debug_assert!(self.busy.is_none(), "undone while an edit was under way");
+        if self.refused() {
+            return false;
+        }
         self.commit_pending();
         let before = self.history.doc().clone();
         let moved = self.history.undo();
@@ -496,7 +526,9 @@ impl DocState {
     }
 
     pub fn redo(&mut self) -> bool {
-        debug_assert!(self.busy.is_none(), "redone while an edit was under way");
+        if self.refused() {
+            return false;
+        }
         self.commit_pending();
         let before = self.history.doc().clone();
         let moved = self.history.redo();
@@ -508,7 +540,9 @@ impl DocState {
     }
 
     pub fn goto(&mut self, node: NodeId) {
-        debug_assert!(self.busy.is_none(), "another state gone to while an edit was under way");
+        if self.refused() {
+            return;
+        }
         self.commit_pending();
         // Committing can drop old states to keep history within its budget.
         if !self.history.contains(node) {

@@ -44,16 +44,7 @@ impl AppState {
         let d = self.active().expect("available");
         let doc = d.doc();
         let canvas = doc.canvas.rect();
-        let layers: Vec<Arc<Layer>> = if merged {
-            doc.layers.clone()
-        } else {
-            // What the selected layers look like, hidden or not: they were chosen to copy.
-            d.selected_layers()
-                .iter()
-                .filter_map(|&l| doc.layer(l))
-                .map(|l| Arc::new(Layer { visible: true, ..l.clone() }))
-                .collect()
-        };
+        let layers: Vec<Arc<Layer>> = if merged { doc.layers.clone() } else { d.selected_as_shown() };
         if let Err(why) = memory.take_tiles(opal_core::composite::composite_cost(&layers, Some(&canvas))) {
             self.message(MessageKind::Info, "Copy", why);
             return false;

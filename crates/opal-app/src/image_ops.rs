@@ -121,9 +121,10 @@ pub fn transform_all(
     progress: &Progress,
 ) -> Result<bool, String> {
     let mut to = Drawing::new(*keep, memory);
+    // An object at a time, and the selection carried (its modifiers worked out again) last.
     let mut objects = 0;
     doc.for_each_layer(&mut |l, _| objects += l.objects().len());
-    progress.begin(objects as u64);
+    progress.begin(objects as u64 + u64::from(doc.selection.is_some()));
     fn walk(
         layer: &mut Layer,
         m: &Affine,
@@ -187,6 +188,7 @@ pub fn transform_all(
         let stop = || progress.is_cancelled();
         let carried = crate::memory::Admission::within(to.memory, &stop, |b| s.transformed_within(m, b))?;
         doc.selection = Some(Arc::new(carried)).filter(|s| !s.is_empty());
+        progress.advance(1);
     }
     Ok(to.clipped)
 }

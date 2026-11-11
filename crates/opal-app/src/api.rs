@@ -616,6 +616,15 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
 /// active and selected layers.
 pub type View = (Option<DocId>, Vec<(DocId, (Option<LayerId>, std::collections::HashSet<LayerId>))>);
 
+/// A call being carried out: its name, whether it is heard (answered: not a notification),
+/// and the user's view as it found it (for a change), for what it begins that ends later.
+#[derive(Clone, Debug)]
+pub struct Calling {
+    pub name: String,
+    pub heard: bool,
+    pub view: Option<View>,
+}
+
 /// The queries: what the API tells of the editor and its images.
 const QUERIES: &[(&str, &str, &[Param])] = &[
     (
@@ -1789,6 +1798,7 @@ impl AppState {
         let view = (method.role == Role::Command).then(|| {
             (self.active_doc, self.docs.iter().map(|d| (d.id, d.layer_selection_state())).collect::<Vec<_>>())
         });
+        self.calling = Some(Calling { name: name.to_owned(), heard, view: view.clone() });
         let reply = match method.cmd {
             Some(cmd) => self.carry_out(cmd, method.params, &args, ctx),
             None if method.name == "image" => self.image_by_args(&args, ctx),
@@ -1807,22 +1817,15 @@ impl AppState {
             None if method.name == "set_preference" => Reply::Now(self.set_preference(&args, ctx)),
             None => Reply::Now(self.answer(&method.name, &args)),
         };
+        self.calling = None;
         let (refusals, notes) = self.told_since(told, notice);
         let reply = match reply {
             Reply::Now(Ok(_)) if !refusals.is_empty() => Reply::Now(Err(refusals.join("\n"))),
             Reply::Now(Ok(value)) if !notes.is_empty() => Reply::Now(Ok(with_notes(value, notes))),
             other => other,
         };
-        match (view, &reply) {
-            (Some(view), Reply::Now(Err(_))) => self.restore_view(view),
-            // Answered once its edit is applied, which may fail then.
-            (Some(view), Reply::Later(n)) => {
-                let a = self.docs.iter_mut().find_map(|d| d.busy.as_mut()?.answer.as_mut().filter(|a| a.n == *n));
-                if let Some(a) = a {
-                    a.view = Some(view);
-                }
-            }
-            _ => {}
+        if let (Some(view), Reply::Now(Err(_))) = (view, &reply) {
+            self.restore_view(view);
         }
         reply
     }
@@ -1901,8 +1904,9 @@ impl AppState {
         }
         self.next_answer += 1;
         let n = self.next_answer;
+        let call = self.calling.clone().unwrap_or(Calling { name: name.to_owned(), heard: true, view: None });
         let b = self.doc_mut(id).and_then(|d| d.busy.as_mut()).expect("checked above");
-        b.answer = Some(crate::edits::Answer { n, name: name.to_owned(), with: Box::new(answer), view: None });
+        b.answer = Some(crate::edits::Answer { n, call, with: Box::new(answer) });
         Reply::Later(n)
     }
 
@@ -3279,7 +3283,7 @@ mod tests {
         let states = st.active().unwrap().history.nodes().count();
         let _pretend = crate::memory::testing::pretend_free(Some(1000));
         let why = now(&mut st, "grow_selection", json!({ "by": 5 })).unwrap_err();
-        assert!(why.starts_with("Grow selection: This would need about"), "{why}");
+        assert!(why.starts_with("grow_selection: This would need about"), "{why}");
         assert_eq!(st.active().unwrap().history.nodes().count(), states);
     }
 
@@ -3289,10 +3293,8 @@ mod tests {
         now(&mut st, "new", json!({ "width": 40, "height": 20 })).unwrap();
         now(&mut st, "new_layer", json!({})).unwrap();
         st.edit_wait = std::time::Duration::ZERO;
-        // The background threads held, so that the merge is still under way when answered
-        // (while no window test runs, whose views need them).
-        let _windows = crate::ui_tests::gpu_lock();
-        let held = crate::background::testing::hold(Some(crate::background::pool()));
+        // The edits' threads held, so that the merge is still under way when answered.
+        let held = crate::background::testing::hold(Some(crate::edits::pool()));
         let Reply::Later(n) = st.call("merge_down", &args(json!({})), &egui::Context::default()) else {
             panic!("answered before the merge was done")
         };
@@ -3318,8 +3320,33 @@ mod tests {
     }
 
     #[test]
+    fn a_notification_whose_edit_fails_once_under_way_tells_the_user() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 40, "height": 20 })).unwrap();
+        now(&mut st, "select_rectangle", json!({ "x": 5, "y": 5, "width": 10, "height": 10 })).unwrap();
+        st.edit_wait = std::time::Duration::ZERO;
+        let held = crate::background::testing::hold(Some(crate::edits::pool()));
+        let _pretend = crate::memory::testing::pretend_free(Some(1000));
+        let reply = st.call_from(&[], false, "grow_selection", &args(json!({ "by": 5 })), &egui::Context::default());
+        assert!(matches!(reply, Reply::Later(_)), "answered before the grow was done");
+        drop(held);
+        let mut waited = 0;
+        while st.editing() {
+            assert!(waited < 1000, "the grow never ended");
+            st.poll_edits();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            waited += 1;
+        }
+        // Told as a refusal, as it would be at once.
+        let said = st.messages.back().map(|m| (m.kind, m.title.clone(), m.body.clone()));
+        let refused = |(k, t, b): &(MessageKind, String, String)| {
+            *k == MessageKind::Info && t == "grow_selection" && b.contains("would need")
+        };
+        assert!(said.as_ref().is_some_and(refused), "{said:?}");
+    }
+
+    #[test]
     fn a_call_whose_edit_fails_once_under_way_puts_the_view_back() {
-        let _windows = crate::ui_tests::gpu_lock();
         let mut st = AppState::new();
         now(&mut st, "new", json!({ "width": 40, "height": 20 })).unwrap();
         let first = st.active_doc.unwrap();
@@ -3328,7 +3355,7 @@ mod tests {
         let second = st.active_doc.unwrap();
         st.edit_wait = std::time::Duration::ZERO;
         // Under way when answered, and refused memory once it runs.
-        let held = crate::background::testing::hold(Some(crate::background::pool()));
+        let held = crate::background::testing::hold(Some(crate::edits::pool()));
         let _pretend = crate::memory::testing::pretend_free(Some(1000));
         let call = args(json!({ "document": first.0, "by": 5 }));
         let Reply::Later(n) = st.call("grow_selection", &call, &egui::Context::default()) else {

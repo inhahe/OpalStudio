@@ -89,14 +89,9 @@ impl DocState {
         if !turned && !delete {
             return None;
         }
-        let mut locked = None;
-        self.doc().for_each_layer(&mut |l, _| {
-            if l.locked && locked.is_none() {
-                locked = Some(l.name.clone());
-            }
-        });
         let what = if turned { "Straightening" } else { "Deleting cropped pixels" };
-        locked.map(|name| format!("{what} changes every layer, and \"{name}\" is locked. Unlock it first."))
+        crate::commands::locked_layer(self.doc())
+            .map(|name| format!("{what} changes every layer, and \"{name}\" is locked. Unlock it first."))
     }
 }
 

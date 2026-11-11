@@ -192,7 +192,7 @@ impl AppState {
             Err(why) => return self.message(MessageKind::Info, "Merge Down", why),
         };
         let work = move |doc: &mut Document, ids: &mut IdGen, progress: &Progress| {
-            let image = composited(&pair, progress)?;
+            let image = composited(&pair, None, progress)?;
             tree(|| {
                 let lower = doc.layer(below).ok_or(TreeError::NoSuchLayer(below))?;
                 let merged = Layer::new_raster(below, ids.object(), lower.name.clone(), image);
@@ -224,7 +224,7 @@ impl AppState {
         };
         let adjacent = adjacent_siblings(doc, &sel);
         let work = move |doc: &mut Document, ids: &mut IdGen, progress: &Progress| {
-            let image = composited(&layers, progress)?;
+            let image = composited(&layers, None, progress)?;
             tree(|| {
                 let name = doc.layer(top).ok_or(TreeError::NoSuchLayer(top))?.name.clone();
                 for &l in &sel[..sel.len() - 1] {
@@ -261,7 +261,7 @@ impl AppState {
             Err(why) => return self.message(MessageKind::Info, "Merge Visible", why),
         };
         let work = |doc: &mut Document, ids: &mut IdGen, progress: &Progress| {
-            let image = composited(&doc.layers, progress)?;
+            let image = composited(&doc.layers, None, progress)?;
             let last_visible =
                 doc.layers.iter().rposition(|l| shows(l)).ok_or_else(|| TreeError::IndexOutOfRange.to_string())?;
             let keep = doc.layers[last_visible].clone();
@@ -295,7 +295,7 @@ impl AppState {
             Err(why) => return self.message(MessageKind::Info, "Merge Group", why),
         };
         let work = move |doc: &mut Document, ids: &mut IdGen, progress: &Progress| {
-            let image = composited(&children, progress)?;
+            let image = composited(&children, None, progress)?;
             tree(|| {
                 let pos = doc.position(id).ok_or(TreeError::NoSuchLayer(id))?;
                 let hidden: Vec<Arc<Layer>> =
@@ -328,7 +328,7 @@ impl AppState {
         };
         let index = d.active_layer().and_then(|a| d.doc().path(a)).map_or(layers.len(), |p| p[0] + 1);
         let work = move |doc: &mut Document, ids: &mut IdGen, progress: &Progress| {
-            let image = composited(&doc.layers, progress)?;
+            let image = composited(&doc.layers, None, progress)?;
             let stamp = Layer::new_raster(ids.layer(), ids.object(), "Stamp", image);
             tree(|| doc.insert(Position { parent: None, index }, stamp))
         };
@@ -342,7 +342,7 @@ impl AppState {
             Err(why) => return self.message(MessageKind::Info, "Flatten Image", why),
         };
         let work = |doc: &mut Document, ids: &mut IdGen, progress: &Progress| {
-            let image = composited(&doc.layers, progress)?;
+            let image = composited(&doc.layers, None, progress)?;
             doc.layers = vec![Arc::new(Layer::new_raster(ids.layer(), ids.object(), "Background", image))];
             Ok(())
         };
@@ -500,7 +500,7 @@ fn adjacent_siblings(doc: &Document, layers: &[LayerId]) -> bool {
 
 /// Refuses merging `layers` if the result would need more memory than is free; else the
 /// memory measured, to keep while merging.
-fn check_size(layers: &[Arc<Layer>], canvas: &IRect) -> Result<Allowance, String> {
+pub(crate) fn check_size(layers: &[Arc<Layer>], canvas: &IRect) -> Result<Allowance, String> {
     fits(layers, canvas, Allowance::now())
 }
 

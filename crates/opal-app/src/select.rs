@@ -167,7 +167,7 @@ impl AppState {
             return self.message(MessageKind::Info, "Select Layer's Pixels", why);
         }
         let work = move |doc: &mut Document, _: &mut opal_core::document::IdGen, progress: &opal_io::Progress| {
-            let image = crate::edits::composited(&[layer], progress)?;
+            let image = crate::edits::composited(&[layer], None, progress)?;
             let mask = Arc::new(Mask::of_opacity(&image));
             let made = match (doc.selection.as_deref(), combine) {
                 (Some(s), _) => s.then(Step::Mask { mask, combine }),
@@ -393,24 +393,33 @@ impl AppState {
             return self.duplicate_layers();
         };
         let mask = selection.mask().clone();
+        let title = if cut { "Layer via Cut" } else { "Layer via Copy" };
+        // Only within the selection's reach: what lies past it is left out anyway.
+        let range = match mask.extent() {
+            Extent::Within(b) => Some(b),
+            Extent::Unbounded => None,
+            Extent::Nothing => return self.message(MessageKind::Info, title, "Nothing is selected."),
+        };
         let doc = d.doc();
         let selected = d.selected_layers();
         let top = *selected.last().expect("available");
         let name = format!("{} copy", doc.layer(top).map_or("Layer", |l| l.name.as_str()));
-        // As they look, hidden or not: they were chosen.
-        let layers: Vec<Arc<Layer>> = selected
-            .iter()
-            .filter_map(|&l| doc.layer(l))
-            .map(|l| Arc::new(Layer { visible: true, ..l.clone() }))
-            .collect();
+        let layers = d.selected_as_shown();
         let erased: Vec<LayerId> =
             if cut { cleared(d).iter().filter(|l| !l.is_group()).map(|l| l.id).collect() } else { Vec::new() };
-        let mut memory = crate::memory::Allowance::now();
-        if let Err(why) = memory.take_tiles(opal_core::composite::composite_cost(&layers, None)) {
-            return self.message(MessageKind::Info, if cut { "Layer via Cut" } else { "Layer via Copy" }, why);
-        }
+        let memory = match range {
+            Some(b) => {
+                let mut memory = crate::memory::Allowance::now();
+                memory.take_tiles(opal_core::composite::composite_cost(&layers, Some(&b))).map(|()| memory)
+            }
+            None => crate::layer_ops::check_size(&layers, &doc.canvas.rect()),
+        };
+        let memory = match memory {
+            Ok(memory) => memory,
+            Err(why) => return self.message(MessageKind::Info, title, why),
+        };
         let work = move |doc: &mut Document, ids: &mut opal_core::document::IdGen, progress: &opal_io::Progress| {
-            let flat = crate::edits::composited(&layers, progress)?;
+            let flat = crate::edits::composited(&layers, range.as_ref(), progress)?;
             let kept = opal_core::mask::keep_selected(&flat, [0, 0], &mask);
             if kept.content_bounds().is_none() {
                 return Err("The selected layers show nothing within the selection.".to_owned());
@@ -659,6 +668,41 @@ mod tests {
     }
 
     #[test]
+    fn layer_via_copy_works_out_only_what_the_selection_reaches() {
+        use crate::commands::Cmd;
+        use opal_core::mask::{Combine, Shape};
+        use opal_core::selection::{Selection, Step};
+        use opal_core::tile::{Tile, TileCoord};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        // A layer at half opacity of 64 tiles, each its own: composited, each would be made.
+        let mut img = RasterImage::new();
+        for y in 0..8 {
+            for x in 0..8 {
+                let t = Tile::filled([half::f16::from_f32(1.0); 4]);
+                img.set_tile(TileCoord::new(x, y), Some(std::sync::Arc::new(t)));
+            }
+        }
+        let d = st.active_mut().unwrap();
+        let mut made = None;
+        let _ = d.apply("Add", |doc, ids| {
+            let id = ids.layer();
+            let mut l = Layer::new_raster(id, ids.object(), "tiles", img);
+            l.opacity = 0.5;
+            made = Some(id);
+            doc.insert(Position { parent: None, index: 1 }, l).map_err(|_| ())
+        });
+        d.select_only(made.unwrap());
+        let shape = Shape::rectangle(&IRect::new(10, 10, 20, 20).to_f(), false);
+        d.set_pixel_selection(Some(Selection::new(Step::Shape { shape, combine: Combine::Replace })), "Select");
+        // 4 MB: the 64 tiles (32 MB) would not fit; the one the selection reaches does.
+        let _pretend = crate::memory::testing::pretend_free(Some(4 << 20));
+        st.run(Cmd::LayerViaCopy, &eframe::egui::Context::default());
+        assert!(st.messages.is_empty(), "{:?}", st.messages.front().map(|m| &m.body));
+        assert_eq!(st.active().unwrap().doc().layers.len(), 3);
+    }
+
+    #[test]
     fn layer_via_copy_and_cut_put_what_is_selected_on_a_layer_of_its_own() {
         use crate::commands::Cmd;
         use opal_core::mask::{Combine, Shape};
@@ -674,7 +718,7 @@ mod tests {
                 ObjectKind::Image(_) => panic!("an image object"),
             })
         };
-        // Nothing selected: the layer duplicated, as Ctrl+J did before.
+        // With nothing selected, Layer via Copy duplicates the layers, as Duplicate does.
         st.run(Cmd::LayerViaCopy, &eframe::egui::Context::default());
         assert_eq!(st.active().unwrap().doc().layers.len(), 2);
         st.active_mut().unwrap().undo();

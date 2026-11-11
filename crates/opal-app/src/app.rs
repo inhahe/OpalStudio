@@ -67,8 +67,10 @@ pub struct OpalApp {
     mcp_http: Option<crate::mcp_http::HttpServer>,
     /// The port it could not be served on, not tried again until the preferences change.
     mcp_http_failed: Option<u16>,
-    /// Whether the window was last asked to be full screen (see `AppState::screen`).
+    /// Whether the window was last asked to be full screen (see `AppState::screen`), and
+    /// whether it has been seen so since.
     full_screen: bool,
+    full_screen_seen: bool,
 }
 
 impl OpalApp {
@@ -120,6 +122,7 @@ impl OpalApp {
             field_had_keys: false,
             fitted_to_monitor: false,
             full_screen: false,
+            full_screen_seen: false,
             #[cfg(test)]
             status_given: None,
             work_area,
@@ -712,6 +715,34 @@ impl OpalApp {
         StatusSeen { clients, steps, shut_out, tiles: opal_core::store::status() }
     }
 
+    /// With the image alone, which has no status bar, what the status bar would show, over the
+    /// image's foot: a recent notice, and an edit under way, with how far it has got and Cancel.
+    fn alone_status(&mut self, ctx: &egui::Context) {
+        const SHOWN: std::time::Duration = crate::state::NOTICE_SHOWN;
+        let notice = self.st.notice.clone().filter(|(_, at)| at.elapsed() < SHOWN);
+        let edit = self.shown_edit().is_some();
+        if notice.is_none() && !edit {
+            return;
+        }
+        let seen = self.status_seen();
+        egui::Area::new(egui::Id::unique("image-alone-status")).anchor(egui::Align2::CENTER_BOTTOM, [0.0, -16.0]).show(
+            ctx,
+            |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if let Some((text, at)) = &notice {
+                            ui.ctx().request_repaint_after(SHOWN.saturating_sub(at.elapsed()));
+                            ui.label(format!("{}  {text}", icons::INFO));
+                        }
+                        if edit {
+                            self.status_part(ui, StatusPart::Edit, &seen);
+                        }
+                    });
+                });
+            },
+        );
+    }
+
     /// The window as usual, round the panels: the ribbon, the status bar, the tools' strip if
     /// they are at a side, and the panels.
     fn frame_ui(&mut self, ui: &mut egui::Ui) {
@@ -1041,16 +1072,25 @@ impl eframe::App for OpalApp {
         self.handle_dropped_files(&ctx);
         self.poll_gpu();
 
-        // The screen mode: full screen, or not; the image alone, or with the rest.
+        // The screen mode: full screen, or not; the image alone, or with the rest. A window
+        // seen full screen, then not, left it another way (the system's key): as usual again.
+        let shown_full = ctx.input(|i| i.viewport().fullscreen);
+        if self.full_screen && shown_full == Some(true) {
+            self.full_screen_seen = true;
+        } else if self.full_screen && self.full_screen_seen && shown_full == Some(false) {
+            self.st.screen = ScreenMode::Standard;
+            (self.full_screen, self.full_screen_seen) = (false, false);
+        }
         let full = self.st.screen != ScreenMode::Standard;
         if full != self.full_screen {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(full));
-            self.full_screen = full;
+            (self.full_screen, self.full_screen_seen) = (full, false);
         }
         match (self.st.screen == ScreenMode::ImageAlone).then_some(self.st.active_doc).flatten() {
             Some(id) => {
                 let fill = egui::Frame::NONE.fill(ui.visuals().panel_fill);
                 egui::CentralPanel::default().frame(fill).show(ui, |ui| canvas::canvas_ui(ui, &mut self.st, id));
+                self.alone_status(&ctx);
             }
             None => self.frame_ui(ui),
         }

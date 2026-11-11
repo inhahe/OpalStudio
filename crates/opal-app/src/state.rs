@@ -246,6 +246,8 @@ pub struct AppState {
     pub repaint: egui::Context,
     /// How the window shows the image (F cycles through them).
     pub screen: ScreenMode,
+    /// The script's call being carried out, while one is.
+    pub calling: Option<crate::api::Calling>,
     /// How long an edit is waited for as it begins (see `edits::WAITED_FOR`).
     pub edit_wait: std::time::Duration,
     pub thumbs: crate::thumbs::Thumbnails,
@@ -386,6 +388,7 @@ impl AppState {
             dropped: VecDeque::new(),
             repaint: egui::Context::default(),
             screen: ScreenMode::Standard,
+            calling: None,
             edit_wait: crate::edits::WAITED_FOR,
             thumbs: Default::default(),
             reading: None,

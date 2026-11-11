@@ -2441,6 +2441,10 @@ fn f_shows_the_window_full_screen_then_the_image_alone_then_as_usual() {
     }
     h.run();
     assert!(h.state().state().active().unwrap().view.zoom > before, "the image alone took no click");
+    // With no status bar, what it would say shows over the image.
+    h.state_mut().state_mut().notify("Something to say");
+    h.run();
+    assert!(h.query_by_label_contains("Something to say").is_some(), "the notice went unseen");
 }
 
 #[test]
@@ -2719,10 +2723,9 @@ fn a_view_taking_a_while_says_so() {
     let mut h = harness();
     image_of(&mut h, 256, 256);
     h.state_mut().state_mut().active_mut().unwrap().projector.wait = std::time::Duration::ZERO;
-    // The background threads held, so the next view cannot be done. (Its layer hidden: a
-    // change the interface makes itself, unlike a flip, which those threads would work out.)
+    // The background threads held, so the next view cannot be done.
     let held = crate::background::testing::hold(Some(crate::background::pool()));
-    h.state_mut().state_mut().queue.push(Cmd::ToggleVisible);
+    h.state_mut().state_mut().queue.push(Cmd::FlipHorizontal);
     h.run();
     assert!(h.query_by_label("Drawing…").is_none(), "said at once");
     std::thread::sleep(std::time::Duration::from_millis(200));
