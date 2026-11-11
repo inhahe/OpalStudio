@@ -389,6 +389,32 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             },
             UNIT,
         ],
+        SmoothSelection => &[
+            DOCUMENT,
+            Param {
+                name: "radius",
+                kind: Kind::Length { min: 0.0, max: opal_core::modify::MAX_DISTANCE },
+                help: "Pinholes, notches, specks and spurs narrower than twice it go, and corners round to it.",
+                otherwise: Otherwise::Required,
+            },
+            UNIT,
+        ],
+        BorderSelection => &[
+            DOCUMENT,
+            Param {
+                name: "width",
+                kind: Kind::Length { min: 0.0, max: opal_core::modify::MAX_DISTANCE },
+                help: "How wide the band along the outline is.",
+                otherwise: Otherwise::Required,
+            },
+            Param {
+                name: "side",
+                kind: Kind::Choice(&opal_core::modify::Side::NAMES),
+                help: "Where the band lies: inside the outline, outside it, or half each way.",
+                otherwise: Otherwise::Value("\"centered\""),
+            },
+            UNIT,
+        ],
         FeatherSelection => &[
             DOCUMENT,
             Param {
@@ -2174,7 +2200,7 @@ impl AppState {
                 self.rename_layer(doc.expect("available"), id, args.text("name").expect("required").to_owned());
                 now(Ok(json!({ "layer": id.0 })))
             }
-            Cmd::GrowSelection | Cmd::FeatherSelection => {
+            Cmd::GrowSelection | Cmd::FeatherSelection | Cmd::SmoothSelection | Cmd::BorderSelection => {
                 use opal_core::modify::{Falloff, Reach, Side};
                 use opal_core::selection::Step;
                 // Each a name its choice allows (checked), or its default.
@@ -2182,6 +2208,11 @@ impl AppState {
                     Cmd::GrowSelection => Step::Grow {
                         by: args.number("by"),
                         corners: args.text("corners").and_then(Reach::named).unwrap_or_default(),
+                    },
+                    Cmd::SmoothSelection => Step::Smooth { radius: args.number("radius") },
+                    Cmd::BorderSelection => Step::Border {
+                        width: args.number("width"),
+                        side: args.text("side").and_then(Side::named).unwrap_or_default(),
                     },
                     _ => Step::Feather {
                         width: args.number("width"),
@@ -3232,6 +3263,18 @@ mod tests {
         assert_eq!(s["steps"][3]["step"], json!("feather"));
         let label = st.active().unwrap().history.undo_label().map(str::to_owned);
         assert_eq!(label.as_deref(), Some("Feather selection"));
+        // Smoothed and bordered: steps of the recipe too; the border a band along the outline,
+        // here inward, 10 pixels wide.
+        now(&mut st, "select_rectangle", json!({ "x": 100, "y": 50, "width": 100, "height": 100, "smooth": false }))
+            .unwrap();
+        let s = now(&mut st, "smooth_selection", json!({ "radius": 3 })).unwrap();
+        assert_eq!(s["steps"][1], json!({ "step": "smooth", "radius": 3.0 }));
+        let s = now(&mut st, "border_selection", json!({ "width": 10, "side": "inward" })).unwrap();
+        assert_eq!(s["steps"][2], json!({ "step": "border", "width": 10.0, "side": "inward" }));
+        let d = st.active().unwrap();
+        let level = |x, y| d.pixel_selection().unwrap().mask().level_at(x, y);
+        assert_eq!([level(105, 100), level(150, 100), level(95, 100)], [opal_core::mask::FULL, 0, 0]);
+        assert_eq!(d.history.undo_label(), Some("Border selection"));
         // Not memory enough: refused, saying why, the selection as it was.
         let states = st.active().unwrap().history.nodes().count();
         let _pretend = crate::memory::testing::pretend_free(Some(1000));

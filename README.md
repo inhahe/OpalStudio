@@ -97,8 +97,9 @@ cargo test --workspace                     # all tests, interface tests included
   move, size and turn it, and whose numbers button gives its exact position, size and angle,
   in any unit; scripts select shapes so too (`select_rectangle`, `select_ellipse`). View ›
   Selection Overlay shows what is not selected under red, fading with a soft selection. Grow
-  or Shrink (round, square or diamond corners) and Feather (inward, outward or centered;
-  Gaussian or straight) change its edge, shown as you set them.
+  or Shrink (round, square or diamond corners), Feather (inward, outward or centered;
+  Gaussian or straight), Smooth (pinholes, specks and jagged corners gone) and Border (a band
+  along the outline) change its edge, shown as you set them.
   Selections are part of history, and turn, flip and resize with the image.
 - **Layers and groups.** Add, duplicate, delete, group, reorder (buttons or dragging,
   into and out of groups), rename, hide, lock, change opacity; select several with Ctrl

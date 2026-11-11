@@ -163,6 +163,38 @@ impl Mask {
         by_distance(self, grow_band(by), reach, |d| coverage(d - by), bounds)
     }
 
+    /// The mask with its outline smoothed over `radius` pixels: closed (grown, then shrunk
+    /// back), so that pinholes and notches narrower than twice the radius fill and inward
+    /// corners round, then opened (shrunk, then grown back), so that specks and spurs as thin
+    /// go and outward corners round; unless `bounds` hold it back.
+    pub fn smoothed_within(&self, radius: f64, bounds: Bounds) -> Result<Mask, Halt> {
+        if radius <= 0.0 {
+            return Ok(self.clone());
+        }
+        let closed = self.grown_within(radius, Reach::Round, bounds)?.grown_within(-radius, Reach::Round, bounds)?;
+        closed.grown_within(-radius, Reach::Round, bounds)?.grown_within(radius, Reach::Round, bounds)
+    }
+
+    /// The band `width` pixels wide along the mask's outline, on its `side` (inside it,
+    /// outside it, or half each way), its edges as smooth as a grown outline's; unless `bounds`
+    /// hold it back.
+    pub fn bordered_within(&self, width: f64, side: Side, bounds: Bounds) -> Result<Mask, Halt> {
+        if width <= 0.0 {
+            return Ok(Mask::none());
+        }
+        // How far the band reaches out of the outline, and in.
+        let outer = feather_outer(width, side);
+        let inner = width - outer;
+        // Within the band's outer edge and outside its inner one, each as much as a pixel is:
+        // its share of both.
+        let level_of = move |d: f64| {
+            let within = u32::from(coverage(d - outer));
+            let beyond = u32::from(FULL - coverage(d + inner));
+            (within + beyond).saturating_sub(u32::from(FULL)) as u16
+        };
+        by_distance(self, Band::new(inner, outer), Reach::Round, level_of, bounds)
+    }
+
     /// [`feathered`](Self::feathered), unless `bounds` hold it back.
     pub fn feathered_within(&self, width: f64, side: Side, falloff: Falloff, bounds: Bounds) -> Result<Mask, Halt> {
         if width <= 0.0 {
@@ -682,6 +714,36 @@ mod tests {
         // And what it makes is what it was: selected all the way in, to 300 out.
         let m = rect(0.0, 0.0, 1000.0, 1000.0).grown(300.0, Reach::Square);
         assert_eq!([m.level_at(500, 500), m.level_at(-300, 500), m.level_at(-301, 500)], [FULL, FULL, 0]);
+    }
+
+    #[test]
+    fn smoothing_fills_pinholes_takes_specks_away_and_rounds_corners() {
+        let unbounded = |m: &Mask, r: f64| m.smoothed_within(r, UNBOUNDED).unwrap();
+        // A square with a pinhole in it, and a speck beside it.
+        let square = rect(0.0, 0.0, 200.0, 200.0);
+        let holed = square.combined(&rect(100.0, 100.0, 103.0, 103.0), crate::mask::Combine::Subtract);
+        let specked = holed.combined(&rect(300.0, 0.0, 303.0, 3.0), crate::mask::Combine::Add);
+        let smooth = unbounded(&specked, 5.0);
+        assert_eq!([smooth.level_at(101, 101), smooth.level_at(301, 1), smooth.level_at(150, 50)], [FULL, 0, FULL]);
+        // The square's corner rounded: its very corner left out, the edge's middle kept.
+        assert_eq!([smooth.level_at(0, 0), smooth.level_at(0, 100)], [0, FULL]);
+        // Nothing by no radius.
+        assert_eq!(unbounded(&specked, 0.0), specked);
+    }
+
+    #[test]
+    fn a_border_is_a_band_along_the_outline_on_the_side_asked() {
+        let square = rect(100.0, 100.0, 300.0, 300.0);
+        let border = |side| square.bordered_within(10.0, side, UNBOUNDED).unwrap();
+        // Pixels whose middles are 6.5 and 2.5 outside the left edge, 2.5 and 7.5 inside it, and
+        // the middle: inward, 10 inside to the outline; outward, the outline to 10 outside;
+        // centered, 5 each way.
+        let at = |m: &Mask| [93, 97, 102, 107, 200].map(|x| m.level_at(x, 200));
+        assert_eq!(at(&border(Side::Inward)), [0, 0, FULL, FULL, 0]);
+        assert_eq!(at(&border(Side::Outward)), [FULL, FULL, 0, 0, 0]);
+        assert_eq!(at(&border(Side::Centered)), [0, FULL, FULL, 0, 0]);
+        // No width, nothing.
+        assert!(square.bordered_within(0.0, Side::Centered, UNBOUNDED).unwrap().is_none());
     }
 
     #[test]

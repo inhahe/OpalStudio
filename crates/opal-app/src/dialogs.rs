@@ -729,6 +729,31 @@ fn modifier_fields(
                 );
             });
         }
+        Step::Smooth { radius } => {
+            ui.heading("Smooth the selection");
+            ui.add_space(4.0);
+            egui::Grid::new("smooth").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                ui.label("Radius");
+                ui.add(lengths::length_field(radius, scope, 0.0..=MAX_DISTANCE, 2).remember("select.smooth"));
+                ui.end_row();
+            });
+            ui.label(
+                RichText::new("Pinholes, notches, specks and spurs narrower than twice it go; corners round.")
+                    .small()
+                    .color(palette.weak_text),
+            );
+        }
+        Step::Border { width, side } => {
+            ui.heading("Border the selection");
+            ui.add_space(4.0);
+            egui::Grid::new("border").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                ui.label("Width");
+                ui.add(lengths::length_field(width, scope, 0.0..=MAX_DISTANCE, 2).remember("select.border"));
+                ui.end_row();
+                let sides = [(Side::Inward, "Inward"), (Side::Outward, "Outward"), (Side::Centered, "Centered")];
+                choice(ui, "Lies", "border-side", side, &sides);
+            });
+        }
         _ => {}
     }
 }

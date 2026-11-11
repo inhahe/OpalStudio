@@ -458,6 +458,27 @@ Soften the selection's edge over a width.
 | `falloff` | `gaussian`, `linear` | Its shape: as a Gaussian blur's edge, or straight. Default: "gaussian". |
 | `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
 
+### `smooth_selection`
+
+Smooth the selection's outline over a radius.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `radius` (required) | length | Pinholes, notches, specks and spurs narrower than twice it go, and corners round to it. From 0.0 to 1000.0 pixels. |
+| `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
+
+### `border_selection`
+
+Select a band along the selection's outline.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `width` (required) | length | How wide the band along the outline is. From 0.0 to 1000.0 pixels. |
+| `side` | `inward`, `outward`, `centered` | Where the band lies: inside the outline, outside it, or half each way. Default: "centered". |
+| `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
+
 ### `crop_to_content`
 
 Shrink (or grow) the canvas to fit what the visible layers hold.

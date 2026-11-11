@@ -22,6 +22,11 @@ pub enum Step {
     /// The selection so far feathered: its edge falling off over `width` pixels, on the
     /// `side` of its outline, along `falloff`.
     Feather { width: f64, side: Side, falloff: Falloff },
+    /// The selection so far with its outline smoothed over `radius` pixels: pinholes and
+    /// notches filled, specks and spurs taken away, corners rounded.
+    Smooth { radius: f64 },
+    /// A band `width` pixels wide along the outline of the selection so far, on its `side`.
+    Border { width: f64, side: Side },
     /// A mask as it is, combined with the selection so far as `combine` says: a layer's
     /// opacity, or (replacing it) what a selection carried through a transform its shapes
     /// could not follow becomes (see [`Selection::transformed`]). It is told without its mask,
@@ -46,6 +51,8 @@ impl Step {
             Step::Invert => before.inverted(),
             Step::Grow { by, corners } => before.grown_within(*by, *corners, bounds)?,
             Step::Feather { width, side, falloff } => before.feathered_within(*width, *side, *falloff, bounds)?,
+            Step::Smooth { radius } => before.smoothed_within(*radius, bounds)?,
+            Step::Border { width, side } => before.bordered_within(*width, *side, bounds)?,
             Step::Mask { mask, combine } => before.combined(mask, *combine),
         })
     }
@@ -76,6 +83,8 @@ impl Step {
             Step::Feather { width, side, falloff } => {
                 Step::Feather { width: distance(*width, false)?, side: *side, falloff: *falloff }
             }
+            Step::Smooth { radius } => Step::Smooth { radius: distance(*radius, false)? },
+            Step::Border { width, side } => Step::Border { width: distance(*width, false)?, side: *side },
             Step::Mask { mask, combine } => Step::Mask { mask: Arc::new(mask.transformed(m)), combine: *combine },
         })
     }
@@ -84,7 +93,7 @@ impl Step {
     fn leaves_as_is(&self) -> bool {
         match self {
             Step::Grow { by, .. } => *by == 0.0,
-            Step::Feather { width, .. } => *width <= 0.0,
+            Step::Feather { width, .. } | Step::Smooth { radius: width } => *width <= 0.0,
             _ => false,
         }
     }

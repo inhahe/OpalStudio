@@ -466,11 +466,19 @@ tile, for a straight edge), against what was free when it began, measured on its
 refused, and Rotate, Flip or Resize Image working a carried recipe out again fail, saying
 why.
 Distances go to 1000 pixels at most (`modify::MAX_DISTANCE`).
+Two more modifiers are built the same way. **Smooth** (a radius) closes the outline (grown,
+then shrunk back), so that pinholes and notches narrower than twice the radius fill and inward
+corners round, then opens it (shrunk, then grown back), so that specks and spurs as thin go
+and outward corners round: four passes of exact distances, round. **Border** (a width; inward,
+outward or centered) selects the band of that width along the outline in place of what was
+selected, each pixel as much as it lies in the band, in one pass.
 They work from the outline, where pixels are half selected, so a soft selection grown or
-feathered loses its own softness; growing by nothing, or a feather of no width, is no step.
-On the Select tab, *Grow or Shrink* and *Feather* open dialogs (refused while a box is open)
-that show what they make on their own image (a pending edit, *Grow selection*, *Shrink
-selection* or *Feather selection*, which a save leaves pending, as it changes nothing saved),
+feathered loses its own softness; growing by nothing, or a feather or smoothing of no width,
+is no step.
+On the Select tab, *Grow or Shrink*, *Feather*, *Smooth* and *Border* open dialogs (refused
+while a box is open) that show what they make on their own image (a pending edit, *Grow
+selection*, *Shrink selection*, *Feather selection*, *Smooth selection* or *Border selection*,
+which a save leaves pending, as it changes nothing saved),
 worked out off the interface thread as the numbers are set (lengths in that image's
 resolution), the first included, the image showing the last done meanwhile. The jobs run one
 at a time on a thread with a pool of threads of their own (`background::LatestJob`), so they

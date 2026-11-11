@@ -72,6 +72,8 @@ pub fn modifier_label(step: &Step) -> &'static str {
     match step {
         Step::Grow { by, .. } if *by < 0.0 => "Shrink selection",
         Step::Grow { .. } => "Grow selection",
+        Step::Smooth { .. } => "Smooth selection",
+        Step::Border { .. } => "Border selection",
         _ => "Feather selection",
     }
 }
@@ -190,16 +192,19 @@ impl AppState {
         d.set_pixel_selection(Some(s), "Invert selection");
     }
 
-    /// Opens the Grow or Shrink dialog (`grow`), or the Feather dialog, on what the active
-    /// image has selected, what it makes worked out off the interface thread at once.
-    pub(crate) fn modify_selection(&mut self, grow: bool, ctx: &eframe::egui::Context) {
+    /// Opens the dialog of `cmd`, a modifier (Grow or Shrink, Feather, Smooth or Border), on
+    /// what the active image has selected, what it makes worked out off the interface thread at
+    /// once.
+    pub(crate) fn modify_selection(&mut self, cmd: crate::commands::Cmd, ctx: &eframe::egui::Context) {
+        use crate::commands::Cmd;
         use opal_core::modify::{Falloff, Reach, Side};
         let d = self.active().expect("available");
         let (doc, before) = (d.id, d.pixel_selection().expect("available").clone());
-        let step = if grow {
-            Step::Grow { by: 5.0, corners: Reach::Round }
-        } else {
-            Step::Feather { width: 10.0, side: Side::Centered, falloff: Falloff::Gaussian }
+        let step = match cmd {
+            Cmd::GrowSelection => Step::Grow { by: 5.0, corners: Reach::Round },
+            Cmd::SmoothSelection => Step::Smooth { radius: 4.0 },
+            Cmd::BorderSelection => Step::Border { width: 4.0, side: Side::Centered },
+            _ => Step::Feather { width: 10.0, side: Side::Centered, falloff: Falloff::Gaussian },
         };
         self.modifying = Some(Modifying {
             doc,
@@ -722,7 +727,7 @@ mod tests {
         };
         // Opened: grown by 5, worked out off the interface thread, the selection as it was
         // until then; as an edit not yet a state; a dialog, which keys and calls wait for.
-        st.modify_selection(true, &ctx);
+        st.modify_selection(crate::commands::Cmd::GrowSelection, &ctx);
         assert!(st.dialog_open());
         assert_eq!(selected(&st), Extent::Within(IRect::new(100, 50, 200, 150)), "shown before it was worked out");
         settle(&mut st);
@@ -736,11 +741,16 @@ mod tests {
         assert_eq!(st.active().unwrap().pending_label(), Some("Shrink selection"));
         // Cancelled: as it was, no state.
         st.end_modifying(false);
+        // Smooth's dialog, as the others: what it makes shown under its own name.
+        st.modify_selection(crate::commands::Cmd::SmoothSelection, &ctx);
+        settle(&mut st);
+        assert_eq!(st.active().unwrap().pending_label(), Some("Smooth selection"));
+        st.end_modifying(false);
         assert_eq!(selected(&st), Extent::Within(IRect::new(100, 50, 200, 150)));
         assert_eq!(st.active().unwrap().history.nodes().count(), states);
         // OK while what it makes is worked out (a job taken as under way here, and asked for
         // after): the dialog waits, saying so, then closes, keeping it, once it is shown.
-        st.modify_selection(true, &ctx);
+        st.modify_selection(crate::commands::Cmd::GrowSelection, &ctx);
         settle(&mut st);
         let m = st.modifying.as_mut().unwrap();
         m.step = Step::Grow { by: 30.0, corners: Reach::Square };
@@ -759,7 +769,7 @@ mod tests {
         // Set to a step there is not memory enough for: the dialog says so, the image shows
         // the selection as it was, and OK keeps nothing, the dialog staying; a step that fits
         // is shown, and kept.
-        st.modify_selection(true, &ctx);
+        st.modify_selection(crate::commands::Cmd::GrowSelection, &ctx);
         settle(&mut st);
         assert_eq!(st.active().unwrap().pending_label(), Some("Grow selection"));
         let pretend = crate::memory::testing::pretend_free(Some(1000));
@@ -789,7 +799,7 @@ mod tests {
         st.active_mut().unwrap().undo();
         let states = states + 1;
         // Cancel pressed in the frame what OK waited for comes: nothing kept.
-        st.modify_selection(true, &ctx);
+        st.modify_selection(crate::commands::Cmd::GrowSelection, &ctx);
         settle(&mut st);
         let step = Step::Grow { by: 30.0, corners: Reach::Square };
         let m = st.modifying.as_mut().unwrap();
@@ -805,7 +815,7 @@ mod tests {
         assert_eq!(selected(&st), Extent::Within(IRect::new(100, 50, 200, 150)));
         // Set twice before either is shown: the last shown until the later is done, the
         // earlier never.
-        st.modify_selection(true, &ctx);
+        st.modify_selection(crate::commands::Cmd::GrowSelection, &ctx);
         settle(&mut st);
         st.modifying.as_mut().unwrap().step = Step::Grow { by: 30.0, corners: Reach::Square };
         st.preview_modifying(&ctx);
@@ -818,7 +828,7 @@ mod tests {
         // Its image is its own: another shown meanwhile is left alone, and Cancel takes back
         // the preview on its own image.
         let first = st.active_doc.unwrap();
-        st.modify_selection(true, &ctx);
+        st.modify_selection(crate::commands::Cmd::GrowSelection, &ctx);
         st.create_image(&NewImage { width: 50, height: 50, background: Background::White, resolution: 72.0 });
         settle(&mut st);
         assert!(st.active().unwrap().pending_label().is_none(), "the other image took the preview");
@@ -858,7 +868,7 @@ mod tests {
         st.show_doc(first);
         // Feathered, OK at once: kept once shown, a state of its own, the feather a step of the
         // recipe.
-        st.modify_selection(false, &ctx);
+        st.modify_selection(crate::commands::Cmd::FeatherSelection, &ctx);
         st.end_modifying(true);
         settle(&mut st);
         assert!(st.modifying.is_none());

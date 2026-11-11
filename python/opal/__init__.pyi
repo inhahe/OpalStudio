@@ -326,6 +326,21 @@ class Editor:
         falloff: Its shape: as a Gaussian blur's edge, or straight. Default: "gaussian".
         unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
+    def smooth_selection(self, *, document: int | None = None, radius: float | str | Expr, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+        """Smooth the selection's outline over a radius.
+
+        document: The image, by id. Default: the active image.
+        radius: Pinholes, notches, specks and spurs narrower than twice it go, and corners round to it. From 0.0 to 1000.0 pixels.
+        unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
+        """
+    def border_selection(self, *, document: int | None = None, width: float | str | Expr, side: Literal["inward", "outward", "centered"] = "centered", unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
+        """Select a band along the selection's outline.
+
+        document: The image, by id. Default: the active image.
+        width: How wide the band along the outline is. From 0.0 to 1000.0 pixels.
+        side: Where the band lies: inside the outline, outside it, or half each way. Default: "centered".
+        unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
+        """
     def crop_to_content(self, *, document: int | None = None) -> Any:
         """Shrink (or grow) the canvas to fit what the visible layers hold.
 

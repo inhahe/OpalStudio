@@ -56,6 +56,8 @@ pub enum Cmd {
     CropToSelection,
     GrowSelection,
     FeatherSelection,
+    SmoothSelection,
+    BorderSelection,
     CropToContent,
     ResizeImage,
     ResizeCanvas,
@@ -120,7 +122,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 75] = [
+    pub const ALL: [Cmd; 77] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -167,6 +169,8 @@ impl Cmd {
         Cmd::CropToSelection,
         Cmd::GrowSelection,
         Cmd::FeatherSelection,
+        Cmd::SmoothSelection,
+        Cmd::BorderSelection,
         Cmd::CropToContent,
         Cmd::ResizeImage,
         Cmd::ResizeCanvas,
@@ -534,6 +538,23 @@ impl Cmd {
                  growing round, square or to a point as you choose. It works from the outline (where \
                  pixels are half selected), keeping the edge smooth if it was. It is a step of the \
                  selection's recipe, so Rotate, Flip and Resize Image carry it.",
+                &[],
+            ),
+            Cmd::SmoothSelection => i(
+                "Smooth",
+                icons::SMOOTH,
+                "Smooth the selection's outline over a radius.",
+                "Fills pinholes and notches narrower than twice the radius, takes away specks and \
+                 spurs as thin, and rounds corners, the outline staying where it is elsewhere. A step \
+                 of the selection's recipe.",
+                &[],
+            ),
+            Cmd::BorderSelection => i(
+                "Border",
+                icons::BORDER_SELECTION,
+                "Select a band along the selection's outline.",
+                "A band of the width you give along the outline, inside it, outside it, or half each \
+                 way, in place of what was selected. A step of the selection's recipe.",
                 &[],
             ),
             Cmd::FeatherSelection => i(
@@ -929,7 +950,7 @@ pub static RIBBON: &[Tab] = &[
                 name: "Modify",
                 description: "Changing the selection's edge: moving it out or in, and softening it.",
                 large: 0,
-                cmds: &[Cmd::GrowSelection, Cmd::FeatherSelection],
+                cmds: &[Cmd::GrowSelection, Cmd::FeatherSelection, Cmd::SmoothSelection, Cmd::BorderSelection],
             },
             Group {
                 name: "Selected",
@@ -1088,10 +1109,13 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         | WidgetGallery => Ok(()),
         Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup | CopyMerged
         | StampVisible | ResizeCanvas | CropToContent | Place | SelectAll => needs_doc(),
-        Deselect | InvertSelection | CropToSelection | GrowSelection | FeatherSelection => {
+        Deselect | InvertSelection | CropToSelection | GrowSelection | FeatherSelection | SmoothSelection
+        | BorderSelection => {
             let d = st.active().ok_or("Open or create an image first.")?;
             // The dialog shows what it makes as the image's pending edit: the box's first.
-            if matches!(cmd, GrowSelection | FeatherSelection) && d.transform.is_some() {
+            if matches!(cmd, GrowSelection | FeatherSelection | SmoothSelection | BorderSelection)
+                && d.transform.is_some()
+            {
                 return Err("Apply or cancel the box first.".into());
             }
             d.pixel_selection().map(|_| ()).ok_or_else(|| "Nothing is selected.".to_owned())
