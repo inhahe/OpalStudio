@@ -3,7 +3,7 @@
 //! tool settings panel, and in a panel that opens from the numbers button by the box; a
 //! box of any later tool (a selection's) is meant to take the same fields.
 
-use crate::crop::CropBox;
+use crate::edit_box::EditBox;
 use crate::doc::DocId;
 use crate::lengths;
 use crate::number_field::NumberField;
@@ -545,7 +545,7 @@ pub fn crop(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
     let at = point_at(reference);
     let Some(d) = st.doc_mut(id) else { return };
     let (c, ppi) = (d.doc().canvas, d.doc().resolution);
-    let b = *d.crop.get_or_insert_with(|| CropBox::of(&c));
+    let b = *d.crop.get_or_insert_with(|| EditBox::of(&c));
     let doc = d.history.doc();
     let origin = counted_from(d.origin, doc);
     let from = origin.locate(doc).expect("counted_from gives one there");
@@ -559,8 +559,38 @@ pub fn crop(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
         salt,
     };
     if fields(ui, &mut p, &mut m, doc, ppi, &how, &mut Vec::new()) {
-        d.crop = Some(CropBox::from_numbers(&p, from, at));
+        d.crop = Some(EditBox::from_numbers(&p, from, at));
         d.revision += 1;
+    }
+    if m.origin != origin {
+        d.origin = m.origin;
+    }
+    set_reference(st, m.reference);
+    if m.unit != st.unit() {
+        st.set_unit(m.unit);
+    }
+}
+
+/// The fields of the box round the selection's last shape on document `id` (its position,
+/// size and angle); what is typed reshapes it at once, as one pending edit, "Edit selection",
+/// until something else is done.
+pub fn selection(ui: &mut egui::Ui, st: &mut AppState, id: DocId, salt: &str) {
+    let (unit, reference) = (st.unit(), reference(st));
+    let at = point_at(reference);
+    let Some(d) = st.doc_mut(id) else { return };
+    let Some((shape, combine)) = crate::select_tool::editable(d) else { return };
+    let ppi = d.doc().resolution;
+    // Positions count from layers as history has them (no box moves them).
+    let doc = d.history.doc().clone();
+    let origin = counted_from(d.origin, &doc);
+    let from = origin.locate(&doc).expect("counted_from gives one there");
+    let mut m = Measure { unit, reference, origin };
+    let mut p = EditBox::of_shape(&shape).numbers(from, at);
+    let how = Fields { keep: None, scale_of: None, px_decimals: 2, sides: 0.01..=FAR, salt };
+    if fields(ui, &mut p, &mut m, &doc, ppi, &how, &mut Vec::new()) {
+        let shape = EditBox::from_numbers(&p, from, at).shape(&shape);
+        let before = d.pixel_selection().expect("one with a shape").before_last();
+        crate::select_tool::reshape(d, &before, shape, combine, "Edit selection");
     }
     if m.origin != origin {
         d.origin = m.origin;

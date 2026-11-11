@@ -1693,7 +1693,7 @@ fn the_crop_tool_crops_to_its_box_on_enter() {
     {
         let d = h.state_mut().state_mut().active_mut().unwrap();
         assert!(d.crop.is_some(), "the box appears with the tool");
-        d.crop = Some(crate::crop::CropBox { center: [50.0, 50.0], size: [60.0, 40.0], angle: 0.0 });
+        d.crop = Some(crate::edit_box::EditBox { center: [50.0, 50.0], size: [60.0, 40.0], angle: 0.0 });
     }
     h.run();
     render(&mut h, "crop-box");
@@ -1710,7 +1710,7 @@ fn space_keeps_the_crop_box_while_it_scrolls_the_view() {
     image_of(&mut h, 200, 100);
     h.key_press(egui::Key::C);
     h.run();
-    let b = crate::crop::CropBox { center: [60.0, 50.0], size: [50.0, 30.0], angle: 0.1 };
+    let b = crate::edit_box::EditBox { center: [60.0, 50.0], size: [50.0, 30.0], angle: 0.1 };
     h.state_mut().state_mut().active_mut().unwrap().crop = Some(b);
     h.event(egui::Event::Key {
         key: egui::Key::Space,
@@ -1948,7 +1948,7 @@ fn a_late_paste_waits_for_a_crop_box_changed_meanwhile() {
     let st = h.state_mut().state_mut();
     assert!(st.active().unwrap().crop.is_some(), "the crop tool is still chosen");
     st.reading = Some(read(st));
-    st.active_mut().unwrap().crop = Some(crate::crop::CropBox { center: [50.0, 50.0], size: [60.0, 40.0], angle: 0.0 });
+    st.active_mut().unwrap().crop = Some(crate::edit_box::EditBox { center: [50.0, 50.0], size: [60.0, 40.0], angle: 0.0 });
     h.run();
     assert!(h.state().state().active().unwrap().transform.is_none(), "the crop box was thrown away");
     h.key_press(egui::Key::V);
@@ -2934,6 +2934,68 @@ fn select_drag(
 }
 
 #[test]
+fn the_box_round_the_last_shape_moves_it_sizes_it_and_takes_its_numbers() {
+    use egui::Modifiers;
+    use opal_core::geom::IRect;
+    use opal_core::mask::Extent;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    let none = Modifiers::NONE;
+    let within = |x0, y0, x1, y1| Some(Extent::Within(IRect::new(x0, y0, x1, y1)));
+    let label = |h: &Harness<'static, OpalApp>| {
+        h.state().state().active().unwrap().history.undo_label().map(str::to_owned).unwrap_or_default()
+    };
+    select_drag(&mut h, [100.0, 50.0], [200.0, 120.0], none, none);
+    assert_eq!(selected(&h), within(100, 50, 200, 120));
+    // Dragged from inside, it moves, by whole pixels, as a history state of its own.
+    select_drag(&mut h, [150.0, 80.0], [170.4, 89.6], none, none);
+    assert_eq!(selected(&h), within(120, 60, 220, 130));
+    assert_eq!(label(&h), "Move selection");
+    // Over its bottom-right corner, the pointer says it sizes; dragged, the opposite corner
+    // stays, and the one dragged goes to the nearest pixel corner.
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let at = |[x, y]: [f32; 2]| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    h.hover_at(at([220.0, 130.0]));
+    h.run();
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::ResizeNwSe);
+    select_drag(&mut h, [220.0, 130.0], [250.3, 160.2], none, none);
+    assert_eq!(selected(&h), within(120, 60, 250, 160));
+    assert_eq!(label(&h), "Resize selection");
+    render(&mut h, "select-box");
+    // Esc in the middle of a drag gives it up.
+    h.hover_at(at([150.0, 100.0]));
+    h.run();
+    h.drag_at(at([150.0, 100.0]));
+    h.run();
+    h.hover_at(at([190.0, 120.0]));
+    h.run();
+    assert_eq!(selected(&h), within(160, 80, 290, 180), "not moved while dragged");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.drop_at(at([190.0, 120.0]));
+    h.run();
+    assert_eq!(selected(&h), within(120, 60, 250, 160), "Esc did not give the drag up");
+    assert_eq!(label(&h), "Resize selection");
+    // With Shift held as it begins, a drag inside it adds a new shape instead.
+    select_drag(&mut h, [130.0, 70.0], [300.0, 200.0], Modifiers::SHIFT, Modifiers::SHIFT);
+    assert_eq!(selected(&h), within(120, 60, 300, 200));
+    // The box is the added shape's now; a width typed in its numbers sizes it, about its
+    // top-left corner, as an edit not yet a history state of its own.
+    h.state_mut().state_mut().box_numbers = true;
+    h.run();
+    type_into(&mut h, box_field(170.0, 0.01), "100");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert_eq!(selected(&h), within(120, 60, 250, 200));
+    render(&mut h, "select-box-numbers");
+    let d = h.state().state().active().unwrap();
+    assert_eq!(d.pending_label(), Some("Edit selection"));
+    assert_eq!(d.pixel_selection().unwrap().steps().len(), 2, "the shape was added, not edited");
+}
+
+#[test]
 fn the_select_tool_selects_a_rectangle_dragged_on_whole_pixels_and_combines_by_the_keys() {
     use egui::Modifiers;
     use opal_core::geom::IRect;
@@ -2958,8 +3020,9 @@ fn the_select_tool_selects_a_rectangle_dragged_on_whole_pixels_and_combines_by_t
     // Shift pressed once dragging: a square; Alt: from its middle.
     select_drag(&mut h, [100.0, 100.0], [140.0, 120.0], none, Modifiers::SHIFT);
     assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 100, 140, 140))), "not a square");
-    select_drag(&mut h, [100.0, 100.0], [140.0, 120.0], none, Modifiers::ALT);
-    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(60, 80, 140, 120))), "not from its middle");
+    // (Begun away from the square's box: on it, a drag edits the square.)
+    select_drag(&mut h, [300.0, 200.0], [340.0, 220.0], none, Modifiers::ALT);
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(260, 180, 340, 220))), "not from its middle");
     // A click selects nothing.
     let v = h.state().state().active().unwrap().view;
     let at = v.screen_rect.min + v.to_screen(egui::vec2(50.0, 50.0)) / h.ctx.pixels_per_point();

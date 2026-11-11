@@ -368,6 +368,21 @@ gives a drag up; a click with no keys held selects nothing. *Smooth edges* (on b
 selects a pixel the edge crosses as much as the shape covers it. Each selection is a history
 state, *Rectangle selection* or *Ellipse selection*.
 
+**Its box.** The selection's last step, when it is a shape, has a box round it (`edit_box`,
+shared with the Crop tool; an ellipse's is the rectangle round it, turned with it). A drag
+from inside it moves the shape, from a handle sizes it (the opposite corner or side staying;
+Shift keeps its proportions), and from just outside a corner turns it; upright, its sides
+stay on the pixels' edges, and a move keeps its size. Elsewhere, or with Shift or Alt held as
+it begins, a drag draws a new shape as above. A drag edits that step in place, the steps
+before it kept (worked out once, as it begins), as one history state: *Move selection*,
+*Resize selection* or *Rotate selection*; Esc gives it up. The numbers button under the box
+shows its exact position, size and angle beside it (`box_fields::selection`), as the
+transform and crop boxes' do; what is typed edits the step at once, as one pending edit,
+*Edit selection*, until something else is done. Scripts select shapes by the same numbers:
+`select_rectangle` and `select_ellipse`, the canvas's box unless told otherwise, with
+`combine` and `smooth`, and the box's `x`, `y`, `width`, `height`, `angle`, `anchor`,
+`from_layer` and `from_anchor`, which take expressions.
+
 ### The recipe
 
 A selection is kept as an ordered list of steps, not only as its final mask:
@@ -758,8 +773,8 @@ existing layers: Transform (Ctrl+T) opens it on the selected layers.
 - **Exact numbers by the box:** a button on the box opens the same numbers beside it
   (`box_fields`), beside the box and its toolbar (to the right, else the left, else the
   view's corner), so a paste can be put in a rectangle typed in any unit without leaving
-  the canvas. The crop box has the same fields and button; the selection tools' boxes will
-  take them too. The fields give the numbers first and how they are measured after them
+  the canvas. The crop box has the same fields and button, and so has the box round the
+  selection's last shape. The fields give the numbers first and how they are measured after them
   (the unit, the reference point, and what the position counts from), so that the tool
   settings, which have half the right column in the starting layout, show a paste's
   numbers without scrolling (the crop box's come after the crop tool's own settings, and

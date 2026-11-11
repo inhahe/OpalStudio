@@ -241,10 +241,16 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     }
     if tool == ToolId::Select && !boxed {
         let v = d.view;
-        crate::select_tool::canvas(&ctx, d, &response, &|p| to_doc(p, &v), select);
-    } else if d.select_drag.take().is_some() {
+        let to_screen = |p: [f64; 2]| rect.min + v.to_screen(Vec2::new(p[0] as f32, p[1] as f32)) / ppp;
+        crate::select_tool::canvas(&ctx, d, &response, &|p| to_doc(p, &v), &to_screen, select);
+    } else {
         // The tool changed (or Space made it the hand) mid-drag: the drag is given up.
-        d.revision += 1;
+        if d.select_drag.take().is_some() {
+            d.revision += 1;
+        }
+        if let Some(s) = d.shape_drag.take() {
+            d.discard_pending(crate::select_tool::ShapeDrag::label(s.drag.part));
+        }
     }
     if tool == ToolId::Zoom && !boxed {
         let alt = ctx.input(|i| i.modifiers.alt);
@@ -460,6 +466,8 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         crate::transform_ui::canvas_box(ui, st, id, &response, rect, !space);
     } else if cropping {
         crate::crop::canvas_crop(ui, st, id, &response, rect, !space);
+    } else if tool == ToolId::Select {
+        crate::select_tool::draw_box(ui, st, id, &response, rect, &to_screen);
     }
     if let Some(n) = notice {
         st.notify(n);

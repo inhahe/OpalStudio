@@ -516,6 +516,44 @@ Give the active layer a new name.
 | `layer` | layer | The layer, by id. Default: the active layer. |
 | `name` (required) | text | Its new name. |
 
+### `select_rectangle`
+
+Selects a rectangle, which may be turned, as the Select tool's box numbers give it: the canvas, unless the numbers say otherwise. Answers with what is selected then, as the selection query does.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `x` | length | Where the shape's anchor point is (of the rectangle round an ellipse), across from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where that point of the canvas is. |
+| `y` | length | Where the shape's anchor point is, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where that point of the canvas is. |
+| `width` | length | The shape's width (an ellipse's across). From 0.01 to 10000000.0 pixels. Default: the canvas's. |
+| `height` | length | The shape's height. From 0.01 to 10000000.0 pixels. Default: the canvas's. |
+| `angle` | angle | How far the shape is turned, in degrees clockwise, about its anchor point. From -360.0 to 360.0 degrees. Default: 0. |
+| `combine` | `replace`, `add`, `subtract`, `intersect` | How it combines with what is selected: in its place, added to it, taken away from it, or keeping only what is in both. Default: "replace". |
+| `smooth` | bool | Select a pixel its edge crosses as much as the shape covers it; else all or nothing, by the pixel's middle. Default: the Select tool's Smooth edges. |
+| `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the shape (of the rectangle round an ellipse) x and y give, and what the angle turns it about. Default: "top-left". |
+| `from_layer` | layer | A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas. |
+| `from_anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the canvas (or of from_layer) x and y count from. Default: "top-left". |
+| `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
+
+### `select_ellipse`
+
+Selects an ellipse, given by the rectangle round it (which may be turned), as the Select tool's box numbers give it: the one within the canvas, unless the numbers say otherwise. Answers with what is selected then, as the selection query does.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `x` | length | Where the shape's anchor point is (of the rectangle round an ellipse), across from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where that point of the canvas is. |
+| `y` | length | Where the shape's anchor point is, down from the point from_layer and from_anchor give (the canvas's top-left corner, unless they say). From -10000000.0 to 10000000.0 pixels. Default: where that point of the canvas is. |
+| `width` | length | The shape's width (an ellipse's across). From 0.01 to 10000000.0 pixels. Default: the canvas's. |
+| `height` | length | The shape's height. From 0.01 to 10000000.0 pixels. Default: the canvas's. |
+| `angle` | angle | How far the shape is turned, in degrees clockwise, about its anchor point. From -360.0 to 360.0 degrees. Default: 0. |
+| `combine` | `replace`, `add`, `subtract`, `intersect` | How it combines with what is selected: in its place, added to it, taken away from it, or keeping only what is in both. Default: "replace". |
+| `smooth` | bool | Select a pixel its edge crosses as much as the shape covers it; else all or nothing, by the pixel's middle. Default: the Select tool's Smooth edges. |
+| `anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the shape (of the rectangle round an ellipse) x and y give, and what the angle turns it about. Default: "top-left". |
+| `from_layer` | layer | A layer x and y count from (from a point of the bounds of what it holds, as from_anchor says), rather than from the canvas. Held where it is when the call begins (a layer moved counts from where it was). Default: the canvas. |
+| `from_anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the canvas (or of from_layer) x and y count from. Default: "top-left". |
+| `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
+
 ### `crop`
 
 Crops the image to a rectangle of its canvas, which may be turned: the canvas becomes the rectangle, and if it was turned, everything turns the other way, so its contents come out upright. Only the canvas moves (enlarging it again brings back what was cropped away), unless delete says.

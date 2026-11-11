@@ -16,6 +16,7 @@ mod crop;
 mod curve_editor;
 mod dialogs;
 mod doc;
+mod edit_box;
 mod gallery;
 mod gpu;
 mod gpu_memory;

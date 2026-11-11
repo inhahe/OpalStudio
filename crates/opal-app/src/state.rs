@@ -261,7 +261,7 @@ pub struct Reading {
     /// serial), and its crop box. A box opened (or a crop box changed) after that is the
     /// user's newer work, which the paste waits for rather than ending it.
     pub box_then: Option<u64>,
-    pub crop_then: Option<crate::crop::CropBox>,
+    pub crop_then: Option<crate::edit_box::EditBox>,
     /// The status-bar notice this paste put up, taken down when it is placed.
     pub notice: String,
     /// The API call the paste answers once it is placed, if it was one's.

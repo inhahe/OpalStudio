@@ -133,10 +133,12 @@ pub struct DocState {
     /// A Move tool drag in progress.
     pub moving: Option<crate::move_tool::MoveDrag>,
     /// The Crop tool's box, while the tool is in use, and a drag on it.
-    pub crop: Option<crate::crop::CropBox>,
-    pub crop_drag: Option<crate::crop::CropDrag>,
-    /// A Select tool drag in progress.
+    pub crop: Option<crate::edit_box::EditBox>,
+    pub crop_drag: Option<crate::edit_box::BoxDrag>,
+    /// A Select tool drag in progress, drawing a new shape, and one on the box round the
+    /// selection's last shape.
     pub select_drag: Option<crate::select_tool::SelectDrag>,
+    pub shape_drag: Option<crate::select_tool::ShapeDrag>,
     /// The rectangle the transform box's fields fit it into (its top-left corner from the
     /// canvas's, and its size), once one has been typed; the canvas, whatever it is then,
     /// until then.
@@ -187,6 +189,7 @@ impl DocState {
             notice: None,
             outline: None,
             select_drag: None,
+            shape_drag: None,
             told_dropped: false,
             groups: Vec::new(),
             made_by: HashMap::new(),
@@ -399,6 +402,15 @@ impl DocState {
             self.pending.get_or_insert_with(|| Pending { doc: self.history.doc().clone(), label: label.to_owned() });
         f(&mut p.doc);
         self.revision += 1;
+    }
+
+    /// Gives up the pending edit, if one labeled `label` is in progress, leaving the document
+    /// as it was.
+    pub fn discard_pending(&mut self, label: &str) {
+        if self.pending_label() == Some(label) {
+            self.pending = None;
+            self.revision += 1;
+        }
     }
 
     /// The label of the pending edit, if one is in progress.

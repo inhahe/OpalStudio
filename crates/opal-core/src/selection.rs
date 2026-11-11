@@ -100,6 +100,19 @@ impl Selection {
         self.mask.is_none()
     }
 
+    /// Its last step, if that is a shape, and how it combines: what the box round it edits.
+    pub fn last_shape(&self) -> Option<(Shape, Combine)> {
+        match self.steps.last()? {
+            Step::Shape { shape, combine } => Some((*shape, *combine)),
+            _ => None,
+        }
+    }
+
+    /// The selection its steps but the last make (nothing selected, if it has one step).
+    pub fn before_last(&self) -> Selection {
+        Selection::of(self.steps[..self.steps.len().saturating_sub(1)].to_vec())
+    }
+
     /// The selection `m` carries this one to, as Rotate, Flip and Resize Image carry the
     /// layers: each step carried exactly, as far as they can be; where one cannot (a turned
     /// rectangle stretched along another way is no longer a rectangle), the selection up to
@@ -159,6 +172,11 @@ mod tests {
         assert_eq!([c.mask().level_at(50, 50), c.mask().level_at(150, 50)], [0, FULL]);
         // Worked out again from its steps, the same.
         assert_eq!(Selection::of(c.steps().to_vec()), c);
+        // Its last step a shape, the box round it edits it; the steps before it make the rest.
+        assert_eq!(b.last_shape(), Some((rect(200.0, 0.0, 300.0, 100.0), Combine::Add)));
+        assert_eq!(b.before_last(), a);
+        assert_eq!(c.last_shape(), None, "an inverting step is no shape");
+        assert!(a.before_last().is_empty());
         // A new shape replacing it is all there is.
         let d = c.then(Step::Shape { shape: rect(0.0, 0.0, 10.0, 10.0), combine: Combine::Replace });
         assert_eq!(d.steps().len(), 1);

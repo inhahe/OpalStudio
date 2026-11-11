@@ -658,9 +658,84 @@ fn role_name(role: Role) -> &'static str {
     }
 }
 
+/// The parameters of `select_rectangle` and `select_ellipse`: the shape's box, as the Select
+/// tool's box numbers give it, and how it combines.
+const SHAPE_PARAMS: &[Param] = &[
+    DOCUMENT,
+    Param {
+        name: "x",
+        kind: Kind::Length { min: -FAR, max: FAR },
+        help: "Where the shape's anchor point is (of the rectangle round an ellipse), across from the point \
+               from_layer and from_anchor give (the canvas's top-left corner, unless they say).",
+        otherwise: Otherwise::Now("where that point of the canvas is"),
+    },
+    Param {
+        name: "y",
+        kind: Kind::Length { min: -FAR, max: FAR },
+        help: "Where the shape's anchor point is, down from the point from_layer and from_anchor give (the \
+               canvas's top-left corner, unless they say).",
+        otherwise: Otherwise::Now("where that point of the canvas is"),
+    },
+    Param {
+        name: "width",
+        kind: Kind::Length { min: 0.01, max: FAR },
+        help: "The shape's width (an ellipse's across).",
+        otherwise: Otherwise::Now("the canvas's"),
+    },
+    Param {
+        name: "height",
+        kind: Kind::Length { min: 0.01, max: FAR },
+        help: "The shape's height.",
+        otherwise: Otherwise::Now("the canvas's"),
+    },
+    Param {
+        name: "angle",
+        kind: Kind::Angle { min: -360.0, max: 360.0 },
+        help: "How far the shape is turned, in degrees clockwise, about its anchor point.",
+        otherwise: Otherwise::Value("0"),
+    },
+    Param {
+        name: "combine",
+        kind: Kind::Choice(&["replace", "add", "subtract", "intersect"]),
+        help: "How it combines with what is selected: in its place, added to it, taken away from it, or \
+               keeping only what is in both.",
+        otherwise: Otherwise::Value("\"replace\""),
+    },
+    Param {
+        name: "smooth",
+        kind: Kind::Bool,
+        help: "Select a pixel its edge crosses as much as the shape covers it; else all or nothing, by the \
+               pixel's middle.",
+        otherwise: Otherwise::Now("the Select tool's Smooth edges"),
+    },
+    Param {
+        name: "anchor",
+        kind: Kind::Choice(&ANCHOR_NAMES),
+        help: "Which point of the shape (of the rectangle round an ellipse) x and y give, and what the angle \
+               turns it about.",
+        otherwise: Otherwise::Value("\"top-left\""),
+    },
+    FROM_LAYER,
+    FROM_ANCHOR,
+    UNIT,
+];
+
 /// The changes the API alone makes (no command of the interface makes them): their names,
 /// what they do, and their parameters.
 const CHANGES: &[(&str, &str, &[Param])] = &[
+    (
+        "select_rectangle",
+        "Selects a rectangle, which may be turned, as the Select tool's box numbers give it: the canvas, \
+         unless the numbers say otherwise. Answers with what is selected then, as the selection query does.",
+        SHAPE_PARAMS,
+    ),
+    (
+        "select_ellipse",
+        "Selects an ellipse, given by the rectangle round it (which may be turned), as the Select tool's box \
+         numbers give it: the one within the canvas, unless the numbers say otherwise. Answers with what is \
+         selected then, as the selection query does.",
+        SHAPE_PARAMS,
+    ),
     (
         "crop",
         "Crops the image to a rectangle of its canvas, which may be turned: the canvas becomes the \
@@ -1624,6 +1699,12 @@ impl AppState {
             None if method.name == "pixels" => self.pixels_by_args(&args, ctx),
             None if method.name == "put_pixels" => self.put_pixels_by_args(&args, ctx),
             None if method.name == "crop" => Reply::Now(self.crop_by_args(&args)),
+            None if method.name == "select_rectangle" => {
+                Reply::Now(self.select_by_args(opal_core::mask::ShapeKind::Rectangle, &args))
+            }
+            None if method.name == "select_ellipse" => {
+                Reply::Now(self.select_by_args(opal_core::mask::ShapeKind::Ellipse, &args))
+            }
             None if method.name == "set_preference" => Reply::Now(self.set_preference(&args, ctx)),
             None => Reply::Now(self.answer(&method.name, &args)),
         };
@@ -2144,13 +2225,65 @@ impl AppState {
             angle: b.angle.unwrap_or(0.0),
             mirrored: false,
         };
-        let b = crate::crop::CropBox::from_numbers(&p, from, at);
+        let b = crate::edit_box::EditBox::from_numbers(&p, from, at);
         if b.canvas() != c || b.angle.abs() > 1e-9 || delete {
             d.crop_to(&b, delete, sampling).map_err(|why| format!("crop: {why}"))?;
         }
         // The Crop tool's box, if it had one, goes back around the new canvas.
         d.crop = None;
         Ok(self.canvas_json())
+    }
+
+    /// Selects a shape of `kind` as `args` give its box (the canvas's, unless they say), as
+    /// `select_rectangle` and `select_ellipse` do; what is selected then, as the `selection`
+    /// query tells it.
+    fn select_by_args(&mut self, kind: opal_core::mask::ShapeKind, args: &Args) -> Result<Value, String> {
+        use opal_core::mask::{Combine, Shape, ShapeKind};
+        let (name, label) = match kind {
+            ShapeKind::Rectangle => ("select_rectangle", "Rectangle selection"),
+            ShapeKind::Ellipse => ("select_ellipse", "Ellipse selection"),
+        };
+        let id = self.which(args)?;
+        self.show_doc(id);
+        let smooth = args
+            .flag("smooth")
+            .unwrap_or_else(|| self.tool_settings(crate::tools::ToolId::Select).bool("select.smooth"));
+        let combine = match args.text("combine") {
+            Some("add") => Combine::Add,
+            Some("subtract") => Combine::Subtract,
+            Some("intersect") => Combine::Intersect,
+            _ => Combine::Replace,
+        };
+        let params = method(name).expect("a method").params;
+        let d = self.doc_mut(id).expect("found");
+        let (c, ppi) = (d.doc().canvas, d.doc().resolution);
+        let doc = d.history.doc();
+        let place = BoxArgs::of(args, params, Some(doc)).map_err(|why| format!("{name}: {why}"))?;
+        let (at, from) = (place.at, place.from);
+        let (w, h) = (f64::from(c.width), f64::from(c.height));
+        // Left out, the shape's box is the canvas, x and y where the anchor's point of it is;
+        // so too for an expression that names the box.
+        let own = Own {
+            x: c.x as f64 + at[0] * w - from[0],
+            y: c.y as f64 + at[1] * h - from[1],
+            width: w,
+            height: h,
+            angle: 0.0,
+        };
+        let b = place.worked_out(doc, ppi, own).map_err(|why| format!("{name}: {why}"))?;
+        let p = crate::transform::Params {
+            x: b.x.unwrap_or(own.x),
+            y: b.y.unwrap_or(own.y),
+            width: b.width.unwrap_or(w),
+            height: b.height.unwrap_or(h),
+            angle: b.angle.unwrap_or(0.0),
+            mirrored: false,
+        };
+        let like = Shape { kind, center: [0.0; 2], size: [0.0; 2], angle: 0.0, smooth };
+        let shape = crate::edit_box::EditBox::from_numbers(&p, from, at).shape(&like);
+        let made = opal_core::selection::with_shape(d.pixel_selection().map(|s| &**s), shape, combine);
+        d.set_pixel_selection(Some(made), label);
+        Ok(selection_json(d))
     }
 
     /// Every preference, as the `preferences` query tells them.
@@ -2906,6 +3039,42 @@ mod tests {
         let s = selection(&mut st);
         assert_eq!(s["bounds"], json!([0, 0, 100, 50]));
         assert_eq!(s["steps"][0]["shape"]["center"], json!([50.0, 25.0]));
+    }
+
+    #[test]
+    fn shapes_are_selected_by_their_box_numbers() {
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 300, "height": 200 })).unwrap();
+        // Left out, the box is the canvas.
+        let s = now(&mut st, "select_rectangle", json!({})).unwrap();
+        assert_eq!(s["bounds"], json!([0, 0, 300, 200]));
+        assert_eq!(s["steps"][0]["shape"]["kind"], json!("rectangle"));
+        // An ellipse by its middle, added; its numbers expressions.
+        let s = now(
+            &mut st,
+            "select_ellipse",
+            json!({ "x": "canvas.width + 50", "y": 100, "width": 40, "height": "20", "anchor": "center", "combine": "add" }),
+        )
+        .unwrap();
+        assert_eq!(s["bounds"], json!([0, 0, 370, 200]), "{s}");
+        assert_eq!(s["steps"][1]["shape"]["center"], json!([350.0, 100.0]));
+        assert_eq!(s["steps"][1]["combine"], json!("add"));
+        // Taken away, sharp, in another unit (72 pixels an inch).
+        let s = now(
+            &mut st,
+            "select_rectangle",
+            json!({ "x": 0, "y": 0, "width": "1in", "height": 200, "combine": "subtract", "smooth": false }),
+        )
+        .unwrap();
+        assert_eq!(s["bounds"], json!([72, 0, 298, 200]));
+        assert_eq!(s["steps"][2]["shape"]["smooth"], json!(false));
+        // Turned, about its anchor.
+        let s = now(&mut st, "select_rectangle", json!({ "x": 10, "y": 10, "width": 100, "height": 1, "angle": 90 }))
+            .unwrap();
+        assert_eq!(s["bounds"], json!([9, 10, 1, 100]), "{s}");
+        // A box made of nothing is refused.
+        assert!(now(&mut st, "select_ellipse", json!({ "width": 0 })).is_err());
     }
 
     #[test]
