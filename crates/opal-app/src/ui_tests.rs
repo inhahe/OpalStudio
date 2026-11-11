@@ -2871,3 +2871,116 @@ fn the_selection_s_outline_shows_as_marching_ants_on_the_canvas() {
     select_rect(&mut h, [100.0, 50.0, 200.0, 150.0]);
     assert!(black_along_top(&mut h) > 10, "no ants along the selection's top");
 }
+
+/// Drags with the Select tool from `from` to `to` (document pixels) on the active image,
+/// `held` down as it starts and `then` once it has (and through to its end).
+fn select_drag(
+    h: &mut Harness<'static, OpalApp>,
+    from: [f32; 2],
+    to: [f32; 2],
+    held: egui::Modifiers,
+    then: egui::Modifiers,
+) {
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Select);
+    h.run();
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let at = |[x, y]: [f32; 2]| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    h.event(egui::Event::ModifiersChanged(held));
+    h.hover_at(at(from));
+    h.run();
+    h.drag_at(at(from));
+    h.run();
+    for k in [0.25, 0.5, 0.75] {
+        h.hover_at(at([from[0] + (to[0] - from[0]) * k, from[1] + (to[1] - from[1]) * k]));
+        h.run();
+    }
+    h.event(egui::Event::ModifiersChanged(then));
+    h.hover_at(at(to));
+    h.run();
+    h.drop_at(at(to));
+    h.run();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+}
+
+#[test]
+fn the_select_tool_selects_a_rectangle_dragged_on_whole_pixels_and_combines_by_the_keys() {
+    use egui::Modifiers;
+    use opal_core::geom::IRect;
+    use opal_core::mask::Extent;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    let none = Modifiers::NONE;
+    // Its corners on the pixels' corners nearest the pointer.
+    select_drag(&mut h, [100.3, 50.7], [200.6, 120.2], none, none);
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 51, 201, 120))));
+    assert_eq!(h.state().state().active().unwrap().history.undo_label(), Some("Rectangle selection"));
+    // Shift as it starts adds another.
+    select_drag(&mut h, [300.0, 200.0], [350.0, 250.0], Modifiers::SHIFT, Modifiers::SHIFT);
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 51, 350, 250))));
+    // Alt takes away.
+    select_drag(&mut h, [290.0, 190.0], [360.0, 260.0], Modifiers::ALT, Modifiers::ALT);
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 51, 201, 120))));
+    // Without keys, it replaces.
+    select_drag(&mut h, [10.0, 10.0], [20.0, 30.0], none, none);
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(10, 10, 20, 30))));
+    // Shift pressed once dragging: a square; Alt: from its middle.
+    select_drag(&mut h, [100.0, 100.0], [140.0, 120.0], none, Modifiers::SHIFT);
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 100, 140, 140))), "not a square");
+    select_drag(&mut h, [100.0, 100.0], [140.0, 120.0], none, Modifiers::ALT);
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(60, 80, 140, 120))), "not from its middle");
+    // A click selects nothing.
+    let v = h.state().state().active().unwrap().view;
+    let at = v.screen_rect.min + v.to_screen(egui::vec2(50.0, 50.0)) / h.ctx.pixels_per_point();
+    h.hover_at(at);
+    h.run();
+    h.drag_at(at);
+    h.drop_at(at);
+    h.run();
+    assert_eq!(selected(&h), None, "a click did not deselect");
+}
+
+#[test]
+fn the_select_tool_s_variant_is_chosen_atop_its_settings_and_an_ellipse_drawn() {
+    use crate::tools::ToolId;
+    use egui_kittest::kittest::by;
+    use opal_core::geom::IRect;
+    use opal_core::mask::{Extent, FULL};
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    h.state_mut().state_mut().set_tool(ToolId::Select);
+    h.run();
+    // A button a variant, not a setting listed below too.
+    h.get(on_side(by().label("Ellipse").role(egui::accesskit::Role::RadioButton), false)).click();
+    h.run();
+    let settings = |h: &Harness<'static, OpalApp>| h.state().state().tool_settings(ToolId::Select).clone();
+    assert_eq!(settings(&h).choice("select.shape"), "ellipse");
+    assert_eq!(ToolId::Select.icon_with(&settings(&h)), crate::icons::ELLIPSE, "the tool's button shows the rectangle");
+    assert!(h.query(on_side(by().label("Shape"), false)).is_none(), "the variant is listed as a setting too");
+    select_drag(&mut h, [100.0, 100.0], [200.0, 160.0], egui::Modifiers::NONE, egui::Modifiers::NONE);
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 100, 200, 160))));
+    assert_eq!(h.state().state().active().unwrap().history.undo_label(), Some("Ellipse selection"));
+    let level = |h: &Harness<'static, OpalApp>, x, y| {
+        h.state().state().active().unwrap().pixel_selection().unwrap().mask().level_at(x, y)
+    };
+    assert_eq!([level(&h, 150, 130), level(&h, 101, 101)], [FULL, 0], "not an ellipse");
+    // Esc partway gives the drag up.
+    let (v, ppp) = (h.state().state().active().unwrap().view, h.ctx.pixels_per_point());
+    let at = |x: f32, y: f32| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    h.hover_at(at(10.0, 10.0));
+    h.run();
+    h.drag_at(at(10.0, 10.0));
+    h.run();
+    h.hover_at(at(50.0, 50.0));
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.hover_at(at(60.0, 60.0));
+    h.run();
+    h.drop_at(at(60.0, 60.0));
+    h.run();
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 100, 200, 160))), "Esc did not give the drag up");
+}

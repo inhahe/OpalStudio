@@ -7,6 +7,7 @@ use eframe::egui::Key;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ToolId {
     Move,
+    Select,
     Crop,
     Hand,
     Zoom,
@@ -24,15 +25,47 @@ pub struct ToolInfo {
     /// Longer help, for the help pages.
     pub help: &'static str,
     pub settings: &'static [Def],
+    /// Its variants, if it has any: shown at the top of the tool settings, never hidden
+    /// behind its button (design.md, *No hidden tool groups*).
+    pub variants: Option<Variants>,
+}
+
+/// A tool's variants: which of its settings chooses one (a choice, its options the variants),
+/// and each one's icon, in the order of the options.
+pub struct Variants {
+    pub key: &'static str,
+    pub icons: &'static [char],
 }
 
 impl ToolId {
+    /// The icon of the variant `settings` (the tool's) choose, or the tool's own.
+    pub fn icon_with(self, settings: &crate::settings::Settings) -> char {
+        let info = self.info();
+        let Some(v) = &info.variants else { return info.icon };
+        let chosen = settings.choice(v.key);
+        let options = settings.defs().iter().find(|d| d.key == v.key).map_or(&[][..], |d| match d.kind {
+            Kind::Choice(options) => options,
+            _ => &[],
+        });
+        options.iter().position(|(id, _)| *id == chosen).and_then(|i| v.icons.get(i)).copied().unwrap_or(info.icon)
+    }
+
+    /// The name of the variant `settings` (the tool's) choose, if the tool has variants.
+    pub fn variant_with(self, settings: &crate::settings::Settings) -> Option<&'static str> {
+        let v = self.info().variants.as_ref()?;
+        let chosen = settings.choice(v.key);
+        let d = settings.defs().iter().find(|d| d.key == v.key)?;
+        let Kind::Choice(options) = d.kind else { return None };
+        options.iter().find(|(id, _)| *id == chosen).map(|(_, label)| *label)
+    }
+
     /// Every tool, in toolbar order.
-    pub const ALL: [ToolId; 4] = [ToolId::Move, ToolId::Crop, ToolId::Hand, ToolId::Zoom];
+    pub const ALL: [ToolId; 5] = [ToolId::Move, ToolId::Select, ToolId::Crop, ToolId::Hand, ToolId::Zoom];
 
     pub fn info(self) -> &'static ToolInfo {
         match self {
             ToolId::Move => &MOVE,
+            ToolId::Select => &SELECT,
             ToolId::Crop => &CROP,
             ToolId::Hand => &HAND,
             ToolId::Zoom => &ZOOM,
@@ -64,6 +97,60 @@ pub static MOVE_SETTINGS: &[Def] = &[
         advanced: true,
     },
 ];
+
+pub static SELECT_SETTINGS: &[Def] = &[
+    Def {
+        key: "select.shape",
+        label: "Shape",
+        help: "What a drag draws.",
+        section: "Select",
+        kind: Kind::Choice(&[("rectangle", "Rectangle"), ("ellipse", "Ellipse")]),
+        default: Init::Choice("rectangle"),
+        advanced: false,
+    },
+    Def {
+        key: "select.combine",
+        label: "Combine",
+        help: "How what a drag draws combines with what is selected: replacing it, added to it, \
+               taken away from it, or keeping only what is in both. Keys held as a drag starts \
+               choose for that drag: Shift adds, Alt takes away, both keep only what is in both.",
+        section: "Select",
+        kind: Kind::Choice(&[
+            ("replace", "Replace"),
+            ("add", "Add"),
+            ("subtract", "Subtract"),
+            ("intersect", "Intersect"),
+        ]),
+        default: Init::Choice("replace"),
+        advanced: false,
+    },
+    Def {
+        key: "select.smooth",
+        label: "Smooth edges",
+        help: "A pixel the edge crosses is selected as much of it as the shape covers. Off: each \
+               pixel is selected or not, by its middle.",
+        section: "Select",
+        kind: Kind::Bool,
+        default: Init::Bool(true),
+        advanced: false,
+    },
+];
+
+static SELECT: ToolInfo = ToolInfo {
+    id: "select",
+    name: "Select",
+    icon: icons::RECTANGLE,
+    key: Key::M,
+    description: "Drag to select a rectangle or an ellipse; Shift adds to the selection, Alt takes away.",
+    help: "Drag across the canvas to select a rectangle, or an ellipse (choose which at the top of \
+           the tool settings). Edges fall on whole pixels. Holding Shift as the drag starts adds \
+           to what is selected, Alt takes away, and both keep only what is in both (or choose \
+           with Combine); pressing Shift once dragging makes it a square or a circle, and Alt \
+           draws it from its middle. Esc while dragging gives up the drag; a click without a \
+           drag selects nothing.",
+    settings: SELECT_SETTINGS,
+    variants: Some(Variants { key: "select.shape", icons: &[icons::RECTANGLE, icons::ELLIPSE] }),
+};
 
 pub static CROP_SETTINGS: &[Def] = &[
     Def {
@@ -156,6 +243,7 @@ static CROP: ToolInfo = ToolInfo {
            only moves the canvas, so nothing is lost unless Delete cropped pixels is set; a box \
            larger than the canvas enlarges it.",
     settings: CROP_SETTINGS,
+    variants: None,
 };
 
 static MOVE: ToolInfo = ToolInfo {
@@ -172,6 +260,7 @@ static MOVE: ToolInfo = ToolInfo {
            move the selected layers by a pixel, and Ctrl+click selects the layer under the \
            pointer. To scale or rotate, use Transform (Ctrl+T).",
     settings: MOVE_SETTINGS,
+    variants: None,
 };
 
 static HAND: ToolInfo = ToolInfo {
@@ -184,6 +273,7 @@ static HAND: ToolInfo = ToolInfo {
            any tool by holding Space and dragging, or by dragging with the middle mouse \
            button.",
     settings: &[],
+    variants: None,
 };
 
 pub static ZOOM_SETTINGS: &[Def] = &[
@@ -238,6 +328,7 @@ static ZOOM: ToolInfo = ToolInfo {
            right or left to zoom in or out smoothly around where the drag started. With any \
            tool, the mouse wheel zooms around the pointer (see Preferences › Navigation).",
     settings: ZOOM_SETTINGS,
+    variants: None,
 };
 
 /// The preset zoom levels the zoom commands and clicks step through.

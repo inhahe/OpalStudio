@@ -232,6 +232,8 @@ impl Settings {
 pub enum Show<'a> {
     All,
     Section(&'a str),
+    /// All but the setting with this key (one shown otherwise: a tool's variant).
+    AllBut(&'a str),
 }
 
 /// Shows the settings: basic ones first, then advanced ones in a collapsed section. Returns
@@ -249,6 +251,7 @@ pub fn settings_ui(
         .filter(|d| match show {
             Show::All => true,
             Show::Section(s) => d.section == s,
+            Show::AllBut(key) => d.key != key,
         })
         .collect();
     let mut changed = false;

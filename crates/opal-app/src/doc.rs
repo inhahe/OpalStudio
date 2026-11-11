@@ -136,6 +136,8 @@ pub struct DocState {
     /// The Crop tool's box, while the tool is in use, and a drag on it.
     pub crop: Option<crate::crop::CropBox>,
     pub crop_drag: Option<crate::crop::CropDrag>,
+    /// A Select tool drag in progress.
+    pub select_drag: Option<crate::select_tool::SelectDrag>,
     /// The rectangle the transform box's fields fit it into (its top-left corner from the
     /// canvas's, and its size), once one has been typed; the canvas, whatever it is then,
     /// until then.
@@ -184,6 +186,7 @@ impl DocState {
             crop_drag: None,
             notice: None,
             outline: None,
+            select_drag: None,
             told_dropped: false,
             groups: Vec::new(),
             made_by: HashMap::new(),

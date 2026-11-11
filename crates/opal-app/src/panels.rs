@@ -574,8 +574,9 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
     let tool = st.tool();
     let info = tool.info();
     let has_settings = !info.settings.is_empty();
+    let glyph = tool.icon_with(st.tool_settings(tool));
     ui.horizontal(|ui| {
-        heading(ui, info.icon, info.name, info.description);
+        heading(ui, glyph, info.name, info.description);
         if has_settings {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| presets_menu(ui, st));
         }
@@ -585,10 +586,14 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
         return;
     }
     preset_naming(ui, st);
+    if let Some(v) = &info.variants {
+        variant_row(ui, st, tool, v);
+    }
     ui.separator();
     let palette = st.palette;
     let settings = st.tool_settings.get_mut(&tool).expect("every tool has settings");
-    if settings::settings_ui(ui, settings, Show::All, &palette, info.id) {
+    let show = info.variants.as_ref().map_or(Show::All, |v| Show::AllBut(v.key));
+    if settings::settings_ui(ui, settings, show, &palette, info.id) {
         st.settings_touched();
     }
     // The crop box, in numbers.
@@ -610,6 +615,30 @@ pub fn heading(ui: &mut egui::Ui, glyph: char, name: &str, does: &str) {
     })
     .response
     .on_hover_text(does);
+}
+
+/// A tool's variants (design.md, *No hidden tool groups*): a button each, the one chosen
+/// marked.
+fn variant_row(ui: &mut egui::Ui, st: &mut AppState, tool: crate::tools::ToolId, v: &crate::tools::Variants) {
+    let settings = st.tool_settings.get_mut(&tool).expect("every tool has settings");
+    let Some(def) = settings.defs().iter().find(|d| d.key == v.key) else { return };
+    let crate::settings::Kind::Choice(options) = def.kind else { return };
+    let chosen = settings.choice(v.key);
+    let mut picked = None;
+    ui.horizontal_wrapped(|ui| {
+        for (i, (id, label)) in options.iter().enumerate() {
+            let glyph = v.icons.get(i).copied().unwrap_or(' ');
+            let r = ui.add(egui::Button::selectable(chosen == *id, format!("{glyph}  {label}")));
+            r.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, chosen == *id, *label));
+            if r.on_hover_text(def.help).clicked() {
+                picked = Some(*id);
+            }
+        }
+    });
+    if let Some(id) = picked {
+        settings.set(v.key, crate::settings::Value::Choice(id.to_owned()));
+        st.settings_touched();
+    }
 }
 
 /// A menu of the current tool's presets: saving its settings under a name (typed below the

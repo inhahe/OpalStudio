@@ -39,6 +39,7 @@ mod recent;
 mod ribbon;
 mod rulers;
 mod select;
+mod select_tool;
 mod server;
 mod settings;
 mod shared_memory;

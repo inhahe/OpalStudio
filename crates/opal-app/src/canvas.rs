@@ -103,6 +103,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let texture_budget = (st.gpu.memory.map_or(1 << 30, |(_, budget)| budget / 2) / crate::gpu::TEXTURE_BYTES) as usize;
     let zs = st.tool_settings(ToolId::Zoom).clone();
     let ms = st.tool_settings(ToolId::Move).clone();
+    let select = crate::select_tool::Options::of(st.tool_settings(ToolId::Select));
     let snapping = st.prefs.bool("transform.snapping");
     let snap_points = st.prefs.f64("transform.snap_distance") as f32;
     let palette = st.palette;
@@ -238,6 +239,13 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
             d.commit_pending();
         }
     }
+    if tool == ToolId::Select && !boxed {
+        let v = d.view;
+        crate::select_tool::canvas(&ctx, d, &response, &|p| to_doc(p, &v), select);
+    } else if d.select_drag.take().is_some() {
+        // The tool changed (or Space made it the hand) mid-drag: the drag is given up.
+        d.revision += 1;
+    }
     if tool == ToolId::Zoom && !boxed {
         let alt = ctx.input(|i| i.modifiers.alt);
         if response.clicked()
@@ -277,7 +285,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         ToolId::Zoom if ctx.input(|i| i.modifiers.alt) => CursorIcon::ZoomOut,
         ToolId::Zoom => CursorIcon::ZoomIn,
         ToolId::Move => CursorIcon::Move,
-        ToolId::Crop => CursorIcon::Crosshair,
+        ToolId::Select | ToolId::Crop => CursorIcon::Crosshair,
     };
     // The boxes set their own cursors, by the handle under the pointer.
     // The crop box belongs to the chosen tool, so it stays while Space scrolls the view.
@@ -419,6 +427,9 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         draw_ants(ui, &lines, rect, &to_screen, ctx.input(|i| i.time));
         ctx.request_repaint_after(std::time::Duration::from_millis(ANTS_STEP_MS));
     }
+    if let Some(drag) = &d.select_drag {
+        crate::select_tool::draw(ui, drag, select, rect, &to_screen);
+    }
     if let Some(m) = &d.moving {
         draw_guides(ui, &m.guides, rect, &to_screen);
     }
@@ -480,7 +491,13 @@ const ANTS_STEP_MS: u64 = 100;
 /// The selection's outline (`lines`, closed, in document coordinates), as marching ants:
 /// black dashes on white, moving along it as `time` (seconds) goes on. Each line is drawn
 /// through the middles of the screen's pixels, so that it stays one sharp pixel wide.
-fn draw_ants(ui: &egui::Ui, lines: &[Vec<[f64; 2]>], rect: Rect, to_screen: &dyn Fn([f64; 2]) -> Pos2, time: f64) {
+pub(crate) fn draw_ants(
+    ui: &egui::Ui,
+    lines: &[Vec<[f64; 2]>],
+    rect: Rect,
+    to_screen: &dyn Fn([f64; 2]) -> Pos2,
+    time: f64,
+) {
     const DASH: f32 = 4.0;
     let painter = ui.painter().with_clip_rect(rect);
     let ppp = ui.ctx().pixels_per_point();

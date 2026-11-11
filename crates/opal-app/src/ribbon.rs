@@ -531,16 +531,21 @@ pub fn tool_button(ui: &mut egui::Ui, st: &mut AppState, t: ToolId, rect: Rect) 
     let on = st.tool() == t;
     r.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, on, format!("{} tool", info.name)));
     paint_button_bg(ui, st, &r, rect, on, true);
+    // Its icon and its name say which variant it will be (design.md, *No hidden tool groups*).
+    let (glyph, variant) = (t.icon_with(st.tool_settings(t)), t.variant_with(st.tool_settings(t)));
     ui.painter().text(
         rect.center(),
         Align2::CENTER_CENTER,
-        info.icon.to_string(),
+        glyph.to_string(),
         FontId::new(19.0, icon_family()),
         st.palette.strong_text,
     );
     let r = r.on_hover_ui(|ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(info.name).strong());
+            if let Some(v) = variant {
+                ui.label(RichText::new(format!("· {v}")).strong());
+            }
             ui.label(RichText::new(format!("({})", key_char(info.key))).color(st.palette.weak_text));
         });
         ui.label(info.description);

@@ -332,6 +332,19 @@ On the Select tab (and for scripts, by the same names):
   step every 100 ms, drawn through the middles of the screen's pixels so that they stay
   sharp.
 
+### The Select tool
+
+The Select tool (M) draws rectangles and ellipses, its variants (`select_tool.rs`). A drag
+selects the shape from where it began to where it ends, both on the pixels' corners nearest
+the pointer, so its edges fall on whole pixels; while it goes on, the shape shows as marching
+ants. How it combines with what is selected is the tool's *Combine* setting (replace by
+default), or the keys held as it begins: Shift adds, Alt takes away, both keep what is in
+both. Shift pressed once it has begun makes it a square or a circle, and Alt draws it from
+its middle (the keys held from its beginning count only once let go and pressed again). Esc
+gives a drag up; a click with no keys held selects nothing. *Smooth edges* (on by default)
+selects a pixel the edge crosses as much as the shape covers it. Each selection is a history
+state, *Rectangle selection* or *Ellipse selection*.
+
 ### The recipe
 
 A selection is kept as an ordered list of steps, not only as its final mask:
@@ -922,6 +935,10 @@ B can leave you on the Pencil when you expected the Brush. In Opal Studio:
   tooltip names it. A tool's variants are a visible control at the top of the *Tool
   settings* panel, never a flyout.
 - A shortcut selects a tool; it never cycles through hidden variants.
+- A tool's variants are one of its settings, a choice (`ToolInfo::variants` names it, with
+  an icon for each option), so presets keep the variant too. The Tool settings panel shows
+  it as a row of buttons above the other settings, and leaves it out of their list; the
+  tool's button, the panel's heading and the status bar show the variant's icon.
 - The cursor shows the active variant.
 
 | Tool | Variants | Covers Photoshop's |

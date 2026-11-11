@@ -89,9 +89,10 @@ cargo test --workspace                     # all tests, interface tests included
   free (counting room on disk for the parts that can go there) is refused, with how much
   it needs, rather than run out of it.
 - **Selections** (in progress). A selection can be soft: each pixel is selected from not at
-  all to fully, and everything acting on it acts on each pixel that much. So far: Select
-  All, Deselect and Invert Selection; Clear, Cut and Copy within it; Crop to Selection;
-  marching ants round it. Selections are part of history.
+  all to fully, and everything acting on it acts on each pixel that much. So far: the Select
+  tool (M), dragging rectangles and ellipses on whole pixels, Shift adding to the selection
+  and Alt taking away; Select All, Deselect and Invert Selection; Clear, Cut and Copy within
+  it; Crop to Selection; marching ants round it. Selections are part of history.
 - **Layers and groups.** Add, duplicate, delete, group, reorder (buttons or dragging,
   into and out of groups), rename, hide, lock, change opacity; select several with Ctrl
   and Shift; merge down, merge selected, merge visible, merge a group, stamp visible,

@@ -93,3 +93,5 @@ pub const DESELECT: char = '\u{ea85}';
 pub const INVERT_SELECTION: char = '\u{ea99}';
 pub const CUT: char = '\u{f33a}';
 pub const CLEAR: char = '\u{e5e4}';
+pub const RECTANGLE: char = '\u{ea09}';
+pub const ELLIPSE: char = '\u{e8a2}';

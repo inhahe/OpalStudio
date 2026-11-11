@@ -627,10 +627,10 @@ impl OpalApp {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let weak = self.st.palette.weak_text;
         // What the canvas does: the transform box's, while one is open, takes its drags.
-        let tool = self.st.tool().info();
+        let chosen = self.st.tool();
         let (glyph, does) = match self.st.active().and_then(|d| d.transform.as_ref()) {
             Some(_) => (crate::icons::TRANSFORM, crate::transform_ui::HINT),
-            None => (tool.icon, tool.description),
+            None => (chosen.icon_with(self.st.tool_settings(chosen)), chosen.info().description),
         };
         // A recent notice, for a few seconds, instead of what the canvas does.
         const SHOWN: std::time::Duration = crate::state::NOTICE_SHOWN;
