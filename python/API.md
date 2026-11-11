@@ -634,6 +634,17 @@ Give the active layer a new name.
 | `layer` | layer | The layer, by id. Default: the active layer. |
 | `name` (required) | text | Its new name. |
 
+### `select_outline`
+
+Selects what an outline encloses, as the outline tool does: its points joined by straight sides, the last back to the first (a loop crossing itself selects each of its lobes). Answers with what is selected then, as the selection query does.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `points` (required) | points | The outline's points, in order, each [x, y] in pixels from the canvas's top-left corner. |
+| `combine` | `replace`, `add`, `subtract`, `intersect` | How it combines with what is selected: in its place, added to it, taken away from it, or keeping only what is in both. Default: "replace". |
+| `smooth` | bool | Select a pixel the outline crosses as much as it encloses it; else all or nothing, by the pixel's middle. Default: the outline tool's Smooth edges. |
+
 ### `delete_saved_selection`
 
 Deletes a selection saved in the image (as the Selection panel does), by its name. Answers with the selections saved then, as saved_selections tells them.

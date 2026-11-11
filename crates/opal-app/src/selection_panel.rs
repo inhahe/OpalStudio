@@ -146,7 +146,7 @@ fn act(ui: &egui::Ui, st: &mut AppState, action: Option<Action>) {
 /// How `step`, a maker (a shape, or a mask), combines with the steps before it.
 fn combine_of(step: &Step) -> Option<Combine> {
     match step {
-        Step::Shape { combine, .. } | Step::Mask { combine, .. } => Some(*combine),
+        Step::Shape { combine, .. } | Step::Outline { combine, .. } | Step::Mask { combine, .. } => Some(*combine),
         _ => None,
     }
 }
@@ -155,6 +155,7 @@ fn step_icon(step: &Step) -> char {
     match step {
         Step::Shape { shape, .. } if shape.kind == ShapeKind::Ellipse => icons::ELLIPSE,
         Step::Shape { .. } => icons::RECTANGLE,
+        Step::Outline { .. } => icons::OUTLINE,
         Step::Invert => icons::INVERT_SELECTION,
         Step::Grow { .. } => icons::GROW,
         Step::Feather { .. } => icons::FEATHER,
@@ -181,6 +182,15 @@ fn describe(step: &Step, origin: [f64; 2], unit: Unit, ppi: f64) -> String {
                 s.push_str(&format!(", turned {:.1}°", shape.angle));
             }
             s
+        }
+        Step::Outline { outline, .. } => {
+            let curves =
+                outline.segments.iter().filter(|s| matches!(s, opal_core::outline::Segment::Curve { .. })).count();
+            let n = outline.segments.len() + 1;
+            match curves {
+                0 => format!("Outline of {n} points"),
+                _ => format!("Outline of {n} points, {curves} of its sides curves"),
+            }
         }
         Step::Invert => "Inverted".to_owned(),
         Step::Grow { by, corners } => {

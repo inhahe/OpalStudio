@@ -3438,6 +3438,120 @@ fn save_selection_names_it_and_the_panel_lists_and_loads_it_back() {
     assert_eq!(h.state().state().active().unwrap().history.undo_label(), Some("Load selection"));
 }
 
+/// Clicks the active image at `at` (document pixels), with `held` down: pressed and let go in
+/// one frame (the harness runs a frame an event, too far apart for a double-click).
+fn click_image(h: &mut Harness<'static, OpalApp>, at: [f32; 2], held: egui::Modifiers) {
+    let v = h.state().state().active().unwrap().view;
+    let p = v.screen_rect.min + v.to_screen(egui::vec2(at[0], at[1])) / h.ctx.pixels_per_point();
+    h.event(egui::Event::ModifiersChanged(held));
+    h.hover_at(p);
+    h.run();
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: held,
+        });
+    }
+    h.step();
+    h.run();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+}
+
+/// Drags on the active image along `path` (document pixels), with `held` down.
+fn drag_image(h: &mut Harness<'static, OpalApp>, path: &[[f32; 2]], held: egui::Modifiers) {
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let at = |[x, y]: [f32; 2]| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    h.event(egui::Event::ModifiersChanged(held));
+    h.hover_at(at(path[0]));
+    h.run();
+    h.drag_at(at(path[0]));
+    h.run();
+    for &p in &path[1..] {
+        h.hover_at(at(p));
+        h.run();
+    }
+    h.drop_at(at(*path.last().unwrap()));
+    h.run();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+}
+
+#[test]
+fn the_outline_tool_selects_a_loop_drawn_freehand_or_point_by_point() {
+    use opal_core::geom::IRect;
+    use opal_core::mask::{Extent, FULL};
+    use opal_core::outline::Segment;
+    use opal_core::selection::Step;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Outline);
+    h.run();
+    let none = egui::Modifiers::NONE;
+    let label = |h: &Harness<'static, OpalApp>| {
+        h.state().state().active().unwrap().history.undo_label().map(str::to_owned).unwrap_or_default()
+    };
+    let level = |h: &Harness<'static, OpalApp>, x, y| {
+        h.state().state().active().unwrap().pixel_selection().map_or(0, |s| s.mask().level_at(x, y))
+    };
+    // Freehand: round a rectangle, selected once let go.
+    drag_image(
+        &mut h,
+        &[
+            [100.0, 50.0],
+            [150.0, 50.0],
+            [200.0, 50.0],
+            [200.0, 100.0],
+            [200.0, 150.0],
+            [150.0, 150.0],
+            [100.0, 150.0],
+            [100.0, 100.0],
+        ],
+        none,
+    );
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 50, 200, 150))));
+    assert_eq!(label(&h), "Outline selection");
+    // Point by point: three clicks, the last taken back, another, and Enter: a triangle,
+    // replacing the rectangle.
+    for p in [[300.0, 50.0], [380.0, 50.0], [380.0, 120.0]] {
+        click_image(&mut h, p, none);
+    }
+    assert!(h.state().state().active().unwrap().outlining.is_some(), "not drawn point by point");
+    h.key_press(egui::Key::Backspace);
+    h.run();
+    click_image(&mut h, [340.0, 130.0], none);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(300, 50, 380, 130))));
+    assert_eq!([level(&h, 340, 70), level(&h, 375, 115)], [FULL, 0], "not the triangle with its last point taken back");
+    // Begun with Shift, closed by a click on its first point: added.
+    for p in [[10.0, 200.0], [60.0, 200.0], [60.0, 250.0]] {
+        click_image(&mut h, p, if p[0] == 10.0 { egui::Modifiers::SHIFT } else { none });
+    }
+    click_image(&mut h, [10.0, 200.0], none);
+    assert_eq!([level(&h, 50, 210), level(&h, 340, 70)], [FULL, FULL], "not added by the click on its first point");
+    // Esc gives one up; a drag from the last point pulls a curve.
+    click_image(&mut h, [150.0, 200.0], none);
+    click_image(&mut h, [250.0, 200.0], none);
+    drag_image(&mut h, &[[250.0, 200.0], [250.0, 230.0], [250.0, 260.0]], none);
+    click_image(&mut h, [200.0, 280.0], none);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let s = h.state().state().active().unwrap().pixel_selection().unwrap().clone();
+    let Some(Step::Outline { outline, .. }) = s.steps().last() else { panic!("{:?}", s.steps()) };
+    assert!(outline.segments.iter().any(|s| matches!(s, Segment::Curve { .. })), "no curve pulled: {outline:?}");
+    click_image(&mut h, [20.0, 20.0], none);
+    click_image(&mut h, [60.0, 20.0], none);
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(h.state().state().active().unwrap().outlining.is_none(), "Esc did not give it up");
+    assert_eq!(h.state().state().active().unwrap().pixel_selection().unwrap(), &s, "Esc changed the selection");
+}
+
 #[test]
 fn the_selection_panel_lists_the_steps_and_takes_one_away() {
     let _gpu = gpu_lock();

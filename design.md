@@ -598,6 +598,33 @@ differ by gesture:
 The snapped segment is previewed live before it is committed; Backspace removes the last
 anchor.
 
+**Built so far** (`outline_tool`, the Outline tool, L): a drag draws a loop freehand (a point
+kept every 2 screen points), closed and selected once the button is let go. A click begins
+one point by point instead: each click a point joined to the last by a straight side; a drag
+from the last point (within 7 screen points) pulls the side to it into a cubic curve, smooth
+through the point, the handle pulled carried on to the next side; a drag elsewhere draws a
+freehand stretch. Enter, a double-click, or a click on the first point (marked) closes it;
+Backspace takes the last point back (all of them, and it is given up), Esc gives it up, as
+do changing tool or the image no longer drawn; while one is drawn it takes Enter, Esc and
+Backspace before any command (Backspace is not Clear then). Keys held as it begins combine
+it as the Select tool's shapes do (or the tool's *Combine*); *Smooth edges* (on by default).
+It shows as marching ants, closed back to its first point, with the side to the pointer. It
+is a recipe step of its own (`Step::Outline`, an `outline::Outline`: a start and its line
+and curve segments; *Outline selection*), carried exactly by any transform (its points
+carried), its combine changed in the selection panel ("Outline of N points"). Scripts:
+`select_outline(points, combine, smooth)`, points `[x, y]` from the canvas's corner joined
+by straight sides; the `selection` query tells an outline step's start and segments.
+
+**What an outline selects** (`outline::Filled`): what it encloses by the nonzero rule (a loop
+crossing itself selects each lobe; loops one inside another going the same way select all of
+them), curves flattened to within 0.05 pixels. Smooth, each pixel as much as the polygon
+covers it, exactly: a tile at a time, the edges crossing its rows (bucketed by tile row)
+clipped to it, those left of it standing as vertical at its left side, each adding the area
+it covers along each row's cells, a running sum along the row giving each pixel's share
+(`Coverage::tile`, which the mask code asks of an edge tile before asking pixel by pixel).
+Sharp, each pixel by whether its middle is enclosed, counting the edges crossing its row.
+Edge snapping (live-wire) and editing an outline's points come next.
+
 ### Reshaping an outline
 
 - **Right-drag** starting on an existing outline redraws part of it. While dragging, the

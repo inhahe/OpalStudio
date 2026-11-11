@@ -104,6 +104,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let zs = st.tool_settings(ToolId::Zoom).clone();
     let ms = st.tool_settings(ToolId::Move).clone();
     let select = crate::select_tool::Options::of(st.tool_settings(ToolId::Select));
+    let outlining = crate::outline_tool::Options::of(st.tool_settings(ToolId::Outline));
     let threshold = opal_core::mask::level((st.prefs.f64("selection.threshold") / 100.0) as f32);
     let overlay =
         st.prefs.bool("selection.overlay").then(|| (st.prefs.f64("selection.overlay_opacity") / 100.0) as f32);
@@ -260,6 +261,14 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
             d.discard_pending(crate::select_tool::ShapeDrag::label(s.drag.part));
         }
     }
+    if tool == ToolId::Outline && !boxed {
+        let v = d.view;
+        let to_screen = |p: [f64; 2]| rect.min + v.to_screen(Vec2::new(p[0] as f32, p[1] as f32)) / ppp;
+        crate::outline_tool::canvas(&ctx, d, &response, &|p| to_doc(p, &v), &to_screen, outlining);
+    } else if d.outlining.take().is_some() {
+        // The tool changed (or Space made it the hand) while it was drawn: given up.
+        d.revision += 1;
+    }
     if tool == ToolId::Zoom && !boxed {
         let alt = ctx.input(|i| i.modifiers.alt);
         if response.clicked()
@@ -299,7 +308,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         ToolId::Zoom if ctx.input(|i| i.modifiers.alt) => CursorIcon::ZoomOut,
         ToolId::Zoom => CursorIcon::ZoomIn,
         ToolId::Move => CursorIcon::Move,
-        ToolId::Select | ToolId::Crop => CursorIcon::Crosshair,
+        ToolId::Select | ToolId::Outline | ToolId::Crop => CursorIcon::Crosshair,
     };
     // The boxes set their own cursors, by the handle under the pointer.
     // The crop box belongs to the chosen tool, so it stays while Space scrolls the view.
@@ -457,6 +466,9 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     }
     if let Some(drag) = &d.select_drag {
         crate::select_tool::draw(ui, drag, select, &d.doc().canvas.rect(), rect, &to_screen);
+    }
+    if let Some(o) = &d.outlining {
+        crate::outline_tool::draw(ui, o, outlining.smooth, palette.accent, rect, &to_screen);
     }
     if let Some(m) = &d.moving {
         draw_guides(ui, &m.guides, rect, &to_screen);

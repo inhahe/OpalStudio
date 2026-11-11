@@ -299,6 +299,13 @@ pub trait Coverage: Sync {
     fn convex(&self) -> bool {
         false
     }
+
+    /// Tile `c` of its mask worked out whole, if it can do that faster than a pixel at a time
+    /// (an outline does: see `outline`); else `None`, and [`at`](Self::at) is asked of each
+    /// pixel near its edge.
+    fn tile(&self, _c: TileCoord) -> Option<MaskTile> {
+        None
+    }
 }
 
 /// Tiles side by side along a row of tiles, `x0..x1` (in tiles), all `tile`: only one tile,
@@ -1020,6 +1027,9 @@ const BLOCK: u32 = 16;
 /// The tile at `c` of the mask of `shape`, which its edge may cross: told apart block by
 /// block, the pixels of the blocks the edge may cross one by one.
 fn edge_tile(shape: &impl Coverage, c: TileCoord) -> MaskTile {
+    if let Some(tile) = shape.tile(c) {
+        return tile;
+    }
     let r = c.rect(0);
     let mut levels = vec![0u16; TILE_PIXELS];
     for by in (0..TILE_SIZE).step_by(BLOCK as usize) {

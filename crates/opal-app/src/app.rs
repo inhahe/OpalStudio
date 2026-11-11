@@ -344,12 +344,38 @@ impl OpalApp {
         let crop_tool = self.st.tool() == ToolId::Crop;
         let crop_delete = self.st.tool_settings(ToolId::Crop).bool("crop.delete");
         let sampling = crate::prefs::sampling(&self.st.prefs, "transform");
+        let outline_smooth = self.st.tool_settings(ToolId::Outline).bool("outline.smooth");
         let Some(d) = self.st.active_mut() else { return };
         // While an edit is under way on the image, they change nothing (see `edits`).
         if d.busy.is_some() {
             return;
         }
         let cropping = crop_tool && d.crop.is_some();
+        // An outline being drawn takes Enter (closing it), Esc (giving it up) and Backspace
+        // (taking its last point back), before any command does.
+        if d.outlining.is_some() {
+            let smooth = outline_smooth;
+            let (enter, escape, back) = ctx.input_mut(|i| {
+                (
+                    i.consume_key(Modifiers::NONE, Key::Enter),
+                    i.consume_key(Modifiers::NONE, Key::Escape),
+                    i.consume_key(Modifiers::NONE, Key::Backspace),
+                )
+            });
+            if enter {
+                crate::outline_tool::close(d, smooth);
+            } else if escape {
+                d.outlining = None;
+                d.revision += 1;
+            } else if back {
+                let left = d.outlining.as_mut().is_some_and(|o| o.take_back());
+                if !left {
+                    d.outlining = None;
+                }
+                d.revision += 1;
+            }
+            return;
+        }
         let boxed = d.transform.is_some() || cropping;
         let mut refused = None;
         let (enter, escape, arrows, held) = ctx.input_mut(|i| {

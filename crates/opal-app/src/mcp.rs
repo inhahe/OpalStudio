@@ -200,6 +200,11 @@ fn made_tools() -> Value {
                     "choice" => json!({ "type": "string", "enum": p["choices"] }),
                     "document" | "layer" => json!({ "type": "integer", "minimum": 0 }),
                     "layers" => json!({ "type": "array", "items": { "type": "integer", "minimum": 0 }, "minItems": 1 }),
+                    "points" => json!({
+                        "type": "array",
+                        "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+                        "minItems": p["min"],
+                    }),
                     other => unreachable!("a parameter of kind {other}"),
                 };
                 let mut help = p["help"].as_str().expect("helped").to_owned();

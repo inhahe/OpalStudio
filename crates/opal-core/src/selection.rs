@@ -14,6 +14,8 @@ use std::sync::Arc;
 pub enum Step {
     /// A rectangle or an ellipse, combined with the selection so far.
     Shape { shape: Shape, combine: Combine },
+    /// What an outline encloses (the outline tool), combined with the selection so far.
+    Outline { outline: crate::outline::Outline, combine: Combine },
     /// The opposite of the selection so far: selected where it was not.
     Invert,
     /// The selection so far grown by `by` pixels (shrunk, by less than 0), its corners as
@@ -60,6 +62,7 @@ impl Step {
                 let made = Mask::of(shape);
                 before.combined(&made, *combine)
             }
+            Step::Outline { outline, combine } => before.combined(&Mask::of(&outline.filled()), *combine),
             Step::Invert => before.inverted(),
             Step::Grow { by, corners } => before.grown_within(*by, *corners, bounds)?,
             Step::Feather { width, side, falloff } => before.feathered_within(*width, *side, *falloff, bounds)?,
@@ -83,7 +86,12 @@ impl Step {
 
     /// Whether the step makes a selection of its own, the steps before it no longer counting.
     fn starts_over(&self) -> bool {
-        matches!(self, Step::Shape { combine: Combine::Replace, .. } | Step::Mask { combine: Combine::Replace, .. })
+        matches!(
+            self,
+            Step::Shape { combine: Combine::Replace, .. }
+                | Step::Outline { combine: Combine::Replace, .. }
+                | Step::Mask { combine: Combine::Replace, .. }
+        )
     }
 
     /// The step `m` carries this one to, if there is one: shapes as [`Shape::transformed`]
@@ -100,6 +108,7 @@ impl Step {
         };
         Some(match self {
             Step::Shape { shape, combine } => Step::Shape { shape: shape.transformed(m)?, combine: *combine },
+            Step::Outline { outline, combine } => Step::Outline { outline: outline.transformed(m), combine: *combine },
             Step::Invert => Step::Invert,
             Step::Grow { by, corners } => {
                 Step::Grow { by: distance(*by, *corners != Reach::Round)?, corners: *corners }
@@ -129,7 +138,7 @@ impl Step {
     /// always does).
     fn carried_by(&self, m: &Affine) -> bool {
         match self {
-            Step::Mask { .. } | Step::Invert => true,
+            Step::Mask { .. } | Step::Invert | Step::Outline { .. } => true,
             other => other.transformed(m).is_some(),
         }
     }
@@ -329,7 +338,7 @@ fn give_back(mask: Arc<Mask>, bounds: Bounds) {
     }
 }
 
-/// The selection a maker `step` (a shape, or a mask) makes with the document's selection
+/// The selection a maker `step` (a shape, an outline, or a mask) makes with the document's selection
 /// `before` (or with none).
 pub fn with_maker(before: Option<&Selection>, step: Step) -> Selection {
     match before {
@@ -339,6 +348,9 @@ pub fn with_maker(before: Option<&Selection>, step: Step) -> Selection {
         None => match step {
             Step::Shape { shape, combine: Combine::Replace | Combine::Add } => {
                 Selection::new(Step::Shape { shape, combine: Combine::Replace })
+            }
+            Step::Outline { outline, combine: Combine::Replace | Combine::Add } => {
+                Selection::new(Step::Outline { outline, combine: Combine::Replace })
             }
             Step::Mask { mask, combine: Combine::Replace | Combine::Add, of } => {
                 Selection::new(Step::Mask { mask, combine: Combine::Replace, of })

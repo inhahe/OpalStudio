@@ -139,6 +139,8 @@ pub struct DocState {
     /// selection's last shape.
     pub select_drag: Option<crate::select_tool::SelectDrag>,
     pub shape_drag: Option<crate::select_tool::ShapeDrag>,
+    /// An outline being drawn with the outline tool.
+    pub outlining: Option<crate::outline_tool::Outlining>,
     /// The rectangle the transform box's fields fit it into (its top-left corner from the
     /// canvas's, and its size), once one has been typed; the canvas, whatever it is then,
     /// until then.
@@ -218,6 +220,7 @@ impl DocState {
             overlay: Default::default(),
             drawn: 0,
             select_drag: None,
+            outlining: None,
             shape_drag: None,
             told_dropped: false,
             groups: Vec::new(),

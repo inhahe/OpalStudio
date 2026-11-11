@@ -69,6 +69,10 @@ pub enum Kind {
     Layer,
     /// Layers of the image, by id.
     Layers,
+    /// Points, each `[x, y]` in pixels: `min` of them at least.
+    Points {
+        min: usize,
+    },
     /// Any value: one a preference takes.
     Any,
 }
@@ -935,6 +939,29 @@ const STEP_SETTINGS: &[Param] = &[
 /// The changes the API alone makes (no command of the interface makes them): their names,
 /// what they do, and their parameters.
 const CHANGES: &[(&str, &str, &[Param])] = &[
+    (
+        "select_outline",
+        "Selects what an outline encloses, as the outline tool does: its points joined by straight sides, \
+         the last back to the first (a loop crossing itself selects each of its lobes). Answers with what is \
+         selected then, as the selection query does.",
+        &[
+            DOCUMENT,
+            Param {
+                name: "points",
+                kind: Kind::Points { min: 3 },
+                help: "The outline's points, in order, each [x, y] in pixels from the canvas's top-left corner.",
+                otherwise: Otherwise::Required,
+            },
+            COMBINE,
+            Param {
+                name: "smooth",
+                kind: Kind::Bool,
+                help: "Select a pixel the outline crosses as much as it encloses it; else all or nothing, by the \
+                       pixel's middle.",
+                otherwise: Otherwise::Now("the outline tool's Smooth edges"),
+            },
+        ],
+    ),
     (
         "delete_saved_selection",
         "Deletes a selection saved in the image (as the Selection panel does), by its name. Answers with the \
@@ -1863,6 +1890,13 @@ fn check_value(p: &Param, value: &Value) -> Result<(), String> {
         },
         Kind::Document | Kind::Layer => id(value),
         Kind::Layers => value.as_array().is_some_and(|a| !a.is_empty() && a.iter().all(id)),
+        Kind::Points { min } => value.as_array().is_some_and(|a| {
+            let point = |p: &Value| {
+                p.as_array()
+                    .is_some_and(|xy| xy.len() == 2 && xy.iter().all(|v| v.as_f64().is_some_and(f64::is_finite)))
+            };
+            a.len() >= min && a.iter().all(point)
+        }),
     };
     if ok { Ok(()) } else { Err(format!("\"{name}\" must be {}, not {value}", kind_text(p.kind))) }
 }
@@ -1883,6 +1917,7 @@ pub fn kind_text(kind: Kind) -> &'static str {
         Kind::Document => "an image's id",
         Kind::Layer => "a layer's id",
         Kind::Layers => "a list of layers' ids, not empty",
+        Kind::Points { .. } => "a list of points, each [x, y] in pixels, enough of them",
     }
 }
 
@@ -1944,6 +1979,7 @@ impl AppState {
             None if method.name == "select_ellipse" => {
                 Reply::Now(self.select_by_args(opal_core::mask::ShapeKind::Ellipse, &args))
             }
+            None if method.name == "select_outline" => Reply::Now(self.select_outline_by_args(&args)),
             None if method.name == "remove_selection_step" => self.selection_step_by_args(true, &args),
             None if method.name == "edit_selection_step" => self.selection_step_by_args(false, &args),
             None if method.name == "delete_saved_selection" => Reply::Now(self.delete_saved_by_args(&args)),
@@ -2666,6 +2702,37 @@ impl AppState {
         self.reply_when_done(|st, id| selection_json(st.doc(id).expect("its image")))
     }
 
+    /// Selects what the outline `args` give encloses (`select_outline`); what is selected then,
+    /// as the `selection` query tells it.
+    fn select_outline_by_args(&mut self, args: &Args) -> Result<Value, String> {
+        use opal_core::outline::{Outline, Segment};
+        let id = self.which(args)?;
+        self.show_doc(id);
+        let smooth = args
+            .flag("smooth")
+            .unwrap_or_else(|| self.tool_settings(crate::tools::ToolId::Outline).bool("outline.smooth"));
+        let combine = args.text("combine").and_then(opal_core::mask::Combine::named).unwrap_or_default();
+        let d = self.doc_mut(id).expect("found");
+        let c = d.doc().canvas;
+        // From the canvas's corner, as everywhere in the API.
+        let points: Vec<[f64; 2]> = args
+            .get("points")
+            .and_then(Value::as_array)
+            .expect("checked")
+            .iter()
+            .map(|p| [p[0].as_f64().expect("checked") + c.x as f64, p[1].as_f64().expect("checked") + c.y as f64])
+            .collect();
+        let outline = Outline {
+            start: points[0],
+            segments: points[1..].iter().map(|&to| Segment::Line { to }).collect(),
+            smooth,
+        };
+        let step = opal_core::selection::Step::Outline { outline, combine };
+        let made = opal_core::selection::with_maker(d.pixel_selection().map(|s| &**s), step);
+        d.set_pixel_selection(Some(made), crate::outline_tool::LABEL);
+        Ok(selection_json(d))
+    }
+
     /// Every preference, as the `preferences` query tells them.
     fn preferences_json(&self) -> Value {
         use crate::settings::Kind as Setting;
@@ -3028,6 +3095,7 @@ fn changed_step(step: opal_core::selection::Step, args: &Args) -> Result<opal_co
     use opal_core::selection::Step;
     let (kind, takes): (&str, &[&str]) = match &step {
         Step::Shape { .. } => ("A shape", &["combine"]),
+        Step::Outline { .. } => ("An outline", &["combine"]),
         Step::Mask { .. } => ("A mask", &["combine"]),
         Step::Invert => ("An inverting step", &[]),
         Step::Grow { .. } => ("A grow", &["by", "corners"]),
@@ -3046,6 +3114,7 @@ fn changed_step(step: opal_core::selection::Step, args: &Args) -> Result<opal_co
     let side = |s: Side| args.text("side").and_then(Side::named).unwrap_or(s);
     Ok(match step {
         Step::Shape { shape, combine: c } => Step::Shape { shape, combine: combine(c) },
+        Step::Outline { outline, combine: c } => Step::Outline { outline, combine: combine(c) },
         Step::Mask { mask, combine: c, of } => Step::Mask { mask, combine: combine(c), of },
         Step::Invert => Step::Invert,
         Step::Grow { by, corners } => Step::Grow {
@@ -3113,6 +3182,10 @@ fn selection_value(
             Step::Shape { shape, combine } => {
                 let center = [shape.center[0] - c.x as f64, shape.center[1] - c.y as f64];
                 Step::Shape { shape: opal_core::mask::Shape { center, ..*shape }, combine: *combine }
+            }
+            Step::Outline { outline, combine } => {
+                let from_corner = opal_core::geom::Affine::translate(-c.x as f64, -c.y as f64);
+                Step::Outline { outline: outline.transformed(&from_corner), combine: *combine }
             }
             other => other.clone(),
         })
@@ -3237,6 +3310,7 @@ pub fn describe() -> Value {
                                 (v["min"], v["max"]) = (json!(min), json!(max))
                             }
                             Kind::Choice(words) => v["choices"] = json!(words),
+                            Kind::Points { min } => v["min"] = json!(min),
                             _ => {}
                         }
                         match p.otherwise {
@@ -3271,6 +3345,7 @@ fn kind_name(kind: Kind) -> &'static str {
         Kind::Document => "document",
         Kind::Layer => "layer",
         Kind::Layers => "layers",
+        Kind::Points { .. } => "points",
     }
 }
 
@@ -3294,6 +3369,7 @@ mod tests {
             "text" => "str".into(),
             "path" => "str | os.PathLike[str]".into(),
             "layers" => "list[int]".into(),
+            "points" => "list[tuple[float, float]]".into(),
             "choice" => {
                 let words: Vec<String> = p["choices"].as_array().unwrap().iter().map(|w| format!("{w}")).collect();
                 format!("Literal[{}]", words.join(", "))
@@ -3697,6 +3773,24 @@ mod tests {
         let left = now(&mut st, "delete_saved_selection", json!({ "name": "CORNER" })).unwrap();
         assert_eq!(left.as_array().unwrap().len(), 1);
         assert_eq!(left[0]["name"], json!("Other"));
+    }
+
+    #[test]
+    fn a_script_selects_what_an_outline_encloses() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 300, "height": 200 })).unwrap();
+        let triangle = json!({ "points": [[10, 10], [110, 10], [10, 90]] });
+        let s = now(&mut st, "select_outline", triangle).unwrap();
+        assert_eq!(s["bounds"], json!([10, 10, 100, 80]), "{s}");
+        assert_eq!(s["steps"][0]["step"], json!("outline"));
+        assert_eq!(s["steps"][0]["outline"]["start"], json!([10.0, 10.0]));
+        // Added: the two together; and fewer than three points refused.
+        let more = json!({ "points": [[200, 100], [250, 100], [250, 150], [200, 150]], "combine": "add" });
+        let s = now(&mut st, "select_outline", more).unwrap();
+        assert_eq!(s["bounds"], json!([10, 10, 240, 140]), "{s}");
+        let why = now(&mut st, "select_outline", json!({ "points": [[0, 0], [5, 5]] })).unwrap_err();
+        assert!(why.contains("a list of points"), "{why}");
+        assert_eq!(st.active().unwrap().history.undo_label(), Some("Outline selection"));
     }
 
     #[test]

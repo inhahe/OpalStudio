@@ -482,6 +482,14 @@ class Editor:
         """
     def preferences(self) -> Any:
         """Every preference: for each, its key, label, section, help, value and default, and what it takes (its range or choices). set_preference changes them."""
+    def select_outline(self, *, document: int | None = None, points: list[tuple[float, float]], combine: Literal["replace", "add", "subtract", "intersect"] = "replace", smooth: bool | None = None) -> Any:
+        """Selects what an outline encloses, as the outline tool does: its points joined by straight sides, the last back to the first (a loop crossing itself selects each of its lobes). Answers with what is selected then, as the selection query does.
+
+        document: The image, by id. Default: the active image.
+        points: The outline's points, in order, each [x, y] in pixels from the canvas's top-left corner.
+        combine: How it combines with what is selected: in its place, added to it, taken away from it, or keeping only what is in both. Default: "replace".
+        smooth: Select a pixel the outline crosses as much as it encloses it; else all or nothing, by the pixel's middle. Default: the outline tool's Smooth edges.
+        """
     def delete_saved_selection(self, *, document: int | None = None, name: str) -> Any:
         """Deletes a selection saved in the image (as the Selection panel does), by its name. Answers with the selections saved then, as saved_selections tells them.
 

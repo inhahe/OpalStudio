@@ -227,6 +227,7 @@ impl AppState {
     pub(crate) fn leave_undrawn(&mut self, pass: u64) {
         for d in self.docs.iter_mut().filter(|d| d.drawn + 1 < pass) {
             d.select_drag = None;
+            d.outlining = None;
             if let Some(s) = d.shape_drag.take() {
                 d.discard_pending(crate::select_tool::ShapeDrag::label(s.drag.part));
             }

@@ -228,7 +228,7 @@ impl AppState {
     /// cropping) rather than to a paste.
     pub(crate) fn box_takes_escape(&self) -> bool {
         let crop_tool = self.tool() == crate::tools::ToolId::Crop;
-        self.active().is_some_and(|d| d.transform.is_some() || (crop_tool && d.crop.is_some()))
+        self.active().is_some_and(|d| d.transform.is_some() || (crop_tool && d.crop.is_some()) || d.outlining.is_some())
     }
 
     /// Gives up the paste being read or waiting to be placed, if there is one.

@@ -8,6 +8,7 @@ use eframe::egui::Key;
 pub enum ToolId {
     Move,
     Select,
+    Outline,
     Crop,
     Hand,
     Zoom,
@@ -73,12 +74,14 @@ impl ToolId {
     }
 
     /// Every tool, in toolbar order.
-    pub const ALL: [ToolId; 5] = [ToolId::Move, ToolId::Select, ToolId::Crop, ToolId::Hand, ToolId::Zoom];
+    pub const ALL: [ToolId; 6] =
+        [ToolId::Move, ToolId::Select, ToolId::Outline, ToolId::Crop, ToolId::Hand, ToolId::Zoom];
 
     pub fn info(self) -> &'static ToolInfo {
         match self {
             ToolId::Move => &MOVE,
             ToolId::Select => &SELECT,
+            ToolId::Outline => &OUTLINE,
             ToolId::Crop => &CROP,
             ToolId::Hand => &HAND,
             ToolId::Zoom => &ZOOM,
@@ -154,6 +157,52 @@ pub static SELECT_SETTINGS: &[Def] = &[
         advanced: false,
     },
 ];
+
+pub static OUTLINE_SETTINGS: &[Def] = &[
+    Def {
+        key: "outline.combine",
+        label: "Combine",
+        help: "How what an outline encloses combines with what is selected: replacing it, added to it, \
+               taken away from it, or keeping only what is in both. Keys held as it begins choose for \
+               that outline: Shift adds, Alt takes away, both keep only what is in both.",
+        section: "Outline",
+        kind: Kind::Choice(&[
+            ("replace", "Replace"),
+            ("add", "Add"),
+            ("subtract", "Subtract"),
+            ("intersect", "Intersect"),
+        ]),
+        default: Init::Choice("replace"),
+        advanced: false,
+    },
+    Def {
+        key: "outline.smooth",
+        label: "Smooth edges",
+        help: "A pixel the outline crosses is selected as much of it as the outline encloses. Off: each \
+               pixel is selected or not, by its middle.",
+        section: "Outline",
+        kind: Kind::Bool,
+        default: Init::Bool(true),
+        advanced: false,
+    },
+];
+
+static OUTLINE: ToolInfo = ToolInfo {
+    id: "outline",
+    name: "Outline",
+    icon: icons::OUTLINE,
+    key: Key::L,
+    description: "Drag round what to select, or click from point to point (Shift adds, Alt takes away).",
+    help: "Drag round what to select: the loop closes, and is selected, when you let go. Or click: \
+           each click is a point, joined to the last by a straight side; a drag from the last point \
+           bends that side into a curve, and a drag elsewhere draws a stretch freehand. Enter, a \
+           double-click, or a click on the first point closes the loop and selects what it encloses; \
+           Backspace takes the last point back, and Esc gives the loop up. A loop crossing itself \
+           selects each of its lobes. Holding Shift as it begins adds to what is selected, Alt takes \
+           away, and both keep only what is in both (or choose with Combine).",
+    settings: OUTLINE_SETTINGS,
+    variants: None,
+};
 
 static SELECT: ToolInfo = ToolInfo {
     id: "select",

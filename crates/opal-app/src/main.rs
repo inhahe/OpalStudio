@@ -33,6 +33,7 @@ mod mcp_http;
 mod memory;
 mod move_tool;
 mod number_field;
+mod outline_tool;
 mod panels;
 mod paste;
 mod paste_keys;
