@@ -285,13 +285,7 @@ fn layer_row(ui: &mut egui::Ui, cx: &mut RowCtx<'_>, layer: &Arc<Layer>, pos: Po
     let on_thumb = |p: Option<egui::Pos2>| thumb.zip(p).is_some_and(|(r, p): (Rect, _)| r.contains(p));
     let m = ui.input(|i| i.modifiers);
     if response.clicked() && m.command && on_thumb(response.interact_pointer_pos()) {
-        let combine = match (m.shift, m.alt) {
-            (false, false) => Combine::Replace,
-            (true, false) => Combine::Add,
-            (false, true) => Combine::Subtract,
-            (true, true) => Combine::Intersect,
-        };
-        cx.actions.push(Action::SelectPixels(layer.id, combine));
+        cx.actions.push(Action::SelectPixels(layer.id, crate::select_tool::combine_held(m, Combine::Replace)));
     } else if response.clicked() {
         cx.actions.push(Action::Click(layer.id, m));
     } else if response.secondary_clicked() || response.drag_started() {

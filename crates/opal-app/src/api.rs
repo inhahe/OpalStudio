@@ -1892,12 +1892,12 @@ fn check_value(p: &Param, value: &Value) -> Result<(), String> {
         },
         Kind::Document | Kind::Layer => id(value),
         Kind::Layers => value.as_array().is_some_and(|a| !a.is_empty() && a.iter().all(id)),
+        // Each as far from the canvas's corner as a box's may be put, and no more of them than
+        // an outline may have.
         Kind::Points { min } => value.as_array().is_some_and(|a| {
-            let point = |p: &Value| {
-                p.as_array()
-                    .is_some_and(|xy| xy.len() == 2 && xy.iter().all(|v| v.as_f64().is_some_and(f64::is_finite)))
-            };
-            a.len() >= min && a.iter().all(point)
+            let near = |v: &Value| v.as_f64().is_some_and(|v| v.abs() <= crate::box_fields::FAR);
+            let point = |p: &Value| p.as_array().is_some_and(|xy| xy.len() == 2 && xy.iter().all(near));
+            (min..=opal_core::selection::MOST_POINTS).contains(&a.len()) && a.iter().all(point)
         }),
     };
     if ok { Ok(()) } else { Err(format!("\"{name}\" must be {}, not {value}", kind_text(p.kind))) }
@@ -1919,7 +1919,7 @@ pub fn kind_text(kind: Kind) -> &'static str {
         Kind::Document => "an image's id",
         Kind::Layer => "a layer's id",
         Kind::Layers => "a list of layers' ids, not empty",
-        Kind::Points { .. } => "a list of points, each [x, y] in pixels, enough of them",
+        Kind::Points { .. } => "a list of points (enough, at most a million), each [x, y] within 1e7 pixels",
     }
 }
 
@@ -3791,6 +3791,10 @@ mod tests {
         assert_eq!(s["bounds"], json!([10, 10, 240, 140]), "{s}");
         let why = now(&mut st, "select_outline", json!({ "points": [[0, 0], [5, 5]] })).unwrap_err();
         assert!(why.contains("a list of points"), "{why}");
+        // A point farther from the canvas's corner than a box's may be put: refused.
+        let far = json!({ "points": [[-1e8, -1e8], [1e8, -1e8], [1e8, 500]] });
+        let why = now(&mut st, "select_outline", far).unwrap_err();
+        assert!(why.contains("within 1e7 pixels"), "{why}");
         assert_eq!(st.active().unwrap().history.undo_label(), Some("Outline selection"));
     }
 

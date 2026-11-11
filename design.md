@@ -303,7 +303,11 @@ red, a preference.
   change from column to column alone, or from row to row (along a straight edge on the
   pixel grid), keeps a level a column or a row, alike ones (along one side) sharing them;
   only the rest keep a level a pixel. A Select All on a canvas 300,000 pixels a side takes a
-  few hundred kilobytes. Copies share tiles until one changes, and combining keeps sharing a
+  few hundred kilobytes. A mask keeps no tile past `MASK_REACH` tiles from the origin (33.5
+  million pixels either way, the pixels past that at its level outside): every mask is cut
+  to it as it is made, so that every one can be written to a file and read back, and what
+  makes a mask of a shape or outline, or carries one, works nothing out past it, however far
+  the shape reaches. Copies share tiles until one changes, and combining keeps sharing a
   tile the other mask leaves as it is (adding nothing to it, say); history counts a state's
   masks (the one its selection comes to, and those its mask steps keep) with its layers'
   tiles. Operations
@@ -609,25 +613,34 @@ one point by point instead: each click a point joined to the last by a straight 
 from the last point (within 7 screen points) pulls the side to it into a cubic curve, smooth
 through the point, the handle pulled carried on to the next side; a drag elsewhere draws a
 freehand stretch. Enter, a double-click, or a click on the first point (marked) closes it;
-Backspace takes the last point back (all of them, and it is given up), Esc gives it up, as
-do changing tool or the image no longer drawn; while one is drawn it takes Enter, Esc and
-Backspace before any command (Backspace is not Clear then). Keys held as it begins combine
+Backspace takes the last point back (all of them, and it is given up), ending a pull or
+stretch under way, the point now last giving again the handle it gave; Esc gives it up, as
+do changing tool, a box opening, an edit beginning on the image, or the image no longer
+drawn, but not Space held to scroll the view, while which it waits; Ctrl+click picks a layer
+and adds no point. While one is drawn it takes Enter, Esc and Backspace before any command
+(Backspace is not Clear then). It holds at most a million points, as a file's may. Keys held as it begins combine
 it as the Select tool's shapes do (or the tool's *Combine*); *Smooth edges* (on by default).
-It shows as marching ants, closed back to its first point, with the side to the pointer. It
+It shows as marching ants, closed back to its first point, with the side to the pointer that
+a click would add (a curve, after a handle was pulled). It
 is a recipe step of its own (`Step::Outline`, an `outline::Outline`: a start and its line
 and curve segments; *Outline selection*), carried exactly by any transform (its points
 carried), its combine changed in the selection panel ("Outline of N points"). Scripts:
-`select_outline(points, combine, smooth)`, points `[x, y]` from the canvas's corner joined
-by straight sides; the `selection` query tells an outline step's start and segments.
+`select_outline(points, combine, smooth)`, points `[x, y]` from the canvas's corner (as far
+as a box's may be put, 1e7 pixels; at most a million of them) joined by straight sides; the `selection` query tells an outline step's start and segments.
 
 **What an outline selects** (`outline::Filled`): what it encloses by the nonzero rule (a loop
 crossing itself selects each lobe; loops one inside another going the same way select all of
-them), curves flattened to within 0.05 pixels. Smooth, each pixel as much as the polygon
-covers it, exactly: a tile at a time, the edges crossing its rows (bucketed by tile row)
-clipped to it, those left of it standing as vertical at its left side, each adding the area
-it covers along each row's cells, a running sum along the row giving each pixel's share
-(`Coverage::tile`, which the mask code asks of an edge tile before asking pixel by pixel).
-Sharp, each pixel by whether its middle is enclosed, counting the edges crossing its row.
+them), curves flattened to within 0.05 pixels (four million points at most for all its
+curves, fewer for each in proportion past that). Its mask is made a row of tiles at a time
+(`Coverage::row`): the tiles its edges pass through are worked out, and those between them,
+wholly in or out, are told by the winding at their middles, so that the work follows the
+outline's length, not the area it encloses. Smooth, each pixel as much as the polygon covers
+it, exactly, however it crosses itself or nests (`Coverage::tile`): each row of pixels is cut
+where the edges reaching into it begin, end or cross, and between the cuts each stretch the
+outline goes round (from where the winding leaves 0 to where it comes back) adds the area it
+covers along the row's cells, those left of the tile standing at its left side, a running
+sum along the row giving each pixel's share. Sharp, each pixel by whether its middle is
+enclosed, counting the edges crossing its row.
 Edge snapping (live-wire) and editing an outline's points come next.
 
 ### Reshaping an outline
@@ -2207,9 +2220,12 @@ masks (as read, and as made) with the tiles against what memory is free, and rea
 larger than the archive says it is; it refuses a damaged or hostile file rather than trust
 it: a mask whose rows and runs are out of order, reach past `MASK_REACH` tiles, or hold more
 or less than its bytes; a name empty or given twice; a step unknown, or one the editor would
-not make (a shape or outline reaching past `selection::REACH` pixels, an outline of more than
-a million points, a modifier's distance past `MAX_DISTANCE`); a mask missing; a change since
-that the editor's own changes would not reach (`ImageObject::transform_ok`). A file holding
+not make (a shape or outline with a place or size that is not a number, an outline of more
+than a million points, a modifier's distance past `MAX_DISTANCE`; a shape however far off is
+read, since its mask is worked out only within `MASK_REACH`); a mask missing; a change since
+that the editor's own changes would not reach (`ImageObject::transform_ok`; a selection kept
+whose change since would pass that is carried at once instead, as an image object past it is
+drawn into pixels). A file holding
 no saved selections is written as version 2, which the versions before them read. Objects are
 pixel objects (their tiles and whole-pixel offset) or image objects (their tiles, frame,
 transform and sampling). A tile shared by several layers is stored once. A `.bin` tile is

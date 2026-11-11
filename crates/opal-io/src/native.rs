@@ -384,6 +384,12 @@ fn mask_sizes<R: Read + Seek>(
     Ok(sizes)
 }
 
+/// The bytes the masks of `sizes` (see `mask_sizes`) take together: the archive's word, so
+/// summed without wrapping round.
+fn all_bytes(sizes: &HashMap<u64, usize>) -> u64 {
+    sizes.values().fold(0u64, |all, &b| all.saturating_add(b as u64))
+}
+
 /// The selections a file saved, their masks read from `zip`, each no larger than `sizes` says
 /// (counted before); or why they are not: a name empty or given twice, a step the editor does
 /// not know or would not make, a mask missing or damaged, a change since the image that the
@@ -569,7 +575,7 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
     let batch = stored.chunks(BATCH).map(|b| b.iter().map(|s| s.2 as u64).sum()).max().unwrap_or(0);
     // The saved selections' masks: as read, and as made of what is read, at once.
     let mask_sizes = mask_sizes(&mut zip, &file.selections, path)?;
-    let masks: u64 = mask_sizes.values().map(|&b| b as u64).sum();
+    let masks = all_bytes(&mask_sizes);
     let need = Need {
         at_once: places.saturating_mul(24 + 64).saturating_add(batch).saturating_add(masks.saturating_mul(2)),
         tiles,
@@ -622,7 +628,7 @@ fn read_entry<R: Read + Seek>(
         .by_name(name)
         .map_err(|_| IoError::Format { path: path.to_owned(), message: format!("{name} is missing") })?;
     let mut bytes = Vec::new();
-    entry.take(limit as u64 + 1).read_to_end(&mut bytes).map_err(|e| IoError::io(path, e))?;
+    entry.take((limit as u64).saturating_add(1)).read_to_end(&mut bytes).map_err(|e| IoError::io(path, e))?;
     if bytes.len() > limit {
         return Err(IoError::Format { path: path.to_owned(), message: format!("{name} is larger than {limit} bytes") });
     }
@@ -862,11 +868,16 @@ mod tests {
         assert!(twice.contains("given twice"), "{twice}");
         let missing = rewrite(&|v| v["selections"][0]["mask"] = 99.into()).unwrap_err().to_string();
         assert!(missing.contains("masks/99.bin"), "{missing}");
-        // Past what the editor makes: a shape too large, a change since scaling it ten-millionfold.
-        let large = rewrite(&|v| v["selections"][0]["steps"][0]["shape"]["size"] = serde_json::json!([1e15, 10.0]))
-            .unwrap_err()
-            .to_string();
+        // Past what the editor makes: a step growing it a billion pixels, a change since scaling
+        // it ten-millionfold.
+        let large =
+            rewrite(&|v| v["selections"][0]["steps"][1]["by"] = serde_json::json!(1e9)).unwrap_err().to_string();
         assert!(large.contains("reaches farther"), "{large}");
+        // A shape as far off as the document's coordinates go is not refused: what lies past a
+        // mask's reach is simply not selected.
+        assert!(
+            rewrite(&|v| v["selections"][0]["steps"][0]["shape"]["center"] = serde_json::json!([1e12, 10.0])).is_ok()
+        );
         let scaled = rewrite(&|v| v["selections"][1]["since"] = serde_json::json!([1e7, 0.0, 0.0, 1e7, 0.0, 0.0]))
             .unwrap_err()
             .to_string();
@@ -874,6 +885,18 @@ mod tests {
         // The mask the steps but the last come to, kept: not worked out again.
         assert!(b.kept.selection.kept_before().is_some(), "the mask before the last step was not kept");
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn sizes_an_archive_claims_neither_wrap_round_nor_overflow_a_limit() {
+        // Two masks each claiming as many bytes as there can be: as many as there can be.
+        assert_eq!(all_bytes(&HashMap::from([(0, usize::MAX), (1, usize::MAX)])), u64::MAX);
+        // An entry read with no limit to speak of.
+        let mut zip = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("masks/0.bin", SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"levels").unwrap();
+        let mut zip = ZipArchive::new(zip.finish().unwrap()).unwrap();
+        assert_eq!(read_entry(&mut zip, "masks/0.bin", usize::MAX, Path::new("x.opal")).unwrap(), b"levels");
     }
 
     #[test]

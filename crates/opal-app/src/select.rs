@@ -300,7 +300,9 @@ impl AppState {
                 loaded = (!s.is_empty()).then(|| Arc::new(s));
             }
             let made = match (combine, loaded) {
+                // With nothing selected, adding it is bringing it back as it was, its recipe too.
                 (Combine::Replace, loaded) => loaded,
+                (Combine::Add, loaded) if doc.selection.is_none() => loaded,
                 (_, Some(s)) => {
                     let step = Step::Mask { mask: s.mask().clone(), combine, of: opal_core::selection::MaskOf::Saved };
                     let made = opal_core::selection::with_maker(doc.selection.as_deref(), step);
@@ -477,7 +479,11 @@ impl AppState {
         let d = self.active().expect("an image with a selection");
         let mut steps = d.pixel_selection().expect("a selection").steps().to_vec();
         match steps.get_mut(index) {
-            Some(Step::Shape { combine: c, .. } | Step::Mask { combine: c, .. }) if *c != combine => *c = combine,
+            Some(Step::Shape { combine: c, .. } | Step::Outline { combine: c, .. } | Step::Mask { combine: c, .. })
+                if *c != combine =>
+            {
+                *c = combine
+            }
             _ => return,
         }
         self.rework_selection(steps, STEP_CHANGED);
@@ -1238,6 +1244,39 @@ mod tests {
         // Told apart without the spaces round them.
         st.save_selection("  Moved ");
         assert_eq!(st.active().unwrap().doc().saved.len(), 1, "saved twice under one name");
+    }
+
+    #[test]
+    fn an_outline_step_combines_as_changed_and_loading_with_nothing_selected_keeps_the_recipe() {
+        use opal_core::mask::{Combine, Shape};
+        use opal_core::modify::Reach;
+        use opal_core::outline::{Outline, Segment};
+        use opal_core::selection::{Selection, Step};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let rect = Shape::rectangle(&IRect::new(20, 20, 200, 80).to_f(), false);
+        let triangle = Outline {
+            start: [150.0, 20.0],
+            segments: vec![Segment::Line { to: [250.0, 20.0] }, Segment::Line { to: [250.0, 80.0] }],
+            smooth: false,
+        };
+        let made = Selection::new(Step::Shape { shape: rect, combine: Combine::Replace })
+            .then(Step::Outline { outline: triangle, combine: Combine::Add })
+            .then(Step::Grow { by: 2.0, corners: Reach::Square });
+        st.active_mut().unwrap().set_pixel_selection(Some(made), "Select");
+        // The outline taken away rather than added, as the panel's menu says.
+        st.combine_selection_step(1, Combine::Subtract);
+        st.finish_edits();
+        let steps = st.active().unwrap().pixel_selection().unwrap().steps().to_vec();
+        assert!(matches!(steps[1], Step::Outline { combine: Combine::Subtract, .. }), "{steps:?}");
+        // Saved, nothing selected, and loaded as an addition: brought back as it was, its
+        // recipe and all, not as a mask.
+        st.save_selection("Kept");
+        st.active_mut().unwrap().set_pixel_selection(None, "Deselect");
+        st.load_selection("Kept", Combine::Add, false);
+        st.finish_edits();
+        let loaded = st.active().unwrap().pixel_selection().expect("nothing loaded").steps().to_vec();
+        assert_eq!(loaded, steps, "the recipe was not brought back");
     }
 
     #[test]

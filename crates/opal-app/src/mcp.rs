@@ -200,11 +200,16 @@ fn made_tools() -> Value {
                     "choice" => json!({ "type": "string", "enum": p["choices"] }),
                     "document" | "layer" => json!({ "type": "integer", "minimum": 0 }),
                     "layers" => json!({ "type": "array", "items": { "type": "integer", "minimum": 0 }, "minItems": 1 }),
-                    "points" => json!({
-                        "type": "array",
-                        "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
-                        "minItems": p["min"],
-                    }),
+                    "points" => {
+                        let far = crate::box_fields::FAR;
+                        let coordinate = json!({ "type": "number", "minimum": -far, "maximum": far });
+                        json!({
+                            "type": "array",
+                            "items": { "type": "array", "items": coordinate, "minItems": 2, "maxItems": 2 },
+                            "minItems": p["min"],
+                            "maxItems": opal_core::selection::MOST_POINTS,
+                        })
+                    }
                     other => unreachable!("a parameter of kind {other}"),
                 };
                 let mut help = p["help"].as_str().expect("helped").to_owned();

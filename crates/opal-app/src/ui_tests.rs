@@ -3553,6 +3553,66 @@ fn the_outline_tool_selects_a_loop_drawn_freehand_or_point_by_point() {
 }
 
 #[test]
+fn an_outline_drawn_point_by_point_survives_backspace_mid_pull_space_and_ctrl_click() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Outline);
+    h.run();
+    let none = egui::Modifiers::NONE;
+    let points = |h: &Harness<'static, OpalApp>| {
+        h.state().state().active().unwrap().outlining.as_ref().map(|o| o.segments.len() + 1)
+    };
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let at = |[x, y]: [f32; 2]| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    click_image(&mut h, [100.0, 100.0], none);
+    click_image(&mut h, [200.0, 100.0], none);
+    // A curve pulled from the last point, Backspace pressed with the button still held, and
+    // the pull going on: the point taken back, the editor still standing.
+    h.hover_at(at([200.0, 100.0]));
+    h.run();
+    h.drag_at(at([200.0, 100.0]));
+    h.run();
+    h.hover_at(at([220.0, 130.0]));
+    h.run();
+    h.key_press(egui::Key::Backspace);
+    h.run();
+    for p in [[240.0, 150.0], [260.0, 170.0]] {
+        h.hover_at(at(p));
+        h.run();
+    }
+    h.drop_at(at([260.0, 170.0]));
+    h.run();
+    assert_eq!(points(&h), Some(1), "the point was not taken back");
+    click_image(&mut h, [200.0, 100.0], none);
+    // Space held to scroll, a drag with it, and let go: the outline waits.
+    h.event(egui::Event::Key {
+        key: egui::Key::Space,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: none,
+    });
+    h.run();
+    drag_image(&mut h, &[[300.0, 200.0], [320.0, 220.0], [340.0, 240.0]], none);
+    h.event(egui::Event::Key {
+        key: egui::Key::Space,
+        physical_key: None,
+        pressed: false,
+        repeat: false,
+        modifiers: none,
+    });
+    h.run();
+    assert_eq!(points(&h), Some(2), "Space gave the outline up");
+    // Ctrl+click picks a layer and adds no point.
+    click_image(&mut h, [150.0, 200.0], egui::Modifiers::COMMAND);
+    assert_eq!(points(&h), Some(2), "Ctrl+click added a point");
+    click_image(&mut h, [150.0, 200.0], none);
+    assert_eq!(points(&h), Some(3));
+}
+
+#[test]
 fn the_selection_panel_lists_the_steps_and_takes_one_away() {
     let _gpu = gpu_lock();
     let mut h = harness();

@@ -124,7 +124,8 @@ pub fn transform_all(
     // An object at a time, and the selection carried (its modifiers worked out again) last.
     let mut objects = 0;
     doc.for_each_layer(&mut |l, _| objects += l.objects().len());
-    progress.begin(objects as u64 + u64::from(doc.selection.is_some()));
+    // (And one for the selections carried.)
+    progress.begin(objects as u64 + 1);
     fn walk(
         layer: &mut Layer,
         m: &Affine,
@@ -184,14 +185,25 @@ pub fn transform_all(
     }
     // What is selected goes with what it was selected on (its modifiers worked out again,
     // within what is left of the memory); what Reselect would bring back, and the selections
-    // saved, once they are brought back.
-    for kept in doc.deselected.iter_mut().chain(doc.saved.iter_mut().map(|s| &mut s.kept)) {
-        kept.since = kept.since.then(*m);
-    }
-    if let Some(s) = doc.selection.take() {
-        doc.selection = crate::select::carried(&s, m, to.memory, &|| progress.is_cancelled())?;
-        progress.advance(1);
-    }
+    // saved, once they are brought back, unless the change since would then be past what an
+    // image object may be drawn through (which a file refuses): then they are carried now, as
+    // such image objects are drawn into pixels.
+    let selection = doc.selection.take();
+    let kept: Vec<_> = doc.deselected.iter_mut().chain(doc.saved.iter_mut().map(|s| &mut s.kept)).collect();
+    let carried = crate::memory::Admission::within(to.memory, &|| progress.is_cancelled(), |b| {
+        for kept in kept {
+            let since = kept.since.then(*m);
+            if ImageObject::transform_ok(&since) {
+                kept.since = since;
+            } else {
+                kept.selection = Arc::new(kept.selection.transformed_within(&since, b)?);
+                kept.since = Affine::IDENTITY;
+            }
+        }
+        selection.map(|s| s.transformed_within(m, b)).transpose()
+    })?;
+    doc.selection = carried.filter(|s| !s.is_empty()).map(Arc::new);
+    progress.advance(1);
     Ok(to.clipped)
 }
 
@@ -511,6 +523,36 @@ mod tests {
         )
         .unwrap();
         assert!(close(pixel_at(&d, 10, 20), 0.4) && close(pixel_at(&d, 12, 21), 0.2));
+    }
+
+    #[test]
+    fn selections_kept_are_carried_at_once_past_what_an_image_object_may_be_drawn_through() {
+        use opal_core::document::{KeptSelection, SavedSelection};
+        use opal_core::mask::{Combine, Shape};
+        use opal_core::selection::{Selection, Step};
+        let mut d = corners();
+        let shape = Shape::rectangle(&IRect::new(10, 20, 12, 22).to_f(), false);
+        let kept = KeptSelection::new(Arc::new(Selection::new(Step::Shape { shape, combine: Combine::Replace })));
+        d.saved = vec![SavedSelection { name: "Corner".into(), kept: kept.clone() }];
+        d.deselected = Some(kept);
+        // Grown a thousandfold, then a little more: past what an image may be drawn through (and
+        // a file keeps), so they are carried then and there.
+        for k in [1000.0, 1001.0] {
+            transform_all(
+                &mut d,
+                &Affine::scale(k, k).about(10.0, 20.0),
+                None,
+                Sampling::default(),
+                &IRect::from_size(100, 100),
+                Allowance::now(),
+                &Progress::default(),
+            )
+            .unwrap();
+        }
+        for kept in [&d.saved[0].kept, d.deselected.as_ref().unwrap()] {
+            assert!(ImageObject::transform_ok(&kept.since), "carried later, past what a file keeps: {:?}", kept.since);
+        }
+        assert_eq!(d.saved[0].kept.since, Affine::IDENTITY);
     }
 
     #[test]

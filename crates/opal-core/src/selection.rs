@@ -7,10 +7,6 @@ use crate::mask::{Combine, Mask, Shape};
 use crate::modify::{Bounds, Falloff, Halt, Reach, Side, UNBOUNDED};
 use std::sync::Arc;
 
-/// How far from the document's origin a shape or an outline may reach (pixels): as far as
-/// the editor lets one be given.
-pub const REACH: f64 = 1e7;
-
 /// The most points an outline may have.
 pub const MOST_POINTS: usize = 1_000_000;
 
@@ -80,11 +76,13 @@ impl Step {
     }
 
     /// Why the step could not have been made in the editor, if it could not (as a step read from
-    /// a file may be): a shape or an outline reaching past [`REACH`] pixels, or with more points
-    /// than [`MOST_POINTS`]; a modifier's distance past
-    /// [`MAX_DISTANCE`](crate::modify::MAX_DISTANCE), or not a number.
+    /// a file may be): a shape or an outline with a place or size that is not a number, or
+    /// with more points than [`MOST_POINTS`]; a modifier's distance past
+    /// [`MAX_DISTANCE`](crate::modify::MAX_DISTANCE), or not a number. (However far a shape
+    /// reaches, its mask is worked out only within `MASK_REACH`, its work following its
+    /// outline's length.)
     pub fn refused(&self) -> Option<&'static str> {
-        let within = |v: f64| v.is_finite() && v.abs() <= REACH;
+        let within = |v: f64| v.is_finite();
         let distance = |v: f64| v.is_finite() && v.abs() <= crate::modify::MAX_DISTANCE;
         let ok = match self {
             Step::Shape { shape, .. } => {
@@ -103,7 +101,7 @@ impl Step {
             }
             Step::Invert | Step::Mask { .. } => true,
         };
-        (!ok).then_some("a step reaches farther, or has more points, than the editor makes")
+        (!ok).then_some("a step is not a number, or has more points or reaches farther than the editor makes")
     }
 
     /// Whether it is a modifier (grow, feather, smooth or border): one with settings, which

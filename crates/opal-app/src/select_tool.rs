@@ -165,6 +165,18 @@ fn edits_box(modifiers: egui::Modifiers, options: Options) -> bool {
     !modifiers.any() && options.combine == Combine::Replace && !options.line()
 }
 
+/// How what is drawn or picked with the keys `held` combines with what is selected: Shift
+/// adds it, Alt takes it away, both keep what is in both; neither, `otherwise` (a tool's
+/// setting, say). The Select and Outline tools' way, and a thumbnail's Ctrl+click's.
+pub fn combine_held(held: egui::Modifiers, otherwise: Combine) -> Combine {
+    match (held.shift, held.alt) {
+        (true, true) => Combine::Intersect,
+        (true, false) => Combine::Add,
+        (false, true) => Combine::Subtract,
+        (false, false) => otherwise,
+    }
+}
+
 /// The history state selecting what `draws` makes.
 pub fn label(draws: Draws) -> &'static str {
     match draws {
@@ -251,12 +263,7 @@ pub fn canvas(
         }
         return;
     }
-    let combine = match (modifiers.shift, modifiers.alt) {
-        (true, true) => Combine::Intersect,
-        (true, false) => Combine::Add,
-        (false, true) => Combine::Subtract,
-        (false, false) => options.combine,
-    };
+    let combine = combine_held(modifiers, options.combine);
     let point = |p: Pos2| if options.line() { to_doc(p).map(f64::floor) } else { on_corner(to_doc(p)) };
     // Ctrl+click picks a layer, as with every tool: no drag starts.
     if response.drag_started_by(PointerButton::Primary)

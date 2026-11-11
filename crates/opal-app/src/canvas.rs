@@ -265,8 +265,9 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         let v = d.view;
         let to_screen = |p: [f64; 2]| rect.min + v.to_screen(Vec2::new(p[0] as f32, p[1] as f32)) / ppp;
         crate::outline_tool::canvas(&ctx, d, &response, &|p| to_doc(p, &v), &to_screen, outlining);
-    } else if d.outlining.take().is_some() {
-        // The tool changed (or Space made it the hand) while it was drawn: given up.
+    } else if (chosen != ToolId::Outline || boxed || frozen) && d.outlining.take().is_some() {
+        // The tool changed, a box opened, or an edit began on the image while it was drawn:
+        // given up. While Space makes the tool the hand, to scroll, it waits.
         d.revision += 1;
     }
     if tool == ToolId::Zoom && !boxed {
@@ -468,7 +469,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         crate::select_tool::draw(ui, drag, select, &d.doc().canvas.rect(), rect, &to_screen);
     }
     if let Some(o) = &d.outlining {
-        crate::outline_tool::draw(ui, o, outlining.smooth, palette.accent, rect, &to_screen);
+        crate::outline_tool::draw(ui, o, palette.accent, rect, &to_screen);
     }
     if let Some(m) = &d.moving {
         draw_guides(ui, &m.guides, rect, &to_screen);
