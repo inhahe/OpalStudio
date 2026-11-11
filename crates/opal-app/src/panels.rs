@@ -659,12 +659,13 @@ fn outline_points(ui: &mut egui::Ui, st: &mut AppState) {
     use opal_core::outline::Join;
     let weak = st.palette.weak_text;
     let Some(d) = st.active_mut() else { return };
-    let Some((o, _)) = edited(d) else { return };
+    let Some(count) = edited(d).map(|(o, _)| o.point_count()) else { return };
     let picked = picked(d);
     ui.separator();
     ui.label(RichText::new("Points").strong());
-    ui.label(RichText::new(format!("{} points, {} picked", o.points().len(), picked.len())).color(weak));
-    let some = !picked.is_empty();
+    ui.label(RichText::new(format!("{count} points, {} picked", picked.len())).color(weak));
+    // (Not while a box is open on it, or an edit is under way.)
+    let some = !picked.is_empty() && d.transform.is_none() && d.busy.is_none();
     ui.horizontal_wrapped(|ui| {
         if ui.add_enabled(some, egui::Button::new("Smooth")).on_hover_text("Make the points picked smooth").clicked() {
             join_picked(d, Join::Smooth);
@@ -687,8 +688,9 @@ fn outline_points(ui: &mut egui::Ui, st: &mut AppState) {
         RichText::new(
             "Click a point to pick it (Shift for more) and drag it to move it; drag a handle to bend its sides \
              (Alt: that side alone); drag a side to bend it; click a side to add a point; Alt+click a point to \
-             take it away; double-click a point to make it smooth or a corner; Alt+drag the outline to move it \
-             all.",
+             take it away; double-click a point to make it smooth or a corner; Alt+drag a point to move the \
+             whole outline. With Shift or Alt held, or Combine not Replace, a press on a side begins another \
+             outline.",
         )
         .color(weak)
         .small(),

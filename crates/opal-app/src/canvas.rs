@@ -478,7 +478,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     } else if tool == ToolId::Outline
         && let Some((o, _)) = crate::outline_tool::edited(d)
     {
-        crate::outline_tool::draw_edited(ui, &o, &crate::outline_tool::picked(d), palette.accent, rect, &to_screen);
+        crate::outline_tool::draw_edited(ui, o, &crate::outline_tool::picked(d), palette.accent, rect, &to_screen);
     }
     if let Some(m) = &d.moving {
         draw_guides(ui, &m.guides, rect, &to_screen);

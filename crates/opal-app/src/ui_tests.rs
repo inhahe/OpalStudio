@@ -3643,7 +3643,7 @@ fn the_outline_tool_edits_the_last_outline_point_by_point() {
     h.run();
     let none = egui::Modifiers::NONE;
     let edited = |h: &Harness<'static, OpalApp>| -> Outline {
-        crate::outline_tool::edited(h.state().state().active().unwrap()).expect("an outline edited").0
+        crate::outline_tool::edited(h.state().state().active().unwrap()).expect("an outline edited").0.clone()
     };
     let picked = |h: &Harness<'static, OpalApp>| crate::outline_tool::picked(h.state().state().active().unwrap());
     let label = |h: &Harness<'static, OpalApp>| {
@@ -3704,9 +3704,9 @@ fn the_outline_tool_edits_the_last_outline_point_by_point() {
     let (u, v) = ([into[0] - p[0], into[1] - p[1]], [out[0] - p[0], out[1] - p[1]]);
     assert!(close(out, to), "{out:?}");
     assert!((u[0] * v[1] - u[1] * v[0]).abs() / (u[0].hypot(u[1]) * v[0].hypot(v[1])) < 1e-3, "not in line");
-    // Alt+drag from a side: the whole outline moved.
+    // Alt+drag from a point: the whole outline moved.
     let before = edited(&h).points();
-    drag_image(&mut h, &[[150.0, 200.0], [155.0, 205.0], [160.0, 210.0]], egui::Modifiers::ALT);
+    drag_image(&mut h, &[[200.0, 200.0], [205.0, 205.0], [210.0, 210.0]], egui::Modifiers::ALT);
     let after = edited(&h).points();
     assert!(before.iter().zip(&after).all(|(a, b)| close([a[0] + 10.0, a[1] + 10.0], *b)), "{after:?}");
     // A point picked and Delete pressed: taken away.
@@ -3734,6 +3734,22 @@ fn the_outline_tool_edits_the_last_outline_point_by_point() {
     double_click(&mut h, [300.0, 200.0]);
     let o = edited(&h);
     assert_eq!((o.points().len(), o.join(0), label(&h)), (3, Join::Sharp, "Outline selection".to_owned()));
+    // Shift+drag from its side: another outline added, not the side bent.
+    let steps =
+        |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().pixel_selection().unwrap().steps().len();
+    let was = steps(&h);
+    drag_image(&mut h, &[[340.0, 200.0], [340.0, 150.0], [300.0, 150.0], [300.0, 185.0]], egui::Modifiers::SHIFT);
+    assert_eq!(steps(&h), was + 1, "the side bent rather than an outline added");
+    // With points picked and a box open, Esc is the box's.
+    crate::outline_tool::pick_all(h.state_mut().state_mut().active_mut().unwrap());
+    let ctx = h.ctx.clone();
+    h.state_mut().state_mut().run(crate::commands::Cmd::TransformSelection, &ctx);
+    h.run();
+    assert!(h.state().state().active().unwrap().transform.is_some(), "no box");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(h.state().state().active().unwrap().transform.is_none(), "Esc let go of the points, not the box");
+    assert!(!picked(&h).is_empty());
 }
 
 #[test]

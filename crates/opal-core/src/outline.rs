@@ -128,6 +128,16 @@ pub enum Join {
     Symmetric,
 }
 
+/// One of an outline's points as it goes round: where it is, its handles into it and out of
+/// it (`None` where that side is straight), and how its line goes through it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Node {
+    pub at: [f64; 2],
+    pub into: Option<[f64; 2]>,
+    pub out: Option<[f64; 2]>,
+    pub join: Join,
+}
+
 /// Which of a point's handles: the one the side into it bends by, or the one the side out of
 /// it bends by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,8 +237,9 @@ impl Ring {
         let n = self.points.len();
         let mut segments: Vec<Segment> = (1..n).map(|i| self.sides[i - 1].to(self.points[i])).collect();
         // The side back to the first point is kept only if it is a curve (a straight one is
-        // implied).
-        if let Side::Curve { .. } = self.sides[n - 1] {
+        // implied), or if the last point lies on the first: its last segment would then seem
+        // the side back, and the point be lost.
+        if matches!(self.sides[n - 1], Side::Curve { .. }) || (n > 1 && self.points[n - 1] == self.points[0]) {
             segments.push(self.sides[n - 1].to(self.points[0]));
         }
         Outline { start: self.points[0], segments, smooth: self.smooth, joins: self.joins }
@@ -371,6 +382,11 @@ impl Outline {
         Ring::of(self).points
     }
 
+    /// How many points it has (as [`points`](Self::points) counts them), worked out at once.
+    pub fn point_count(&self) -> usize {
+        self.segments.len() + 1 - usize::from(self.segments.last().is_some_and(|s| s.end() == self.start))
+    }
+
     /// Point `i`'s handles: into it and out of it, each `None` where that side is straight.
     pub fn handles(&self, i: usize) -> [Option<[f64; 2]>; 2] {
         Ring::of(self).handles(i)
@@ -379,6 +395,26 @@ impl Outline {
     /// How its line goes through point `i`.
     pub fn join(&self, i: usize) -> Join {
         Ring::of(self).joins[i]
+    }
+
+    /// Its points as they go round (as [`points`](Self::points) counts them), each with its
+    /// handles and its join: what drawing it and pressing on it read, worked out at once.
+    pub fn nodes(&self) -> Vec<Node> {
+        let ring = Ring::of(self);
+        (0..ring.points.len())
+            .map(|i| {
+                let [into, out] = ring.handles(i);
+                Node { at: ring.points[i], into, out, join: ring.joins[i] }
+            })
+            .collect()
+    }
+
+    /// Every place it names: its start, and each segment's end and handles.
+    pub fn coordinates(&self) -> impl Iterator<Item = [f64; 2]> + '_ {
+        std::iter::once(self.start).chain(self.segments.iter().flat_map(|s| match *s {
+            Segment::Line { to } => vec![to],
+            Segment::Curve { c1, c2, to } => vec![c1, c2, to],
+        }))
     }
 
     /// The point `t` (0 to 1) along its side from point `i` to the next.
@@ -590,13 +626,7 @@ pub fn flattened(start: [f64; 2], segments: &[Segment]) -> Vec<[f64; 2]> {
             Segment::Curve { c1, c2, to } => {
                 let n = ((n as f64 * share).ceil() as usize).max(1);
                 for i in 1..=n {
-                    let t = i as f64 / n as f64;
-                    let u = 1.0 - t;
-                    let (a, b, c, e) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
-                    points.push([
-                        a * at[0] + b * c1[0] + c * c2[0] + e * to[0],
-                        a * at[1] + b * c1[1] + c * c2[1] + e * to[1],
-                    ]);
+                    points.push(cubic(at, c1, c2, to, i as f64 / n as f64));
                 }
             }
         }
@@ -1314,6 +1344,16 @@ mod tests {
         let line = o.split(2, 0.5);
         assert_eq!(line.points()[3], [50.0, 100.0]);
         assert_eq!((line.join(3), line.handles(3)), (Join::Sharp, [None, None]));
+        // The last point moved onto the first: still a point of its own, as many as before.
+        let onto = o.moved(&[3], [0.0, -100.0]);
+        assert_eq!((onto.points().len(), onto.point_count()), (4, 4));
+        assert_eq!(onto.points()[3], onto.points()[0]);
+        let mut joined = onto.joined(&[3], Join::Smooth);
+        joined = joined.moved(&[2], [1.0, 1.0]);
+        assert_eq!((joined.point_count(), joined.join(3)), (4, Join::Smooth), "{:?}", joined.joins);
+        // Its last side a curve back to its start: as many points as sides.
+        let curved = o.joined(&[0], Join::Smooth);
+        assert_eq!((curved.segments.len(), curved.point_count(), curved.points().len()), (4, 4, 4));
         // Taken away: the sides either side made one; three points at least are left.
         let gone = split.without(&[1]).expect("four left");
         assert_eq!(gone.points(), o.points());

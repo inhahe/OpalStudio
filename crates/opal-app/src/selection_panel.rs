@@ -187,7 +187,7 @@ fn describe(step: &Step, origin: [f64; 2], unit: Unit, ppi: f64) -> String {
         Step::Outline { outline, .. } => {
             let curves =
                 outline.segments.iter().filter(|s| matches!(s, opal_core::outline::Segment::Curve { .. })).count();
-            let n = outline.segments.len() + 1;
+            let n = outline.point_count();
             match curves {
                 0 => format!("Outline of {n} points"),
                 _ => format!("Outline of {n} points, {curves} of its sides curves"),
@@ -242,5 +242,22 @@ mod tests {
         assert_eq!(px(&layer), "A layer's pixels");
         let carried = Step::Mask { mask, combine: Combine::Replace, of: MaskOf::Carried };
         assert_eq!(px(&carried), "The steps before, carried pixel by pixel");
+        // An outline: its points as the outline tool counts them, its side back to its start
+        // too when that is a curve.
+        use opal_core::outline::{Outline, Segment};
+        let square = Outline::new(
+            [0.0, 0.0],
+            vec![
+                Segment::Line { to: [10.0, 0.0] },
+                Segment::Line { to: [10.0, 10.0] },
+                Segment::Line { to: [0.0, 10.0] },
+            ],
+            true,
+        );
+        let curved = square.joined(&[0], opal_core::outline::Join::Smooth);
+        assert_eq!(
+            px(&Step::Outline { outline: curved, combine: Combine::Replace }),
+            "Outline of 4 points, 2 of its sides curves"
+        );
     }
 }

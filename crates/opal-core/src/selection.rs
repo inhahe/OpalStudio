@@ -91,11 +91,7 @@ impl Step {
                 shape.center.iter().chain(&shape.size).all(|&v| within(v)) && shape.angle.is_finite()
             }
             Step::Outline { outline, .. } => {
-                let points = std::iter::once(&outline.start).chain(outline.segments.iter().flat_map(|s| match s {
-                    crate::outline::Segment::Line { to } => vec![to],
-                    crate::outline::Segment::Curve { c1, c2, to } => vec![c1, c2, to],
-                }));
-                outline.segments.len() < MOST_POINTS && points.flatten().all(|&v| within(v))
+                outline.segments.len() < MOST_POINTS && outline.coordinates().flatten().all(within)
             }
             Step::Grow { by, .. } => distance(*by),
             Step::Feather { width, .. } | Step::Smooth { radius: width } | Step::Border { width, .. } => {

@@ -225,14 +225,24 @@ fn made_tools() -> Value {
                                 "segments": {
                                     "type": "array",
                                     "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "kind": { "type": "string", "enum": ["line", "curve"] },
-                                            "to": point, "c1": point, "c2": point,
-                                        },
-                                        "required": ["kind", "to"],
+                                        "oneOf": [
+                                            {
+                                                "type": "object",
+                                                "properties": { "kind": { "const": "line" }, "to": point },
+                                                "required": ["kind", "to"],
+                                            },
+                                            {
+                                                "type": "object",
+                                                "properties": {
+                                                    "kind": { "const": "curve" },
+                                                    "c1": point, "c2": point, "to": point,
+                                                },
+                                                "required": ["kind", "c1", "c2", "to"],
+                                            },
+                                        ],
                                     },
                                     "minItems": 2,
+                                    "maxItems": opal_core::selection::MOST_POINTS - 1,
                                 },
                                 "joins": {
                                     "type": "array",

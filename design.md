@@ -645,15 +645,24 @@ ends); a click on a side adds a point there, splitting it exactly; Alt+click tak
 away (its sides made one, a curve if either was); a double-click on the point the click
 before picked makes it smooth (its handles in line, pulled out a third of the way to its
 neighbors where it had none) or, if smooth, a corner (its handles taken back in); Alt+drag
-from a point or a side moves the whole outline. Delete or Backspace takes the points picked
-away, Esc lets go of them, before any command (Delete is not Clear then); a click away from
-it lets go of them too, beginning nothing (with none picked, it begins another outline). An
+from a point moves the whole outline. A press is on the point or picked point's handle
+nearest it (on the point, where a handle lies on it); on a side, only when a new outline would
+not combine with what is selected (with Shift or Alt held, or the tool's *Combine* not
+Replace, a press on a side begins another outline, as one away from it does, as the Select
+tool's box gives way). Delete or Backspace takes the points picked away, Esc lets go of them,
+before any command (Delete is not Clear then), but not while a box is open on the selection
+(whose keys they are) or a drag on the outline is under way (whose Esc gives it up); the
+buttons do nothing then either. A click away from it lets go of them too, beginning nothing
+(with none picked, it begins another outline). An
 outline left with fewer than three points goes, and what the steps before it selected is
 selected. Tool settings shows its points, how many are picked, and buttons for them: Smooth,
 Sharp, Delete, All. Each edit is a history state (a drag, *Edit outline*, pending while it
 goes, as a box's; *Add point*, *Delete points*, *Smooth points*, *Sharp points*), the
 selection worked out again within the memory free. The points picked are kept with the
-outline they were picked on, and none are once the last step is another (after an undo, say).
+selection they were picked on (by a weak pointer, compared by address), and none are once it
+is another (after an undo, say); a drag keeps those it began with while the selection it makes
+changes. An outline whose last point lies on its first keeps that point (its side back to the
+start then a segment of its own).
 How the line goes through each point is kept with the outline (`outline::Join`: sharp,
 smooth or symmetric, told from the handles where an outline keeps none), and goes with it
 through transforms and files; the edits are made on the outline seen as its points going

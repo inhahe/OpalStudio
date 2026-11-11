@@ -378,8 +378,13 @@ impl OpalApp {
             return;
         }
         // Points picked on the outline edited take Delete and Backspace (taking them away) and
-        // Esc (letting go of them), before any command does.
-        if outline_tool && !crate::outline_tool::picked(d).is_empty() {
+        // Esc (letting go of them), before any command does; not while a box is open (whose
+        // keys they are) or a drag on the outline is under way (whose Esc gives it up).
+        if outline_tool
+            && d.transform.is_none()
+            && d.outline_drag.is_none()
+            && !crate::outline_tool::picked(d).is_empty()
+        {
             let (delete, escape) = ctx.input_mut(|i| {
                 (
                     i.consume_key(Modifiers::NONE, Key::Delete) || i.consume_key(Modifiers::NONE, Key::Backspace),

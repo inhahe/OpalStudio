@@ -804,8 +804,6 @@ pub fn role_of(name: &str) -> Option<Role> {
     method(name).map(|m| m.role)
 }
 
-/// Whether `given` are arguments method `name` takes (as every call's are checked): why
-/// not, if they are not.
 /// The outline `value` gives, as the `selection` query tells an outline step (its `start`, its
 /// `segments`, lines and curves, and, if wanted, its `joins`, sharp, smooth or symmetric, one
 /// for each point; in pixels from the canvas's corner), smoothed as it says or else as
@@ -823,19 +821,17 @@ fn given_outline(value: &Value, smooth: bool) -> Option<opal_core::outline::Outl
         smooth: Option<bool>,
     }
     let g: Given = serde_json::from_value(value.clone()).ok()?;
-    let near = |p: &[f64; 2]| p.iter().all(|v| v.is_finite() && v.abs() <= FAR);
-    let handles = g.segments.iter().flat_map(|s| match s {
-        Segment::Line { to } => vec![to],
-        Segment::Curve { c1, c2, to } => vec![c1, c2, to],
-    });
-    if !near(&g.start) || !handles.into_iter().all(near) || g.segments.len() >= opal_core::selection::MOST_POINTS {
+    let o = Outline { start: g.start, segments: g.segments, smooth: g.smooth.unwrap_or(smooth), joins: g.joins };
+    let near = |v: f64| v.is_finite() && v.abs() <= FAR;
+    if !o.coordinates().flatten().all(near) || o.segments.len() >= opal_core::selection::MOST_POINTS {
         return None;
     }
-    let o = Outline { start: g.start, segments: g.segments, smooth: g.smooth.unwrap_or(smooth), joins: g.joins };
-    let n = o.points().len();
+    let n = o.point_count();
     (n >= 3 && (o.joins.is_empty() || o.joins.len() == n)).then_some(o)
 }
 
+/// Whether `given` are arguments method `name` takes (as every call's are checked): why
+/// not, if they are not.
 pub fn check_args(name: &str, given: &Map<String, Value>) -> Result<(), String> {
     let method = method(name).ok_or_else(|| format!("There is no method \"{name}\"."))?;
     Args::check(method.params, given).map(|_| ()).map_err(|why| format!("{name}: {why}."))
@@ -2781,7 +2777,12 @@ impl AppState {
                     points.iter().map(|p| [p[0].as_f64().expect("checked"), p[1].as_f64().expect("checked")]).collect();
                 Outline::new(points[0], points[1..].iter().map(|&to| Segment::Line { to }).collect(), smooth)
             }
-            (None, Some(outline)) => given_outline(outline, smooth).expect("checked"),
+            // (The call's smooth, if it gives one, over the outline's own.)
+            (None, Some(outline)) => {
+                let mut o = given_outline(outline, smooth).expect("checked");
+                o.smooth = args.flag("smooth").unwrap_or(o.smooth);
+                o
+            }
             _ => return Err("select_outline: Give points or an outline, one of them.".into()),
         };
         // From the canvas's corner, as everywhere in the API.
@@ -3873,6 +3874,10 @@ mod tests {
         );
         let again = now(&mut st, "select_outline", json!({ "outline": told })).unwrap();
         assert_eq!(again["steps"], s["steps"], "{again}");
+        // The call's smooth over the outline's own (the query tells it smooth).
+        assert_eq!(told["smooth"], json!(true));
+        let sharp = now(&mut st, "select_outline", json!({ "outline": told, "smooth": false })).unwrap();
+        assert_eq!(sharp["steps"][0]["outline"]["smooth"], json!(false), "{sharp}");
         // Edited: its top made straight, its joins given.
         let flat = json!({
             "start": [100, 100],
