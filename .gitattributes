@@ -1,0 +1,3 @@
+# Batch files keep CRLF line endings when checked out: cmd can misread labels and
+# jumps in a file with LF alone.
+*.bat text eol=crlf
