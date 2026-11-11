@@ -154,7 +154,13 @@ impl ShapeDrag {
 /// selection that comes to nothing so keeps its steps while the edit goes on, so that the box
 /// stays to be put right (once done, nothing is selected: `DocState::commit_pending`).
 pub fn reshape(d: &mut DocState, before: &Selection, shape: Shape, combine: Combine, label: &str) {
-    match crate::select::within_memory(|b| before.then_within(Step::Shape { shape, combine }, b)) {
+    reshape_with(d, before, Step::Shape { shape, combine }, label);
+}
+
+/// [`reshape`], the step put in place of the last one any maker `step` (an outline the outline
+/// tool edits, say).
+pub fn reshape_with(d: &mut DocState, before: &Selection, step: Step, label: &str) {
+    match crate::select::within_memory(|b| before.then_within(step, b)) {
         Ok(made) => {
             let made = Arc::new(made);
             d.edit_pending(label, |doc| doc.selection = Some(made));

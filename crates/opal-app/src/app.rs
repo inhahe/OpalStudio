@@ -345,6 +345,7 @@ impl OpalApp {
         let crop_delete = self.st.tool_settings(ToolId::Crop).bool("crop.delete");
         let sampling = crate::prefs::sampling(&self.st.prefs, "transform");
         let outline_smooth = self.st.tool_settings(ToolId::Outline).bool("outline.smooth");
+        let outline_tool = self.st.tool() == ToolId::Outline;
         let Some(d) = self.st.active_mut() else { return };
         // While an edit is under way on the image, they change nothing (see `edits`).
         if d.busy.is_some() {
@@ -375,6 +376,24 @@ impl OpalApp {
                 d.revision += 1;
             }
             return;
+        }
+        // Points picked on the outline edited take Delete and Backspace (taking them away) and
+        // Esc (letting go of them), before any command does.
+        if outline_tool && !crate::outline_tool::picked(d).is_empty() {
+            let (delete, escape) = ctx.input_mut(|i| {
+                (
+                    i.consume_key(Modifiers::NONE, Key::Delete) || i.consume_key(Modifiers::NONE, Key::Backspace),
+                    i.consume_key(Modifiers::NONE, Key::Escape),
+                )
+            });
+            if delete {
+                return crate::outline_tool::delete_picked(d);
+            }
+            if escape {
+                d.picked = None;
+                d.revision += 1;
+                return;
+            }
         }
         let boxed = d.transform.is_some() || cropping;
         let mut refused = None;

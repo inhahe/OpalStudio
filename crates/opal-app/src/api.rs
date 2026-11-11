@@ -2724,11 +2724,7 @@ impl AppState {
             .iter()
             .map(|p| [p[0].as_f64().expect("checked") + c.x as f64, p[1].as_f64().expect("checked") + c.y as f64])
             .collect();
-        let outline = Outline {
-            start: points[0],
-            segments: points[1..].iter().map(|&to| Segment::Line { to }).collect(),
-            smooth,
-        };
+        let outline = Outline::new(points[0], points[1..].iter().map(|&to| Segment::Line { to }).collect(), smooth);
         let step = opal_core::selection::Step::Outline { outline, combine };
         d.select_with(step, crate::outline_tool::LABEL).map_err(|why| format!("select_outline: {why}"))?;
         Ok(selection_json(d))

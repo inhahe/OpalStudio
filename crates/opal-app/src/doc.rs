@@ -141,6 +141,11 @@ pub struct DocState {
     pub shape_drag: Option<crate::select_tool::ShapeDrag>,
     /// An outline being drawn with the outline tool.
     pub outlining: Option<crate::outline_tool::Outlining>,
+    /// The points picked on the outline the outline tool edits (the selection's last step,
+    /// when it is one), with that outline: none once the last step is another.
+    pub picked: Option<crate::outline_tool::Picked>,
+    /// A drag on the outline the outline tool edits.
+    pub outline_drag: Option<crate::outline_tool::EditDrag>,
     /// The rectangle the transform box's fields fit it into (its top-left corner from the
     /// canvas's, and its size), once one has been typed; the canvas, whatever it is then,
     /// until then.
@@ -221,6 +226,8 @@ impl DocState {
             drawn: 0,
             select_drag: None,
             outlining: None,
+            picked: None,
+            outline_drag: None,
             shape_drag: None,
             told_dropped: false,
             groups: Vec::new(),

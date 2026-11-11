@@ -10,7 +10,7 @@ use crate::doc::DocState;
 use crate::settings::Settings;
 use eframe::egui::{self, PointerButton, Pos2, Rect, Response};
 use opal_core::mask::Combine;
-use opal_core::outline::{Outline, Segment};
+use opal_core::outline::{End, Join, Outline, Segment};
 use opal_core::selection::{MOST_POINTS, Step};
 
 /// How near the first point (screen points) a click closes the loop, and how near the last
@@ -123,7 +123,7 @@ impl Outlining {
 
     /// The outline it makes, closed, sharp if not `smooth`; `None` with fewer than three points.
     pub fn outline(&self, smooth: bool) -> Option<Outline> {
-        (self.points() >= 3).then(|| Outline { start: self.start, segments: self.segments.clone(), smooth })
+        (self.points() >= 3).then(|| Outline::new(self.start, self.segments.clone(), smooth))
     }
 }
 
@@ -136,6 +136,303 @@ pub fn close(d: &mut DocState, smooth: bool) {
     let Some(outline) = o.outline(smooth) else { return };
     if let Err(why) = d.select_with(Step::Outline { outline, combine: o.combine }, LABEL) {
         d.notice = Some(why);
+    }
+}
+
+/// The history state a drag on the outline edited makes.
+pub const EDIT: &str = "Edit outline";
+
+/// The selection's last step, if it is an outline, and how it combines: the outline the tool
+/// edits while none is being drawn.
+pub fn edited(d: &DocState) -> Option<(Outline, Combine)> {
+    d.pixel_selection()?.last_outline().map(|(o, c)| (o.clone(), c))
+}
+
+/// The points picked on the outline edited (see [`Outline::points`]), with that outline.
+#[derive(Clone, Debug)]
+pub struct Picked {
+    of: Outline,
+    pub points: Vec<usize>,
+    /// The point the last click picked, which a double-click on it turns smooth or sharp.
+    clicked: Option<usize>,
+}
+
+/// The points picked on the outline edited now (none if it is another than they were picked
+/// on).
+pub fn picked(d: &DocState) -> Vec<usize> {
+    match (&d.picked, edited(d)) {
+        (Some(p), Some((o, _))) if p.of == o => p.points.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// Picks `points` on `outline`, the outline edited, the last click's on `clicked`.
+fn pick(d: &mut DocState, outline: Outline, points: Vec<usize>, clicked: Option<usize>) {
+    d.picked = Some(Picked { of: outline, points, clicked });
+    d.revision += 1;
+}
+
+/// What part of the outline edited a press is on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Part {
+    Point(usize),
+    /// A picked point's handle.
+    Handle(usize, End),
+    /// A side, from point `.0`, `.1` (0 to 1) of the way along it.
+    Side(usize, f64),
+}
+
+/// The part of `o` at `at` (screen points), its points `picked`: a picked point's handle (they
+/// lie over the sides), else a point, else a side, each within [`NEAR`].
+fn part_at(
+    o: &Outline,
+    picked: &[usize],
+    at: Pos2,
+    to_doc: &dyn Fn(Pos2) -> [f64; 2],
+    to_screen: &dyn Fn([f64; 2]) -> Pos2,
+) -> Option<Part> {
+    let near = |p: [f64; 2]| to_screen(p).distance(at) <= NEAR;
+    for &i in picked {
+        let [into, out] = o.handles(i);
+        for (h, end) in [(out, End::Out), (into, End::In)] {
+            if h.is_some_and(near) {
+                return Some(Part::Handle(i, end));
+            }
+        }
+    }
+    let points = o.points();
+    let nearest = (0..points.len())
+        .min_by(|&a, &b| to_screen(points[a]).distance(at).total_cmp(&to_screen(points[b]).distance(at)));
+    if let Some(i) = nearest.filter(|&i| near(points[i])) {
+        return Some(Part::Point(i));
+    }
+    let (side, t, _) = o.nearest(to_doc(at));
+    near(o.along(side, t)).then_some(Part::Side(side, t))
+}
+
+/// A drag on the outline edited.
+#[derive(Clone, Debug)]
+pub struct EditDrag {
+    pub part: Part,
+    /// Where it began (document pixels).
+    from: [f64; 2],
+    /// The outline as it was, how it combines, and what the steps before it select.
+    start: Outline,
+    combine: Combine,
+    before: opal_core::selection::Selection,
+    /// The points a point's drag moves: those picked, it among them.
+    moving: Vec<usize>,
+    /// Alt held as it began: a handle dragged alone (its point made sharp), or, from a point
+    /// or a side, the whole outline moved.
+    alt: bool,
+}
+
+impl EditDrag {
+    /// The outline it makes, the pointer moved `by` (document pixels) since it began.
+    fn made(&self, by: [f64; 2]) -> Outline {
+        let o = &self.start;
+        match self.part {
+            Part::Point(_) | Part::Side(..) if self.alt => {
+                o.transformed(&opal_core::geom::Affine::translate(by[0], by[1]))
+            }
+            Part::Point(_) => o.moved(&self.moving, by),
+            Part::Handle(i, end) => {
+                let h = o.handles(i)[usize::from(end == End::Out)].expect("a handle dragged is one there is");
+                o.with_handle(i, end, [h[0] + by[0], h[1] + by[1]], self.alt)
+            }
+            Part::Side(i, t) => o.bent(i, t, by),
+        }
+    }
+}
+
+/// Makes `outline` the selection's last step in place of the outline edited, as a history
+/// state labeled `label`, unless there is not memory enough for it (the status bar says so);
+/// without one (`None`), the steps before it. Picks `points` on it.
+fn replace(d: &mut DocState, outline: Option<Outline>, points: Vec<usize>, label: &str) {
+    let Some((_, combine)) = edited(d) else { return };
+    let before = d.pixel_selection().expect("one with an outline").before_last();
+    let Some(outline) = outline else {
+        d.picked = None;
+        return d.set_pixel_selection(Some(before), label);
+    };
+    let made =
+        crate::select::within_memory(|b| before.then_within(Step::Outline { outline: outline.clone(), combine }, b));
+    match made {
+        Ok(made) => {
+            d.set_pixel_selection(Some(made), label);
+            pick(d, outline, points, None);
+        }
+        Err(why) => d.notice = Some(why),
+    }
+}
+
+/// Turns the points picked on the outline edited sharp or smooth (`join`), as a history state.
+pub fn join_picked(d: &mut DocState, join: Join) {
+    let Some((o, _)) = edited(d) else { return };
+    let points = picked(d);
+    if points.is_empty() {
+        return;
+    }
+    let label = if join == Join::Sharp { "Sharp points" } else { "Smooth points" };
+    replace(d, Some(o.joined(&points, join)), points, label);
+}
+
+/// Takes the points picked on the outline edited away, as a history state; with fewer than
+/// three points left, the outline goes.
+pub fn delete_picked(d: &mut DocState) {
+    let Some((o, _)) = edited(d) else { return };
+    let points = picked(d);
+    if !points.is_empty() {
+        replace(d, o.without(&points), Vec::new(), "Delete points");
+    }
+}
+
+/// Picks every point of the outline edited.
+pub fn pick_all(d: &mut DocState) {
+    if let Some((o, _)) = edited(d) {
+        let all = (0..o.points().len()).collect();
+        pick(d, o, all, None);
+    }
+}
+
+/// What a frame's presses and drags on the canvas do to the outline edited, if one is (the
+/// selection's last step, none being drawn): whether they were its, or are left to begin
+/// another (a press away from it).
+fn edit(
+    ctx: &egui::Context,
+    d: &mut DocState,
+    response: &Response,
+    to_doc: &dyn Fn(Pos2) -> [f64; 2],
+    to_screen: &dyn Fn([f64; 2]) -> Pos2,
+) -> bool {
+    let modifiers = ctx.input(|i| i.modifiers);
+    if let Some(drag) = d.outline_drag.clone() {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            d.outline_drag = None;
+            d.discard_pending(EDIT);
+        } else if !ctx.input(|i| i.pointer.primary_down()) {
+            // Let go: the edit is a history state of its own, its points still picked.
+            d.outline_drag = None;
+            if d.pending_label() == Some(EDIT) {
+                d.commit_pending();
+            }
+            if let Some((o, _)) = edited(d) {
+                let points = d.picked.as_ref().map(|p| p.points.clone()).unwrap_or_default();
+                pick(d, o, points, None);
+            }
+        } else if let Some(p) = response.interact_pointer_pos() {
+            let at = to_doc(p);
+            let made = drag.made([at[0] - drag.from[0], at[1] - drag.from[1]]);
+            if edited(d).map(|(o, _)| o) != Some(made.clone()) {
+                let step = Step::Outline { outline: made, combine: drag.combine };
+                crate::select_tool::reshape_with(d, &drag.before, step, EDIT);
+            }
+        }
+        return true;
+    }
+    let Some((outline, combine)) = edited(d) else {
+        d.picked = None;
+        return false;
+    };
+    let points = picked(d);
+    let clicked_before = d.picked.as_ref().filter(|p| p.of == outline).and_then(|p| p.clicked);
+    let part = |at: Pos2| part_at(&outline, &points, at, to_doc, to_screen);
+    if response.drag_started_by(PointerButton::Primary)
+        && let Some(origin) = ctx.input(|i| i.pointer.press_origin())
+        && let Some(part) = part(origin)
+    {
+        // A point not picked, dragged: picked alone (with Shift, besides the others).
+        let mut points = points;
+        if let Part::Point(i) = part
+            && !points.contains(&i)
+        {
+            if !modifiers.shift {
+                points.clear();
+            }
+            points.push(i);
+        }
+        let before = d.pixel_selection().expect("one with an outline").before_last();
+        let moving = if matches!(part, Part::Point(_)) { points.clone() } else { Vec::new() };
+        pick(d, outline.clone(), points, None);
+        d.outline_drag =
+            Some(EditDrag { part, from: to_doc(origin), start: outline, combine, before, moving, alt: modifiers.alt });
+        return true;
+    }
+    let Some(at) = response.interact_pointer_pos() else { return false };
+    if response.double_clicked_by(PointerButton::Primary) {
+        // On the point the click before picked: it turned smooth if sharp, sharp if not.
+        return match part(at) {
+            Some(Part::Point(i)) if clicked_before == Some(i) => {
+                let join = if outline.join(i) == Join::Sharp { Join::Smooth } else { Join::Sharp };
+                let label = if join == Join::Sharp { "Sharp points" } else { "Smooth points" };
+                replace(d, Some(outline.joined(&[i], join)), vec![i], label);
+                true
+            }
+            // (The second click of the double-click that closed an outline, say.)
+            _ => true,
+        };
+    }
+    if !response.clicked_by(PointerButton::Primary) {
+        return false;
+    }
+    match part(at) {
+        Some(Part::Point(i)) if modifiers.alt => {
+            let rest: Vec<usize> = points.iter().copied().filter(|&p| p != i).map(|p| p - usize::from(p > i)).collect();
+            replace(d, outline.without(&[i]), rest, "Delete points");
+        }
+        Some(Part::Point(i)) => {
+            let mut points = points;
+            match (modifiers.shift, points.iter().position(|&p| p == i)) {
+                (true, Some(k)) => {
+                    points.remove(k);
+                }
+                (true, None) => points.push(i),
+                (false, _) => points = vec![i],
+            }
+            pick(d, outline, points, Some(i));
+        }
+        Some(Part::Side(i, t)) => {
+            // The point added is picked alone; those after it count one more.
+            replace(d, Some(outline.split(i, t)), vec![i + 1], "Add point");
+        }
+        Some(Part::Handle(..)) => {}
+        // A click away from it: the points picked let go (with none picked, it begins another).
+        None if !points.is_empty() => pick(d, outline, Vec::new(), None),
+        None => return false,
+    }
+    true
+}
+
+/// The outline edited `o` on `rect` (by `to_screen`): its points, those `picked` filled in
+/// `accent` with their handles drawn out of them.
+pub fn draw_edited(
+    ui: &egui::Ui,
+    o: &Outline,
+    picked: &[usize],
+    accent: egui::Color32,
+    rect: Rect,
+    to_screen: &dyn Fn([f64; 2]) -> Pos2,
+) {
+    let painter = ui.painter().with_clip_rect(rect);
+    let line = egui::Stroke::new(1.0, accent);
+    let points = o.points();
+    for &i in picked {
+        let p = to_screen(points[i]);
+        for h in o.handles(i).into_iter().flatten() {
+            let h = to_screen(h);
+            painter.line_segment([p, h], line);
+            painter.circle(h, 3.5, egui::Color32::WHITE, line);
+        }
+    }
+    for (i, &p) in points.iter().enumerate() {
+        let fill = if picked.contains(&i) { accent } else { egui::Color32::WHITE };
+        painter.rect(
+            Rect::from_center_size(to_screen(p), egui::vec2(7.0, 7.0)),
+            0.0,
+            fill,
+            line,
+            egui::StrokeKind::Middle,
+        );
     }
 }
 
@@ -158,6 +455,10 @@ pub fn canvas(
     let picking = modifiers.command;
     let Some(o) = d.outlining.as_mut() else {
         if picking {
+            return;
+        }
+        // On the outline edited (the selection's last step), a press edits it.
+        if edit(ctx, d, response, to_doc, to_screen) {
             return;
         }
         let combine = crate::select_tool::combine_held(modifiers, options.combine);
@@ -283,6 +584,42 @@ fn shown(o: &Outlining) -> Vec<[f64; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_panel_s_buttons_join_delete_and_pick_every_point() {
+        use crate::state::{AppState, Background, NewImage};
+        use opal_core::selection::Selection;
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let square = Outline::new(
+            [20.0, 20.0],
+            vec![
+                Segment::Line { to: [120.0, 20.0] },
+                Segment::Line { to: [120.0, 120.0] },
+                Segment::Line { to: [20.0, 120.0] },
+            ],
+            true,
+        );
+        let d = st.active_mut().unwrap();
+        d.set_pixel_selection(
+            Some(Selection::new(Step::Outline { outline: square, combine: Combine::Replace })),
+            "Select",
+        );
+        // Nothing picked: the buttons change nothing.
+        join_picked(d, Join::Smooth);
+        delete_picked(d);
+        assert_eq!(d.history.undo_label(), Some("Select"));
+        pick_all(d);
+        assert_eq!(picked(d), vec![0, 1, 2, 3]);
+        join_picked(d, Join::Smooth);
+        let o = edited(d).unwrap().0;
+        assert!((0..4).all(|i| o.join(i) == Join::Smooth), "{:?}", o.joins);
+        assert_eq!((picked(d), d.history.undo_label()), (vec![0, 1, 2, 3], Some("Smooth points")));
+        // All taken away: the outline goes, and with it what it selected.
+        delete_picked(d);
+        assert!(d.pixel_selection().is_none());
+        assert_eq!(d.history.undo_label(), Some("Delete points"));
+    }
 
     #[test]
     fn taking_a_point_back_gives_back_the_handle_and_the_side_to_the_pointer_is_the_one_a_click_adds() {

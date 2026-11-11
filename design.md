@@ -631,7 +631,35 @@ It shows as marching ants, closed back to its first point, with the side to the 
 a click would add (a curve, after a handle was pulled). It
 is a recipe step of its own (`Step::Outline`, an `outline::Outline`: a start and its line
 and curve segments; *Outline selection*), carried exactly by any transform (its points
-carried), its combine changed in the selection panel ("Outline of N points"). Scripts:
+carried), its combine changed in the selection panel ("Outline of N points").
+
+**Editing an outline** (`outline_tool::edit`): while the tool is chosen and none is being drawn,
+the selection's last step, if it is an outline, is edited as it stands: its points shown as
+squares, those picked filled and their handles drawn out of them. A click on a point picks it
+(Shift adds it to those picked, or takes it out); a drag from a point moves it with the
+others picked; a drag from a picked point's handle bends its sides, the other handle turning
+to stay in line (keeping its length, or mirrored, as the point is joined), or with Alt alone,
+the point made a corner; a drag from a side bends it (a curve, its ends staying, the handles
+sharing the move as much as each pulls the point held; a straight side moves with its two
+ends); a click on a side adds a point there, splitting it exactly; Alt+click takes a point
+away (its sides made one, a curve if either was); a double-click on the point the click
+before picked makes it smooth (its handles in line, pulled out a third of the way to its
+neighbors where it had none) or, if smooth, a corner (its handles taken back in); Alt+drag
+from a point or a side moves the whole outline. Delete or Backspace takes the points picked
+away, Esc lets go of them, before any command (Delete is not Clear then); a click away from
+it lets go of them too, beginning nothing (with none picked, it begins another outline). An
+outline left with fewer than three points goes, and what the steps before it selected is
+selected. Tool settings shows its points, how many are picked, and buttons for them: Smooth,
+Sharp, Delete, All. Each edit is a history state (a drag, *Edit outline*, pending while it
+goes, as a box's; *Add point*, *Delete points*, *Smooth points*, *Sharp points*), the
+selection worked out again within the memory free. The points picked are kept with the
+outline they were picked on, and none are once the last step is another (after an undo, say).
+How the line goes through each point is kept with the outline (`outline::Join`: sharp,
+smooth or symmetric, told from the handles where an outline keeps none), and goes with it
+through transforms and files; the edits are made on the outline seen as its points going
+round (`Ring`), the side back to its start kept as a segment only when it is a curve.
+
+Scripts:
 `select_outline(points, combine, smooth)`, points `[x, y]` from the canvas's corner (as far
 as a box's may be put, 1e7 pixels; at most a million of them) joined by straight sides; the `selection` query tells an outline step's start and segments.
 
@@ -649,7 +677,7 @@ the edges taken left to right as they lie at its middle, each stretch the outlin
 (from where the winding leaves 0 to where it comes back) adds the area it covers along the
 row's cells, a running sum along the row giving each pixel's share. Sharp, each pixel by whether its middle is
 enclosed, counting the edges crossing its row.
-Edge snapping (live-wire) and editing an outline's points come next.
+Edge snapping (live-wire) comes with milestone 8.
 
 ### Reshaping an outline
 

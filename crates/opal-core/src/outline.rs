@@ -65,15 +65,23 @@ pub struct Outline {
     pub start: [f64; 2],
     pub segments: Vec<Segment>,
     pub smooth: bool,
+    /// How its line goes through each of its points (`points`), in their order; told from
+    /// their handles where it keeps none (an outline made of points alone, or one from before
+    /// they were kept).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joins: Vec<Join>,
 }
 
 impl Outline {
     /// The outline `m` carries this one to.
     pub fn transformed(&self, m: &Affine) -> Outline {
+        // (A map keeps lines straight and the ratios along them: a smooth join stays smooth,
+        // a symmetric one symmetric.)
         Outline {
             start: m.apply(self.start),
             segments: self.segments.iter().map(|s| s.transformed(m)).collect(),
             smooth: self.smooth,
+            joins: self.joins.clone(),
         }
     }
 
@@ -103,6 +111,436 @@ impl Outline {
         };
         (bounds.give_back)(points);
         made
+    }
+}
+
+/// How an outline's line goes through one of its points: what moving one of the point's
+/// handles does to the other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Join {
+    /// A corner: each handle moves alone, if it has any.
+    #[default]
+    Sharp,
+    /// Smooth: its handles stay in line, each as long as it is.
+    Smooth,
+    /// Smooth, its handles as long as each other.
+    Symmetric,
+}
+
+/// Which of a point's handles: the one the side into it bends by, or the one the side out of
+/// it bends by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum End {
+    In,
+    Out,
+}
+
+/// A side of an outline as it goes round: straight, or a curve pulled toward its handles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Side {
+    Line,
+    Curve { c1: [f64; 2], c2: [f64; 2] },
+}
+
+impl Side {
+    /// The segment it is, ending at `to`.
+    fn to(self, to: [f64; 2]) -> Segment {
+        match self {
+            Side::Line => Segment::Line { to },
+            Side::Curve { c1, c2 } => Segment::Curve { c1, c2, to },
+        }
+    }
+}
+
+/// An outline as its points go round (see [`Outline::points`]): each point, the side from it
+/// to the next (the last's back to the first), and how the line goes through it. Every edit
+/// of an outline is made on one.
+#[derive(Clone, Debug)]
+struct Ring {
+    points: Vec<[f64; 2]>,
+    sides: Vec<Side>,
+    joins: Vec<Join>,
+    smooth: bool,
+}
+
+fn add(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
+    [a[0] + b[0], a[1] + b[1]]
+}
+
+fn sub(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
+    [a[0] - b[0], a[1] - b[1]]
+}
+
+fn mul(a: [f64; 2], k: f64) -> [f64; 2] {
+    [a[0] * k, a[1] * k]
+}
+
+fn len(a: [f64; 2]) -> f64 {
+    a[0].hypot(a[1])
+}
+
+fn lerp(a: [f64; 2], b: [f64; 2], t: f64) -> [f64; 2] {
+    add(a, mul(sub(b, a), t))
+}
+
+/// `a` made a unit's length, if it has any length to speak of.
+fn unit(a: [f64; 2]) -> Option<[f64; 2]> {
+    let l = len(a);
+    (l > 1e-12).then(|| mul(a, 1.0 / l))
+}
+
+/// The cubic curve from `a` toward `c1` and `c2` to `b`, at `t`.
+fn cubic(a: [f64; 2], c1: [f64; 2], c2: [f64; 2], b: [f64; 2], t: f64) -> [f64; 2] {
+    let u = 1.0 - t;
+    let (wa, w1, w2, wb) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+    [wa * a[0] + w1 * c1[0] + w2 * c2[0] + wb * b[0], wa * a[1] + w1 * c1[1] + w2 * c2[1] + wb * b[1]]
+}
+
+impl Ring {
+    fn of(o: &Outline) -> Ring {
+        let mut points = vec![o.start];
+        let mut sides = Vec::with_capacity(o.segments.len() + 1);
+        for s in &o.segments {
+            sides.push(match *s {
+                Segment::Line { .. } => Side::Line,
+                Segment::Curve { c1, c2, .. } => Side::Curve { c1, c2 },
+            });
+            points.push(s.end());
+        }
+        // Closed by a side of its own back to its start: that point is its first, once.
+        if points.len() > 1 && points.last() == Some(&o.start) {
+            points.pop();
+        } else {
+            sides.push(Side::Line);
+        }
+        let mut ring = Ring { points, sides, joins: Vec::new(), smooth: o.smooth };
+        ring.joins = if o.joins.len() == ring.points.len() {
+            o.joins.clone()
+        } else {
+            (0..ring.points.len()).map(|i| ring.told_join(i)).collect()
+        };
+        ring
+    }
+
+    fn outline(self) -> Outline {
+        let n = self.points.len();
+        let mut segments: Vec<Segment> = (1..n).map(|i| self.sides[i - 1].to(self.points[i])).collect();
+        // The side back to the first point is kept only if it is a curve (a straight one is
+        // implied).
+        if let Side::Curve { .. } = self.sides[n - 1] {
+            segments.push(self.sides[n - 1].to(self.points[0]));
+        }
+        Outline { start: self.points[0], segments, smooth: self.smooth, joins: self.joins }
+    }
+
+    fn next(&self, i: usize) -> usize {
+        (i + 1) % self.points.len()
+    }
+
+    fn prev(&self, i: usize) -> usize {
+        (i + self.points.len() - 1) % self.points.len()
+    }
+
+    /// Point `i`'s handles: into it (the side before it bends by it) and out of it (the side
+    /// after), each `None` where that side is straight.
+    fn handles(&self, i: usize) -> [Option<[f64; 2]>; 2] {
+        let into = match self.sides[self.prev(i)] {
+            Side::Curve { c2, .. } => Some(c2),
+            Side::Line => None,
+        };
+        let out = match self.sides[i] {
+            Side::Curve { c1, .. } => Some(c1),
+            Side::Line => None,
+        };
+        [into, out]
+    }
+
+    /// Puts point `i`'s handle at `end` at `to`, a straight side becoming a curve (its other
+    /// end's handle at that end).
+    fn set_handle(&mut self, i: usize, end: End, to: [f64; 2]) {
+        match end {
+            End::In => {
+                let p = self.prev(i);
+                self.sides[p] = match self.sides[p] {
+                    Side::Curve { c1, .. } => Side::Curve { c1, c2: to },
+                    Side::Line => Side::Curve { c1: self.points[p], c2: to },
+                };
+            }
+            End::Out => {
+                let at = self.points[self.next(i)];
+                self.sides[i] = match self.sides[i] {
+                    Side::Curve { c2, .. } => Side::Curve { c1: to, c2 },
+                    Side::Line => Side::Curve { c1: to, c2: at },
+                };
+            }
+        }
+    }
+
+    /// The join point `i`'s handles show: smooth where it has both and they are in line
+    /// (symmetric, if as long as each other), else sharp. (What an outline kept no joins for
+    /// is taken to have.)
+    fn told_join(&self, i: usize) -> Join {
+        let p = self.points[i];
+        let [Some(a), Some(b)] = self.handles(i) else { return Join::Sharp };
+        let (u, v) = (sub(a, p), sub(b, p));
+        let (lu, lv) = (len(u), len(v));
+        if lu < 1e-9 || lv < 1e-9 {
+            return Join::Sharp;
+        }
+        // In line: pointing opposite ways, within a hair.
+        let cross = (u[0] * v[1] - u[1] * v[0]) / (lu * lv);
+        let dot = (u[0] * v[0] + u[1] * v[1]) / (lu * lv);
+        if cross.abs() > 1e-6 || dot > 0.0 {
+            Join::Sharp
+        } else if (lu - lv).abs() <= 1e-6 * lu.max(lv) {
+            Join::Symmetric
+        } else {
+            Join::Smooth
+        }
+    }
+
+    /// Point `i`'s other handle, once its handle at `end` has moved, put as its join says: in
+    /// line with it, as long as it was (smooth) or as the one moved (symmetric).
+    fn follow(&mut self, i: usize, end: End) {
+        let p = self.points[i];
+        let [into, out] = self.handles(i);
+        let (moved, other, other_end) = match end {
+            End::In => (into, out, End::Out),
+            End::Out => (out, into, End::In),
+        };
+        let (Some(moved), Some(other)) = (moved, other) else { return };
+        let Some(away) = unit(sub(p, moved)) else { return };
+        let length = match self.joins[i] {
+            Join::Sharp => return,
+            Join::Smooth => len(sub(other, p)),
+            Join::Symmetric => len(sub(moved, p)),
+        };
+        self.set_handle(i, other_end, add(p, mul(away, length)));
+    }
+
+    /// The point `t` (0 to 1) along the side from point `i`.
+    fn along(&self, i: usize, t: f64) -> [f64; 2] {
+        let (a, b) = (self.points[i], self.points[self.next(i)]);
+        match self.sides[i] {
+            Side::Line => lerp(a, b, t),
+            Side::Curve { c1, c2 } => cubic(a, c1, c2, b, t),
+        }
+    }
+
+    /// How far along the side from point `i` (0 to 1) its point nearest `p` is.
+    fn nearest_on(&self, i: usize, p: [f64; 2]) -> f64 {
+        let (a, b) = (self.points[i], self.points[self.next(i)]);
+        match self.sides[i] {
+            Side::Line => {
+                let ab = sub(b, a);
+                let l2 = ab[0] * ab[0] + ab[1] * ab[1];
+                if l2 > 0.0 { (((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / l2).clamp(0.0, 1.0) } else { 0.0 }
+            }
+            Side::Curve { .. } => {
+                // Sampled, then narrowed about the nearest sample.
+                const SAMPLES: usize = 32;
+                let far = |t: f64| len(sub(self.along(i, t), p));
+                let best = (0..=SAMPLES).map(|k| k as f64 / SAMPLES as f64).min_by(|s, t| far(*s).total_cmp(&far(*t)));
+                let best = best.expect("samples");
+                let (mut lo, mut hi) = ((best - 1.0 / SAMPLES as f64).max(0.0), (best + 1.0 / SAMPLES as f64).min(1.0));
+                for _ in 0..40 {
+                    let (m1, m2) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+                    if far(m1) < far(m2) {
+                        hi = m2;
+                    } else {
+                        lo = m1;
+                    }
+                }
+                (lo + hi) / 2.0
+            }
+        }
+    }
+}
+
+impl Outline {
+    /// An outline from `start` along `segments` and back, sharp if not `smooth`, the joins at
+    /// its points told from their handles.
+    pub fn new(start: [f64; 2], segments: Vec<Segment>, smooth: bool) -> Outline {
+        Outline { start, segments, smooth, joins: Vec::new() }
+    }
+
+    /// Its points as they go round, the first its start (once, if its last segment comes back
+    /// to it): what the indices its edits take count.
+    pub fn points(&self) -> Vec<[f64; 2]> {
+        Ring::of(self).points
+    }
+
+    /// Point `i`'s handles: into it and out of it, each `None` where that side is straight.
+    pub fn handles(&self, i: usize) -> [Option<[f64; 2]>; 2] {
+        Ring::of(self).handles(i)
+    }
+
+    /// How its line goes through point `i`.
+    pub fn join(&self, i: usize) -> Join {
+        Ring::of(self).joins[i]
+    }
+
+    /// The point `t` (0 to 1) along its side from point `i` to the next.
+    pub fn along(&self, i: usize, t: f64) -> [f64; 2] {
+        Ring::of(self).along(i, t)
+    }
+
+    /// Its side nearest `p`, how far along it (0 to 1) the nearest point is, and how far that
+    /// point is from `p`.
+    pub fn nearest(&self, p: [f64; 2]) -> (usize, f64, f64) {
+        let ring = Ring::of(self);
+        (0..ring.points.len())
+            .map(|i| {
+                let t = ring.nearest_on(i, p);
+                (i, t, len(sub(ring.along(i, t), p)))
+            })
+            .min_by(|a, b| a.2.total_cmp(&b.2))
+            .expect("an outline has a point")
+    }
+
+    /// The outline with points `which` moved by `by`, their handles with them.
+    pub fn moved(&self, which: &[usize], by: [f64; 2]) -> Outline {
+        let mut ring = Ring::of(self);
+        let mut which = which.to_vec();
+        which.sort_unstable();
+        which.dedup();
+        for &i in &which {
+            let [into, out] = ring.handles(i);
+            ring.points[i] = add(ring.points[i], by);
+            if let Some(h) = into {
+                ring.set_handle(i, End::In, add(h, by));
+            }
+            if let Some(h) = out {
+                ring.set_handle(i, End::Out, add(h, by));
+            }
+        }
+        ring.outline()
+    }
+
+    /// The outline with point `i`'s handle at `end` put at `to`, the other following as its
+    /// join says; or, if `broken`, the point made sharp first, so that it moves alone.
+    pub fn with_handle(&self, i: usize, end: End, to: [f64; 2], broken: bool) -> Outline {
+        let mut ring = Ring::of(self);
+        if broken {
+            ring.joins[i] = Join::Sharp;
+        }
+        ring.set_handle(i, end, to);
+        ring.follow(i, end);
+        ring.outline()
+    }
+
+    /// The outline with a point added `t` (0 to 1) along the side from point `i`, which it
+    /// splits exactly: a curve into two (the point smooth), a straight side into two (sharp).
+    /// The point added is point `i + 1`.
+    pub fn split(&self, i: usize, t: f64) -> Outline {
+        let mut ring = Ring::of(self);
+        let (a, b) = (ring.points[i], ring.points[ring.next(i)]);
+        let (q, first, second, join) = match ring.sides[i] {
+            Side::Line => (lerp(a, b, t), Side::Line, Side::Line, Join::Sharp),
+            Side::Curve { c1, c2 } => {
+                let (e1, e2, e3) = (lerp(a, c1, t), lerp(c1, c2, t), lerp(c2, b, t));
+                let (f1, f2) = (lerp(e1, e2, t), lerp(e2, e3, t));
+                let q = lerp(f1, f2, t);
+                (q, Side::Curve { c1: e1, c2: f1 }, Side::Curve { c1: f2, c2: e3 }, Join::Smooth)
+            }
+        };
+        ring.sides[i] = first;
+        ring.points.insert(i + 1, q);
+        ring.sides.insert(i + 1, second);
+        ring.joins.insert(i + 1, join);
+        ring.outline()
+    }
+
+    /// The outline without points `which`, the sides either side of each made one (a curve, if
+    /// either was); `None` if fewer than three points would be left.
+    pub fn without(&self, which: &[usize]) -> Option<Outline> {
+        let mut ring = Ring::of(self);
+        let mut which = which.to_vec();
+        which.sort_unstable();
+        which.dedup();
+        if ring.points.len() < which.len() + 3 {
+            return None;
+        }
+        for &i in which.iter().rev() {
+            let p = ring.prev(i);
+            let (from, to) = (ring.points[p], ring.points[ring.next(i)]);
+            ring.sides[p] = match (ring.sides[p], ring.sides[i]) {
+                (Side::Line, Side::Line) => Side::Line,
+                (into, out) => Side::Curve {
+                    c1: if let Side::Curve { c1, .. } = into { c1 } else { from },
+                    c2: if let Side::Curve { c2, .. } = out { c2 } else { to },
+                },
+            };
+            ring.points.remove(i);
+            ring.sides.remove(i);
+            ring.joins.remove(i);
+        }
+        Some(ring.outline())
+    }
+
+    /// The outline with the line through points `which` joined as `join` says: sharp, its
+    /// handles taken back into the point (a side left with none straight again); smooth or
+    /// symmetric, its handles put in line (pulled out along the line between its neighbors,
+    /// a third of the way to each, where it had none).
+    pub fn joined(&self, which: &[usize], join: Join) -> Outline {
+        let mut ring = Ring::of(self);
+        for &i in which {
+            let (p, a, b) = (ring.points[i], ring.points[ring.prev(i)], ring.points[ring.next(i)]);
+            let [into, out] = ring.handles(i);
+            match join {
+                Join::Sharp => {
+                    for (h, end) in [(into, End::In), (out, End::Out)] {
+                        if h.is_some() {
+                            ring.set_handle(i, end, p);
+                        }
+                    }
+                    for s in [ring.prev(i), i] {
+                        let (from, to) = (ring.points[s], ring.points[ring.next(s)]);
+                        if ring.sides[s] == (Side::Curve { c1: from, c2: to }) {
+                            ring.sides[s] = Side::Line;
+                        }
+                    }
+                }
+                Join::Smooth | Join::Symmetric => {
+                    let across = unit(sub(b, a)).unwrap_or([1.0, 0.0]);
+                    let u_out = out.and_then(|h| unit(sub(h, p))).unwrap_or(across);
+                    let u_in = into.and_then(|h| unit(sub(p, h))).unwrap_or(across);
+                    let dir = unit(add(u_out, u_in)).unwrap_or(across);
+                    let held =
+                        |h: Option<[f64; 2]>, or: f64| h.map(|h| len(sub(h, p))).filter(|&l| l > 1e-9).unwrap_or(or);
+                    let (l_in, l_out) = (held(into, len(sub(p, a)) / 3.0), held(out, len(sub(b, p)) / 3.0));
+                    let (l_in, l_out) = if join == Join::Symmetric {
+                        ((l_in + l_out) / 2.0, (l_in + l_out) / 2.0)
+                    } else {
+                        (l_in, l_out)
+                    };
+                    ring.set_handle(i, End::In, sub(p, mul(dir, l_in)));
+                    ring.set_handle(i, End::Out, add(p, mul(dir, l_out)));
+                }
+            }
+            ring.joins[i] = join;
+        }
+        ring.outline()
+    }
+
+    /// The outline with its side from point `i`, held `t` (0 to 1) along, moved by `by`: a
+    /// curve bent so that its point there moves so (its ends staying, their other handles
+    /// following as their joins say), a straight side moved with its two ends.
+    pub fn bent(&self, i: usize, t: f64, by: [f64; 2]) -> Outline {
+        let ring = Ring::of(self);
+        let Side::Curve { c1, c2 } = ring.sides[i] else { return self.moved(&[i, ring.next(i)], by) };
+        let mut ring = ring;
+        // The handles share the move as much as each pulls the point there (near an end, where
+        // they pull it hardly at all, as near it as they still do).
+        let t = t.clamp(0.05, 0.95);
+        let u = 1.0 - t;
+        let k = 3.0 * u * t * (u * u + t * t);
+        ring.sides[i] = Side::Curve { c1: add(c1, mul(by, u / k)), c2: add(c2, mul(by, t / k)) };
+        let next = ring.next(i);
+        ring.follow(i, End::Out);
+        ring.follow(next, End::In);
+        ring.outline()
     }
 }
 
@@ -636,7 +1074,7 @@ mod tests {
     use crate::mask::{Extent, Mask, Shape, ShapeKind};
 
     fn polygon(points: &[[f64; 2]], smooth: bool) -> Outline {
-        Outline { start: points[0], segments: points[1..].iter().map(|&to| Segment::Line { to }).collect(), smooth }
+        Outline::new(points[0], points[1..].iter().map(|&to| Segment::Line { to }).collect(), smooth)
     }
 
     #[test]
@@ -678,7 +1116,7 @@ mod tests {
             Segment::Curve { c1: [cx - r, cy - k], c2: [cx - k, cy - r], to: [cx, cy - r] },
             Segment::Curve { c1: [cx + k, cy - r], c2: [cx + r, cy - k], to: start },
         ];
-        let m = Mask::of(&Outline { start, segments, smooth: true }.filled());
+        let m = Mask::of(&Outline::new(start, segments, true).filled());
         assert_eq!(m.extent(), Extent::Within(IRect::new(150, 160, 350, 360)));
         assert_eq!([m.level_at(250, 260), m.level_at(160, 260), m.level_at(140, 260)], [FULL, FULL, 0]);
         // All it covers is the circle's area, as near as four curves come to a circle.
@@ -800,6 +1238,130 @@ mod tests {
         let points = o.polygon().len();
         assert!(points <= MOST_FLATTENED + o.segments.len() + 1, "{points} points");
         assert!(points > MOST_FLATTENED / 2, "flattened to too few: {points}");
+    }
+
+    fn close(a: [f64; 2], b: [f64; 2]) -> bool {
+        (a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9
+    }
+
+    /// A square 100 across, its top side a curve bulging upward.
+    fn bulging() -> Outline {
+        Outline::new(
+            [0.0, 0.0],
+            vec![
+                Segment::Curve { c1: [30.0, -20.0], c2: [70.0, -20.0], to: [100.0, 0.0] },
+                Segment::Line { to: [100.0, 100.0] },
+                Segment::Line { to: [0.0, 100.0] },
+            ],
+            true,
+        )
+    }
+
+    #[test]
+    fn an_outline_s_points_handles_and_joins_are_read_as_they_go_round() {
+        let o = bulging();
+        assert_eq!(o.points(), vec![[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]);
+        assert_eq!(o.handles(0), [None, Some([30.0, -20.0])]);
+        assert_eq!(o.handles(1), [Some([70.0, -20.0]), None]);
+        assert_eq!(o.join(0), Join::Sharp);
+        // Closed by a side of its own back to its start: the start once.
+        let mut closed = o.clone();
+        closed.segments.push(Segment::Line { to: [0.0, 0.0] });
+        assert_eq!(closed.points().len(), 4);
+        // Handles in line: smooth; as long as each other, symmetric; else sharp.
+        let through = |c2: [f64; 2], c1: [f64; 2]| {
+            Outline::new(
+                [0.0, 0.0],
+                vec![
+                    Segment::Curve { c1: [10.0, 0.0], c2, to: [50.0, 0.0] },
+                    Segment::Curve { c1, c2: [90.0, 10.0], to: [100.0, 50.0] },
+                ],
+                true,
+            )
+            .join(1)
+        };
+        assert_eq!(through([40.0, -10.0], [70.0, 20.0]), Join::Smooth);
+        assert_eq!(through([40.0, -10.0], [60.0, 10.0]), Join::Symmetric);
+        assert_eq!(through([40.0, -10.0], [60.0, -10.0]), Join::Sharp);
+        // Joins kept go with it, through a file's words and a transform: a corner whose handles
+        // happen to lie in line stays a corner (told from its handles, it would be smooth).
+        let mut kept = o.joined(&[0], Join::Smooth);
+        kept.joins[0] = Join::Sharp;
+        let read: Outline = serde_json::from_str(&serde_json::to_string(&kept).unwrap()).unwrap();
+        assert_eq!(read, kept);
+        assert_eq!(kept.transformed(&Affine::translate(5.0, 5.0)).join(0), Join::Sharp);
+    }
+
+    #[test]
+    fn points_are_moved_split_off_and_taken_away_exactly() {
+        let o = bulging();
+        // Moved, their handles with them.
+        let m = o.moved(&[1, 2], [10.0, 5.0]);
+        assert_eq!(m.points(), vec![[0.0, 0.0], [110.0, 5.0], [110.0, 105.0], [0.0, 100.0]]);
+        assert_eq!(m.handles(1)[0], Some([80.0, -15.0]));
+        // A curve split at a third: the same curve, in two, through a smooth point.
+        let t = 1.0 / 3.0;
+        let split = o.split(0, t);
+        assert_eq!(split.points().len(), 5);
+        assert!(close(split.points()[1], o.along(0, t)));
+        assert_eq!(split.join(1), Join::Smooth);
+        for k in 0..=10 {
+            let s = f64::from(k) / 10.0;
+            assert!(close(split.along(0, s), o.along(0, s * t)), "first part at {s}");
+            assert!(close(split.along(1, s), o.along(0, t + s * (1.0 - t))), "second part at {s}");
+        }
+        // A straight side split: two straight sides, a sharp point between.
+        let line = o.split(2, 0.5);
+        assert_eq!(line.points()[3], [50.0, 100.0]);
+        assert_eq!((line.join(3), line.handles(3)), (Join::Sharp, [None, None]));
+        // Taken away: the sides either side made one; three points at least are left.
+        let gone = split.without(&[1]).expect("four left");
+        assert_eq!(gone.points(), o.points());
+        assert_eq!(gone.handles(0)[1], split.handles(0)[1]);
+        assert!(o.without(&[0]).is_some());
+        assert!(o.without(&[0, 1]).is_none(), "an outline of two points");
+        // The start taken away: the next point is its start.
+        assert_eq!(o.without(&[0]).unwrap().start, [100.0, 0.0]);
+    }
+
+    #[test]
+    fn handles_move_as_their_points_join_and_sides_bend() {
+        let o = bulging().joined(&[0], Join::Smooth);
+        // Made smooth from a corner: handles in line, a third of the way to each neighbor.
+        let [into, out] = o.handles(0);
+        let (into, out) = (into.expect("pulled out"), out.expect("kept"));
+        let (u, v) = ([into[0], into[1]], [out[0], out[1]]);
+        assert!((u[0] * v[1] - u[1] * v[0]).abs() < 1e-6, "not in line: {u:?} {v:?}");
+        assert!((u[0].hypot(u[1]) - 100.0 / 3.0).abs() < 1e-9, "{u:?}");
+        // A smooth point's handle moved: the other turns with it, keeping its length.
+        let length = |h: [f64; 2]| h[0].hypot(h[1]);
+        let moved = o.with_handle(0, End::Out, [0.0, -40.0], false);
+        let [into2, out2] = moved.handles(0);
+        assert_eq!(out2, Some([0.0, -40.0]));
+        assert!(close(into2.unwrap(), [0.0, length(into)]), "{into2:?}");
+        // Symmetric: mirrored. Broken (Alt): alone, the point made sharp.
+        let sym = o.joined(&[0], Join::Symmetric).with_handle(0, End::Out, [0.0, -40.0], false);
+        assert!(close(sym.handles(0)[0].unwrap(), [0.0, 40.0]));
+        let broken = o.with_handle(0, End::Out, [0.0, -40.0], true);
+        assert_eq!((broken.handles(0)[0], broken.join(0)), (Some(into), Join::Sharp));
+        // Made sharp: handles taken back, the bottom-left side straight again.
+        let sharp = o.joined(&[0], Join::Sharp);
+        assert_eq!(sharp.handles(0)[0], None);
+        assert_eq!(sharp.join(0), Join::Sharp);
+        // A curve bent: its point where it is held moves as the pointer does.
+        let b = bulging();
+        for t in [0.3, 0.5, 0.7] {
+            let bent = b.bent(0, t, [5.0, -12.0]);
+            let was = b.along(0, t);
+            assert!(close(bent.along(0, t), [was[0] + 5.0, was[1] - 12.0]), "at {t}");
+            assert_eq!(bent.points(), b.points());
+        }
+        // A straight side dragged: moved with its two ends.
+        assert_eq!(b.bent(1, 0.5, [10.0, 0.0]).points()[1..3], [[110.0, 0.0], [110.0, 100.0]]);
+        // The side nearest a point, how far along, how far away.
+        let (side, t, far) = b.nearest([103.0, 40.0]);
+        assert_eq!(side, 1);
+        assert!((t - 0.4).abs() < 1e-9 && (far - 3.0).abs() < 1e-9, "{t} {far}");
     }
 
     #[test]

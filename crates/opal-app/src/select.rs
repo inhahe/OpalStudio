@@ -1275,11 +1275,11 @@ mod tests {
         let mut st = AppState::new();
         st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
         let rect = Shape::rectangle(&IRect::new(20, 20, 200, 80).to_f(), false);
-        let triangle = Outline {
-            start: [150.0, 20.0],
-            segments: vec![Segment::Line { to: [250.0, 20.0] }, Segment::Line { to: [250.0, 80.0] }],
-            smooth: false,
-        };
+        let triangle = Outline::new(
+            [150.0, 20.0],
+            vec![Segment::Line { to: [250.0, 20.0] }, Segment::Line { to: [250.0, 80.0] }],
+            false,
+        );
         let made = Selection::new(Step::Shape { shape: rect, combine: Combine::Replace })
             .then(Step::Outline { outline: triangle, combine: Combine::Add })
             .then(Step::Grow { by: 2.0, corners: Reach::Square });

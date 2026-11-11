@@ -638,6 +638,10 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
     if settings::settings_ui(ui, settings, show, &palette, info.id) {
         st.settings_touched();
     }
+    // The outline edited (the selection's last step), its points picked.
+    if tool == crate::tools::ToolId::Outline {
+        outline_points(ui, st);
+    }
     // The crop box, in numbers.
     if tool == crate::tools::ToolId::Crop
         && let Some(id) = st.active_doc
@@ -646,6 +650,49 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
         ui.label(RichText::new("Box").strong());
         crate::box_fields::crop(ui, st, id, "crop-panel");
     }
+}
+
+/// The outline tool's buttons for the points picked on the outline it edits (the selection's
+/// last step, when it is one), and what its presses and drags do to it.
+fn outline_points(ui: &mut egui::Ui, st: &mut AppState) {
+    use crate::outline_tool::{delete_picked, edited, join_picked, pick_all, picked};
+    use opal_core::outline::Join;
+    let weak = st.palette.weak_text;
+    let Some(d) = st.active_mut() else { return };
+    let Some((o, _)) = edited(d) else { return };
+    let picked = picked(d);
+    ui.separator();
+    ui.label(RichText::new("Points").strong());
+    ui.label(RichText::new(format!("{} points, {} picked", o.points().len(), picked.len())).color(weak));
+    let some = !picked.is_empty();
+    ui.horizontal_wrapped(|ui| {
+        if ui.add_enabled(some, egui::Button::new("Smooth")).on_hover_text("Make the points picked smooth").clicked() {
+            join_picked(d, Join::Smooth);
+        }
+        if ui.add_enabled(some, egui::Button::new("Sharp")).on_hover_text("Make the points picked corners").clicked() {
+            join_picked(d, Join::Sharp);
+        }
+        if ui
+            .add_enabled(some, egui::Button::new("Delete"))
+            .on_hover_text("Take the points picked away (Delete)")
+            .clicked()
+        {
+            delete_picked(d);
+        }
+        if ui.button("All").on_hover_text("Pick every point").clicked() {
+            pick_all(d);
+        }
+    });
+    ui.label(
+        RichText::new(
+            "Click a point to pick it (Shift for more) and drag it to move it; drag a handle to bend its sides \
+             (Alt: that side alone); drag a side to bend it; click a side to add a point; Alt+click a point to \
+             take it away; double-click a point to make it smooth or a corner; Alt+drag the outline to move it \
+             all.",
+        )
+        .color(weak)
+        .small(),
+    );
 }
 
 /// The heading of what the tool settings show: `glyph` and `name`, which say on hover what

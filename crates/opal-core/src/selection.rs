@@ -324,6 +324,14 @@ impl Selection {
         }
     }
 
+    /// Its last step, if that is an outline, and how it combines: what the outline tool edits.
+    pub fn last_outline(&self) -> Option<(&crate::outline::Outline, Combine)> {
+        match self.steps.last()? {
+            Step::Outline { outline, combine } => Some((outline, *combine)),
+            _ => None,
+        }
+    }
+
     /// The selection its steps but the last make (nothing selected, if it has one step): its
     /// mask the one kept, if one was, else worked out again.
     pub fn before_last(&self) -> Selection {

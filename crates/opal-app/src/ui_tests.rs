@@ -3634,6 +3634,109 @@ fn an_outline_drawn_point_by_point_survives_backspace_mid_pull_space_and_ctrl_cl
 }
 
 #[test]
+fn the_outline_tool_edits_the_last_outline_point_by_point() {
+    use opal_core::outline::{Join, Outline};
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Outline);
+    h.run();
+    let none = egui::Modifiers::NONE;
+    let edited = |h: &Harness<'static, OpalApp>| -> Outline {
+        crate::outline_tool::edited(h.state().state().active().unwrap()).expect("an outline edited").0
+    };
+    let picked = |h: &Harness<'static, OpalApp>| crate::outline_tool::picked(h.state().state().active().unwrap());
+    let label = |h: &Harness<'static, OpalApp>| {
+        h.state().state().active().unwrap().history.undo_label().map(str::to_owned).unwrap_or_default()
+    };
+    let close = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 0.6 && (a[1] - b[1]).abs() < 0.6;
+    // Two clicks a frame apart (within a double-click's time) at `at`, document pixels.
+    let double_click = |h: &mut Harness<'static, OpalApp>, at: [f32; 2]| {
+        let v = h.state().state().active().unwrap().view;
+        let p = v.screen_rect.min + v.to_screen(egui::vec2(at[0], at[1])) / h.ctx.pixels_per_point();
+        h.hover_at(p);
+        h.run();
+        for _ in 0..2 {
+            for pressed in [true, false] {
+                h.input_mut().events.push(egui::Event::PointerButton {
+                    pos: p,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            h.step();
+        }
+        h.run();
+    };
+    // A square drawn point by point and closed: the outline edited.
+    for p in [[100.0, 100.0], [200.0, 100.0], [200.0, 200.0], [100.0, 200.0]] {
+        click_image(&mut h, p, none);
+    }
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert_eq!(edited(&h).points().len(), 4);
+    // A point clicked: picked. Dragged: moved, as a history state.
+    click_image(&mut h, [200.0, 100.0], none);
+    assert_eq!(picked(&h), vec![1]);
+    drag_image(&mut h, &[[200.0, 100.0], [210.0, 105.0], [220.0, 110.0]], none);
+    assert!(close(edited(&h).points()[1], [220.0, 110.0]), "{:?}", edited(&h).points());
+    assert_eq!(label(&h), "Edit outline");
+    // A side clicked: a point added there, picked; Alt+click on it: taken away.
+    click_image(&mut h, [210.0, 155.0], none);
+    assert_eq!((edited(&h).points().len(), picked(&h), label(&h)), (5, vec![2], "Add point".to_owned()));
+    click_image(&mut h, [210.0, 155.0], egui::Modifiers::ALT);
+    assert_eq!((edited(&h).points().len(), label(&h)), (4, "Delete points".to_owned()));
+    // A double-click on a point: picked by the first click, made smooth by the second.
+    double_click(&mut h, [100.0, 100.0]);
+    assert_eq!((edited(&h).join(0), label(&h)), (Join::Smooth, "Smooth points".to_owned()));
+    // Its handle dragged: the other turns to stay in line with it.
+    let out = edited(&h).handles(0)[1].expect("pulled out");
+    let to = [out[0], out[1] - 20.0];
+    drag_image(
+        &mut h,
+        &[[out[0] as f32, out[1] as f32], [to[0] as f32, (to[1] + 10.0) as f32], [to[0] as f32, to[1] as f32]],
+        none,
+    );
+    let o = edited(&h);
+    let [into, out] = o.handles(0).map(|h| h.expect("both handles"));
+    let p = o.points()[0];
+    let (u, v) = ([into[0] - p[0], into[1] - p[1]], [out[0] - p[0], out[1] - p[1]]);
+    assert!(close(out, to), "{out:?}");
+    assert!((u[0] * v[1] - u[1] * v[0]).abs() / (u[0].hypot(u[1]) * v[0].hypot(v[1])) < 1e-3, "not in line");
+    // Alt+drag from a side: the whole outline moved.
+    let before = edited(&h).points();
+    drag_image(&mut h, &[[150.0, 200.0], [155.0, 205.0], [160.0, 210.0]], egui::Modifiers::ALT);
+    let after = edited(&h).points();
+    assert!(before.iter().zip(&after).all(|(a, b)| close([a[0] + 10.0, a[1] + 10.0], *b)), "{after:?}");
+    // A point picked and Delete pressed: taken away.
+    click_image(&mut h, [110.0, 210.0], none);
+    h.key_press(egui::Key::Delete);
+    h.run();
+    assert_eq!((edited(&h).points().len(), label(&h)), (3, "Delete points".to_owned()));
+    // Esc lets go of the points picked; so does a click away, which begins nothing; another does.
+    click_image(&mut h, [230.0, 115.0], none);
+    assert_eq!(picked(&h).len(), 1);
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(picked(&h).is_empty());
+    click_image(&mut h, [230.0, 115.0], none);
+    click_image(&mut h, [350.0, 40.0], none);
+    assert!(picked(&h).is_empty() && h.state().state().active().unwrap().outlining.is_none());
+    click_image(&mut h, [350.0, 40.0], none);
+    assert!(h.state().state().active().unwrap().outlining.is_some(), "a click away began nothing");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    // An outline closed by a double-click on its first point: that point not made smooth.
+    for p in [[300.0, 200.0], [380.0, 200.0], [380.0, 280.0]] {
+        click_image(&mut h, p, none);
+    }
+    double_click(&mut h, [300.0, 200.0]);
+    let o = edited(&h);
+    assert_eq!((o.points().len(), o.join(0), label(&h)), (3, Join::Sharp, "Outline selection".to_owned()));
+}
+
+#[test]
 fn the_selection_panel_lists_the_steps_and_takes_one_away() {
     let _gpu = gpu_lock();
     let mut h = harness();

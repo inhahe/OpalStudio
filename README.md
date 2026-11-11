@@ -101,7 +101,9 @@ cargo test --workspace                     # all tests, interface tests included
   column of pixels the canvas across, Shift adding to the selection and Alt taking away; the
   Outline tool (L), a loop dragged freehand round what to select, or clicked point by point
   (a drag from the last point bending the side into a curve; Enter closes it, Backspace takes a
-  point back); Select All, Deselect, Reselect and Invert Selection; a layer's pixels
+  point back), and the last outline edited with it: points dragged, added by a click on a side,
+  taken away with Alt+click or Delete, made smooth or sharp with a double-click, their handles
+  and sides dragged to bend them, the whole outline moved with Alt+drag; Select All, Deselect, Reselect and Invert Selection; a layer's pixels
   selected by Ctrl+clicking its thumbnail (with Shift to add, Alt to take away); Clear, Cut and Copy within
   it; Layer via Copy (Ctrl+J) and Layer via Cut; Crop to Selection; Transform Selection (the
   selection itself moved, sized or turned in the transform box); marching ants round it. The last shape keeps a box whose handles
