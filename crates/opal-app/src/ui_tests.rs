@@ -3854,7 +3854,8 @@ fn a_right_drag_redraws_a_stretch_of_the_outline_the_nearer_or_with_tab_the_othe
         h.state().state().active().unwrap().history.undo_label().map(str::to_owned).unwrap_or_default()
     };
     // A drag with `button` along `path` (document pixels), `key` pressed once it has gone a number of
-    // points.
+    // points (through the input hook, as the app's window gives it), let go in the frame of its last
+    // move.
     let drag = |h: &mut Harness<'static, OpalApp>,
                 button: egui::PointerButton,
                 path: &[[f32; 2]],
@@ -3871,17 +3872,24 @@ fn a_right_drag_redraws_a_stretch_of_the_outline_the_nearer_or_with_tab_the_othe
             modifiers: none,
         });
         h.run();
-        for (k, &p) in path[1..].iter().enumerate() {
+        for (k, &p) in path[1..path.len() - 1].iter().enumerate() {
             h.hover_at(at(p));
             h.run();
             if let Some((after, modifiers, key)) = key
                 && after == k
             {
-                h.key_press_modifiers(modifiers, key);
+                // Into the frame's input itself, as the window gives it to the hook.
+                let mut raw = std::mem::take(h.input_mut());
+                for pressed in [true, false] {
+                    raw.events.push(egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers });
+                }
+                crate::outline_tool::take_reshape_keys(&mut h.state_mut().state_mut().docs, &mut raw);
+                *h.input_mut() = raw;
                 h.run();
             }
         }
         let last = at(*path.last().unwrap());
+        h.hover_at(last);
         h.input_mut().events.push(egui::Event::PointerButton { pos: last, button, pressed: false, modifiers: none });
         h.run();
     };
@@ -3895,6 +3903,15 @@ fn a_right_drag_redraws_a_stretch_of_the_outline_the_nearer_or_with_tab_the_othe
     square(&mut h);
     drag(&mut h, egui::PointerButton::Secondary, &bump, Some((1, none, egui::Key::Tab)));
     assert_eq!(selected(&h), Some(Extent::Within(IRect::new(125, 70, 175, 100))));
+    // (Tab was the redrawing's alone: no widget has the keyboard.)
+    assert_eq!(h.ctx.memory(|m| m.focused()), None);
+    // Delete mid-drag: neither the picked points' nor Clear's.
+    square(&mut h);
+    drag(&mut h, egui::PointerButton::Secondary, &bump, Some((1, none, egui::Key::Delete)));
+    assert_eq!(label(&h), crate::outline_tool::RESHAPE);
+    h.state_mut().state_mut().active_mut().unwrap().undo();
+    h.run();
+    assert_ne!(label(&h), "Clear");
     // Let go away from it: nothing redrawn, and said why.
     square(&mut h);
     let was = selected(&h);
@@ -3947,6 +3964,48 @@ fn a_right_drag_redraws_a_stretch_of_the_outline_the_nearer_or_with_tab_the_othe
     h.key_press(egui::Key::L);
     h.run();
     assert_eq!(selected(&h), was);
+}
+
+#[test]
+fn a_symmetric_outline_is_redrawn_from_any_of_its_copies() {
+    use crate::tools::ToolId;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    let st = h.state_mut().state_mut();
+    st.set_tool(ToolId::Outline);
+    st.tool_settings.get_mut(&ToolId::Outline).unwrap().set("outline.symmetry", crate::settings::Value::Float(4.0));
+    h.run();
+    let none = egui::Modifiers::NONE;
+    // A diamond round the canvas's middle (200, 150), its slice the side from the top to the
+    // right.
+    click_image(&mut h, [200.0, 100.0], none);
+    click_image(&mut h, [250.0, 150.0], none);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    // A right-drag bulging out its lower left side, the slice's copy half a turn round.
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let at = |[x, y]: [f32; 2]| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    let path = [[187.5, 187.5], [170.0, 196.0], [147.0, 203.0], [150.0, 185.0], [162.5, 162.5]];
+    h.hover_at(at(path[0]));
+    h.run();
+    let button = egui::PointerButton::Secondary;
+    h.input_mut().events.push(egui::Event::PointerButton { pos: at(path[0]), button, pressed: true, modifiers: none });
+    h.run();
+    for &p in &path[1..] {
+        h.hover_at(at(p));
+        h.run();
+    }
+    let last = at(path[4]);
+    h.input_mut().events.push(egui::Event::PointerButton { pos: last, button, pressed: false, modifiers: none });
+    h.run();
+    // The slice bulges out as that copy does, half a turn back: past its top right corner.
+    let d = h.state().state().active().unwrap();
+    assert_eq!(d.history.undo_label(), Some(crate::outline_tool::RESHAPE));
+    let slice = crate::outline_tool::edited(d).unwrap().0;
+    assert_eq!(slice.symmetry.map(|s| s.order), Some(4));
+    assert!(slice.points().iter().any(|p| p[0] > 250.0 && p[1] < 100.0), "{:?}", slice.points());
 }
 
 #[test]

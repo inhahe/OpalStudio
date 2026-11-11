@@ -49,6 +49,17 @@ impl Symmetry {
         Affine::rotate(step * k as f64).about(self.center[0], self.center[1])
     }
 
+    /// What carries what is drawn to each of its copies, itself first (the turns, then, with a
+    /// mirror, the reflection followed by each turn): [`copies`](Self::copies) of them.
+    pub fn maps(&self) -> Vec<Affine> {
+        let turns: Vec<Affine> = (0..i64::from(self.order.max(1))).map(|k| self.turn(k)).collect();
+        let mut maps = turns.clone();
+        if self.mirror {
+            maps.extend(turns.iter().map(|&t| self.reflection().then(t)));
+        }
+        maps
+    }
+
     /// The symmetry `m` carries this one to, if it carries shapes to shapes alike (turning,
     /// moving, flipping, or scaling alike both ways): none, if it stretches one way more than
     /// the other, which no longer keeps it.
@@ -95,6 +106,14 @@ mod tests {
         let tilted = Symmetry { angle: 90.0, ..s };
         assert!(close(tilted.axis(), [1.0, 0.0]));
         assert!(close(tilted.reflection().apply([130.0, 60.0]), [130.0, 140.0]));
+        // Its maps: itself first, a quarter turn, and across the axis then turned.
+        let maps = s.maps();
+        assert_eq!(maps.len(), s.copies());
+        assert!(close(maps[0].apply([130.0, 60.0]), [130.0, 60.0]));
+        assert!(close(maps[1].apply([100.0, 50.0]), [150.0, 100.0]));
+        assert!(close(maps[4].apply([130.0, 60.0]), [70.0, 60.0]));
+        assert!(close(maps[5].apply([130.0, 60.0]), s.turn(1).apply([70.0, 60.0])));
+        assert_eq!(Symmetry { mirror: false, ..s }.maps().len(), 4);
         // Carried by a turn and a move: its center and axis with it; by a stretch, not at all.
         let m = Affine::rotate(std::f64::consts::FRAC_PI_2).then(Affine::translate(10.0, 0.0));
         let t = s.transformed(&m).expect("a turn keeps it");

@@ -633,10 +633,12 @@ impl Cmd {
                 icons::CLEAR,
                 "Erase what is selected on the selected layers.",
                 "Each pixel is erased as much as it is selected, so a soft edge fades out, past the \
-                 canvas too. Inside a selected group, the layers shown are cleared (a hidden one is \
-                 left as it is); a selected layer or group that is hidden, or a lock on a layer to \
-                 clear or a group it is in, refuses it. A layer holding a placed image keeps that \
-                 image's pixels as they were placed: rasterize it first.",
+                 canvas too. Inside a selected group, the layers shown are cleared (one hidden or \
+                 at 0% opacity is left as it is); a selected layer or group that is hidden or at \
+                 0% opacity, or a lock on a layer to clear or a group it is in, refuses it. A layer \
+                 holding a placed image keeps that image's pixels as they were placed: rasterize it \
+                 first. When nothing you can see changes, the status bar says why: no pixels there, \
+                 a layer above covering them (named), or what lies beneath looking the same.",
                 const { &[plain(Key::Delete)] },
             ),
             Cmd::CropToSelection => i(

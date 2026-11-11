@@ -377,6 +377,14 @@ impl OpalApp {
             }
             return;
         }
+        // While a drag on the outline edited or a redrawing of it is under way, Delete and
+        // Backspace do nothing: not the picked points' (they wait for it), nor Clear's.
+        if outline_tool && (d.outline_drag.is_some() || d.reshaping.is_some()) {
+            ctx.input_mut(|i| {
+                i.consume_key(Modifiers::NONE, Key::Delete);
+                i.consume_key(Modifiers::NONE, Key::Backspace);
+            });
+        }
         // Points picked on the outline edited take Delete and Backspace (taking them away) and
         // Esc (letting go of them), before any command does; not while a box is open (whose
         // keys they are) or a drag on the outline is under way (whose Esc gives it up).
@@ -1107,6 +1115,10 @@ pub(crate) const STATUS_TEXT_ROOM: f32 = 160.0;
 const STATUS_PART_MAX: f32 = 260.0;
 
 impl eframe::App for OpalApp {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::outline_tool::take_reshape_keys(&mut self.st.docs, raw_input);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if !self.fitted_to_monitor {

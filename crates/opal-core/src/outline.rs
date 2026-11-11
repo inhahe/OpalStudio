@@ -114,7 +114,7 @@ impl Outline {
     pub fn whole(&self) -> std::borrow::Cow<'_, Outline> {
         let Some(s) = self.symmetric() else { return std::borrow::Cow::Borrowed(self) };
         let end = self.segments.last().map_or(self.start, Segment::end);
-        let closed = self.segments.len() > 1 && touching(end, self.start);
+        let closed = self.slice_loops();
         let m = s.reflection();
         let mirrored = || {
             let image: Vec<Segment> = self.segments.iter().map(|seg| seg.transformed(&m)).collect();
@@ -517,11 +517,14 @@ impl Ring {
     }
 
     /// How near the points `line` are, on average, to the stretch of it through the points
-    /// `stretch` (as [`sampled`](Self::sampled) takes them).
+    /// `stretch` (as [`sampled`](Self::sampled) takes them): of a long line, [`NEARNESS_POINTS`]
+    /// of its points, evenly spaced along its list, stand for it.
     fn nearness(&self, stretch: &[usize], line: &[[f64; 2]]) -> f64 {
         let samples = self.sampled(stretch);
         let nearest = |p: [f64; 2]| samples.iter().map(|q| far(p, *q)).fold(f64::INFINITY, f64::min);
-        line.iter().map(|&p| nearest(p)).sum::<f64>() / line.len() as f64
+        let taken = line.len().min(NEARNESS_POINTS);
+        let at = |k: usize| line[k * (line.len() - 1) / (taken - 1).max(1)];
+        (0..taken).map(|k| nearest(at(k))).sum::<f64>() / taken as f64
     }
 
     /// The point `t` (0 to 1) along the side from point `i`.
@@ -579,6 +582,13 @@ impl Outline {
     /// The fewest points it may have: three, or, as a symmetric outline's slice, two.
     pub fn fewest_points(&self) -> usize {
         if self.symmetric().is_some() { 2 } else { 3 }
+    }
+
+    /// Whether it is a slice that goes round, its end on its start (within a millionth of a
+    /// pixel): its copies are then loops of their own (see [`whole`](Self::whole)).
+    fn slice_loops(&self) -> bool {
+        let end = self.segments.last().map_or(self.start, Segment::end);
+        self.symmetric().is_some() && self.segments.len() > 1 && touching(end, self.start)
     }
 
     /// Why it could not have been made in the editor, if it could not (as one read from a file
@@ -712,8 +722,8 @@ impl Outline {
     /// The outline with a stretch of it drawn again as `line` (points, joined by straight
     /// sides), which runs from the place `from` on it (a side and how far along, as
     /// [`nearest`](Self::nearest) gives them) to the place `to`, its ends put there: of a
-    /// closed outline, the stretch between them nearer the line, or, with `other`, the other;
-    /// of a slice, the stretch between them. The points it is cut at are corners. `None` if the
+    /// closed outline (or a slice going round), the stretch between them nearer the line, or,
+    /// with `other`, the other; of a slice, the stretch between them. The points it is cut at are corners. `None` if the
     /// two places are one, or the line is not a line.
     pub fn reshaped(&self, from: (usize, f64), to: (usize, f64), line: &[[f64; 2]], other: bool) -> Option<Outline> {
         self.reshaping(from, to, line, other).map(|(o, _)| o)
@@ -732,6 +742,13 @@ impl Outline {
             return None;
         }
         let mut ring = Ring::of(self);
+        // A slice going round is redrawn as a closed outline is (its end, its start again,
+        // taken off), and made a slice again after.
+        let looped = self.slice_loops().then(|| {
+            ring.points.pop();
+            ring.joins.pop();
+            ring.symmetry.take()
+        });
         // Cut the later place first, so that the earlier's side is still where it was; then
         // the earlier (on the same side, its share of the part before the later cut).
         let (lo_at, hi_at, back) = if (from.0, from.1) <= (to.0, to.1) { (from, to, false) } else { (to, from, true) };
@@ -793,6 +810,11 @@ impl Outline {
                     new.sides.push(Side::Line);
                 }
             }
+        }
+        if let Some(symmetry) = looped {
+            new.symmetry = symmetry;
+            new.points.push(new.points[0]);
+            new.joins.push(new.joins[0]);
         }
         Some((new.outline(), gone))
     }
@@ -907,6 +929,9 @@ impl Outline {
 
 /// A line: where it begins, and its segments.
 type Path = ([f64; 2], Vec<Segment>);
+
+/// How many of a redrawing's line's points [`Ring::nearness`] measures at most.
+const NEARNESS_POINTS: usize = 64;
 
 /// How far apart `a` and `b` are.
 fn far(a: [f64; 2], b: [f64; 2]) -> f64 {
@@ -1982,6 +2007,24 @@ mod tests {
         let redrawn = slice.reshaped((0, 0.5), (1, 0.5), &[[50.0, 0.0], [60.0, 40.0], [100.0, 50.0]], false).unwrap();
         assert_eq!(redrawn.points(), vec![[0.0, 0.0], [50.0, 0.0], [60.0, 40.0], [100.0, 50.0], [100.0, 100.0]]);
         assert_eq!(redrawn.symmetry, Some(sym));
+        // A slice going round (its end on its start), a corner cut across: that corner
+        // redrawn, as of a closed outline, or with `other` the rest; a slice going round still.
+        let loop_points = [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0], [0.0, 0.0]];
+        let looped = Outline { symmetry: Some(sym), ..polygon(&loop_points, true) };
+        let corner = [[0.0, 50.0], [20.0, 20.0], [50.0, 0.0]];
+        let places = |o: &Outline| {
+            let mut p = o.points();
+            p.sort_by(|a, b| a.partial_cmp(b).expect("numbers"));
+            p.dedup();
+            p
+        };
+        let cut = looped.reshaped((3, 0.5), (0, 0.5), &corner, false).expect("redrawn");
+        let kept = vec![[0.0, 50.0], [0.0, 100.0], [20.0, 20.0], [50.0, 0.0], [100.0, 0.0], [100.0, 100.0]];
+        assert_eq!(places(&cut), kept);
+        assert!(cut.slice_loops());
+        let rest = looped.reshaped((3, 0.5), (0, 0.5), &corner, true).expect("redrawn");
+        assert_eq!(places(&rest), vec![[0.0, 0.0], [0.0, 50.0], [20.0, 20.0], [50.0, 0.0]]);
+        assert!(rest.slice_loops());
         // From and to one place: nothing redrawn.
         assert!(square.reshaped((1, 0.5), (1, 0.5), &bump, false).is_none());
     }

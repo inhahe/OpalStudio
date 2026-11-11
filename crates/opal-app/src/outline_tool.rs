@@ -9,6 +9,7 @@
 use crate::doc::DocState;
 use crate::settings::Settings;
 use eframe::egui::{self, PointerButton, Pos2, Rect, Response};
+use opal_core::geom::Affine;
 use opal_core::mask::Combine;
 use opal_core::outline::{End, Join, Node, Outline, Segment};
 use opal_core::selection::{MOST_POINTS, Step};
@@ -248,16 +249,18 @@ fn guide(
     to_screen: &dyn Fn([f64; 2]) -> Pos2,
 ) -> bool {
     let (s, whose) = shown;
-    if let Some(drag) = d.symmetry_drag.clone() {
+    if let Some(drag) = d.symmetry_drag.take() {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            d.symmetry_drag = None;
             d.discard_pending(MOVE_SYMMETRY);
-        } else if !ctx.input(|i| i.pointer.primary_down()) {
-            d.symmetry_drag = None;
+            return true;
+        }
+        if !ctx.input(|i| i.pointer.primary_down()) {
             if d.pending_label() == Some(MOVE_SYMMETRY) {
                 d.commit_pending();
             }
-        } else if let Some(p) = response.interact_pointer_pos() {
+            return true;
+        }
+        if let Some(p) = response.interact_pointer_pos() {
             let (mut center, mut angle) = (s.center, s.angle);
             if drag.center {
                 center = to_doc(p);
@@ -278,6 +281,7 @@ fn guide(
                 }
             }
         }
+        d.symmetry_drag = Some(drag);
         return true;
     }
     if whose == Shown::Drawn || !response.drag_started_by(PointerButton::Primary) {
@@ -367,11 +371,17 @@ pub struct Reshaping {
     start: Outline,
     combine: Combine,
     before: opal_core::selection::Selection,
-    /// Where on it the drag began: a side, and how far along it.
+    /// What carries the outline (a symmetric one's slice) to where the line is drawn: the copy
+    /// it began on (itself, without symmetry), and back. The line redraws the slice as it lies
+    /// on that copy.
+    map: Affine,
+    back: Affine,
+    /// Where on the outline the drag began: a side, and how far along it.
     from: (usize, f64),
-    /// The line drawn so far (document pixels), from where it began.
+    /// The line drawn so far (document pixels, where it is drawn), from where it began.
     pub line: Vec<[f64; 2]>,
-    /// Whether the other stretch between its ends is the one redrawn (Tab).
+    /// Whether the other stretch between its ends is the one redrawn (Tab, which
+    /// [`take_reshape_keys`] gives it).
     pub other: bool,
     /// The button it is drawn with.
     button: PointerButton,
@@ -381,29 +391,62 @@ pub struct Reshaping {
     /// The selection it began on (weakly, compared by address): once it is another (undone or
     /// deselected meanwhile, say), the redrawing is given up.
     of: std::sync::Weak<opal_core::selection::Selection>,
+    /// What letting go would make, as the line's length and `other` were when it was last
+    /// worked out (see [`made`](Self::made)): shown while it is drawn.
+    shown: Option<(Outline, Vec<[f64; 2]>)>,
+    shown_for: (usize, bool),
 }
 
 impl Reshaping {
-    /// Where its line ends on the outline, if its last point is near it (within its reach on
-    /// screen): a side, and how far along it.
+    /// Where its line ends on the outline (on the copy it began on), if its last point is near
+    /// it (within its reach on screen): a side, and how far along it.
     fn landing(&self, to_screen: &dyn Fn([f64; 2]) -> Pos2) -> Option<(usize, f64)> {
         let last = *self.line.last()?;
-        let (side, t, _) = self.start.nearest(last)?;
-        (to_screen(self.start.along(side, t)).distance(to_screen(last)) <= self.near).then_some((side, t))
+        let (side, t, _) = self.start.nearest(self.back.apply(last))?;
+        let on = self.map.apply(self.start.along(side, t));
+        (to_screen(on).distance(to_screen(last)) <= self.near).then_some((side, t))
     }
 
-    /// The outline it would make let go now, and the stretch it would replace; none, if its
-    /// line does not end on the outline.
-    pub fn made(&self, to_screen: &dyn Fn([f64; 2]) -> Pos2) -> Option<(Outline, Vec<[f64; 2]>)> {
-        self.start.reshaping(self.from, self.landing(to_screen)?, &self.line, self.other)
+    /// The outline it would make let go now, and the stretch it would replace (where it is
+    /// drawn); none, if its line does not end on the outline.
+    fn made(&self, to_screen: &dyn Fn([f64; 2]) -> Pos2) -> Option<(Outline, Vec<[f64; 2]>)> {
+        let line: Vec<[f64; 2]> = self.line.iter().map(|&p| self.back.apply(p)).collect();
+        let (outline, gone) = self.start.reshaping(self.from, self.landing(to_screen)?, &line, self.other)?;
+        Some((outline, gone.into_iter().map(|p| self.map.apply(p)).collect()))
+    }
+
+    /// Works out again what letting go would make, if the line or `other` changed since.
+    fn show(&mut self, to_screen: &dyn Fn([f64; 2]) -> Pos2) {
+        let now = (self.line.len(), self.other);
+        if self.shown_for != now {
+            self.shown = self.made(to_screen);
+            self.shown_for = now;
+        }
     }
 }
 
+/// Tab, while a redrawing is under way on one of `docs`, flips which stretch it redraws: taken
+/// out of `raw`, the frame's input, before egui sees it, which would move the keyboard focus to
+/// a widget.
+pub fn take_reshape_keys(docs: &mut [DocState], raw: &mut egui::RawInput) {
+    let Some(r) = docs.iter_mut().find_map(|d| d.reshaping.as_mut()) else { return };
+    raw.events.retain(|e| match e {
+        egui::Event::Key { key: egui::Key::Tab, pressed, repeat, modifiers, .. } if modifiers.is_none() => {
+            if *pressed && !*repeat {
+                r.other = !r.other;
+            }
+            false
+        }
+        _ => true,
+    });
+}
+
 /// What a frame's right-drags (and drags with R held) do to the outline edited on `d`: from a
-/// press on it, a line drawn freehand, which, let go on the outline, redraws the stretch
-/// between its ends (the one nearer it, or with Tab the other), as a history state; let go
-/// away from it, or given up with Esc or by the selection changing meanwhile, nothing (the
-/// status bar says why, let go away). Whether they were its.
+/// press on it (on a symmetric one, on any of its copies), a line drawn freehand, which, let
+/// go on the outline (that copy), redraws the stretch between its ends (the one nearer it, or
+/// with Tab the other), as a history state; let go away from it, or given up with Esc or by
+/// the selection changing meanwhile, nothing (the status bar says why, let go away; and if the
+/// outline would be larger than an outline may be, or select nothing). Whether they were its.
 fn reshape(
     ctx: &egui::Context,
     d: &mut DocState,
@@ -412,17 +455,12 @@ fn reshape(
     to_doc: &dyn Fn(Pos2) -> [f64; 2],
     to_screen: &dyn Fn([f64; 2]) -> Pos2,
 ) -> bool {
-    if let Some(mut r) = d.reshaping.clone() {
+    if let Some(mut r) = d.reshaping.take() {
         if !d.pixel_selection().is_some_and(|s| std::sync::Weak::ptr_eq(&r.of, &Arc::downgrade(s))) {
-            d.reshaping = None;
             return true;
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-            d.reshaping = None;
             return true;
-        }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
-            r.other = !r.other;
         }
         if ctx.input(|i| i.pointer.button_down(r.button)) {
             if let Some(p) = response.interact_pointer_pos().or_else(|| response.hover_pos())
@@ -430,21 +468,18 @@ fn reshape(
             {
                 r.line.push(to_doc(p));
             }
+            r.show(to_screen);
             d.reshaping = Some(r);
             return true;
         }
-        // Let go: on the outline, the stretch redrawn.
-        d.reshaping = None;
-        match r.made(to_screen) {
-            Some((outline, _)) => {
-                let step = Step::Outline { outline, combine: r.combine };
-                match crate::select::within_memory(|b| r.before.then_within(step, b)) {
-                    Ok(made) => d.set_pixel_selection(Some(made), RESHAPE),
-                    Err(why) => d.notice = Some(why),
-                }
-            }
-            None => d.notice = Some(LET_GO_ON_IT.to_owned()),
+        // Let go: where it was let go the line's end (the last move and the release may come
+        // in one frame), and on the outline, the stretch redrawn.
+        if let Some(p) = ctx.input(|i| i.pointer.latest_pos())
+            && r.line.last().is_none_or(|&l| to_screen(l).distance(p) >= LAST_STEP)
+        {
+            r.line.push(to_doc(p));
         }
+        let_go(d, &r, to_screen);
         return true;
     }
     let button = if response.drag_started_by(PointerButton::Secondary) {
@@ -456,9 +491,20 @@ fn reshape(
     };
     let Some(origin) = ctx.input(|i| i.pointer.press_origin()) else { return false };
     let Some((outline, combine)) = edited(d).map(|(o, c)| (o.clone(), c)) else { return false };
-    let Some((side, t, _)) = outline.nearest(to_doc(origin)) else { return false };
-    let on = outline.along(side, t);
-    if to_screen(on).distance(origin) > near {
+    // The place nearest the press on the outline or any of its copies, and what carries the
+    // outline there and back.
+    let maps = outline.symmetric().map_or_else(|| vec![Affine::IDENTITY], |s| s.maps());
+    let nearest = maps
+        .into_iter()
+        .filter_map(|map| {
+            let back = map.inverse()?;
+            let (side, t, _) = outline.nearest(back.apply(to_doc(origin)))?;
+            let on = map.apply(outline.along(side, t));
+            Some((to_screen(on).distance(origin), (side, t), on, map, back))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0));
+    let Some((far, from, on, map, back)) = nearest else { return false };
+    if far > near {
         return false;
     }
     let s = d.pixel_selection().expect("one with an outline");
@@ -467,15 +513,43 @@ fn reshape(
         start: outline,
         combine,
         before,
-        from: (side, t),
+        map,
+        back,
+        from,
         line: vec![on],
         other: false,
         button,
         near,
         of,
+        shown: None,
+        shown_for: (1, false),
     });
     true
 }
+
+/// What letting go of the redrawing `r` does on `d` (`to_screen` turning document pixels into
+/// screen points): on the outline, the stretch redrawn, as a history state (if that selects
+/// nothing, the status bar says so); away from it, or if the outline would be larger than an
+/// outline may be, nothing, and the status bar says why.
+fn let_go(d: &mut DocState, r: &Reshaping, to_screen: &dyn Fn([f64; 2]) -> Pos2) {
+    let Some((outline, _)) = r.made(to_screen) else {
+        d.notice = Some(LET_GO_ON_IT.to_owned());
+        return;
+    };
+    if let Some(why) = outline.refused() {
+        d.notice = Some(format!("The outline was not redrawn: {why}."));
+        return;
+    }
+    let step = Step::Outline { outline, combine: r.combine };
+    match crate::select::within_memory(|b| r.before.then_within(step, b)) {
+        Ok(made) => d.select_made(made, RESHAPE),
+        Err(why) => d.notice = Some(why),
+    }
+}
+
+/// How far (screen points) from the line's last point a redrawing must be let go for that
+/// place to end it as well.
+const LAST_STEP: f32 = 0.5;
 
 /// What the status bar says when a redrawing is let go away from the outline.
 pub const LET_GO_ON_IT: &str = "Let go on the outline to redraw the stretch between.";
@@ -490,7 +564,7 @@ pub fn draw_reshaping(
     to_screen: &dyn Fn([f64; 2]) -> Pos2,
 ) {
     let painter = ui.painter().with_clip_rect(rect);
-    if let Some((_, gone)) = r.made(to_screen) {
+    if let Some((_, gone)) = &r.shown {
         let red = egui::Color32::from_rgba_unmultiplied(230, 40, 40, 200);
         painter.add(egui::Shape::line(gone.iter().map(|&p| to_screen(p)).collect(), egui::Stroke::new(3.0, red)));
     }
@@ -653,7 +727,7 @@ fn replace(d: &mut DocState, outline: Option<Outline>, points: Vec<usize>, label
     };
     match crate::select::within_memory(|b| before.then_within(Step::Outline { outline, combine }, b)) {
         Ok(made) => {
-            d.set_pixel_selection(Some(made), label);
+            d.select_made(made, label);
             pick(d, points, None);
         }
         Err(why) => d.notice = Some(why),
@@ -706,25 +780,26 @@ fn edit(
     options: Options,
 ) -> bool {
     let modifiers = ctx.input(|i| i.modifiers);
-    if let Some(drag) = d.outline_drag.clone() {
+    if let Some(drag) = d.outline_drag.take() {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            d.outline_drag = None;
             d.discard_pending(EDIT);
             pick(d, drag.picked, None);
         } else if !ctx.input(|i| i.pointer.primary_down()) {
             // Let go: the edit is a history state of its own, its points still picked.
-            d.outline_drag = None;
             if d.pending_label() == Some(EDIT) {
                 d.commit_pending();
             }
             pick(d, drag.picked, None);
-        } else if let Some(p) = response.interact_pointer_pos() {
-            let at = to_doc(p);
-            let made = drag.made([at[0] - drag.from[0], at[1] - drag.from[1]]);
-            if edited(d).map(|(o, _)| o) != Some(&made) {
-                let step = Step::Outline { outline: made, combine: drag.combine };
-                crate::select_tool::reshape_with(d, &drag.before, step, EDIT);
+        } else {
+            if let Some(p) = response.interact_pointer_pos() {
+                let at = to_doc(p);
+                let made = drag.made([at[0] - drag.from[0], at[1] - drag.from[1]]);
+                if edited(d).map(|(o, _)| o) != Some(&made) {
+                    let step = Step::Outline { outline: made, combine: drag.combine };
+                    crate::select_tool::reshape_with(d, &drag.before, step, EDIT);
+                }
             }
+            d.outline_drag = Some(drag);
         }
         return true;
     }
@@ -1002,6 +1077,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_redrawing_too_large_or_selecting_nothing_is_said_so() {
+        use crate::state::{AppState, Background, NewImage};
+        use opal_core::selection::Selection;
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        let d = st.active_mut().unwrap();
+        // On a screen one point a pixel.
+        let to_screen = |p: [f64; 2]| Pos2::new(p[0] as f32, p[1] as f32);
+        let redrawing = |start: Outline, line: Vec<[f64; 2]>, other: bool| Reshaping {
+            start,
+            combine: Combine::Replace,
+            before: Selection::of(Vec::new()),
+            map: Affine::IDENTITY,
+            back: Affine::IDENTITY,
+            from: (0, 0.25),
+            line,
+            other,
+            button: PointerButton::Secondary,
+            near: 7.0,
+            of: std::sync::Weak::new(),
+            shown: None,
+            shown_for: (0, false),
+        };
+        // A slice whose 64 copies come just within the most points an outline may have: a
+        // dozen more drawn into its first side, refused.
+        let sym = Symmetry { order: 32, mirror: true, center: [150.0, 100.0], angle: 0.0 };
+        let n = MOST_POINTS / 64 - 2;
+        let zigzag = (1..=n).map(|i| Segment::Line { to: [i as f64, (i % 2) as f64] }).collect();
+        let slice = Outline { symmetry: Some(sym), ..Outline::new([0.0, 0.0], zigzag, false) };
+        assert_eq!(slice.refused(), None);
+        let bulge = (0..12)
+            .map(|k| {
+                let u = f64::from(k) / 11.0;
+                [0.25 + 0.5 * u, 0.25 + 0.5 * u - 0.2 * (std::f64::consts::PI * u).sin()]
+            })
+            .collect();
+        let_go(d, &redrawing(slice, bulge, false), &to_screen);
+        let said = d.notice.take().unwrap_or_default();
+        assert!(said.starts_with("The outline was not redrawn: "), "{said}");
+        assert!(d.pixel_selection().is_none());
+        // A square's top kept, and the rest drawn again along it: nothing enclosed, and said so.
+        let square = Outline::new(
+            [0.0, 0.0],
+            vec![
+                Segment::Line { to: [100.0, 0.0] },
+                Segment::Line { to: [100.0, 100.0] },
+                Segment::Line { to: [0.0, 100.0] },
+            ],
+            false,
+        );
+        let along_the_top = vec![[25.0, 0.0], [50.0, 0.0], [75.0, 0.0]];
+        let_go(d, &redrawing(square, along_the_top, true), &to_screen);
+        assert_eq!(d.notice.take().as_deref(), Some(crate::select::NOTHING_SELECTED));
+    }
+
+    #[test]
     fn an_image_not_drawn_has_the_tool_s_drags_given_up_their_edits_with_them() {
         use crate::state::{AppState, Background, NewImage};
         use opal_core::selection::Selection;
@@ -1031,12 +1162,16 @@ mod tests {
             start: o.clone(),
             combine: replace,
             before: before.clone(),
+            map: Affine::IDENTITY,
+            back: Affine::IDENTITY,
             from: (0, 0.5),
             line: Vec::new(),
             other: false,
             button: PointerButton::Secondary,
             near: 7.0,
             of,
+            shown: None,
+            shown_for: (0, false),
         });
         d.drawn = 10;
         // Drawn in the pass before: kept.

@@ -959,7 +959,7 @@ pub fn tiles_changed(a: &[Arc<Layer>], b: &[Arc<Layer>]) -> Vec<TileCoord> {
             let (mut ka, mut kb) = (Vec::new(), Vec::new());
             key_into(a, c, &mut ka, &object_token);
             key_into(b, c, &mut kb, &object_token);
-            !same_key(&ka, &kb)
+            ka != kb
         })
         .collect()
 }
@@ -970,28 +970,6 @@ pub fn shows_alike(a: &[Arc<Layer>], b: &[Arc<Layer>], at: &[TileCoord]) -> bool
     prepare(a, Some(&range));
     prepare(b, Some(&range));
     at.par_iter().all(|&c| composite_tile(a, c) == composite_tile(b, c))
-}
-
-/// Whether the keys `a` and `b`, of one tile, are the same: what they composite there is.
-fn same_key(a: &[Token], b: &[Token]) -> bool {
-    let same_tile = |s: &Option<Weak<Tile>>, t: &Option<Weak<Tile>>| match (s, t) {
-        (Some(s), Some(t)) => s.ptr_eq(t),
-        (s, t) => s.is_none() && t.is_none(),
-    };
-    a.len() == b.len()
-        && a.iter().zip(b).all(|pair| match pair {
-            (Token::Layer(p), Token::Layer(q)) | (Token::Group(p), Token::Group(q)) => p == q,
-            (Token::Tile(p), Token::Tile(q)) => p.ptr_eq(q),
-            (Token::Shifted { phase: p, tiles: s }, Token::Shifted { phase: q, tiles: t }) => {
-                p == q && s.iter().zip(t).all(|(s, t)| same_tile(s, t))
-            }
-            (
-                Token::Image { image: p, transform: s, sampling: u },
-                Token::Image { image: q, transform: t, sampling: v },
-            ) => p.ptr_eq(q) && s == t && u == v,
-            (Token::End, Token::End) => true,
-            _ => false,
-        })
 }
 
 /// `tokens` as numbers, alike exactly when the tiles they are the keys of composite alike

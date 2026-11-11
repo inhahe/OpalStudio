@@ -699,26 +699,37 @@ Edge snapping (live-wire) comes with milestone 8.
 ### Reshaping an outline
 
 - **Right-drag** starting on the outline the outline tool edits redraws part of it, freehand.
-  While dragging, the stretch about to be replaced is shown in red with the new line drawn in.
+  While dragging, the stretch about to be replaced is shown in red with the new line drawn in
+  (worked out again only as the line grows or Tab is pressed). On a symmetric outline it may
+  be drawn on any copy (`Symmetry::maps`, what carries the slice to each): the press finds
+  the nearest place on any of them, and the line, carried back from that copy, redraws the
+  slice as it lies there, every copy following.
 - The two ends of the new line split the closed outline into two stretches. The one nearer
-  the new line is replaced (`Ring::nearness`: the mean distance of the line's points from
-  each stretch, sampled); **Tab**, pressed before releasing, flips to the other. On an
-  outline still open (a symmetric slice), what lies between the ends is replaced, the ends
-  kept.
+  the new line is replaced (`Ring::nearness`: the mean distance of the line's points, 64 at
+  most evenly spaced along it, from each stretch, sampled); **Tab**, pressed before
+  releasing, flips to the other. Tab is taken out of the frame's input before egui sees it
+  (`outline_tool::take_reshape_keys`, from the app's `raw_input_hook`), since egui would move
+  the keyboard focus to a widget. On a symmetric slice still open, what lies between the ends
+  is replaced, the ends kept; one going round (its end on its start) is redrawn as a closed
+  outline is, and goes round still.
 - The line's ends cut the outline where they land, exactly (curves split, `Ring::cut`); the
   line replaces what lay between as straight sides, its points as the freehand outline's are
   kept (one every 2 screen points), the points cut at made corners, the outline's other
   joins, its smoothing and its symmetry kept (`Outline::reshaping`). The result is a history
   state, *Reshape outline*, the selection worked out again within the memory free as an
   edit's is.
-- Releasing far from the outline (the status bar says to let go on it), Esc, choosing another
-  tool, or the selection changing meanwhile (an undo, a Deselect: the redrawing keeps the
-  selection it began on weakly, compared by address, as the picked points do) cancels. How
+- Where it is let go ends the line too (the last move and the release may come in one
+  frame). Releasing far from the outline (the status bar says to let go on it), Esc, choosing
+  another tool, or the selection changing meanwhile (an undo, a Deselect: the redrawing keeps
+  the selection it began on weakly, compared by address, as the picked points do) cancels, as
+  does a result larger than an outline may be (`Outline::refused`; said). One that selects
+  nothing is said so, as a new outline's is (`DocState::select_made`). How
   near counts as "on the outline" is the tool's *Reach* setting (`outline.near`, 3 to 20
   screen points, 7 by default), which is also how near a press must be to a point, handle,
   side or the symmetry's handles. A right-click without a drag still opens the context menu.
-  **R + left-drag** does the same as right-drag, for touchpads. The picked points' keys wait
-  while a redrawing is under way.
+  **R + left-drag** does the same as right-drag, for touchpads. While a redrawing or a drag on
+  the outline is under way, Delete and Backspace do nothing: the picked points' keys wait,
+  and Clear, theirs otherwise, does not run.
 - Points of the outline can also be dragged directly.
 
 ### AI object and paint-the-area selection
@@ -1105,10 +1116,14 @@ Built so far, for the commands that erase or copy within the selection:
   only at the tiles whose content changed (`composite::tiles_changed`, told from the
   compositor's tile keys, nothing composited; then `composite::shows_alike`, composited there,
   stopping at the first that differs, so a change that shows costs a tile or two). If
-  nothing shows, the reason is found the same way: the layer above the cleared ones which,
-  hidden, would let it show is named; failing one, the layers above together; failing them,
-  what was cleared was too faint to show. (Layers beneath are not tried: hiding one can let
-  a faint change show by taking away what it was drawn over.)
+  nothing shows, the reason is found the same way: the layer above those it changed which,
+  hidden, would let it show is named (each tried only at the changed tiles it lies over,
+  which are all hiding it can change); failing one, the layers above together; failing them,
+  a layer it changed, or a group it is in, too faint (with nothing above, at full opacity it
+  would show); failing that, what lies beneath looks the same (a copy of a layer cleared over
+  it, say). Layers beneath are not tried as covers: hiding one can let a faint change show by
+  taking away what it was drawn over. Only the layers whose pixels changed count, not every
+  layer selected.
 - **Copy and Layer via Copy** that find the selected layers show nothing add that one of
   them is at 0% opacity, if one is.
 

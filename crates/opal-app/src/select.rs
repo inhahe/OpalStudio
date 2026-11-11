@@ -211,11 +211,17 @@ impl crate::doc::DocState {
     pub fn select_with(&mut self, step: Step, label: &str) -> Result<(), String> {
         let before = self.pixel_selection().cloned();
         let made = within_memory(|b| opal_core::selection::with_maker_within(before.as_deref(), step, b))?;
+        self.select_made(made, label);
+        Ok(())
+    }
+
+    /// Selects `made`, as a history state labeled `label`; if it selects nothing, nothing is
+    /// selected, and the status bar says so.
+    pub fn select_made(&mut self, made: Selection, label: &str) {
         if made.is_empty() {
             self.notice = Some(NOTHING_SELECTED.to_owned());
         }
         self.set_pixel_selection(Some(made), label);
-        Ok(())
     }
 
     /// Selects nothing, as a history state labeled "Deselect", keeping what was selected for
@@ -911,14 +917,26 @@ fn nothing_cleared(doc: &Document, layers: &[LayerId]) -> String {
 }
 
 /// Why erasing from the layers `cleared`, which made `after` of `before`, changed nothing
-/// that shows, if it did not: the layer above them that covers what was erased (hidden, it
-/// would show), or the layers above together, or else it was too faint to show.
+/// that shows, if it did not: the layer above those it changed that covers what was erased
+/// (hidden, it would show), or the layers above together; else one it changed (or a group it
+/// is in) too faint for it to show (at full opacity, it would); else what lies beneath looks
+/// the same.
 fn unseen(before: &Document, after: &Document, cleared: &[LayerId]) -> Option<String> {
     use opal_core::composite::{occupied_tiles, shows_alike, tiles_changed};
+    use opal_core::tile::TileCoord;
     let changed = tiles_changed(&before.layers, &after.layers);
     if changed.is_empty() || !shows_alike(&before.layers, &after.layers, &changed) {
         return None;
     }
+    // Those of `cleared` it changed.
+    let erased: Vec<LayerId> = cleared
+        .iter()
+        .copied()
+        .filter(|&id| match (before.layer(id), after.layer(id)) {
+            (Some(a), Some(b)) => !same_pixels(a, b),
+            _ => false,
+        })
+        .collect();
     // The layers shown (not groups), topmost first: each drawn over those after it.
     fn shown<'a>(layers: &'a [Arc<Layer>], out: &mut Vec<&'a Arc<Layer>>) {
         for l in layers.iter().rev().filter(|l| l.visible && l.opacity > 0.0) {
@@ -930,37 +948,75 @@ fn unseen(before: &Document, after: &Document, cleared: &[LayerId]) -> Option<St
     }
     let mut all = Vec::new();
     shown(&after.layers, &mut all);
-    // Of them, those above the lowest cleared, over what changed, but those cleared. (Hiding
-    // one beneath may let a faint change show, as what lies under it is gone too.)
-    let lowest = all.iter().rposition(|l| cleared.contains(&l.id)).unwrap_or(all.len());
-    let near: std::collections::HashSet<_> = changed.iter().copied().collect();
-    let over: Vec<&Arc<Layer>> = all[..lowest]
+    // Of them, those above the lowest it changed, but those it changed, each with the tiles
+    // that changed it lies over. (Hiding one beneath may let a faint change show, as what lies
+    // under it is gone too.)
+    let lowest = all.iter().rposition(|l| erased.contains(&l.id)).unwrap_or(all.len());
+    let near: std::collections::HashSet<TileCoord> = changed.iter().copied().collect();
+    let over: Vec<(&Arc<Layer>, Vec<TileCoord>)> = all[..lowest]
         .iter()
         .copied()
-        .filter(|l| !cleared.contains(&l.id))
-        .filter(|l| !occupied_tiles(std::slice::from_ref(*l), None).is_disjoint(&near))
+        .filter(|l| !erased.contains(&l.id))
+        .map(|l| (l, occupied_tiles(std::slice::from_ref(l), None).intersection(&near).copied().collect::<Vec<_>>()))
+        .filter(|(_, at)| !at.is_empty())
         .collect();
-    // Whether what was erased shows with `hidden` hidden.
-    let shows_without = |hidden: &[&Arc<Layer>]| {
-        let hide = |doc: &Document| {
-            let mut doc = doc.clone();
-            for l in hidden {
-                if let Some(l) = doc.layer_mut(l.id) {
-                    l.visible = false;
+    // `doc` with the layers `hidden` hidden, and those `full` (and the groups they are in) at
+    // full opacity.
+    fn altered(doc: &Document, hidden: &[LayerId], full: &[LayerId]) -> Document {
+        let mut doc = doc.clone();
+        for &id in hidden {
+            if let Some(l) = doc.layer_mut(id) {
+                l.visible = false;
+            }
+        }
+        for &id in full {
+            let groups: Vec<LayerId> = crate::commands::groups_above(&doc, id).iter().map(|g| g.id).collect();
+            for g in groups.into_iter().chain([id]) {
+                if let Some(l) = doc.layer_mut(g) {
+                    l.opacity = 1.0;
                 }
             }
-            doc
-        };
-        !shows_alike(&hide(before).layers, &hide(after).layers, &changed)
-    };
-    let why = match over.iter().find(|l| shows_without(&[l])) {
-        Some(l) => format!("Nothing you can see changed: \"{}\" covers what was cleared.", l.name),
-        None if shows_without(&over) => {
-            "Nothing you can see changed: the layers above cover what was cleared.".to_owned()
         }
-        None => "Nothing you can see changed: what was cleared was too faint to show.".to_owned(),
+        doc
+    }
+    // Whether what was erased shows at the tiles `at`, so altered.
+    let shows = |hidden: &[LayerId], full: &[LayerId], at: &[TileCoord]| {
+        !shows_alike(&altered(before, hidden, full).layers, &altered(after, hidden, full).layers, at)
     };
-    Some(why)
+    // Hiding a layer changes only the tiles it lies over.
+    if let Some((l, _)) = over.iter().find(|(l, at)| shows(&[l.id], &[], at)) {
+        return Some(format!("Nothing you can see changed: \"{}\" covers what was cleared.", l.name));
+    }
+    let above: Vec<LayerId> = over.iter().map(|(l, _)| l.id).collect();
+    if shows(&above, &[], &changed) {
+        return Some("Nothing you can see changed: the layers above cover what was cleared.".to_owned());
+    }
+    let faintest = erased
+        .iter()
+        .flat_map(|&id| crate::commands::groups_above(after, id).into_iter().chain(after.layer(id)))
+        .filter(|l| l.opacity < 1.0)
+        .min_by(|a, b| a.opacity.total_cmp(&b.opacity));
+    if let Some(l) = faintest
+        && shows(&above, &erased, &changed)
+    {
+        return Some(format!("Nothing you can see changed: \"{}\" is too faint for what was cleared to show.", l.name));
+    }
+    Some("Nothing you can see changed: what lies beneath looks the same as what was cleared.".to_owned())
+}
+
+/// Whether two states of a layer hold the very same pixels: each pixel object's bitmap the
+/// same one.
+fn same_pixels(a: &Layer, b: &Layer) -> bool {
+    match (&a.content, &b.content) {
+        (LayerContent::Objects(x), LayerContent::Objects(y)) => {
+            x.len() == y.len()
+                && x.iter().zip(y).all(|(p, q)| match (&p.kind, &q.kind) {
+                    (ObjectKind::Pixels(p), ObjectKind::Pixels(q)) => Arc::ptr_eq(&p.image, &q.image),
+                    _ => true,
+                })
+        }
+        _ => true,
+    }
 }
 
 /// What Clear and Cut act on: the selected layers, and inside the selected groups the layers
@@ -1936,11 +1992,35 @@ mod tests {
         st.active_mut().unwrap().select_only(under);
         let said = clear(&mut st, IRect::new(70, 10, 120, 60));
         assert_eq!(said, "Nothing you can see changed: the layers above cover what was cleared.");
+        // Twin, at the top, red as Under is over the right half, cleared there; and Blank,
+        // beneath Under, holding nothing there, with it: Under shows the same, and is no cover.
+        let mut twins = Vec::new();
+        st.active_mut()
+            .unwrap()
+            .apply("Twins", |doc: &mut Document, made: &mut IdGen| {
+                let red = opal_core::tile::pixel_from_f32([1.0, 0.0, 0.0, 1.0]);
+                for (name, index, area) in
+                    [("Twin", doc.layers.len(), IRect::new(150, 0, 300, 200)), ("Blank", 1, IRect::new(0, 0, 0, 0))]
+                {
+                    let id = made.layer();
+                    let image = RasterImage::filled(&area, red);
+                    doc.insert(Position { parent: None, index }, Layer::new_raster(id, made.object(), name, image))?;
+                    twins.push(id);
+                }
+                Ok::<(), opal_core::document::TreeError>(())
+            })
+            .unwrap();
+        let d = st.active_mut().unwrap();
+        d.select_only(twins[0]);
+        d.toggle_selected(twins[1]);
+        let said = clear(&mut st, IRect::new(260, 10, 290, 60));
+        assert_eq!(said, "Nothing you can see changed: what lies beneath looks the same as what was cleared.");
+        st.active_mut().unwrap().select_only(under);
         // At a millionth of opacity, uncovered, over the white background: too faint to show
         // (the background beneath is no cover).
         set(&mut st, under, 1e-6);
         let said = clear(&mut st, IRect::new(200, 100, 250, 150));
-        assert_eq!(said, "Nothing you can see changed: what was cleared was too faint to show.");
+        assert_eq!(said, "Nothing you can see changed: \"Under\" is too faint for what was cleared to show.");
         // At 0% opacity: refused.
         set(&mut st, under, 0.0);
         let refused = super::clear_refused(st.active().unwrap()).unwrap_err();
