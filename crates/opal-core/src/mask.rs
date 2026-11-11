@@ -336,6 +336,25 @@ pub fn blend(
     mask: &Mask,
     changed: impl Fn(PixelF32) -> PixelF32 + Sync,
 ) -> RasterImage {
+    blend_by(before, offset, mask, fraction, changed)
+}
+
+/// `before` (a pixel object's bitmap at `offset`, as for [`blend`]) with only what `mask`
+/// selects kept, as much of each pixel as it selects it: what copying within a selection
+/// copies.
+pub fn keep_selected(before: &RasterImage, offset: [i64; 2], mask: &Mask) -> RasterImage {
+    blend_by(before, offset, mask, |l| 1.0 - fraction(l), |_| [0.0; 4])
+}
+
+/// [`blend`], with `weight` giving `m` from each level (tiles where it is 0 throughout left
+/// alone).
+fn blend_by(
+    before: &RasterImage,
+    offset: [i64; 2],
+    mask: &Mask,
+    weight: impl Fn(u16) -> f32 + Sync,
+    changed: impl Fn(PixelF32) -> PixelF32 + Sync,
+) -> RasterImage {
     debug_assert_eq!(changed([0.0; 4]), [0.0; 4], "a transparent pixel changed");
     let coords: Vec<TileCoord> = before.tiles().map(|(c, _)| c).collect();
     let done: Vec<(TileCoord, Option<Arc<Tile>>)> = coords
@@ -343,18 +362,17 @@ pub fn blend(
         .filter_map(|c| {
             let tile = before.tile(c).expect("listed");
             let area = c.rect(0).translate(offset[0], offset[1]);
-            let levels = mask.levels_in(&area);
-            if levels.iter().all(|&l| l == 0) {
+            let weights: Vec<f32> = mask.levels_in(&area).into_iter().map(&weight).collect();
+            if weights.iter().all(|&m| m == 0.0) {
                 return None;
             }
             let mut px = vec![[0.0f32; 4]; TILE_PIXELS];
             tile.to_f32(&mut px);
             let mut same = true;
-            for (p, &l) in px.iter_mut().zip(&levels) {
-                if l == 0 {
+            for (p, &m) in px.iter_mut().zip(&weights) {
+                if m == 0.0 {
                     continue;
                 }
-                let m = fraction(l);
                 let c = changed(*p);
                 let new = [0, 1, 2, 3].map(|i| p[i] * (1.0 - m) + c[i] * m);
                 if new != *p {
@@ -801,5 +819,20 @@ mod tests {
         assert!(shared(&image, &cleared, TileCoord::new(2, 0)));
         // Wholly cleared tiles go.
         assert!(cleared.tile(TileCoord::new(0, 0)).is_none());
+    }
+
+    #[test]
+    fn keeping_what_is_selected_keeps_as_much_of_each_pixel_as_is_selected() {
+        let red = crate::tile::pixel_from_f32([1.0, 0.0, 0.0, 1.0]);
+        let image = RasterImage::filled(&IRect::new(0, 0, 600, 100), red);
+        let mask = Mask::of(&rect(0.0, 0.0, 299.5, 100.0));
+        let kept = keep_selected(&image, [0, 0], &mask);
+        assert_eq!(kept.pixel(10, 50), red);
+        assert_eq!(kept.pixel(400, 50), crate::tile::pixel_from_f32([0.0; 4]));
+        let half = crate::tile::pixel_to_f32(kept.pixel(299, 50));
+        assert!((half[3] - 0.5).abs() < 0.01, "{half:?}");
+        // Wholly selected tiles are the same tiles; wholly unselected ones go.
+        assert!(Arc::ptr_eq(image.tile(TileCoord::new(0, 0)).unwrap(), kept.tile(TileCoord::new(0, 0)).unwrap()));
+        assert!(kept.tile(TileCoord::new(2, 0)).is_none());
     }
 }

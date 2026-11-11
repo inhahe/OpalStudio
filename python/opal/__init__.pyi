@@ -84,6 +84,12 @@ class Editor:
 
         document: The image, by id. Default: the active image.
         """
+    def cut(self, *, document: int | None = None, layers: list[int] | None = None) -> Any:
+        """Copy what is selected on the selected layers, then erase it.
+
+        document: The image, by id. Default: the active image.
+        layers: The layers, by id. Default: the selected layers.
+        """
     def copy(self, *, document: int | None = None) -> Any:
         """Copy the selected layers, as they look, to the clipboard.
 
@@ -253,6 +259,32 @@ class Editor:
         document: The image, by id. Default: the active image.
         layers: The layers, by id. Default: the selected layers.
         """
+    def select_all(self, *, document: int | None = None) -> Any:
+        """Select the whole canvas.
+
+        document: The image, by id. Default: the active image.
+        """
+    def deselect(self, *, document: int | None = None) -> Any:
+        """Select nothing.
+
+        document: The image, by id. Default: the active image.
+        """
+    def invert_selection(self, *, document: int | None = None) -> Any:
+        """Select what is not selected, and nothing of what is.
+
+        document: The image, by id. Default: the active image.
+        """
+    def clear(self, *, document: int | None = None, layers: list[int] | None = None) -> Any:
+        """Erase what is selected on the selected layers.
+
+        document: The image, by id. Default: the active image.
+        layers: The layers, by id. Default: the selected layers.
+        """
+    def crop_to_selection(self, *, document: int | None = None) -> Any:
+        """Make the canvas the rectangle round the selection.
+
+        document: The image, by id. Default: the active image.
+        """
     def crop_to_content(self, *, document: int | None = None) -> Any:
         """Shrink (or grow) the canvas to fit what the visible layers hold.
 
@@ -333,6 +365,11 @@ class Editor:
         document: The image, by id. Default: the active image.
         layer: The layer, by id. Default: the active layer.
         name: Its new name.
+        """
+    def selection(self, *, document: int | None = None) -> Any:
+        """What is selected in an image: the rectangle round it (null if nothing is; "unbounded" where it reaches past every edge, inverted), and the steps that made it, in order.
+
+        document: The image, by id. Default: the active image.
         """
     def documents(self) -> Any:
         """The images open: for each, its id, title, file, canvas size and whether it has unsaved changes."""

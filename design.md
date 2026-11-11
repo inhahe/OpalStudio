@@ -310,6 +310,28 @@ option shows the mask as a red overlay.
 - `.opal` files do not keep selections yet; a later version of the format keeps their
   recipes.
 
+### Commands
+
+On the Select tab (and for scripts, by the same names):
+
+- **Select All** (Ctrl+A) selects the canvas, as Photoshop's does: what lies past it is
+  not selected. **Deselect** (Ctrl+D). **Invert Selection** (Ctrl+Shift+I): a partly
+  selected pixel becomes as selected as it was not, and what lies past the canvas becomes
+  selected. Each is a history state.
+- **Clear** (Delete) erases what is selected on the selected layers, as much of each pixel
+  as it is selected. It is refused, saying why, on a locked or hidden layer, and on one
+  holding a placed image, whose pixels are its own, drawn through its transform (rasterize
+  it first).
+- **Copy** and **Copy Merged** copy within the selection; **Cut** (Ctrl+X, on the Home tab
+  too) copies, then clears.
+- **Crop to Selection** makes the canvas the rectangle round the selection (refused for one
+  that reaches past every edge).
+- The `selection` query tells a script the rectangle round what is selected (or that
+  nothing is, or that it is unbounded) and the steps that made it.
+- The canvas shows the outline as marching ants: white, with black dashes moving along it a
+  step every 100 ms, drawn through the middles of the screen's pixels so that they stay
+  sharp.
+
 ### The recipe
 
 A selection is kept as an ordered list of steps, not only as its final mask:

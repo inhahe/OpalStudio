@@ -587,6 +587,12 @@ impl AppState {
                 }
             }
             Cmd::CropToContent => self.crop_to_content(),
+            Cmd::SelectAll => self.select_all(),
+            Cmd::Deselect => self.deselect(),
+            Cmd::InvertSelection => self.invert_selection(),
+            Cmd::Clear => self.clear_selected(),
+            Cmd::Cut => self.cut(ctx),
+            Cmd::CropToSelection => self.crop_to_selection(),
             Cmd::ResizeImage => {
                 let doc = self.active().expect("available").doc();
                 let (c, resolution) = (doc.canvas, doc.resolution);

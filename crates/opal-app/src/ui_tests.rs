@@ -2712,3 +2712,162 @@ fn the_console_offers_the_scripts_run_lately() {
     h.run();
     assert!(h.state().state().console.recent.is_empty());
 }
+
+// ---- Selections ------------------------------------------------------------------------
+
+/// Makes the rectangle from `(x0, y0)` to `(x1, y1)` what is selected in the active image.
+fn select_rect(h: &mut Harness<'static, OpalApp>, [x0, y0, x1, y1]: [f64; 4]) {
+    use opal_core::mask::{Combine, Shape, ShapeKind};
+    use opal_core::selection::{Selection, Step};
+    let shape = Shape {
+        kind: ShapeKind::Rectangle,
+        center: [(x0 + x1) / 2.0, (y0 + y1) / 2.0],
+        size: [x1 - x0, y1 - y0],
+        angle: 0.0,
+        smooth: true,
+    };
+    let d = h.state_mut().state_mut().active_mut().expect("an image is open");
+    d.set_pixel_selection(Some(Selection::new(Step::Shape { shape, combine: Combine::Replace })), "Select");
+    h.run();
+}
+
+/// Runs `cmd`, as its button would.
+fn command(h: &mut Harness<'static, OpalApp>, cmd: Cmd) {
+    h.state_mut().state_mut().queue.push(cmd);
+    h.run();
+}
+
+/// How much of the active image is selected, if anything is.
+fn selected(h: &Harness<'static, OpalApp>) -> Option<opal_core::mask::Extent> {
+    h.state().state().active().unwrap().pixel_selection().map(|s| s.mask().extent())
+}
+
+#[test]
+fn select_all_deselect_and_invert_change_what_is_selected_as_history_states() {
+    use opal_core::geom::IRect;
+    use opal_core::mask::Extent;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    // By its shortcut: the canvas, outlined round its edge.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run();
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(0, 0, 300, 200))));
+    let outline = h.state_mut().state_mut().active_mut().unwrap().selection_outline().unwrap();
+    let mut corners = outline[0].clone();
+    corners.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(outline.len(), 1);
+    assert_eq!(corners, [[0.0, 0.0], [0.0, 200.0], [300.0, 0.0], [300.0, 200.0]]);
+    command(&mut h, Cmd::InvertSelection);
+    assert_eq!(selected(&h), Some(Extent::Unbounded), "inverted, everything past the canvas");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::D);
+    h.run();
+    assert_eq!(selected(&h), None, "Ctrl+D did not deselect");
+    assert!(crate::commands::availability(h.state().state(), Cmd::InvertSelection).is_err());
+    // Each a state: undone, back through them.
+    command(&mut h, Cmd::Undo);
+    assert_eq!(selected(&h), Some(Extent::Unbounded));
+    command(&mut h, Cmd::Undo);
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(0, 0, 300, 200))));
+    assert_eq!(h.state().state().active().unwrap().history.redo_label(), Some("Invert selection"));
+}
+
+#[test]
+fn clear_erases_what_is_selected_on_the_selected_layers() {
+    use opal_core::document::{LayerContent, ObjectKind};
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    let pixel = |h: &Harness<'static, OpalApp>, x: i64, y: i64| {
+        let d = h.state().state().active().unwrap();
+        let LayerContent::Objects(o) = &d.doc().layers[0].content else { panic!("a pixel layer") };
+        let ObjectKind::Pixels(p) = &o[0].kind else { panic!("pixels") };
+        opal_core::tile::pixel_to_f32(p.image.pixel(x - p.offset[0], y - p.offset[1]))[3]
+    };
+    // Nothing selected: refused, saying why.
+    let why = crate::commands::availability(h.state().state(), Cmd::Clear).unwrap_err();
+    assert!(why.contains("Select an area first"), "{why}");
+    // Half of pixel 199 across is selected.
+    select_rect(&mut h, [100.0, 50.0, 199.5, 150.0]);
+    h.key_press(egui::Key::Delete);
+    h.run();
+    assert_eq!(pixel(&h, 150, 100), 0.0, "inside is not erased");
+    assert_eq!(pixel(&h, 50, 100), 1.0, "outside was erased");
+    assert!((pixel(&h, 199, 100) - 0.5).abs() < 0.01, "a pixel half selected is not half erased");
+    assert_eq!(h.state().state().active().unwrap().history.undo_label(), Some("Clear"));
+}
+
+#[test]
+fn copy_and_cut_take_what_is_selected() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    h.state_mut().state_mut().clipboard = Box::new(crate::clipboard::TestClipboard::default());
+    let copied = |h: &mut Harness<'static, OpalApp>| match h.state_mut().state_mut().clipboard.read_image() {
+        crate::clipboard::Read::Ready(r) => r.unwrap().map(|p| (p.width, p.height)),
+        crate::clipboard::Read::Later(_) => panic!("the test clipboard reads at once"),
+    };
+    select_rect(&mut h, [10.0, 20.0, 40.0, 30.0]);
+    h.event(egui::Event::Copy);
+    h.run();
+    assert_eq!(copied(&mut h), Some((30, 10)), "not trimmed to the selection");
+    // Cut: the same, then cleared.
+    select_rect(&mut h, [50.0, 60.0, 70.0, 100.0]);
+    h.event(egui::Event::Cut);
+    h.run();
+    assert_eq!(copied(&mut h), Some((20, 40)));
+    let d = h.state().state().active().unwrap();
+    assert_eq!(d.history.undo_label(), Some("Cut"));
+    let flat = opal_core::composite::composite_within(&d.doc().layers, &d.doc().canvas.rect());
+    assert_eq!(opal_core::tile::pixel_to_f32(flat.pixel(60, 80))[3], 0.0, "what was cut is still there");
+    assert_eq!(opal_core::tile::pixel_to_f32(flat.pixel(45, 80))[3], 1.0);
+}
+
+#[test]
+fn crop_to_selection_makes_the_canvas_the_rectangle_round_it() {
+    use opal_core::document::Canvas;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    // Pixel 110 across is half selected, and so within it.
+    select_rect(&mut h, [10.0, 20.0, 110.5, 70.0]);
+    command(&mut h, Cmd::CropToSelection);
+    let canvas = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().doc().canvas;
+    assert_eq!(canvas(&h), Canvas { x: 10, y: 20, width: 101, height: 50 });
+    // Inverted, it reaches past every edge: nothing to crop to.
+    command(&mut h, Cmd::InvertSelection);
+    command(&mut h, Cmd::CropToSelection);
+    assert_eq!(canvas(&h), Canvas { x: 10, y: 20, width: 101, height: 50 });
+}
+
+#[test]
+fn the_selection_s_outline_shows_as_marching_ants_on_the_canvas() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    h.state_mut().state_mut().create_image(&crate::state::NewImage {
+        width: 300,
+        height: 200,
+        background: crate::state::Background::Transparent,
+        resolution: 72.0,
+    });
+    h.run();
+    // The top edge of a selection, on the screen: how many of its pixels are black.
+    let black_along_top = |h: &mut Harness<'static, OpalApp>| {
+        let d = h.state().state().active().unwrap();
+        let (view, min) = (d.view, d.view.screen_rect.min);
+        let at = |x: f32, y: f32| min + view.to_screen(egui::vec2(x, y)) / h.ctx.pixels_per_point();
+        let (a, b) = (at(100.0, 50.0), at(200.0, 50.0));
+        let img = render(h, "ants");
+        let ppp = h.ctx.pixels_per_point();
+        let y = (a.y * ppp).floor() as u32;
+        ((a.x * ppp) as u32 + 2..(b.x * ppp) as u32 - 2)
+            .filter(|&x| {
+                let p = img.get_pixel(x, y);
+                p[0] < 40 && p[1] < 40 && p[2] < 40
+            })
+            .count()
+    };
+    assert_eq!(black_along_top(&mut h), 0, "black along the top with nothing selected");
+    select_rect(&mut h, [100.0, 50.0, 200.0, 150.0]);
+    assert!(black_along_top(&mut h) > 10, "no ants along the selection's top");
+}

@@ -362,7 +362,9 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             },
         ],
         Undo | Redo | Copy | CopyMerged | MergeVisible | StampVisible | Flatten | CropToContent | RotateCw
-        | RotateCcw | Rotate180 | FlipHorizontal | FlipVertical | ReapplyAllPlacements => &[DOCUMENT],
+        | RotateCcw | Rotate180 | FlipHorizontal | FlipVertical | ReapplyAllPlacements | SelectAll | Deselect
+        | InvertSelection | CropToSelection => &[DOCUMENT],
+        Clear | Cut => &[DOCUMENT, LAYERS],
         NewLayer | NewGroup => &[
             DOCUMENT,
             Param { name: "name", kind: Kind::Text, help: "Its name.", otherwise: Otherwise::Now("a numbered one") },
@@ -520,6 +522,12 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
 
 /// The queries: what the API tells of the editor and its images.
 const QUERIES: &[(&str, &str, &[Param])] = &[
+    (
+        "selection",
+        "What is selected in an image: the rectangle round it (null if nothing is; \"unbounded\" where it \
+         reaches past every edge, inverted), and the steps that made it, in order.",
+        &[DOCUMENT],
+    ),
     (
         "documents",
         "The images open: for each, its id, title, file, canvas size and whether it has unsaved changes.",
@@ -1715,6 +1723,10 @@ impl AppState {
                 let d = self.doc(self.which(args)?).expect("found");
                 Ok(history_json(d))
             }
+            "selection" => {
+                let d = self.doc(self.which(args)?).expect("found");
+                Ok(selection_json(d.pixel_selection().map(|s| &**s)))
+            }
             "methods" => Ok(describe()),
             "preferences" => Ok(self.preferences_json()),
             "release_pixels" => {
@@ -1800,6 +1812,11 @@ impl AppState {
                 self.next_answer += 1;
                 let n = self.next_answer;
                 if self.copy_answering(cmd == Cmd::CopyMerged, n, ctx) { Reply::Later(n) } else { now(Ok(json!({}))) }
+            }
+            Cmd::Cut => {
+                self.next_answer += 1;
+                let n = self.next_answer;
+                if self.cut_answering(n, ctx) { Reply::Later(n) } else { now(Ok(json!({}))) }
             }
             Cmd::Close => {
                 let id = doc.expect("available");
@@ -2474,6 +2491,17 @@ impl AppState {
 }
 
 /// Image `d`'s history, as the `history` query gives it.
+/// What `selection` (if any) selects, as the `selection` query gives it.
+fn selection_json(selection: Option<&opal_core::selection::Selection>) -> Value {
+    let Some(s) = selection else { return json!({ "bounds": Value::Null, "steps": [] }) };
+    let bounds = match s.mask().extent() {
+        opal_core::mask::Extent::Nothing => Value::Null,
+        opal_core::mask::Extent::Within(r) => json!([r.x0, r.y0, r.width(), r.height()]),
+        opal_core::mask::Extent::Unbounded => json!("unbounded"),
+    };
+    json!({ "bounds": bounds, "steps": s.steps() })
+}
+
 fn history_json(d: &crate::doc::DocState) -> Value {
     let h = &d.history;
     let id = |n: opal_core::history::NodeId| n.0;
@@ -2811,6 +2839,33 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn selections_are_made_inverted_cleared_and_told_by_calls() {
+        let _turn = crate::background::testing::turn();
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 300, "height": 200 })).unwrap();
+        let selection = |st: &mut AppState| now(st, "selection", json!({})).unwrap();
+        assert_eq!(selection(&mut st), json!({ "bounds": null, "steps": [] }));
+        let refused = now(&mut st, "clear", json!({})).unwrap_err();
+        assert!(refused.contains("Select an area first"), "{refused}");
+        now(&mut st, "select_all", json!({})).unwrap();
+        let s = selection(&mut st);
+        assert_eq!(s["bounds"], json!([0, 0, 300, 200]));
+        assert_eq!(s["steps"][0]["step"], json!("shape"));
+        assert_eq!(s["steps"][0]["shape"]["kind"], json!("rectangle"));
+        now(&mut st, "invert_selection", json!({})).unwrap();
+        assert_eq!(selection(&mut st)["bounds"], json!("unbounded"));
+        assert_eq!(selection(&mut st)["steps"][1]["step"], json!("invert"));
+        // Inverted back, then cleared: the background is gone within the canvas.
+        now(&mut st, "invert_selection", json!({})).unwrap();
+        now(&mut st, "clear", json!({})).unwrap();
+        let d = st.active().unwrap();
+        let flat = opal_core::composite::composite_within(&d.doc().layers, &d.doc().canvas.rect());
+        assert!(flat.content_bounds().is_none(), "the canvas was not cleared");
+        now(&mut st, "deselect", json!({})).unwrap();
+        assert_eq!(selection(&mut st)["bounds"], Value::Null);
     }
 
     #[test]

@@ -293,6 +293,10 @@ impl OpalApp {
                     out.push(Cmd::Copy);
                     false
                 }
+                Event::Cut => {
+                    out.push(Cmd::Cut);
+                    false
+                }
                 Event::Paste(_) | Event::PasteImage(_) => {
                     if !counted {
                         out.push(Cmd::Paste);

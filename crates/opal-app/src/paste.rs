@@ -54,8 +54,18 @@ impl AppState {
             return self.message(MessageKind::Info, "Copy", why);
         }
         let flat = composite_within(&layers, &canvas);
+        // Within the selection, as much of each pixel as it is selected.
+        let flat = match &doc.selection {
+            Some(s) => opal_core::mask::keep_selected(&flat, [0, 0], s.mask()),
+            None => flat,
+        };
         let Some(bounds) = flat.content_bounds().map(|b| b.intersect(&canvas)).filter(|b| !b.is_empty()) else {
-            let what = if merged { "Nothing is visible" } else { "The selected layers show nothing" };
+            let what = match (merged, doc.selection.is_some()) {
+                (true, false) => "Nothing is visible",
+                (true, true) => "Nothing visible is selected",
+                (false, false) => "The selected layers show nothing",
+                (false, true) => "The selected layers show nothing selected",
+            };
             return self.message(
                 MessageKind::Info,
                 "Copy",

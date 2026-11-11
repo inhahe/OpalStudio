@@ -38,6 +38,7 @@ mod projector;
 mod recent;
 mod ribbon;
 mod rulers;
+mod select;
 mod server;
 mod settings;
 mod shared_memory;

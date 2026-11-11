@@ -12,8 +12,6 @@ use std::sync::Arc;
 pub enum Step {
     /// A rectangle or an ellipse, combined with the selection so far.
     Shape { shape: Shape, combine: Combine },
-    /// Everything (Select All).
-    All,
     /// The opposite of the selection so far: selected where it was not.
     Invert,
 }
@@ -26,14 +24,13 @@ impl Step {
                 let made = Mask::of(shape);
                 before.combined(&made, *combine)
             }
-            Step::All => Mask::all(),
             Step::Invert => before.inverted(),
         }
     }
 
     /// Whether the step makes a selection of its own, the steps before it no longer counting.
     fn starts_over(&self) -> bool {
-        matches!(self, Step::All | Step::Shape { combine: Combine::Replace, .. })
+        matches!(self, Step::Shape { combine: Combine::Replace, .. })
     }
 }
 
@@ -129,7 +126,8 @@ mod tests {
         // A new shape replacing it is all there is.
         let d = c.then(Step::Shape { shape: rect(0.0, 0.0, 10.0, 10.0), combine: Combine::Replace });
         assert_eq!(d.steps().len(), 1);
-        assert_eq!(Selection::of(vec![Step::Invert, Step::All]).steps(), [Step::All]);
+        let all = Step::Shape { shape: rect(0.0, 0.0, 5.0, 5.0), combine: Combine::Replace };
+        assert_eq!(Selection::of(vec![Step::Invert, all.clone()]).steps(), [all]);
     }
 
     #[test]

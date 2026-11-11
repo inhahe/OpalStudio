@@ -114,6 +114,15 @@ Repeat the action you undid.
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 
+### `cut`
+
+Copy what is selected on the selected layers, then erase it.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `layers` | layers | The layers, by id. Default: the selected layers. |
+
 ### `copy`
 
 Copy the selected layers, as they look, to the clipboard.
@@ -349,6 +358,47 @@ Turn the selected layers' images into plain pixels.
 | `document` | document | The image, by id. Default: the active image. |
 | `layers` | layers | The layers, by id. Default: the selected layers. |
 
+### `select_all`
+
+Select the whole canvas.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+
+### `deselect`
+
+Select nothing.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+
+### `invert_selection`
+
+Select what is not selected, and nothing of what is.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+
+### `clear`
+
+Erase what is selected on the selected layers.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `layers` | layers | The layers, by id. Default: the selected layers. |
+
+### `crop_to_selection`
+
+Make the canvas the rectangle round the selection.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+
 ### `crop_to_content`
 
 Shrink (or grow) the canvas to fit what the visible layers hold.
@@ -511,6 +561,14 @@ Puts pixels into an image, at a place on its canvas: as a new layer above the ac
 | `name` | text | The new layer's name. Default: a numbered one. |
 
 ## Queries
+
+### `selection`
+
+What is selected in an image: the rectangle round it (null if nothing is; "unbounded" where it reaches past every edge, inverted), and the steps that made it, in order.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
 
 ### `documents`
 

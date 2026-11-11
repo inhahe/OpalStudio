@@ -22,6 +22,7 @@ pub enum Cmd {
     ConnectAssistant,
     Undo,
     Redo,
+    Cut,
     Copy,
     CopyMerged,
     Paste,
@@ -44,6 +45,11 @@ pub enum Cmd {
     StampVisible,
     Flatten,
     Rasterize,
+    SelectAll,
+    Deselect,
+    InvertSelection,
+    Clear,
+    CropToSelection,
     CropToContent,
     ResizeImage,
     ResizeCanvas,
@@ -106,7 +112,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 61] = [
+    pub const ALL: [Cmd; 67] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -119,6 +125,7 @@ impl Cmd {
         Cmd::ConnectAssistant,
         Cmd::Undo,
         Cmd::Redo,
+        Cmd::Cut,
         Cmd::Copy,
         Cmd::CopyMerged,
         Cmd::Paste,
@@ -141,6 +148,11 @@ impl Cmd {
         Cmd::StampVisible,
         Cmd::Flatten,
         Cmd::Rasterize,
+        Cmd::SelectAll,
+        Cmd::Deselect,
+        Cmd::InvertSelection,
+        Cmd::Clear,
+        Cmd::CropToSelection,
         Cmd::CropToContent,
         Cmd::ResizeImage,
         Cmd::ResizeCanvas,
@@ -264,20 +276,30 @@ impl Cmd {
                  the branch you were last on; the History panel reaches the others.",
                 const { &[ctrl(Key::Y), ctrl_shift(Key::Z)] },
             ),
+            Cmd::Cut => i(
+                "Cut",
+                icons::CUT,
+                "Copy what is selected on the selected layers, then erase it.",
+                "Copy, then Clear: what the selected layers show within the selection goes to the \
+                 clipboard, and is erased from them, as much of each pixel as it is selected.",
+                const { &[ctrl(Key::X)] },
+            ),
             Cmd::Copy => i(
                 "Copy",
                 icons::COPY,
                 "Copy the selected layers, as they look, to the clipboard.",
-                "Copies what the selected layers show within the canvas, trimmed to their content, \
-                 for pasting here or into another program. Pasting back into Opal Studio keeps \
-                 full precision, and Paste in Place puts it back where it came from.",
+                "Copies what the selected layers show within the canvas (and within the selection, \
+                 if there is one: a partly selected pixel as much as it is selected), trimmed to \
+                 their content, for pasting here or into another program. Pasting back into Opal \
+                 Studio keeps full precision, and Paste in Place puts it back where it came from.",
                 const { &[ctrl(Key::C)] },
             ),
             Cmd::CopyMerged => i(
                 "Copy Merged",
                 icons::COPY_MERGED,
                 "Copy everything visible within the canvas to the clipboard.",
-                "All visible layers combined, as the canvas shows them, trimmed to their content.",
+                "All visible layers combined, as the canvas shows them (within the selection, if \
+                 there is one), trimmed to their content.",
                 const { &[ctrl_shift(Key::C)] },
             ),
             Cmd::Paste => i(
@@ -452,6 +474,46 @@ impl Cmd {
                  loses nothing. Rasterizing draws it into ordinary pixels as the canvas shows it, \
                  which makes the file smaller and the layer cheaper to show. It is never \
                  required: everything else works on images as they are.",
+                &[],
+            ),
+            Cmd::SelectAll => i(
+                "Select All",
+                icons::SELECT_ALL,
+                "Select the whole canvas.",
+                "Everything within the canvas; what lies past it is not selected. Commands that act \
+                 on the selection then act on all of it.",
+                const { &[ctrl(Key::A)] },
+            ),
+            Cmd::Deselect => i(
+                "Deselect",
+                icons::DESELECT,
+                "Select nothing.",
+                "Commands then act on whole layers again. Undo brings the selection back.",
+                const { &[ctrl(Key::D)] },
+            ),
+            Cmd::InvertSelection => i(
+                "Invert Selection",
+                icons::INVERT_SELECTION,
+                "Select what is not selected, and nothing of what is.",
+                "A partly selected pixel becomes as selected as it was not. What lies past the \
+                 canvas becomes selected too.",
+                const { &[ctrl_shift(Key::I)] },
+            ),
+            Cmd::Clear => i(
+                "Clear",
+                icons::CLEAR,
+                "Erase what is selected on the selected layers.",
+                "Each pixel is erased as much as it is selected, so a soft edge fades out. A layer \
+                 holding a placed image keeps that image's pixels as they were placed: rasterize it \
+                 first.",
+                const { &[plain(Key::Delete)] },
+            ),
+            Cmd::CropToSelection => i(
+                "Crop to Selection",
+                icons::CROP,
+                "Make the canvas the rectangle round the selection.",
+                "Only the canvas changes: no pixels are removed, so enlarging the canvas again \
+                 brings back anything cropped away.",
                 &[],
             ),
             Cmd::CropToContent => i(
@@ -714,7 +776,7 @@ pub static RIBBON: &[Tab] = &[
                 name: "Clipboard",
                 description: "Copying and pasting images, here and between programs.",
                 large: 1,
-                cmds: &[Cmd::Paste, Cmd::Copy, Cmd::CopyMerged, Cmd::PasteInPlace],
+                cmds: &[Cmd::Paste, Cmd::Cut, Cmd::Copy, Cmd::CopyMerged, Cmd::PasteInPlace],
             },
             Group {
                 name: "Transform",
@@ -757,6 +819,24 @@ pub static RIBBON: &[Tab] = &[
                     Cmd::FlipHorizontal,
                     Cmd::FlipVertical,
                 ],
+            },
+        ],
+    },
+    Tab {
+        name: "Select",
+        groups: &[
+            Group {
+                name: "Select",
+                description: "What commands act on: all of the canvas, nothing, or the opposite. The \
+                              Select tool (M) draws rectangles and ellipses.",
+                large: 1,
+                cmds: &[Cmd::SelectAll, Cmd::Deselect, Cmd::InvertSelection],
+            },
+            Group {
+                name: "Selected",
+                description: "Acting on what is selected, as much of each pixel as it is selected.",
+                large: 1,
+                cmds: &[Cmd::Clear, Cmd::Cut, Cmd::CropToSelection],
             },
         ],
     },
@@ -855,7 +935,12 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         New | Open | Preferences | Exit | ConnectAssistant | ToggleOffCanvas | ToggleRulers | ToggleTheme
         | ToggleRibbon | CycleToolsPlace | ResetPanels | Search | Help | Shortcuts | About | WidgetGallery => Ok(()),
         Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup | CopyMerged
-        | StampVisible | ResizeCanvas | CropToContent | Place => needs_doc(),
+        | StampVisible | ResizeCanvas | CropToContent | Place | SelectAll => needs_doc(),
+        Deselect | InvertSelection | CropToSelection => {
+            let d = st.active().ok_or("Open or create an image first.")?;
+            d.pixel_selection().map(|_| ()).ok_or_else(|| "Nothing is selected.".to_owned())
+        }
+        Clear | Cut => crate::select::clear_refused(st.active().ok_or("Open or create an image first.")?),
         Paste | PasteInPlace => Ok(()),
         RunScript => match (&st.scripts_file, st.console.running()) {
             (None, _) => Err(st.scripts_unserved.clone().unwrap_or_else(|| crate::console::NOT_SERVING.to_owned())),
