@@ -4049,6 +4049,37 @@ fn a_symmetric_outline_is_redrawn_from_any_of_its_copies() {
 }
 
 #[test]
+fn a_symmetric_outline_is_edited_on_any_of_its_copies() {
+    use crate::tools::ToolId;
+    use opal_core::geom::IRect;
+    use opal_core::mask::Extent;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    let st = h.state_mut().state_mut();
+    st.set_tool(ToolId::Outline);
+    st.tool_settings.get_mut(&ToolId::Outline).unwrap().set("outline.symmetry", crate::settings::Value::Float(4.0));
+    h.run();
+    let none = egui::Modifiers::NONE;
+    // A diamond round the canvas's middle (200, 150), its slice the side from the top to the
+    // right.
+    click_image(&mut h, [200.0, 100.0], none);
+    click_image(&mut h, [250.0, 150.0], none);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    // A click on the bottom corner, the slice's right one a quarter turn on: that point picked.
+    click_image(&mut h, [200.0, 200.0], none);
+    assert_eq!(crate::outline_tool::picked(h.state().state().active().unwrap()), vec![1]);
+    // Dragged down there: the slice's point out to the right, as that copy sees it, each copy
+    // following.
+    drag_image(&mut h, &[[200.0, 200.0], [200.0, 210.0], [200.0, 220.0]], none);
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(130, 80, 270, 220))));
+    // Alt+drag from the left corner, a copy's: the whole outline moved as dragged, down.
+    drag_image(&mut h, &[[130.0, 150.0], [130.0, 155.0], [130.0, 160.0]], egui::Modifiers::ALT);
+    assert_eq!(selected(&h), Some(Extent::Within(IRect::new(130, 90, 270, 230))));
+}
+
+#[test]
 fn the_selection_panel_lists_the_steps_and_takes_one_away() {
     let _gpu = gpu_lock();
     let mut h = harness();

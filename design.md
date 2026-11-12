@@ -1979,7 +1979,11 @@ kaleidoscope of 2n parts.
   drawing it stops where its whole outline would pass a million segments (its copies, and
   the sides joining them, counted). The slice is what is edited (its points, sides and handles
   as any outline's, its ends with one side each; an outline left with fewer than two points
-  goes), the copies following; an end made smooth gets its handle at right angles to the
+  goes), the copies following. It may be edited on any copy: every copy's points are shown,
+  those picked on each, and a press on a copy's point, handle or side is on the slice's, the
+  slice moved as that copy is (`part_at` tries each of `Symmetry::maps`, the slice first so
+  that it wins where a copy lies on it; a drag carries the pointer's move back through the
+  copy's map). Alt+drag moves the whole outline as dragged, from any copy. An end made smooth gets its handle at right angles to the
   mirror line it lies on, or, turned without a mirror, in line with the handle of the copy
   it meets, so that the whole passes smoothly through the seam; moving it whole moves its
   center too. A symmetry making no copies (order 1, no mirror) is as none, and refused where
