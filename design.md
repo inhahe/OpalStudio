@@ -925,6 +925,42 @@ curve editors.
   (one opened behind it would become the image the dialog acts on): they wait for it to
   close (`AppState::open_dropped`), in the frame its closing brings.
 
+### Comparing
+
+The View tab's Compare group (`compare`):
+
+- **Tile All** puts each open image in a pane of its own, in a grid where the images' tabs
+  were, of as many columns as shows the most of them, each fitted in a cell, given their
+  shapes and the room (`compare::columns`: three photographs in a wide window, two rows;
+  three tall ones, one row); **Consolidate to Tabs** puts them back in one set of tabs.
+  Images' tabs can also be dragged apart into panes, as any panel's. Where they are spread
+  among the panels, both start from the starting layout.
+- Wherever images' tabs are (tiled, dragged apart, pinned), an image opened goes into the
+  tabs of the active one (`app::find_docs_container`).
+- A view resized (a pane's border dragged, the panes tiled) keeps the point in its middle
+  there (`canvas_ui`); the offset moves by whole pixels, half of each size, so as not to
+  drift.
+- Panels rearranged by a command (tiled, put back, pinned, reset) are drawn as they were in
+  that frame, as commands run at its end: another is asked for. Lock Views and Match Zoom
+  and Location are in the frame's signature, for the same reason.
+- **Match Zoom and Location** gives every other image shown the active one's zoom, and
+  shows in the middle of its view the same place of its image (counted from the canvas's
+  corner) the active one shows in the middle of its own. **Lock Views** (a toggle) keeps
+  doing so while the active image is zoomed or scrolled, so that versions of a photograph
+  are gone over together. Not kept between sessions.
+- **Open Reference** opens an image file beside the images being edited, in a pane of its
+  own at the right of their tabs (a third of their room), there whichever of them is
+  chosen: to match its look by eye. The image active when it was asked for stays active,
+  in front. It is an image like any other (it can be edited, and closed).
+- **Before and After** (a toggle, on the active image) splits its view by a line: left of
+  it, the image as it was at a state of its history (the one it was opened or made as,
+  unless Compare with This State, on a state's right-click menu in the History panel, chose
+  another), right of it, as it
+  is now. Both are drawn as the canvas draws (the state by a projector of its own,
+  `DocState::compare`), clipped to their sides; the line is dragged by its handle, and a
+  label on each side says which is which. Off with the toggle, or Esc; gone if the state is
+  dropped from the history.
+
 ### Status bar
 
 - At its left, what the canvas does (the tool's description, or the transform box's hint),

@@ -154,3 +154,12 @@ pub const LAYER_VIA_CUT: char = '\u{ea77}';
 pub const MERGE_GROUP: char = '\u{f435}';
 /// A tag: what the file says of the image.
 pub const FILE_INFO: char = '\u{f77c}';
+/// Comparing images: panes in a grid (slide_grid), back in tabs (tab_desktop_multiple),
+/// views matched (arrow_sync_checkmark) and linked (link_square), a view split before and
+/// after (column_double_compare), a reference pinned (pin).
+pub const TILE_IMAGES: char = '\u{eb17}';
+pub const TAB_IMAGES: char = '\u{f750}';
+pub const MATCH_VIEWS: char = '\u{e111}';
+pub const LOCK_VIEWS: char = '\u{e777}';
+pub const BEFORE_AFTER: char = '\u{e3cb}';
+pub const OPEN_REFERENCE: char = '\u{f601}';

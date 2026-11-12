@@ -687,6 +687,12 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
         | ToggleRibbon
         | CycleToolsPlace
         | ResetPanels
+        | TileImages
+        | TabImages
+        | MatchViews
+        | LockViews
+        | BeforeAfter
+        | OpenReference
         | ScreenMode
         | Search
         | Help

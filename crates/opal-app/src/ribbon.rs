@@ -188,6 +188,12 @@ pub static KEYTIPS: &[TabKeytips] = &[
             (Cmd::ToggleRibbon, 'I'),
             (Cmd::CycleToolsPlace, 'T'),
             (Cmd::ResetPanels, 'P'),
+            (Cmd::TileImages, 'L'),
+            (Cmd::TabImages, 'B'),
+            (Cmd::MatchViews, 'H'),
+            (Cmd::LockViews, 'K'),
+            (Cmd::BeforeAfter, 'N'),
+            (Cmd::OpenReference, 'C'),
         ],
     },
     TabKeytips {

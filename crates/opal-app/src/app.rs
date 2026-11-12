@@ -57,6 +57,11 @@ pub struct OpalApp {
     status_given: Option<StatusSeen>,
     /// Whether settings are saved (not in tests).
     persist: bool,
+    /// The active image and its view when the views were last matched to it (Lock Views
+    /// matches them again when either changes).
+    views_from: Option<(DocId, crate::doc::View)>,
+    /// The image active at the end of the last frame: images opened go into its tabs.
+    last_active: Option<DocId>,
     /// The API's connection for scripts and assistants (not in tests); `None` if it could
     /// not be opened.
     server: Option<crate::server::Server>,
@@ -123,6 +128,8 @@ impl OpalApp {
             alt_down: false,
             field_had_keys: false,
             fitted_to_monitor: false,
+            views_from: None,
+            last_active: None,
             full_screen: false,
             full_screen_seen: false,
             #[cfg(test)]
@@ -190,6 +197,12 @@ impl OpalApp {
             panic!("its tabs are in a column or row")
         };
         l.shares.set_share(tabs, share);
+    }
+
+    /// Brings `pane`'s tab to the front, for tests.
+    #[cfg(test)]
+    pub fn show(&mut self, pane: Pane) {
+        show_pane(&mut self.tree.tiles, pane);
     }
 
     /// Where `pane`'s contents showed in the last frame (below its tab, within its inset), for
@@ -434,6 +447,16 @@ impl OpalApp {
                 return;
             }
         }
+        // Before and After ends with Esc, when no box takes it.
+        if d.compare.is_some()
+            && d.transform.is_none()
+            && !cropping
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            d.compare = None;
+            d.revision += 1;
+            return;
+        }
         let boxed = d.transform.is_some() || cropping;
         let mut refused = None;
         let (enter, escape, arrows, held) = ctx.input_mut(|i| {
@@ -631,7 +654,7 @@ impl OpalApp {
     fn sync_panes(&mut self, ctx: &egui::Context) {
         // A closed document's pane is still in the tree until the next frame drops it (see
         // `retain_pane`), so the documents' container can still be found through it now.
-        let anchor = find_docs_container(&self.tree.tiles);
+        let anchor = find_docs_container(&self.tree.tiles, &[self.st.active_doc, self.last_active]);
         let tiles = &mut self.tree.tiles;
         for id in std::mem::take(&mut self.st.opened) {
             let pane = tiles.insert_pane(Pane::Document(id));
@@ -685,6 +708,7 @@ impl OpalApp {
         {
             self.st.active_doc = Some(first);
         }
+        self.last_active = self.st.active_doc;
     }
 
     /// A digest of everything the window shows that can change without input: the
@@ -727,6 +751,7 @@ impl OpalApp {
             .hash(&mut h);
         st.reading.is_some().hash(&mut h);
         st.writer.busy().hash(&mut h);
+        (st.lock_views, st.match_views).hash(&mut h);
         st.notice.as_ref().map(|n| &n.0).hash(&mut h);
         h.finish()
     }
@@ -858,6 +883,29 @@ impl OpalApp {
             let mut behavior = Behavior { st: &mut self.st };
             self.tree.ui(&mut behavior, ui);
         });
+        self.sync_views();
+    }
+
+    /// Notes which images are shown, and gives the others shown the active one's zoom and place
+    /// when asked (Match Zoom and Location), or, while Lock Views is on, whenever the active
+    /// image or its view has changed since (see `compare::matched`).
+    fn sync_views(&mut self) {
+        let shown = shown_docs(&self.tree.tiles);
+        self.st.shown.clone_from(&shown);
+        let Some(active) = self.st.active_doc.filter(|a| shown.contains(a)) else { return };
+        let Some(d) = self.st.doc(active) else { return };
+        let corner = |d: &crate::doc::DocState| egui::Vec2::new(d.doc().canvas.x as f32, d.doc().canvas.y as f32);
+        let (from, from_corner) = (d.view, corner(d));
+        let moved = self.views_from != Some((active, from));
+        if std::mem::take(&mut self.st.match_views) || (self.st.lock_views && moved) {
+            for other in shown.iter().filter(|&&o| o != active) {
+                if let Some(o) = self.st.doc_mut(*other) {
+                    let to_corner = corner(o);
+                    o.view = crate::compare::matched(&from, from_corner, &o.view, to_corner);
+                }
+            }
+        }
+        self.views_from = Some((active, from));
     }
 
     /// The image whose edit the status bar shows under way, if one is (see `edits`): the active
@@ -1193,10 +1241,43 @@ impl eframe::App for OpalApp {
         for cmd in std::mem::take(&mut self.st.queue) {
             self.st.run(cmd, &ctx);
         }
+        // Panels rearranged now were drawn as they were: another frame shows them.
+        let mut rearranged = false;
         if std::mem::take(&mut self.st.reset_panels) {
             self.tree = default_tree(&self.st);
+            rearranged = true;
+        }
+        if let Some(tiled) = self.st.arrange_images.take() {
+            rearranged = true;
+            let images: Vec<(DocId, f32)> = self
+                .st
+                .docs
+                .iter()
+                .map(|d| (d.id, d.doc().canvas.width as f32 / d.doc().canvas.height.max(1) as f32))
+                .collect();
+            if !crate::compare::arrange(&mut self.tree, &images, self.st.active_doc, tiled) {
+                // The images spread among the panels: arranged in the starting layout.
+                self.tree = default_tree(&self.st);
+                crate::compare::arrange(&mut self.tree, &images, self.st.active_doc, tiled);
+            }
         }
         self.sync_panes(&ctx);
+        // References opened, now their panes are in the tree. The image being edited stays
+        // the active one, in front of its tabs.
+        for (id, editing) in std::mem::take(&mut self.st.pin) {
+            let order: Vec<DocId> = self.st.docs.iter().map(|d| d.id).collect();
+            if self.st.doc(id).is_none() || !crate::compare::pin_beside(&mut self.tree, &order, id) {
+                continue;
+            }
+            rearranged = true;
+            if let Some(e) = editing.filter(|&e| self.st.doc(e).is_some()) {
+                show_pane(&mut self.tree.tiles, Pane::Document(e));
+                self.st.active_doc = Some(e);
+            }
+        }
+        if rearranged {
+            ctx.request_repaint();
+        }
         self.handle_exit(&ctx);
         self.save_settings_if_due(&ctx);
         self.st.between_frames(ctx.input(|i| i.pointer.any_down()));
@@ -1365,13 +1446,16 @@ fn show_pane(tiles: &mut Tiles<Pane>, pane: Pane) {
     }
 }
 
-/// The panel tree's tile for the documents (the tab container holding them or the start
-/// page).
-fn find_docs_container(tiles: &Tiles<Pane>) -> Option<TileId> {
-    let pane = tiles
-        .iter()
-        .find(|(_, t)| matches!(t, egui_tiles::Tile::Pane(Pane::Document(_) | Pane::Welcome)))
-        .map(|(id, _)| *id)?;
+/// The panel tree's tile for the documents: the tabs holding the first of `near` that has a
+/// pane, or else any image's tabs or the start page's (images' tabs dragged apart, tiled or
+/// pinned beside the others are several).
+fn find_docs_container(tiles: &Tiles<Pane>, near: &[Option<DocId>]) -> Option<TileId> {
+    let pane = near.iter().flatten().find_map(|&d| tiles.find_pane(&Pane::Document(d))).or_else(|| {
+        tiles
+            .iter()
+            .find(|(_, t)| matches!(t, egui_tiles::Tile::Pane(Pane::Document(_) | Pane::Welcome)))
+            .map(|(id, _)| *id)
+    })?;
     tiles.parent_of(pane)
 }
 

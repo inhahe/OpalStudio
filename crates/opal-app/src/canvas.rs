@@ -130,6 +130,11 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let frozen = d.busy.is_some();
     let tool = if frozen && tool != ToolId::Zoom { ToolId::Hand } else { tool };
     let canvas = crate::doc::canvas_rect(&d.doc().canvas);
+    // A view resized (a pane's border dragged, the panes tiled) keeps the point in its middle
+    // there. The offset moves by whole pixels, half of each size, so as not to drift.
+    if d.view.placed && d.view.viewport != vp {
+        d.view.offset += (vp * 0.5).floor() - (d.view.viewport * 0.5).floor();
+    }
     d.view.viewport = vp;
     d.view.screen_rect = rect;
     if !d.view.placed {
@@ -353,28 +358,11 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let wait = d.projector.wait;
     let shown = d.projector.shown(wait);
     let shown_level = shown.as_ref().map_or(level, |s| s.level);
-    let mut draws = Vec::new();
-    for (&coord, _) in shown.iter().flat_map(|s| &s.tiles) {
-        let r = coord.rect(shown_level);
-        if r.intersect(&visible).is_empty() {
-            continue;
-        }
-        let tiles = &shown.as_ref().expect("a tile came from it").tiles;
-        let mut sources: [Option<Arc<Tile>>; 9] = Default::default();
-        for dy in -1..=1 {
-            for dx in -1..=1 {
-                let n = TileCoord::new(coord.x + dx, coord.y + dy);
-                sources[((dy + 1) * 3 + dx + 1) as usize] = tiles.get(&n).cloned();
-            }
-        }
-        let p0 = view.to_screen(Vec2::new(r.x0 as f32, r.y0 as f32));
-        let p1 = view.to_screen(Vec2::new(r.x1 as f32, r.y1 as f32));
-        draws.push(TileDraw { coord, rect: [p0.x, p0.y, p1.x, p1.y], sources });
-    }
+    let draws = tile_draws(shown.as_deref(), shown_level, &visible, &view);
     let doc_key = d.id.0;
 
     let nearest = view.zoom >= prefs.sharp_from;
-    let uniforms = ViewUniforms {
+    let uniforms_of = |canvas: Rect| ViewUniforms {
         vp_size: [vp.x, vp.y],
         canvas_origin: view.to_screen(canvas.min.to_vec2()).into(),
         canvas_size: (canvas.size() * view.zoom).into(),
@@ -387,16 +375,53 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         smooth: u32::from(!nearest),
         _pad: [0; 2],
     };
+    let frame = ctx.cumulative_frame_nr();
     let callback = CanvasCallback {
         view_key: doc_key,
         level: shown_level,
-        uniforms,
+        uniforms: uniforms_of(canvas),
         tiles: draws,
         nearest,
         texture_budget,
-        frame: ctx.cumulative_frame_nr(),
+        frame,
     };
-    ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, callback));
+    // Before and After: the state compared, drawn by a projector of its own left of the
+    // line, the image as it is right of it. A state dropped from the history ends it.
+    if d.compare.as_ref().is_some_and(|c| !d.history.contains(c.node)) {
+        d.compare = None;
+    }
+    let before = d.compare.as_mut().map(|c| {
+        let then = d.history.node(c.node).doc();
+        let layers = then.layers.clone();
+        c.projector.ask(&layers, level, &wider, quality, Some(cache_budget), &ctx);
+        let shown = c.projector.shown(c.projector.wait);
+        let shown_level = shown.as_ref().map_or(level, |s| s.level);
+        let callback = CanvasCallback {
+            // Its own textures, beside the image's.
+            view_key: doc_key | COMPARED,
+            level: shown_level,
+            uniforms: uniforms_of(crate::doc::canvas_rect(&then.canvas)),
+            tiles: tile_draws(shown.as_deref(), shown_level, &visible, &view),
+            nearest,
+            texture_budget,
+            frame,
+        };
+        (rect.min.x + rect.width() * c.split, callback)
+    });
+    match before {
+        Some((x, then)) => {
+            let left = Rect::from_min_max(rect.min, egui::pos2(x, rect.max.y));
+            let right = Rect::from_min_max(egui::pos2(x, rect.min.y), rect.max);
+            ui.painter().with_clip_rect(right).add(egui_wgpu::Callback::new_paint_callback(rect, callback));
+            ui.painter().with_clip_rect(left).add(egui_wgpu::Callback::new_paint_callback(rect, then));
+            if let Some(c) = d.compare.as_mut() {
+                split_line(ui, rect, x, &mut c.split, &palette);
+            }
+        }
+        None => {
+            ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, callback));
+        }
+    }
     // A view taking a while (a huge image) says so, rather than look finished.
     const BEHIND: std::time::Duration = std::time::Duration::from_millis(150);
     if let Some(t) = d.projector.behind_for() {
@@ -545,6 +570,71 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
 
 /// How often the marching ants move on, in milliseconds.
 pub(crate) const ANTS_STEP_MS: u64 = 100;
+
+/// The bit that tells the textures of the state Before and After compares with from the
+/// image's own (see [`CanvasCallback::view_key`]).
+const COMPARED: u64 = 1 << 63;
+
+/// The tiles of `shown` (made at `level`) within `visible`, as `view` draws them: each with
+/// the tiles round it, which its edges are sampled from.
+fn tile_draws(
+    shown: Option<&crate::projector::Shown>,
+    level: u32,
+    visible: &IRect,
+    view: &crate::doc::View,
+) -> Vec<TileDraw> {
+    let mut draws = Vec::new();
+    let Some(shown) = shown else { return draws };
+    for &coord in shown.tiles.keys() {
+        let r = coord.rect(level);
+        if r.intersect(visible).is_empty() {
+            continue;
+        }
+        let mut sources: [Option<Arc<Tile>>; 9] = Default::default();
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let n = TileCoord::new(coord.x + dx, coord.y + dy);
+                sources[((dy + 1) * 3 + dx + 1) as usize] = shown.tiles.get(&n).cloned();
+            }
+        }
+        let p0 = view.to_screen(Vec2::new(r.x0 as f32, r.y0 as f32));
+        let p1 = view.to_screen(Vec2::new(r.x1 as f32, r.y1 as f32));
+        draws.push(TileDraw { coord, rect: [p0.x, p0.y, p1.x, p1.y], sources });
+    }
+    draws
+}
+
+/// Before and After's line across the view `rect`, at `x`, with a handle to drag it by
+/// (setting `split`, the fraction of the width left of it) and a label each side.
+fn split_line(ui: &mut egui::Ui, rect: Rect, x: f32, split: &mut f32, palette: &crate::theme::Palette) {
+    let grab = Rect::from_center_size(egui::pos2(x, rect.center().y), Vec2::new(14.0, rect.height()));
+    let r = ui.interact(grab, ui.scope_id().with("before-after"), Sense::drag());
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Before and after"));
+    if r.hovered() || r.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    if r.dragged()
+        && let Some(p) = r.interact_pointer_pos()
+    {
+        *split = ((p.x - rect.min.x) / rect.width()).clamp(0.02, 0.98);
+    }
+    let painter = ui.painter_at(rect);
+    let line = egui::Stroke::new(2.0, palette.accent);
+    painter.line_segment(
+        [egui::pos2(x, rect.min.y), egui::pos2(x, rect.max.y)],
+        egui::Stroke::new(4.0, egui::Color32::from_black_alpha(90)),
+    );
+    painter.line_segment([egui::pos2(x, rect.min.y), egui::pos2(x, rect.max.y)], line);
+    painter.circle(egui::pos2(x, rect.center().y), 9.0, palette.accent, egui::Stroke::new(1.5, egui::Color32::WHITE));
+    let label = |text: &str, at: egui::Pos2, align: egui::Align2| {
+        let galley = painter.layout_no_wrap(text.to_owned(), egui::FontId::proportional(12.0), egui::Color32::WHITE);
+        let r = align.anchor_size(at, galley.size()).expand2(Vec2::new(6.0, 3.0));
+        painter.rect_filled(r, 4.0, egui::Color32::from_black_alpha(150));
+        painter.galley(r.min + Vec2::new(6.0, 3.0), galley, egui::Color32::WHITE);
+    };
+    label("Before", egui::pos2(x - 10.0, rect.min.y + 10.0), egui::Align2::RIGHT_TOP);
+    label("After", egui::pos2(x + 10.0, rect.min.y + 10.0), egui::Align2::LEFT_TOP);
+}
 
 /// Asks for the frame in which marching ants drawn this frame take their next step, if
 /// they were `seen` and the window has the focus: each step is a frame of the whole window.

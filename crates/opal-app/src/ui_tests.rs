@@ -4534,3 +4534,247 @@ fn file_infos_caption_takes_enter_and_ok_with_nothing_changed_changes_nothing() 
     let caption = opal_io::metadata::description(&h.state().state().active().unwrap().doc().metadata).caption;
     assert_eq!(caption, "Boats\nat dusk");
 }
+
+/// The images' ids, in the order they were opened.
+fn doc_ids(h: &Harness<'static, OpalApp>) -> Vec<crate::doc::DocId> {
+    h.state().state().docs.iter().map(|d| d.id).collect()
+}
+
+/// Whether two rectangles overlap by more than a point (panes side by side share an edge).
+fn overlap(a: egui::Rect, b: egui::Rect) -> bool {
+    a.shrink(1.0).intersects(b.shrink(1.0))
+}
+
+#[test]
+fn tile_all_shows_every_image_where_their_tabs_were_and_consolidate_puts_them_back() {
+    use crate::app::Pane;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    for _ in 0..3 {
+        image_of(&mut h, 200, 150);
+    }
+    let ids = doc_ids(&h);
+    let active = h.state().state().active_doc.unwrap();
+    let tabs = h.state().pane_rect(Pane::Document(active));
+    h.state_mut().state_mut().queue.push(Cmd::TileImages);
+    h.run();
+    let mut shown = h.state().shown_docs();
+    shown.sort_by_key(|d| d.0);
+    assert_eq!(shown, ids, "not every image is shown");
+    let panes: Vec<egui::Rect> = ids.iter().map(|&d| h.state().pane_rect(Pane::Document(d))).collect();
+    render(&mut h, "tiled");
+    for (i, a) in panes.iter().enumerate() {
+        assert!(tabs.expand(1.0).contains_rect(*a), "pane {i} {a:?} is outside where the tabs were {tabs:?}");
+        for b in &panes[i + 1..] {
+            assert!(!overlap(*a, *b), "{a:?} and {b:?} overlap");
+        }
+    }
+    // Two in the first row, one below: the first row's side by side.
+    assert!(panes[1].min.x >= panes[0].max.x - 1.0 && panes[2].min.y >= panes[0].max.y - 1.0, "{panes:?}");
+    // Each shows in the middle of its pane what it showed in the middle of the tabs.
+    for &d in &ids {
+        let (middle, _) = middle_of(&h, d);
+        assert!((middle - egui::vec2(100.0, 75.0)).length() <= 1.0, "{d:?} shows {middle:?} in its middle");
+    }
+    // An image opened goes into the tabs of the active one, whichever that is.
+    for (&d, &pane) in ids.iter().zip(&panes) {
+        h.hover_at(pane.center());
+        h.run();
+        h.drag_at(pane.center());
+        h.run();
+        h.drop_at(pane.center());
+        h.run();
+        assert_eq!(h.state().state().active_doc, Some(d), "clicking its image did not make it active");
+        image_of(&mut h, 200, 150);
+        let opened = *doc_ids(&h).last().unwrap();
+        assert_eq!(h.state().pane_rect(Pane::Document(opened)), pane, "the image opened beside {d:?} went elsewhere");
+    }
+    assert_eq!(h.state().shown_docs().len(), 3, "an image opened took a pane of its own");
+    h.state_mut().state_mut().queue.push(Cmd::TabImages);
+    h.run();
+    let active = h.state().state().active_doc.unwrap();
+    assert_eq!(h.state().shown_docs(), vec![active], "the active image is not the one shown");
+    assert_eq!(h.state().pane_rect(Pane::Document(active)), tabs, "not put back where the tabs were");
+}
+
+/// The point of its image (counted from its canvas's corner) the image `id` shows in the
+/// middle of its view, and its zoom.
+fn middle_of(h: &Harness<'static, OpalApp>, id: crate::doc::DocId) -> (egui::Vec2, f32) {
+    let d = h.state().state().doc(id).unwrap();
+    let corner = egui::vec2(d.doc().canvas.x as f32, d.doc().canvas.y as f32);
+    (d.view.to_canvas(d.view.viewport * 0.5) - corner, d.view.zoom)
+}
+
+#[test]
+fn locked_views_follow_the_active_image_and_match_does_so_once() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    image_of(&mut h, 400, 300);
+    let [other, active] = doc_ids(&h)[..] else { panic!("two images") };
+    h.state_mut().state_mut().queue.push(Cmd::TileImages);
+    h.run();
+    let same = |h: &Harness<'static, OpalApp>| {
+        let ((a, za), (b, zb)) = (middle_of(h, active), middle_of(h, other));
+        za == zb && (a - b).length() <= 1.0
+    };
+    let zoom_in = |h: &mut Harness<'static, OpalApp>| {
+        h.state_mut().state_mut().queue.push(Cmd::ZoomIn);
+        h.run();
+        h.run();
+    };
+    zoom_in(&mut h);
+    assert!(!same(&h), "the views already matched");
+    // Locked, they match at once, and again whenever the active one moves.
+    h.state_mut().state_mut().queue.push(Cmd::LockViews);
+    h.run();
+    assert!(same(&h), "not matched when locked");
+    assert_eq!(crate::commands::checked(h.state().state(), Cmd::LockViews), Some(true));
+    zoom_in(&mut h);
+    assert!(same(&h), "not kept matched when zoomed");
+    h.state_mut().state_mut().active_mut().unwrap().view.offset += egui::vec2(-40.0, 25.0);
+    h.run();
+    assert!(same(&h), "not kept matched when scrolled");
+    // Unlocked, they part.
+    h.state_mut().state_mut().queue.push(Cmd::LockViews);
+    h.run();
+    zoom_in(&mut h);
+    assert!(!same(&h), "still locked");
+    // Matched once.
+    h.state_mut().state_mut().queue.push(Cmd::MatchViews);
+    h.run();
+    assert!(same(&h), "Match Zoom and Location did not");
+    zoom_in(&mut h);
+    assert!(!same(&h), "matching once locked them");
+}
+
+#[test]
+fn before_and_after_shows_a_state_left_of_a_line_dragged_across_the_view() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    // White, then red all over.
+    put_on_clipboard(&mut h, pasted(400, 300, [1.0, 0.0, 0.0, 1.0]));
+    h.state_mut().state_mut().queue.push(Cmd::Paste);
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let colors = |h: &mut Harness<'static, OpalApp>, name: &str| {
+        let img = render(h, name);
+        [pixel_at_canvas(h, &img, 100.0, 150.0), pixel_at_canvas(h, &img, 300.0, 150.0)]
+    };
+    let (white, red) = ([255, 255, 255], [255, 0, 0]);
+    assert_eq!(colors(&mut h, "after"), [red, red]);
+    h.state_mut().state_mut().queue.push(Cmd::BeforeAfter);
+    h.run();
+    h.run();
+    assert_eq!(crate::commands::checked(h.state().state(), Cmd::BeforeAfter), Some(true));
+    assert_eq!(colors(&mut h, "before-and-after"), [white, red], "the state it was made as is not left of the line");
+    // The line dragged right of the second point: both are as they were.
+    let line = h.get_by_label("Before and after").rect().center();
+    let v = h.state().state().active().unwrap().view;
+    let to = egui::pos2(v.screen_rect.min.x + v.to_screen(egui::vec2(350.0, 0.0)).x / h.ctx.pixels_per_point(), line.y);
+    h.hover_at(line);
+    h.run();
+    h.drag_at(line);
+    h.run();
+    h.hover_at(to);
+    h.run();
+    h.drop_at(to);
+    h.run();
+    assert_eq!(colors(&mut h, "before-and-after-dragged"), [white, white], "the line was not dragged");
+    // Esc ends it.
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(h.state().state().active().unwrap().compare.is_none(), "Esc did not end it");
+    assert_eq!(colors(&mut h, "after-again"), [red, red]);
+    // The History panel compares with any state: here the paste's own, as the image is.
+    h.state_mut().show(crate::app::Pane::History);
+    h.run();
+    let current = h.state().state().active().unwrap().history.current();
+    history_row(&h, "Paste").click_secondary();
+    h.run();
+    h.get_by_label("Compare with This State").click();
+    h.run();
+    h.run();
+    let compare = h.state().state().active().unwrap().compare.as_ref().map(|c| c.node);
+    assert_eq!(compare, None, "the state the image is in was compared with");
+    history_row(&h, "New image").click_secondary();
+    h.run();
+    h.get_by_label("Compare with This State").click();
+    h.run();
+    h.run();
+    let d = h.state().state().active().unwrap();
+    assert_eq!(d.compare.as_ref().map(|c| c.node), Some(d.history.root()));
+    assert_eq!(d.history.current(), current, "comparing went to the state");
+    assert_eq!(colors(&mut h, "compared-from-history"), [white, red]);
+    // The state dropped from the history (to keep within its memory) ends it: here the
+    // paste, undone and left on a branch of its own by another paste.
+    let pasted_state = h.state().state().active().unwrap().history.current();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run();
+    put_on_clipboard(&mut h, pasted(400, 300, [0.0, 0.0, 1.0, 1.0]));
+    h.state_mut().state_mut().queue.push(Cmd::Paste);
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    {
+        let d = h.state_mut().state_mut().active_mut().unwrap();
+        d.compare = Some(crate::doc::Compare::new(pasted_state));
+        d.revision += 1;
+    }
+    h.run();
+    let blue = [0, 0, 255];
+    assert_eq!(colors(&mut h, "compared-with-a-branch"), [red, blue]);
+    h.state_mut().state_mut().active_mut().unwrap().history.set_budget(0);
+    assert!(!h.state().state().active().unwrap().history.contains(pasted_state), "the state was not dropped");
+    h.run();
+    assert!(h.state().state().active().unwrap().compare.is_none(), "still compared with a state dropped");
+    assert_eq!(colors(&mut h, "compared-state-dropped"), [blue, blue]);
+}
+
+/// The History panel's row for the state labelled `label`.
+fn history_row<'a>(h: &'a Harness<'static, OpalApp>, label: &'a str) -> egui_kittest::Node<'a> {
+    let panel = h.state().pane_rect(crate::app::Pane::History);
+    h.query_all_by_label(label).find(|n| panel.contains(n.rect().center())).expect("the row is in the History panel")
+}
+
+#[test]
+fn a_reference_opens_in_a_pane_of_its_own_beside_the_image_being_edited() {
+    use crate::app::Pane;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    image_of(&mut h, 400, 300);
+    let editing = h.state().state().active_doc.unwrap();
+    let tabs = h.state().pane_rect(Pane::Document(editing));
+    let dir = std::env::temp_dir().join(format!("opal-ui-reference-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("look.png");
+    image::RgbaImage::from_pixel(60, 40, image::Rgba([20, 90, 200, 255])).save(&path).unwrap();
+    let ctx = h.ctx.clone();
+    h.state_mut().state_mut().open_reference(path, &ctx);
+    crate::opening::testing::wait(h.state_mut().state_mut());
+    h.run();
+    h.run();
+    let _ = std::fs::remove_dir_all(&dir);
+    let reference = *doc_ids(&h).last().unwrap();
+    assert_eq!(h.state().state().doc(reference).unwrap().title, "look.png");
+    assert_eq!(h.state().state().active_doc, Some(editing), "the image being edited is no longer the active one");
+    let mut shown = h.state().shown_docs();
+    shown.sort_by_key(|d| d.0);
+    assert_eq!(shown, vec![editing, reference], "not both shown");
+    let (left, right) = (h.state().pane_rect(Pane::Document(editing)), h.state().pane_rect(Pane::Document(reference)));
+    render(&mut h, "reference");
+    assert!(right.min.x >= left.max.x - 1.0, "not at the right: {left:?} {right:?}");
+    assert!(tabs.expand(1.0).contains_rect(left) && tabs.expand(1.0).contains_rect(right), "not where the tabs were");
+    assert!(right.width() < left.width(), "the reference takes more room than the image");
+    // The other image is in the tabs of the one being edited.
+    h.state_mut().state_mut().active_doc = Some(doc_ids(&h)[0]);
+    h.state_mut().state_mut().reveal = Some(doc_ids(&h)[0]);
+    h.run();
+    h.run();
+    let mut shown = h.state().shown_docs();
+    shown.sort_by_key(|d| d.0);
+    assert_eq!(shown, vec![doc_ids(&h)[0], reference], "the reference was not left beside the others");
+}

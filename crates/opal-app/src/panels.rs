@@ -520,6 +520,7 @@ pub fn history_panel(ui: &mut egui::Ui, st: &mut AppState) {
     let scroll_to = ui.ctx().data(|m| m.get_temp::<NodeId>(last_key)) != Some(current);
     ui.ctx().data_mut(|m| m.insert_temp(last_key, current));
     let mut goto: Option<NodeId> = None;
+    let mut compare: Option<NodeId> = None;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         // Depth first. Of a node's children, the one its branch continues with stays at the
         // same indent and comes last; the others are indented as side branches.
@@ -584,9 +585,17 @@ pub fn history_panel(ui: &mut egui::Ui, st: &mut AppState) {
                     Color32::WHITE,
                 );
             });
+            r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, n == current, &node.label));
             if r.clicked() && n != current {
                 goto = Some(n);
             }
+            r.context_menu(|ui| {
+                let label = "Compare with This State";
+                if ui.add_enabled(n != current, egui::Button::new(label)).clicked() {
+                    compare = Some(n);
+                    ui.close();
+                }
+            });
             let main = node.last_child.or_else(|| node.children.last().copied());
             if let Some(m) = main {
                 stack.push((m, depth));
@@ -602,6 +611,13 @@ pub fn history_panel(ui: &mut egui::Ui, st: &mut AppState) {
         && let Some(d) = st.active_mut()
     {
         d.goto(n);
+    }
+    // Before and After, with this state before.
+    if let Some(n) = compare
+        && let Some(d) = st.active_mut()
+    {
+        d.compare = Some(crate::doc::Compare::new(n));
+        d.revision += 1;
     }
 }
 

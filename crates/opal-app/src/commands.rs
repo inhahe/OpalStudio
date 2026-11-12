@@ -103,6 +103,12 @@ pub enum Cmd {
     ToggleRibbon,
     CycleToolsPlace,
     ResetPanels,
+    TileImages,
+    TabImages,
+    MatchViews,
+    LockViews,
+    BeforeAfter,
+    OpenReference,
     ScreenMode,
     Search,
     Help,
@@ -144,7 +150,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 99] = [
+    pub const ALL: [Cmd; 105] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -238,6 +244,12 @@ impl Cmd {
         Cmd::ToggleRibbon,
         Cmd::CycleToolsPlace,
         Cmd::ResetPanels,
+        Cmd::TileImages,
+        Cmd::TabImages,
+        Cmd::MatchViews,
+        Cmd::LockViews,
+        Cmd::BeforeAfter,
+        Cmd::OpenReference,
         Cmd::ScreenMode,
         Cmd::Search,
         Cmd::Help,
@@ -1007,6 +1019,56 @@ impl Cmd {
                  brings them back.",
                 const { &[plain(Key::F)] },
             ),
+            Cmd::TileImages => i(
+                "Tile All",
+                icons::TILE_IMAGES,
+                "Show each open image in a pane of its own, side by side.",
+                "Where their tabs were, laid out to show them largest: three photographs in a wide \
+                 window in two rows, three tall images in one. Consolidate to Tabs puts them back. A \
+                 tab can also be dragged out into a pane of its own.",
+                &[],
+            ),
+            Cmd::TabImages => i(
+                "Consolidate to Tabs",
+                icons::TAB_IMAGES,
+                "Put the open images back in one set of tabs.",
+                "Where the tiled images were, the active one in front.",
+                &[],
+            ),
+            Cmd::MatchViews => i(
+                "Match Zoom and Location",
+                icons::MATCH_VIEWS,
+                "Show the other images at the active one's zoom, on the same place.",
+                "Each image shown beside the active one takes its zoom, and shows in the middle of \
+                 its view the place of its image (counted from the canvas's corner) the active one \
+                 shows in the middle of its own. Lock Views keeps them so.",
+                &[],
+            ),
+            Cmd::LockViews => i(
+                "Lock Views",
+                icons::LOCK_VIEWS,
+                "Keep the images shown at the active one's zoom and place as it moves.",
+                "While on, zooming or scrolling the active image does the same to the others shown \
+                 beside it, as Match Zoom and Location does once: for going over versions of a \
+                 photograph together.",
+                &[],
+            ),
+            Cmd::BeforeAfter => i(
+                "Before and After",
+                icons::BEFORE_AFTER,
+                "Split the view: the image as it was on the left, as it is on the right.",
+                "As it was opened or made, unless the History panel's Compare with This State chose \
+                 another state. Drag the line to move it; Esc, or this again, ends it.",
+                &[],
+            ),
+            Cmd::OpenReference => i(
+                "Open Reference",
+                icons::OPEN_REFERENCE,
+                "Open an image beside those being edited, to match its look by eye.",
+                "In a pane of its own at the right of the images' tabs, there whichever of them is \
+                 chosen. It is an image like any other, to be closed when done with.",
+                &[],
+            ),
             Cmd::ResetPanels => i(
                 "Reset Panels",
                 icons::DOCK,
@@ -1348,6 +1410,21 @@ pub static RIBBON: &[Tab] = &[
                 icons: false,
                 cmds: &[Cmd::ScreenMode, Cmd::ToggleTheme, Cmd::ToggleRibbon, Cmd::CycleToolsPlace, Cmd::ResetPanels],
             },
+            Group {
+                name: "Compare",
+                description: "Images side by side, their views matched or locked together, a reference \
+                              beside them, and an image before and after.",
+                large: 1,
+                icons: false,
+                cmds: &[
+                    Cmd::TileImages,
+                    Cmd::TabImages,
+                    Cmd::MatchViews,
+                    Cmd::LockViews,
+                    Cmd::BeforeAfter,
+                    Cmd::OpenReference,
+                ],
+            },
         ],
     },
     Tab {
@@ -1402,6 +1479,12 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
                 | ToggleRibbon
                 | CycleToolsPlace
                 | ResetPanels
+                | TileImages
+                | TabImages
+                | MatchViews
+                | LockViews
+                | BeforeAfter
+                | OpenReference
                 | ScreenMode
                 | Search
                 | Help
@@ -1426,12 +1509,35 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         | ToggleRibbon
         | CycleToolsPlace
         | ResetPanels
+        | LockViews
         | ScreenMode
         | Search
         | Help
         | Shortcuts
         | About
         | WidgetGallery => Ok(()),
+        TileImages => {
+            if st.docs.len() < 2 {
+                return Err("Open two images or more to tile them.".into());
+            }
+            Ok(())
+        }
+        TabImages => needs_doc(),
+        MatchViews => {
+            needs_doc()?;
+            if st.shown.len() < 2 {
+                return Err("Show two images side by side first (Tile All).".into());
+            }
+            Ok(())
+        }
+        OpenReference => needs_doc(),
+        BeforeAfter => {
+            let d = st.active().ok_or("Open or create an image first.")?;
+            if d.compare.is_none() && d.history.nodes().count() < 2 {
+                return Err("The image is as it was opened or made: there is nothing to compare yet.".into());
+            }
+            Ok(())
+        }
         Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup | CopyMerged
         | StampVisible | ResizeCanvas | CropToContent | Place | SelectAll => needs_doc(),
         LoadSelection => {
@@ -1721,6 +1827,8 @@ pub fn checked(st: &AppState, cmd: Cmd) -> Option<bool> {
     match cmd {
         Cmd::ToggleOffCanvas => Some(st.prefs.bool("canvas.off_canvas_shown")),
         Cmd::ToggleRulers => Some(st.prefs.bool("canvas.rulers")),
+        Cmd::LockViews => Some(st.lock_views),
+        Cmd::BeforeAfter => Some(st.active().is_some_and(|d| d.compare.is_some())),
         Cmd::ToggleSelectionOverlay => Some(st.prefs.bool("selection.overlay")),
         Cmd::ToggleTheme => Some(!st.palette.dark),
         Cmd::ToggleRibbon => Some(st.prefs.choice("ui.ribbon") == "single"),

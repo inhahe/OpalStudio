@@ -167,6 +167,14 @@ cargo test --workspace                     # all tests, interface tests included
   linear light, smoothly when zoomed out and as sharp pixels when zoomed in. Rulers along
   the top and left of the view (View › Rulers, Ctrl+R) count from the canvas's corner in
   the unit sizes are shown in, and mark where the pointer is.
+- **Comparing.** View › Tile All shows every open image at once, in a grid laid out to
+  show them largest, and Consolidate to Tabs puts them back. Match Zoom and Location
+  shows the other images at the active one's zoom and place; Lock Views keeps them so
+  while you zoom and scroll, to go over versions of a photograph together. Open Reference
+  opens an image in a pane of its own beside the one you are editing, to match its look.
+  Before and After splits the view by a line you drag: left of it, the image as it was
+  opened or made (or any state of its history: right-click the state in the History
+  panel and choose Compare with This State), right of it, as it is now; Esc ends it.
 - **The interface.**
   - A ribbon of commands whose groups shrink to fit the window, with tooltips that say
     why a disabled command cannot run.

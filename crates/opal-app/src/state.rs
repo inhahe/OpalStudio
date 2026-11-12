@@ -216,6 +216,17 @@ pub struct AppState {
     /// A layer being renamed in the Layers panel: its document, the layer, the text so far.
     pub renaming: Option<(DocId, LayerId, String)>,
     pub reset_panels: bool,
+    /// The images' panes to be tiled (true) or put back in tabs, as asked (see `compare`).
+    pub arrange_images: Option<bool>,
+    /// Images opened as references, to be pinned beside the others once their panes exist,
+    /// each with the image active when it was asked for.
+    pub pin: Vec<(DocId, Option<DocId>)>,
+    /// Whether the images shown take the active one's zoom and place as it moves (Lock
+    /// Views), and whether they are to now (Match Zoom and Location).
+    pub lock_views: bool,
+    pub match_views: bool,
+    /// The images whose panes are in front, as the panels were last drawn.
+    pub shown: Vec<DocId>,
     /// Set when the window may close (unsaved changes were dealt with).
     pub exit_confirmed: bool,
     pub exit_requested: bool,
@@ -388,6 +399,11 @@ impl AppState {
             help: None,
             renaming: None,
             reset_panels: false,
+            arrange_images: None,
+            pin: Vec::new(),
+            lock_views: false,
+            match_views: false,
+            shown: Vec::new(),
             exit_confirmed: false,
             exit_requested: false,
             writer: crate::writer::Writer::default(),
@@ -815,6 +831,23 @@ impl AppState {
                 self.settings_touched();
             }
             Cmd::ResetPanels => self.reset_panels = true,
+            Cmd::TileImages => self.arrange_images = Some(true),
+            Cmd::TabImages => self.arrange_images = Some(false),
+            Cmd::MatchViews => self.match_views = true,
+            Cmd::LockViews => {
+                self.lock_views = !self.lock_views;
+                // Locked, they are matched at once.
+                self.match_views = self.lock_views;
+            }
+            Cmd::BeforeAfter => {
+                let d = self.active_mut().expect("available");
+                d.compare = match d.compare.take() {
+                    Some(_) => None,
+                    None => Some(crate::doc::Compare::new(d.history.root())),
+                };
+                d.revision += 1;
+            }
+            Cmd::OpenReference => self.open_reference_dialog(ctx),
             Cmd::ScreenMode => {
                 self.screen = self.screen.next();
                 match self.screen {

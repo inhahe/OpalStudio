@@ -146,6 +146,8 @@ pub struct DocState {
     pub expanded: HashSet<LayerId>,
     pub view: View,
     pub projector: crate::projector::Projector,
+    /// Before and After, while on: the state of its history shown left of the line.
+    pub compare: Option<Compare>,
     /// Counts every change to what the document shows (for repainting).
     pub revision: u64,
     /// The transform box, while one is open. Its document is the pending edit.
@@ -200,6 +202,24 @@ pub struct DocState {
     pub busy: Option<crate::edits::Busy>,
 }
 
+/// Before and After (see design.md, *Comparing*): the state of an image's history shown
+/// left of a line across its view, the image as it is right of it.
+pub struct Compare {
+    /// The state shown as it was.
+    pub node: opal_core::history::NodeId,
+    /// Where the line is, as a fraction of the view's width.
+    pub split: f32,
+    /// What draws the state, as the image's own projector draws it now.
+    pub projector: crate::projector::Projector,
+}
+
+impl Compare {
+    /// The image as it was at `node`, the line in the middle.
+    pub fn new(node: opal_core::history::NodeId) -> Compare {
+        Compare { node, split: 0.5, projector: crate::projector::Projector::new() }
+    }
+}
+
 /// What a transform box applied to layers did, kept for Transform Again.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LastTransform {
@@ -246,6 +266,7 @@ impl DocState {
             expanded: HashSet::new(),
             view: View::default(),
             projector: crate::projector::Projector::new(),
+            compare: None,
             revision: 0,
             transform: None,
             drag: None,
