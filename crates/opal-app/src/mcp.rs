@@ -197,6 +197,7 @@ fn made_tools() -> Value {
                     "length" => json!({ "type": ["number", "string"] }),
                     "any" => json!({}),
                     "text" | "path" => json!({ "type": "string" }),
+                    "paths" => json!({ "type": "array", "items": { "type": "string" }, "minItems": 1 }),
                     "choice" => json!({ "type": "string", "enum": p["choices"] }),
                     "document" | "layer" => json!({ "type": "integer", "minimum": 0 }),
                     "layers" => json!({ "type": "array", "items": { "type": "integer", "minimum": 0 }, "minItems": 1 }),

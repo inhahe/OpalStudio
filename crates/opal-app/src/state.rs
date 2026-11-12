@@ -618,6 +618,7 @@ impl AppState {
             Cmd::Paste => self.paste(false, ctx),
             Cmd::PasteInPlace => self.paste(true, ctx),
             Cmd::Place => self.place_dialog(),
+            Cmd::OpenAsLayers => self.open_as_layers_dialog(),
             Cmd::Transform => self.transform(),
             Cmd::TransformAgain => self.transform_again(false),
             Cmd::TransformAgainCopy => self.transform_again(true),

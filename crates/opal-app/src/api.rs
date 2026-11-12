@@ -61,6 +61,8 @@ pub enum Kind {
     Text,
     /// A file's path.
     Path,
+    /// Files' paths, one at least.
+    Paths,
     /// One of these words.
     Choice(&'static [&'static str]),
     /// An image open in the editor, by id.
@@ -327,6 +329,13 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             name: "path",
             kind: Kind::Path,
             help: "The file, by its absolute path: an Opal Studio file, a PNG or a JPEG.",
+            otherwise: Otherwise::Required,
+        }],
+        OpenAsLayers => &[Param {
+            name: "paths",
+            kind: Kind::Paths,
+            help: "The files, PNG or JPEG, by their absolute paths, the first the lowest layer: into the \
+                   active image, or a new one if none is open.",
             otherwise: Otherwise::Required,
         }],
         Save => &[DOCUMENT],
@@ -1971,6 +1980,23 @@ fn check_value(p: &Param, value: &Value) -> Result<(), String> {
             }
             None => false,
         },
+        Kind::Paths => match value.as_array() {
+            Some(paths) if !paths.is_empty() => {
+                for p in paths {
+                    match p.as_str() {
+                        Some(p) if std::path::Path::new(p).is_absolute() => {}
+                        Some(p) => {
+                            return Err(format!(
+                                "\"{name}\" must be absolute paths (the editor's folder is not the caller's), not \"{p}\""
+                            ));
+                        }
+                        None => return Err(format!("\"{name}\" must be a list of paths, which are text")),
+                    }
+                }
+                true
+            }
+            _ => false,
+        },
         Kind::Choice(words) => match value.as_str() {
             Some(w) if words.contains(&w) => true,
             Some(w) => return Err(format!("\"{name}\" must be one of {}, not \"{w}\"", words.join(", "))),
@@ -2010,6 +2036,7 @@ pub fn kind_text(kind: Kind) -> std::borrow::Cow<'static, str> {
         Kind::Any => "a value",
         Kind::Text => "text that is not blank",
         Kind::Path => "a file's path",
+        Kind::Paths => "a list of files' absolute paths, not empty",
         Kind::Choice(_) => "one of its words",
         Kind::Document => "an image's id",
         Kind::Layer => "a layer's id",
@@ -2284,6 +2311,24 @@ impl AppState {
                 let resolution = args.number("resolution");
                 self.create_image(&NewImage { width, height, background, resolution });
                 now(Ok(json!({ "document": self.active_doc.expect("just made").0 })))
+            }
+            Cmd::OpenAsLayers => {
+                let paths: Vec<PathBuf> = args
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .expect("checked to be there")
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(PathBuf::from)
+                    .collect();
+                match self.open_as_layers(&paths) {
+                    Ok((made, said)) => {
+                        let ids: Vec<u64> = made.iter().map(|l| l.0).collect();
+                        let document = self.active_doc.expect("one now").0;
+                        now(Ok(json!({ "document": document, "layers": ids, "notes": said })))
+                    }
+                    Err(why) => now(Err(format!("open_as_layers: {why}"))),
+                }
             }
             Cmd::Open => {
                 let before = self.docs.len();
@@ -3461,6 +3506,7 @@ fn kind_name(kind: Kind) -> &'static str {
         Kind::Any => "any",
         Kind::Text => "text",
         Kind::Path => "path",
+        Kind::Paths => "paths",
         Kind::Choice(_) => "choice",
         Kind::Document => "document",
         Kind::Layer => "layer",
@@ -3489,6 +3535,7 @@ mod tests {
             "any" => "Any".into(),
             "text" => "str".into(),
             "path" => "str | os.PathLike[str]".into(),
+            "paths" => "list[str | os.PathLike[str]]".into(),
             "layers" => "list[int]".into(),
             "points" => "list[tuple[float, float]]".into(),
             "outline" => "dict[str, Any]".into(),
@@ -4171,6 +4218,52 @@ mod tests {
     }
 
     #[test]
+    fn files_open_as_layers_of_the_image_or_of_a_new_one() {
+        let mut st = AppState::new();
+        let file = |name: &str| file_in("layers", name);
+        let (a, b, missing) =
+            (png_at(file("layers-a.png"), 40, 20), png_at(file("layers-b.png"), 10, 10), file("layers-none.png"));
+        let bounds = |st: &AppState, id: u64| st.active().unwrap().doc().layer(LayerId(id)).unwrap().bounds().unwrap();
+        let ids = |r: &Value| r["layers"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect::<Vec<_>>();
+        // None open: a new image the size of the first file, each a layer, centered; one that
+        // cannot be read left out, and said.
+        let r = now(&mut st, "open_as_layers", json!({ "paths": [a, b, missing] })).unwrap();
+        let made = ids(&r);
+        let d = st.active().unwrap();
+        assert_eq!((d.doc().canvas.width, d.doc().canvas.height, d.doc().layers.len()), (40, 20, 2));
+        assert_eq!(d.doc().layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["layers-a", "layers-b"]);
+        assert_eq!(bounds(&st, made[1]), opal_core::geom::FRect::new(15.0, 5.0, 25.0, 15.0));
+        let notes = r["notes"].as_array().unwrap();
+        let note = notes[0].as_str().unwrap();
+        assert!(notes.len() == 1 && note.starts_with("Left out ") && note.contains("layers-none.png"), "{notes:?}");
+        let d = st.active().unwrap();
+        assert_eq!((d.selected_layers().len(), d.active_layer().map(|l| l.0)), (2, Some(made[1])));
+        // Into the image open: above the active layer, the first lowest, as one history state.
+        st.active_mut().unwrap().select_only(LayerId(made[0]));
+        let (c, e) = (png_at(file("layers-c.png"), 6, 4), png_at(file("layers-e.png"), 2, 2));
+        let more = ids(&now(&mut st, "open_as_layers", json!({ "paths": [c, e] })).unwrap());
+        let order = |st: &AppState| st.active().unwrap().doc().layers.iter().map(|l| l.id.0).collect::<Vec<u64>>();
+        assert_eq!(order(&st), vec![made[0], more[0], more[1], made[1]]);
+        assert_eq!(bounds(&st, more[0]), opal_core::geom::FRect::new(17.0, 8.0, 23.0, 12.0));
+        let d = st.active_mut().unwrap();
+        assert_eq!(d.history.undo_label(), Some("Open as layers"));
+        assert!(d.undo());
+        assert_eq!(order(&st), vec![made[0], made[1]]);
+        // A new image takes the first file's resolution.
+        let mut fresh = AppState::new();
+        let jpeg = file("layers-150.jpg");
+        crate::paste::testing::white_jpeg(&jpeg, 8, 8, Some([150, 150]));
+        now(&mut fresh, "open_as_layers", json!({ "paths": [jpeg] })).unwrap();
+        assert_eq!(fresh.active().unwrap().doc().resolution, 150.0);
+        // A path not absolute, or none that can be read: refused.
+        let why = now(&mut st, "open_as_layers", json!({ "paths": ["relative.png"] })).unwrap_err();
+        assert!(why.contains("absolute"), "{why}");
+        let why = now(&mut st, "open_as_layers", json!({ "paths": [missing] })).unwrap_err();
+        assert!(why.contains("Left out "), "{why}");
+        std::fs::remove_dir_all(missing.parent().unwrap()).ok();
+    }
+
+    #[test]
     fn scripts_align_layers_to_what_they_say_the_first_given_the_key() {
         use opal_core::document::{IdGen, Position};
         let mut st = AppState::new();
@@ -4766,14 +4859,24 @@ mod tests {
 
     /// Where a file called `name` that a test places is written.
     fn place_path(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("opal-api-place-{}", std::process::id()));
+        file_in("place", name)
+    }
+
+    /// A file called `name` in a temporary folder of `folder`'s own (a test removing its
+    /// folder takes no other test's files with it).
+    fn file_in(folder: &str, name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("opal-api-{folder}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join(name)
     }
 
     /// A `w × h` PNG of one color, written to a file of its own; its path.
     fn png_file(name: &str, w: u32, h: u32) -> std::path::PathBuf {
-        let path = place_path(name);
+        png_at(place_path(name), w, h)
+    }
+
+    /// A `w × h` PNG of one color, written at `path`; the path.
+    fn png_at(path: std::path::PathBuf, w: u32, h: u32) -> std::path::PathBuf {
         image::RgbaImage::from_pixel(w, h, image::Rgba([200, 30, 30, 255])).save(&path).unwrap();
         path
     }

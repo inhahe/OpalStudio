@@ -80,7 +80,9 @@ cargo test --workspace                     # all tests, interface tests included
   proportions. Place (File)
   puts an image file in the box the same way, at its print size (scaled by its resolution
   against the image's) unless a preference says pixel for pixel; a button on the box
-  switches between the two. Paste in Place, Copy and Copy Merged;
+  switches between the two. Open as Layers (File) brings in several image files at once,
+  a layer each, centered, selected and ready to align; with nothing open, they make a new
+  image the size of the first. Paste in Place, Copy and Copy Merged;
   pasting with nothing open makes a new image. Copies keep their full precision when pasted
   back, and on Windows reach other programs as 16-bit PNG. A large image is read in the
   background (Esc cancels it): anything started meanwhile (a dialog, a drag, another

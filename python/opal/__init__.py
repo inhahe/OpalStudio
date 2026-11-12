@@ -265,9 +265,17 @@ class Editor:
         # Paths go as absolute ones, against this process's current folder (the editor's is
         # another).
         kinds = {p["name"]: p["kind"] for p in self.__dict__.get("_methods", {}).get(method, {}).get("params", [])}
-        params = {
-            k: os.path.abspath(os.fspath(v)) if kinds.get(k) == "path" and v is not None else v for k, v in params.items()
-        }
+
+        def absolute(kind: str | None, v: Any) -> Any:
+            if v is None:
+                return v
+            if kind == "path":
+                return os.path.abspath(os.fspath(v))
+            if kind == "paths":
+                return [os.path.abspath(os.fspath(p)) for p in v]
+            return v
+
+        params = {k: absolute(kinds.get(k), v) for k, v in params.items()}
         reply = self._pipe.exchange({"jsonrpc": "2.0", "id": next(self._ids), "method": method, "params": params})
         if "error" in reply:
             raise OpalError(reply["error"].get("message", "The editor refused."), reply["error"].get("code"))

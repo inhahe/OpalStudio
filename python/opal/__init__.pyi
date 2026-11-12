@@ -151,6 +151,11 @@ class Editor:
         into_active: Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false.
         unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
+    def open_as_layers(self, *, paths: list[str | os.PathLike[str]]) -> Any:
+        """Open image files as layers of this image, one each.
+
+        paths: The files, PNG or JPEG, by their absolute paths, the first the lowest layer: into the active image, or a new one if none is open.
+        """
     def transform(self, *, document: int | None = None, layers: list[int] | None = None, x: float | str | Expr | None = None, y: float | str | Expr | None = None, width: float | str | Expr | None = None, height: float | str | Expr | None = None, angle: float | str | Expr | None = None, fit: Literal["stretch", "inside", "cover"] = "stretch", anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", from_layer: int | None = None, from_anchor: Literal["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] = "top-left", unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px") -> Any:
         """Move, scale and rotate the selected layers with a box.
 

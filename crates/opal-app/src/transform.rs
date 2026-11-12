@@ -1013,7 +1013,7 @@ impl DocState {
     }
 
     /// Makes `layers` (those still in the image) the selected ones, `active` the active one.
-    fn select_layers(&mut self, layers: &[LayerId], active: LayerId) {
+    pub(crate) fn select_layers(&mut self, layers: &[LayerId], active: LayerId) {
         let doc = self.history.doc();
         let kept: Vec<LayerId> = layers.iter().copied().filter(|&l| doc.layer(l).is_some()).collect();
         let Some(&first) = kept.first() else { return };

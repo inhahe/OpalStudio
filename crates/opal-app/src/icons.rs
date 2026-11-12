@@ -109,6 +109,8 @@ pub const FEATHER: char = '\u{f8fa}';
 pub const NUMBERS: char = '\u{e748}';
 pub const PRINT_SIZE: char = '\u{f62a}';
 pub const PLACE: char = '\u{e97d}';
+/// Images stacked: several opened as layers of one.
+pub const OPEN_AS_LAYERS: char = '\u{f018e}';
 pub const REAPPLY: char = '\u{ef33}';
 pub const REAPPLY_ALL: char = '\u{f171}';
 pub const INTO_LAYER: char = '\u{e0dc}';

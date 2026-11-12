@@ -199,6 +199,14 @@ Place an image file into this image, then position and size it.
 | `into_active` | bool | Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false. |
 | `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
 
+### `open_as_layers`
+
+Open image files as layers of this image, one each.
+
+| Parameter | Kind | |
+|---|---|---|
+| `paths` (required) | paths | The files, PNG or JPEG, by their absolute paths, the first the lowest layer: into the active image, or a new one if none is open. |
+
 ### `transform`
 
 Move, scale and rotate the selected layers with a box.

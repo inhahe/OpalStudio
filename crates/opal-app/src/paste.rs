@@ -7,7 +7,7 @@ use crate::state::{AppState, MessageKind, PasteAnswer, Reading};
 use crate::transform::{Kind, PasteAs, PrintSize};
 use eframe::egui;
 use opal_core::composite::composite_within;
-use opal_core::document::{Document, IdGen, Layer, Position};
+use opal_core::document::{Document, IdGen, Layer, LayerId, Position};
 use opal_core::geom::Affine;
 use serde_json::json;
 use std::sync::Arc;
@@ -420,6 +420,110 @@ impl AppState {
         });
         self.begin_pasted(&pasted, false, PasteAs { kind: Kind::Place, name, print });
         Ok(warnings)
+    }
+
+    /// Open as Layers: each of the image files at `paths` (PNG or JPEG, read as Open reads
+    /// them) a layer of its own named after its file, pixel for pixel, centered on the canvas:
+    /// in the active image, above the active layer, the first lowest, as one history state;
+    /// with none open, in a new image the size and resolution of the first. The new layers are
+    /// selected, the topmost active. A file that cannot be read is left out. The new layers, and
+    /// what should be said: those left out, and what reading the others said; or why none
+    /// could be read.
+    pub(crate) fn open_as_layers(
+        &mut self,
+        paths: &[std::path::PathBuf],
+    ) -> Result<(Vec<LayerId>, Vec<String>), String> {
+        let named = |p: &std::path::Path| {
+            p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())
+        };
+        let mut said = Vec::new();
+        let mut read = Vec::new();
+        for path in paths {
+            match opal_io::image_files::import(path, crate::memory::free()) {
+                Ok(imported) => {
+                    said.extend(imported.warnings.iter().map(|w| format!("{}: {w}", named(path))));
+                    let name =
+                        path.file_stem().map_or_else(|| "Layer".to_owned(), |s| s.to_string_lossy().into_owned());
+                    read.push((name, imported));
+                }
+                // (The error names the file.)
+                Err(e) => said.push(format!("Left out {e}")),
+            }
+        }
+        if read.is_empty() {
+            return Err(said.join("\n"));
+        }
+        // Each centered on `canvas` (whole pixels), from `at` up.
+        let layers_of =
+            |read: Vec<(String, opal_io::image_files::Imported)>, canvas: opal_core::geom::IRect, ids: &mut IdGen| {
+                read.into_iter()
+                    .map(|(name, imported)| {
+                        let mut layer = Layer::new_raster(ids.layer(), ids.object(), name, imported.image);
+                        let by = |side: i64, own: u32| (side - i64::from(own)).div_euclid(2);
+                        let d = [
+                            canvas.x0 + by(canvas.width(), imported.width),
+                            canvas.y0 + by(canvas.height(), imported.height),
+                        ];
+                        crate::move_tool::shift(&mut layer, d);
+                        layer
+                    })
+                    .collect::<Vec<Layer>>()
+            };
+        let label = "Open as layers";
+        let made: Vec<LayerId> = match self.active_mut() {
+            None => {
+                let first = &read[0].1;
+                let mut ids = IdGen::default();
+                let mut doc = Document::new(first.width, first.height);
+                let ppi = first.resolution.map(|[across, _]| across).filter(|&r| opal_core::units::valid_ppi(r));
+                doc.resolution = ppi.unwrap_or(self.default_resolution());
+                let canvas = doc.canvas.rect();
+                let layers = layers_of(read, canvas, &mut ids);
+                let made: Vec<LayerId> = layers.iter().map(|l| l.id).collect();
+                for (index, layer) in layers.into_iter().enumerate() {
+                    doc.insert(Position { parent: None, index }, layer).expect("an empty image takes its layers");
+                }
+                self.new_untitled(doc, ids, label);
+                made
+            }
+            Some(d) => {
+                let at = AppState::above_active(d);
+                let mut made = Vec::new();
+                let result = d.apply(label, |doc, ids| {
+                    let layers = layers_of(read, doc.canvas.rect(), ids);
+                    made = layers.iter().map(|l| l.id).collect();
+                    for (k, layer) in layers.into_iter().enumerate() {
+                        doc.insert(Position { index: at.index + k, ..at }, layer)?;
+                    }
+                    Ok::<(), opal_core::document::TreeError>(())
+                });
+                result.map_err(|e| e.to_string())?;
+                made
+            }
+        };
+        let d = self.active_mut().expect("one now");
+        d.select_layers(&made, *made.last().expect("one read at least"));
+        Ok((made, said))
+    }
+
+    /// Asks for image files and opens them as layers (see
+    /// [`open_as_layers`](Self::open_as_layers)).
+    pub(crate) fn open_as_layers_dialog(&mut self) {
+        let Some(paths) = rfd::FileDialog::new()
+            .set_title("Open as Layers")
+            .add_filter("PNG and JPEG images", &["png", "jpg", "jpeg"])
+            .pick_files()
+        else {
+            return;
+        };
+        match self.open_as_layers(&paths) {
+            Ok((_, said)) => {
+                for s in said {
+                    self.message(MessageKind::Warning, "Open as Layers", s);
+                }
+            }
+            Err(why) => self.message(MessageKind::Error, "Nothing was opened", why),
+        }
     }
 
     /// Asks for an image file and places it (see [`place_file`](Self::place_file)).

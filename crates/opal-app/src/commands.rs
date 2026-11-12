@@ -28,6 +28,7 @@ pub enum Cmd {
     Paste,
     PasteInPlace,
     Place,
+    OpenAsLayers,
     Transform,
     TransformAgain,
     TransformAgainCopy,
@@ -142,7 +143,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 97] = [
+    pub const ALL: [Cmd; 98] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -161,6 +162,7 @@ impl Cmd {
         Cmd::Paste,
         Cmd::PasteInPlace,
         Cmd::Place,
+        Cmd::OpenAsLayers,
         Cmd::Transform,
         Cmd::TransformAgain,
         Cmd::TransformAgainCopy,
@@ -382,6 +384,16 @@ impl Cmd {
                 "A copy made in Opal Studio goes back exactly where it was copied from; anything \
                  else goes at the canvas's top-left corner. Otherwise like Paste.",
                 const { &[ctrl_shift(Key::V)] },
+            ),
+            Cmd::OpenAsLayers => i(
+                "Open as Layers",
+                icons::OPEN_AS_LAYERS,
+                "Open image files as layers of this image, one each.",
+                "Each file a layer named after it, pixel for pixel, centered on the canvas, above the \
+                 active layer, all in one step; with no image open, a new one the size of the first \
+                 file. A file that cannot be read is left out, and said. Place puts one file in the \
+                 transform box instead, to position and size it.",
+                &[],
             ),
             Cmd::Place => i(
                 "Place",
@@ -1065,7 +1077,16 @@ pub static RIBBON: &[Tab] = &[
                               into them.",
                 large: 3,
                 icons: false,
-                cmds: &[Cmd::New, Cmd::Open, Cmd::Save, Cmd::Place, Cmd::SaveAs, Cmd::Export, Cmd::Close],
+                cmds: &[
+                    Cmd::New,
+                    Cmd::Open,
+                    Cmd::Save,
+                    Cmd::Place,
+                    Cmd::OpenAsLayers,
+                    Cmd::SaveAs,
+                    Cmd::Export,
+                    Cmd::Close,
+                ],
             },
             Group {
                 name: "Scripts",
@@ -1373,6 +1394,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
     match cmd {
         New
         | Open
+        | OpenAsLayers
         | Preferences
         | Exit
         | ConnectAssistant

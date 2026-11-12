@@ -1287,6 +1287,19 @@ the selection itself (see *Transform Selection*).
   (a size or turn given meanwhile stays, relative to it), and lands on whole pixels when
   that is the file's own size, upright. Scripts: `place(print_size=…)`, the preference
   unless given.
+- **Open as Layers** (File) opens several image files at once, a layer each, named after
+  its file (`AppState::open_as_layers`). No box: each goes in pixel for pixel, centered on
+  the canvas (by whole pixels, rounding toward the top left), above the active layer, the
+  first file lowest, all as one history state ("Open as layers"); the new layers are
+  selected and the topmost made active, ready to align or arrange. With no image open, a
+  new untitled one is made the size of the first file, at its resolution if it says one
+  (the default resolution if not). A file that cannot be read is left out and said, with
+  what reading the others warned of; if none can be read nothing is opened. Files are read
+  as Open and Place read them, on the main thread. Place remains the way to bring in one
+  file to position and size. Scripts: `open_as_layers(paths)`, a parameter of the kind
+  `paths` (a list of absolute paths, at least one; the Python package makes each absolute
+  against its own folder, as it does a `path`; MCP's schema is an array of strings),
+  returning `{document, layers, notes}`.
 - **One history state:** the whole session in the box, from paste to commit, is one entry
   ("Paste" or "Transform"). Cancel leaves the document as it was.
 - **The clipboard:** PNG first (keeping 16-bit color and transparency), then the other
