@@ -471,7 +471,9 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             Param {
                 name: "to",
                 kind: Kind::Choice(&crate::arrange::To::NAMES),
-                help: "What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays.",
+                help: "What they line up with, or spread across: the box round them (aligning one, the canvas; \
+                       distributing, among themselves, the outermost two staying), the canvas, the box round \
+                       what is selected, or the active layer (the first given), which stays.",
                 otherwise: Otherwise::Value("\"layers\""),
             },
         ],
@@ -2266,6 +2268,12 @@ impl AppState {
             return now(Err(format!("{}: {why}", cmd.info().name)));
         }
         let doc = self.active_doc;
+        if let Some(how) = crate::arrange::Arrange::of(cmd) {
+            return match self.arrange(how, to) {
+                Ok(()) => now(Ok(self.selected_layers_json_of(doc.expect("available")))),
+                Err(why) => now(Err(format!("{}: {why}", cmd.info().name))),
+            };
+        }
         match cmd {
             Cmd::New => {
                 let background = match args.text("background") {
@@ -2546,22 +2554,6 @@ impl AppState {
             Cmd::Reselect => {
                 self.run(cmd, ctx);
                 self.reply_when_done(|st, id| selection_json(st.doc(id).expect("open")))
-            }
-            Cmd::AlignLeft
-            | Cmd::AlignHorizontalCenters
-            | Cmd::AlignRight
-            | Cmd::AlignTop
-            | Cmd::AlignVerticalCenters
-            | Cmd::AlignBottom
-            | Cmd::DistributeHorizontalCenters
-            | Cmd::DistributeVerticalCenters
-            | Cmd::DistributeHorizontalSpace
-            | Cmd::DistributeVerticalSpace => {
-                let how = crate::arrange::Arrange::of(cmd).expect("one of them");
-                match self.arrange(how, to) {
-                    Ok(()) => now(Ok(self.selected_layers_json_of(doc.expect("available")))),
-                    Err(why) => now(Err(format!("{}: {why}", cmd.info().name))),
-                }
             }
             _ => {
                 // The rest take no more than the image and layers set above.

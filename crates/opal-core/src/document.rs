@@ -702,7 +702,7 @@ impl Document {
 
     /// Turns the order of the layers `ids` round, in the places they hold among their
     /// siblings (all in one group, or all at the top level): the lowest of them takes the
-    /// highest's place, and so on.
+    /// highest's place, and so on. A layer named twice counts once.
     pub fn reverse(&mut self, ids: &[LayerId]) -> Result<(), TreeError> {
         let mut parent = None;
         let mut places = Vec::with_capacity(ids.len());
@@ -713,7 +713,9 @@ impl Document {
             }
             places.push(pos.index);
         }
+        // (A layer named twice is one place.)
         places.sort_unstable();
+        places.dedup();
         let siblings = self.siblings_mut(parent.flatten())?;
         let layers: Vec<Arc<Layer>> = places.iter().map(|&i| siblings[i].clone()).collect();
         for (&i, layer) in places.iter().zip(layers.into_iter().rev()) {
@@ -765,6 +767,10 @@ mod tests {
         // b, c and e: e takes b's place, c stays in the middle, b takes e's.
         d.reverse(&[l[1], l[2], l[4]]).unwrap();
         assert_eq!(d.layer_ids(), vec![l[0], l[4], l[2], l[3], l[1]]);
+        // A layer named twice: once.
+        d.reverse(&[l[0], l[0], l[4]]).unwrap();
+        assert_eq!(d.layer_ids(), vec![l[4], l[0], l[2], l[3], l[1]]);
+        d.reverse(&[l[0], l[4]]).unwrap();
         // Not all in one group: refused, changing nothing.
         let g = ids.layer();
         d.insert(Position { parent: None, index: 5 }, Layer::new_group(g, "g")).unwrap();

@@ -5,7 +5,7 @@
 use crate::commands::Cmd;
 use crate::doc::DocState;
 use crate::state::AppState;
-use opal_core::document::LayerId;
+use opal_core::document::{Layer, LayerId};
 use opal_core::geom::{Affine, FRect};
 use opal_core::mask::Extent;
 
@@ -115,6 +115,18 @@ impl Arrange {
     }
 }
 
+impl Edge {
+    /// How far across a box (along its axis) it lies: 0 its low side (left or top), ½ its
+    /// center, 1 its high side.
+    fn fraction(self) -> f64 {
+        match self {
+            Edge::Left | Edge::Top => 0.0,
+            Edge::HorizontalCenter | Edge::VerticalCenter => 0.5,
+            Edge::Right | Edge::Bottom => 1.0,
+        }
+    }
+}
+
 /// `r` along the axis `horizontal` names: its low and high sides.
 fn span(r: &FRect, horizontal: bool) -> (f64, f64) {
     if horizontal { (r.x0, r.x1) } else { (r.y0, r.y1) }
@@ -124,12 +136,15 @@ fn center((lo, hi): (f64, f64)) -> f64 {
     (lo + hi) * 0.5
 }
 
+/// The point `at` of the way across `(lo, hi)` (see [`Edge::fraction`]).
+fn point_at((lo, hi): (f64, f64), at: f64) -> f64 {
+    lo + (hi - lo) * at
+}
+
 /// How far (whole pixels) to move each of `spans` (low and high sides along an axis) for its
-/// point `at` of the way across (0 its low side, ½ its center, 1 its high side) to lie on
-/// `target`'s.
+/// point `at` of the way across (see [`Edge::fraction`]) to lie on `target`'s.
 fn aligned(spans: &[(f64, f64)], at: f64, target: (f64, f64)) -> Vec<i64> {
-    let point = |(lo, hi): (f64, f64)| lo + (hi - lo) * at;
-    spans.iter().map(|&s| (point(target) - point(s)).round() as i64).collect()
+    spans.iter().map(|&s| (point_at(target, at) - point_at(s, at)).round() as i64).collect()
 }
 
 /// How far (whole pixels) to move each of `spans` (two or more) to space evenly their
@@ -165,15 +180,29 @@ fn distributed(spans: &[(f64, f64)], gaps: bool, across: Option<(f64, f64)>) -> 
     out
 }
 
+/// What the status bar says, and a command refuses with, when there is no selection to align
+/// to.
+const NOTHING_SELECTED: &str = "Nothing is selected to align to: select an area first.";
+
 /// The box round what is selected on `d`, or why there is none to align to.
 fn selection_box(d: &DocState) -> Result<FRect, String> {
-    let none = || "Nothing is selected to align to: select an area first.".to_owned();
-    match d.pixel_selection().ok_or_else(none)?.mask().extent() {
+    match d.pixel_selection().ok_or(NOTHING_SELECTED)?.mask().extent() {
         Extent::Within(r) => Ok(r.to_f()),
         Extent::Unbounded => {
             Err("The selection reaches past every edge: there is no box round it to align to.".to_owned())
         }
-        Extent::Nothing => Err(none()),
+        Extent::Nothing => Err(NOTHING_SELECTED.to_owned()),
+    }
+}
+
+/// The bounds of what `layer` shows: its objects', or, a group, its shown layers' (those
+/// hidden inside it left out); `None` if it shows nothing.
+fn shown_bounds(layer: &Layer) -> Option<FRect> {
+    match layer.children() {
+        Some(children) => {
+            children.iter().filter(|c| c.visible).filter_map(|c| shown_bounds(c)).reduce(|a, b| a.union(&b))
+        }
+        None => layer.bounds(),
     }
 }
 
@@ -182,14 +211,22 @@ fn selection_box(d: &DocState) -> Result<FRect, String> {
 fn plan(d: &DocState, how: Arrange, to: To) -> Result<Vec<(LayerId, [i64; 2])>, String> {
     let doc = d.doc();
     let canvas = doc.canvas.rect().to_f();
+    let selected = d.selected_layers();
     let mut items: Vec<(LayerId, FRect)> =
-        d.selected_layers().into_iter().filter_map(|l| Some((l, doc.layer(l)?.bounds()?))).collect();
+        selected.iter().filter_map(|&l| Some((l, shown_bounds(doc.layer(l)?)?))).collect();
     let horizontal = how.horizontal();
     let moves: Vec<i64> = match how {
         Arrange::Align(edge) => {
             let target = match to {
-                To::Layers if items.len() >= 2 => items.iter().map(|i| i.1).reduce(|a, b| a.union(&b)).expect("two"),
-                To::Layers | To::Canvas => canvas,
+                // One selected: the canvas (counting those selected, not those showing
+                // something, so that one beside an empty layer stays where it is).
+                To::Layers if selected.len() < 2 => canvas,
+                To::Layers => items
+                    .iter()
+                    .map(|i| i.1)
+                    .reduce(|a, b| a.union(&b))
+                    .ok_or("The selected layers show nothing to align.")?,
+                To::Canvas => canvas,
                 To::Selection => selection_box(d)?,
                 To::Key => {
                     let key = d.active_layer().filter(|&k| items.iter().any(|i| i.0 == k)).ok_or(
@@ -205,13 +242,8 @@ fn plan(d: &DocState, how: Arrange, to: To) -> Result<Vec<(LayerId, [i64; 2])>, 
                     _ => "The selected layers show nothing to align.".to_owned(),
                 });
             }
-            let at = match edge {
-                Edge::Left | Edge::Top => 0.0,
-                Edge::HorizontalCenter | Edge::VerticalCenter => 0.5,
-                Edge::Right | Edge::Bottom => 1.0,
-            };
             let spans: Vec<_> = items.iter().map(|i| span(&i.1, horizontal)).collect();
-            aligned(&spans, at, span(&target, horizontal))
+            aligned(&spans, edge.fraction(), span(&target, horizontal))
         }
         Arrange::Distribute(spread) => {
             let across = match to {
@@ -238,28 +270,55 @@ fn plan(d: &DocState, how: Arrange, to: To) -> Result<Vec<(LayerId, [i64; 2])>, 
     Ok(items.iter().zip(moves).map(|(i, m)| (i.0, along(m))).collect())
 }
 
-/// Why `how` cannot act on the active image to `to` now, if it cannot: none open, an edit
-/// under way, no layer selected, one to move locked, too few that show something, or nothing
-/// selected to align to; with the transform box open, Distribute (Align moves the box).
-pub fn refused(st: &AppState, how: Arrange, to: To) -> Result<(), String> {
-    let d = st.active().ok_or("Open or create an image first.")?;
+/// Why `how` cannot act on `d` to `to` at all now, whatever its layers would do: an edit under
+/// way; nothing selected to align to; with the transform box open, Distribute (Align moves
+/// the box); no layer selected.
+fn unavailable(d: &DocState, how: Arrange, to: To) -> Result<(), String> {
     if let Some(b) = &d.busy {
         return Err(b.why());
     }
+    if to == To::Selection && d.pixel_selection().is_none() {
+        return Err(NOTHING_SELECTED.to_owned());
+    }
     if d.transform.is_some() {
-        return match (how, to) {
-            (Arrange::Distribute(_), _) => Err("Apply or cancel the box first.".to_owned()),
-            (Arrange::Align(_), To::Selection) => selection_box(d).map(|_| ()),
-            (Arrange::Align(_), _) => Ok(()),
+        return match how {
+            Arrange::Distribute(_) => Err("Apply or cancel the box first.".to_owned()),
+            Arrange::Align(_) => Ok(()),
         };
     }
     if d.selected_layers().is_empty() {
         return Err("Select the layers to arrange in the Layers panel first.".to_owned());
     }
-    if let Some(name) = crate::move_tool::locked_in_selected_layers(d) {
-        return Err(format!("\"{name}\" is locked, so it cannot be moved. Unlock it first."));
+    Ok(())
+}
+
+/// [`plan`], refused if a layer it would move is locked (or in a locked group): one it leaves
+/// where it is, the active layer aligned to, say, may be.
+fn checked(d: &DocState, how: Arrange, to: To) -> Result<Vec<(LayerId, [i64; 2])>, String> {
+    let moves = plan(d, how, to)?;
+    let doc = d.doc();
+    let locked = moves
+        .iter()
+        .filter(|(_, m)| *m != [0, 0])
+        .find_map(|(id, _)| crate::commands::locked_for(doc, doc.layer(*id)?));
+    match locked {
+        Some(l) => Err(format!("\"{}\" is locked, so it cannot be moved. Unlock it first.", l.name)),
+        None => Ok(moves),
     }
-    plan(d, how, to).map(|_| ())
+}
+
+/// Why `how` cannot act on the active image to `to` now, if it cannot: none open, an edit
+/// under way, no layer selected, one to move locked, too few that show something, or nothing
+/// selected to align to; with the transform box open, Distribute (Align moves the box). (What
+/// it would do to the selection's box is left for when it runs: the box round a selection
+/// costs a pass over it, and this is asked every frame.)
+pub fn refused(st: &AppState, how: Arrange, to: To) -> Result<(), String> {
+    let d = st.active().ok_or("Open or create an image first.")?;
+    unavailable(d, how, to)?;
+    if d.transform.is_some() || to == To::Selection {
+        return Ok(());
+    }
+    checked(d, how, to).map(|_| ())
 }
 
 /// What the status bar says when nothing would move.
@@ -268,32 +327,27 @@ const ALREADY: &str = "Nothing moved: they are lined up so already.";
 impl AppState {
     /// Aligns or distributes, as `how` says, the selected layers of the active image to `to`,
     /// as one history state; with the transform box open, aligns the box instead (to the
-    /// selection, or else the canvas). Refused as [`refused`] says. When nothing would move,
-    /// the status bar says so.
+    /// selection, or else the canvas), exactly, as it is drawn anew anyway. Refused as
+    /// [`refused`] says. When nothing would move, the status bar says so.
     pub(crate) fn arrange(&mut self, how: Arrange, to: To) -> Result<(), String> {
-        refused(self, how, to)?;
-        let d = self.active_mut().expect("refused without one");
-        if let (Some(s), Arrange::Align(_)) = (&d.transform, how) {
+        let d = self.active_mut().ok_or("Open or create an image first.")?;
+        unavailable(d, how, to)?;
+        if let (Some(s), Arrange::Align(edge)) = (&d.transform, how) {
             let target = if to == To::Selection { selection_box(d)? } else { d.doc().canvas.rect().to_f() };
-            let corners = s.frame.corners().map(|p| s.current.apply(p));
-            let around = FRect::bounding(&corners);
+            let around = FRect::bounding(&s.frame.corners().map(|p| s.current.apply(p)));
             let horizontal = how.horizontal();
-            let at = match how {
-                Arrange::Align(Edge::Left | Edge::Top) => 0.0,
-                Arrange::Align(Edge::HorizontalCenter | Edge::VerticalCenter) => 0.5,
-                _ => 1.0,
-            };
-            let m = aligned(&[span(&around, horizontal)], at, span(&target, horizontal))[0] as f64;
-            let by = if horizontal { Affine::translate(m, 0.0) } else { Affine::translate(0.0, m) };
-            if m == 0.0 {
+            let m = point_at(span(&target, horizontal), edge.fraction())
+                - point_at(span(&around, horizontal), edge.fraction());
+            if m.abs() < 1e-9 {
                 self.notify(ALREADY);
             } else {
+                let by = if horizontal { Affine::translate(m, 0.0) } else { Affine::translate(0.0, m) };
                 let moved = s.current.then(by);
                 d.set_box(moved, None);
             }
             return Ok(());
         }
-        let moves = plan(d, how, to)?;
+        let moves = checked(d, how, to)?;
         if moves.iter().all(|(_, m)| *m == [0, 0]) {
             self.notify(ALREADY);
             return Ok(());
@@ -457,11 +511,112 @@ mod tests {
         let (mut st, _) = image_with(&[IRect::new(10, 10, 50, 30)]);
         let d = st.active_mut().unwrap();
         assert!(d.begin_transform(opal_core::resample::Sampling::default()));
+        // Put between pixels (as a scaled paste may be), then aligned: on the edge exactly.
+        let s = d.transform.as_ref().unwrap();
+        let m = s.current.then(Affine::translate(0.4, 0.0));
+        d.set_box(m, None);
+        st.arrange(Arrange::Align(Edge::Left), To::Layers).unwrap();
+        let sides = |st: &AppState| {
+            let s = st.active().unwrap().transform.as_ref().unwrap();
+            let xs = s.frame.corners().map(|p| s.current.apply(p)[0]);
+            (xs.iter().copied().fold(f64::MAX, f64::min), xs.iter().copied().fold(f64::MIN, f64::max))
+        };
+        assert_eq!(sides(&st).0, 0.0);
         st.arrange(Arrange::Align(Edge::Right), To::Layers).unwrap();
-        let s = st.active().unwrap().transform.as_ref().unwrap();
-        let right = s.frame.corners().map(|p| s.current.apply(p)).iter().map(|p| p[0]).fold(f64::MIN, f64::max);
-        assert_eq!(right, 400.0);
+        assert_eq!(sides(&st).1, 400.0);
         assert!(refused(&st, Arrange::Distribute(Spread::HorizontalGaps), To::Canvas).unwrap_err().contains("box"));
+    }
+
+    #[test]
+    fn a_locked_layer_left_where_it_is_is_no_bar_and_bounds_are_what_shows() {
+        let rects = [IRect::new(10, 10, 50, 30), IRect::new(100, 60, 120, 100), IRect::new(200, 20, 260, 40)];
+        let (mut st, ids) = image_with(&rects);
+        let lock = |st: &mut AppState, id: LayerId| {
+            st.active_mut()
+                .unwrap()
+                .apply("Lock", |doc, _| {
+                    doc.layer_mut(id).unwrap().locked = true;
+                    Ok::<(), ()>(())
+                })
+                .unwrap();
+        };
+        // The active layer aligned to, locked: it does not move, so the others do.
+        lock(&mut st, ids[0]);
+        assert_eq!(refused(&st, Arrange::Align(Edge::Top), To::Key), Ok(()));
+        st.arrange(Arrange::Align(Edge::Top), To::Key).unwrap();
+        assert_eq!((at(&st, ids[1])[1], at(&st, ids[2])[1]), (10.0, 10.0));
+        // Aligned to the canvas instead, it would move: refused.
+        let why = refused(&st, Arrange::Align(Edge::Bottom), To::Canvas).unwrap_err();
+        assert!(why.contains("\"L0\" is locked"), "{why}");
+        // A layer beside an empty one: the box round them is its own, so nothing moves.
+        let (mut st, ids) = image_with(&rects[..1]);
+        let empty = {
+            let d = st.active_mut().unwrap();
+            let mut made = None;
+            d.apply("Empty", |doc: &mut Document, ids: &mut IdGen| {
+                let id = ids.layer();
+                made = Some(id);
+                doc.insert(Position { parent: None, index: doc.layers.len() }, Layer::new_empty(id, "E"))
+            })
+            .unwrap();
+            made.unwrap()
+        };
+        let d = st.active_mut().unwrap();
+        d.select_only(ids[0]);
+        d.toggle_selected(empty);
+        st.notice = None;
+        st.arrange(Arrange::Align(Edge::Left), To::Layers).unwrap();
+        assert_eq!((at(&st, ids[0])[0], st.notice.as_ref().map(|n| n.0.as_str())), (10.0, Some(ALREADY)));
+        // A group goes by what it shows: a hidden layer in it, however large, counts for nothing.
+        let (mut st, ids) = image_with(&rects[..2]);
+        let red = opal_core::tile::pixel_from_f32([1.0, 0.0, 0.0, 1.0]);
+        let group = {
+            let d = st.active_mut().unwrap();
+            let mut made = None;
+            d.apply("Group", |doc: &mut Document, made_ids: &mut IdGen| {
+                let g = made_ids.layer();
+                doc.insert(Position { parent: None, index: doc.layers.len() }, Layer::new_group(g, "G"))?;
+                let mut hidden = Layer::new_raster(
+                    made_ids.layer(),
+                    made_ids.object(),
+                    "H",
+                    RasterImage::filled(&IRect::new(0, 0, 400, 300), red),
+                );
+                hidden.visible = false;
+                doc.insert(Position { parent: Some(g), index: 0 }, hidden)?;
+                let shown = Layer::new_raster(
+                    made_ids.layer(),
+                    made_ids.object(),
+                    "S",
+                    RasterImage::filled(&IRect::new(300, 200, 320, 210), red),
+                );
+                doc.insert(Position { parent: Some(g), index: 1 }, shown)?;
+                made = Some(g);
+                Ok::<(), opal_core::document::TreeError>(())
+            })
+            .unwrap();
+            made.unwrap()
+        };
+        let d = st.active_mut().unwrap();
+        d.select_only(ids[0]);
+        d.toggle_selected(group);
+        st.arrange(Arrange::Align(Edge::Left), To::Layers).unwrap();
+        // Lined up on L0's left edge (10), the group by its shown layer's (300): moved by -290.
+        let shown_left = st.active().unwrap().doc().layer(group).unwrap().children().unwrap()[1].bounds().unwrap().x0;
+        assert_eq!((at(&st, ids[0])[0], shown_left), (10.0, 10.0));
+    }
+
+    #[test]
+    fn the_align_commands_are_those_of_the_align_group_and_its_setting_names_them_all() {
+        let align =
+            crate::commands::RIBBON.iter().flat_map(|t| t.groups).find(|g| g.name == "Align").expect("an Align group");
+        for cmd in Cmd::ALL {
+            assert_eq!(Arrange::of(cmd).is_some(), align.cmds.contains(&cmd), "{cmd:?}");
+        }
+        let def = crate::tools::MOVE_SETTINGS.iter().find(|d| d.key == "move.align_to").expect("the setting");
+        let crate::settings::Kind::Choice(options) = def.kind else { panic!("a choice") };
+        assert!(options.iter().all(|(key, _)| To::named(key).is_some()));
+        assert_eq!(options.len(), To::NAMES.len());
     }
 
     #[test]

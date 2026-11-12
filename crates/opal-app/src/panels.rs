@@ -611,6 +611,14 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
     // While the transform box is open, its settings come first.
     if st.active().is_some_and(|d| d.transform.is_some()) {
         crate::transform_ui::settings(ui, st);
+        // The box aligned to the canvas or the selection, as the Move tool's Align to says.
+        ui.separator();
+        let palette = st.palette;
+        let settings = st.tool_settings.get_mut(&crate::tools::ToolId::Move).expect("every tool has settings");
+        if settings::settings_ui(ui, settings, Show::Section("Align"), &palette, "move") {
+            st.settings_touched();
+        }
+        align_buttons(ui, st, false);
         return;
     }
     let tool = st.tool();
@@ -640,7 +648,7 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
     }
     // Layer › Align's commands, which go by the Move tool's Align to (above).
     if tool == crate::tools::ToolId::Move {
-        align_buttons(ui, st);
+        align_buttons(ui, st, true);
     }
     // The outline edited (the selection's last step), its points picked; the symmetry's place.
     if tool == crate::tools::ToolId::Outline {
@@ -657,19 +665,20 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
     }
 }
 
-/// The Move tool's buttons for Layer › Align's commands, a row for aligning and one for
+/// The buttons for Layer › Align's commands: a row for aligning, and (`distribute`) one for
 /// distributing, each saying why it is not available when it is not.
-fn align_buttons(ui: &mut egui::Ui, st: &mut AppState) {
+fn align_buttons(ui: &mut egui::Ui, st: &mut AppState, distribute: bool) {
     use crate::commands::Cmd::*;
-    let rows: [&[crate::commands::Cmd]; 2] = [
+    let rows: &[&[crate::commands::Cmd]] = &[
         &[AlignLeft, AlignHorizontalCenters, AlignRight, AlignTop, AlignVerticalCenters, AlignBottom],
         &[DistributeHorizontalCenters, DistributeVerticalCenters, DistributeHorizontalSpace, DistributeVerticalSpace],
     ];
+    let rows = &rows[..if distribute { 2 } else { 1 }];
     ui.separator();
     ui.label(RichText::new("Align").strong());
     for row in rows {
         ui.horizontal(|ui| {
-            for &cmd in row {
+            for &cmd in *row {
                 let info = cmd.info();
                 let available = crate::commands::availability(st, cmd);
                 let r = ui.add_enabled(available.is_ok(), egui::Button::new(crate::theme::icon(info.icon, 18.0)));

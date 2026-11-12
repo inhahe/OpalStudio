@@ -277,70 +277,70 @@ class Editor:
 
         document: The image, by id. Default: the active image.
         layers: The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers.
-        to: What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers".
+        to: What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers".
         """
     def align_horizontal_centers(self, *, document: int | None = None, layers: list[int] | None = None, to: Literal["layers", "canvas", "selection", "key"] = "layers") -> Any:
         """Line the selected layers' centers up on a vertical line.
 
         document: The image, by id. Default: the active image.
         layers: The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers.
-        to: What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers".
+        to: What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers".
         """
     def align_right(self, *, document: int | None = None, layers: list[int] | None = None, to: Literal["layers", "canvas", "selection", "key"] = "layers") -> Any:
         """Line the selected layers' right edges up.
 
         document: The image, by id. Default: the active image.
         layers: The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers.
-        to: What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers".
+        to: What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers".
         """
     def align_top(self, *, document: int | None = None, layers: list[int] | None = None, to: Literal["layers", "canvas", "selection", "key"] = "layers") -> Any:
         """Line the selected layers' top edges up.
 
         document: The image, by id. Default: the active image.
         layers: The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers.
-        to: What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers".
+        to: What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers".
         """
     def align_vertical_centers(self, *, document: int | None = None, layers: list[int] | None = None, to: Literal["layers", "canvas", "selection", "key"] = "layers") -> Any:
         """Line the selected layers' centers up on a horizontal line.
 
         document: The image, by id. Default: the active image.
         layers: The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers.
-        to: What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers".
+        to: What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers".
         """
     def align_bottom(self, *, document: int | None = None, layers: list[int] | None = None, to: Literal["layers", "canvas", "selection", "key"] = "layers") -> Any:
         """Line the selected layers' bottom edges up.
 
         document: The image, by id. Default: the active image.
         layers: The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers.
-        to: What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers".
+        to: What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers".
         """
     def distribute_horizontal_centers(self, *, document: int | None = None, layers: list[int] | None = None, to: Literal["layers", "canvas", "selection", "key"] = "layers") -> Any:
         """Space the selected layers' centers evenly from side to side.
 
         document: The image, by id. Default: the active image.
         layers: The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers.
-        to: What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers".
+        to: What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers".
         """
     def distribute_vertical_centers(self, *, document: int | None = None, layers: list[int] | None = None, to: Literal["layers", "canvas", "selection", "key"] = "layers") -> Any:
         """Space the selected layers' centers evenly from top to bottom.
 
         document: The image, by id. Default: the active image.
         layers: The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers.
-        to: What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers".
+        to: What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers".
         """
     def distribute_horizontal_space(self, *, document: int | None = None, layers: list[int] | None = None, to: Literal["layers", "canvas", "selection", "key"] = "layers") -> Any:
         """Make the gaps between the selected layers, side to side, all alike.
 
         document: The image, by id. Default: the active image.
         layers: The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers.
-        to: What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers".
+        to: What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers".
         """
     def distribute_vertical_space(self, *, document: int | None = None, layers: list[int] | None = None, to: Literal["layers", "canvas", "selection", "key"] = "layers") -> Any:
         """Make the gaps between the selected layers, top to bottom, all alike.
 
         document: The image, by id. Default: the active image.
         layers: The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers.
-        to: What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers".
+        to: What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers".
         """
     def merge_down(self, *, document: int | None = None, layer: int | None = None) -> Any:
         """Combine the active layer with the layer below it.

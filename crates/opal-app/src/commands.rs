@@ -522,7 +522,8 @@ impl Cmd {
                 "Move the selected layers to the top of their group.",
                 "Each to the top of the group it is in (or of the image), the selected ones keeping \
                  the order they had.",
-                const { &[ctrl_shift(Key::CloseBracket)] },
+                // (Shift with ] gives }, as egui names the key.)
+                const { &[ctrl_shift(Key::CloseBracket), ctrl_shift(Key::CloseCurlyBracket)] },
             ),
             Cmd::SendToBack => i(
                 "Send to Back",
@@ -530,7 +531,7 @@ impl Cmd {
                 "Move the selected layers to the bottom of their group.",
                 "Each to the bottom of the group it is in (or of the image), the selected ones \
                  keeping the order they had.",
-                const { &[ctrl_shift(Key::OpenBracket)] },
+                const { &[ctrl_shift(Key::OpenBracket), ctrl_shift(Key::OpenCurlyBracket)] },
             ),
             Cmd::ReverseLayers => i(
                 "Reverse",
@@ -1169,7 +1170,8 @@ pub static RIBBON: &[Tab] = &[
             },
             Group {
                 name: "Layers",
-                description: "Which layers commands act on: all of them, or none. Click, Ctrl+click and                               Shift+click in the Layers panel choose them one by one.",
+                description: "Which layers commands act on: all of them, or none. Click, Ctrl+click and \
+                              Shift+click in the Layers panel choose them one by one.",
                 large: 0,
                 icons: false,
                 cmds: &[Cmd::SelectAllLayers, Cmd::DeselectLayers],
@@ -1681,6 +1683,27 @@ pub fn checked(st: &AppState, cmd: Cmd) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_help_text_has_a_run_of_spaces_left_by_a_lost_line_continuation() {
+        let runs = |s: &str| s.contains("   ");
+        for cmd in Cmd::ALL {
+            let info = cmd.info();
+            assert!(!runs(info.description) && !runs(info.help), "{cmd:?}");
+        }
+        for g in RIBBON.iter().flat_map(|t| t.groups) {
+            assert!(!runs(g.description), "{}", g.name);
+        }
+        for m in crate::api::methods() {
+            assert!(m.params.iter().all(|p| !runs(p.help)), "{}", m.name);
+        }
+        for t in crate::tools::ToolId::ALL {
+            let info = t.info();
+            assert!(!runs(info.description) && !runs(info.help), "{}", info.name);
+            assert!(info.settings.iter().all(|d| !runs(d.help)), "{}", info.name);
+        }
+        assert!(crate::prefs::PREFS.iter().all(|d| !runs(d.help)));
+    }
 
     #[test]
     fn every_command_is_listed_once_in_all() {

@@ -385,7 +385,7 @@ Line the selected layers' left edges up.
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 | `layers` | layers | The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers. |
-| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers". |
+| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers". |
 
 ### `align_horizontal_centers`
 
@@ -395,7 +395,7 @@ Line the selected layers' centers up on a vertical line.
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 | `layers` | layers | The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers. |
-| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers". |
+| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers". |
 
 ### `align_right`
 
@@ -405,7 +405,7 @@ Line the selected layers' right edges up.
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 | `layers` | layers | The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers. |
-| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers". |
+| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers". |
 
 ### `align_top`
 
@@ -415,7 +415,7 @@ Line the selected layers' top edges up.
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 | `layers` | layers | The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers. |
-| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers". |
+| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers". |
 
 ### `align_vertical_centers`
 
@@ -425,7 +425,7 @@ Line the selected layers' centers up on a horizontal line.
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 | `layers` | layers | The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers. |
-| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers". |
+| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers". |
 
 ### `align_bottom`
 
@@ -435,7 +435,7 @@ Line the selected layers' bottom edges up.
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 | `layers` | layers | The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers. |
-| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers". |
+| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers". |
 
 ### `distribute_horizontal_centers`
 
@@ -445,7 +445,7 @@ Space the selected layers' centers evenly from side to side.
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 | `layers` | layers | The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers. |
-| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers". |
+| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers". |
 
 ### `distribute_vertical_centers`
 
@@ -455,7 +455,7 @@ Space the selected layers' centers evenly from top to bottom.
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 | `layers` | layers | The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers. |
-| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers". |
+| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers". |
 
 ### `distribute_horizontal_space`
 
@@ -465,7 +465,7 @@ Make the gaps between the selected layers, side to side, all alike.
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 | `layers` | layers | The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers. |
-| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers". |
+| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers". |
 
 ### `distribute_vertical_space`
 
@@ -475,7 +475,7 @@ Make the gaps between the selected layers, top to bottom, all alike.
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 | `layers` | layers | The layers, by id: the first the active one, which they line up to with `to` key. Default: the selected layers. |
-| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays. Default: "layers". |
+| `to` | `layers`, `canvas`, `selection`, `key` | What they line up with, or spread across: the box round them (aligning one, the canvas; distributing, among themselves, the outermost two staying), the canvas, the box round what is selected, or the active layer (the first given), which stays. Default: "layers". |
 
 ### `merge_down`
 

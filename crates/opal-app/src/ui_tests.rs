@@ -4216,6 +4216,56 @@ fn a_symmetric_outline_is_edited_on_any_of_its_copies() {
 }
 
 #[test]
+fn ctrl_shift_brackets_bring_to_front_as_the_keys_arrive_and_the_box_aligns_from_its_settings() {
+    use opal_core::document::{Layer, Position};
+    use opal_core::geom::IRect;
+    use opal_core::raster::RasterImage;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    // Two more layers; the lower of them selected.
+    let mut ids = Vec::new();
+    let red = opal_core::tile::pixel_from_f32([1.0, 0.0, 0.0, 1.0]);
+    h.state_mut()
+        .state_mut()
+        .active_mut()
+        .unwrap()
+        .apply("Layers", |doc, made| {
+            for r in [IRect::new(10, 10, 50, 30), IRect::new(100, 60, 120, 100)] {
+                let id = made.layer();
+                let n = doc.layers.len();
+                doc.insert(
+                    Position { parent: None, index: n },
+                    Layer::new_raster(id, made.object(), "L", RasterImage::filled(&r, red)),
+                )?;
+                ids.push(id);
+            }
+            Ok::<(), opal_core::document::TreeError>(())
+        })
+        .unwrap();
+    h.state_mut().state_mut().active_mut().unwrap().select_only(ids[0]);
+    h.run();
+    // Ctrl+Shift+] comes as Ctrl+Shift+}: to the front all the same.
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::CloseCurlyBracket);
+    h.run();
+    let top = h.state().state().active().unwrap().doc().layers.last().unwrap().id;
+    assert_eq!(top, ids[0]);
+    // With the box open, the tool settings show Align's buttons: Align Left puts it on the canvas's edge.
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Move);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::T);
+    h.run();
+    assert!(h.state().state().active().unwrap().transform.is_some(), "no box");
+    // (Below the box's own settings: scrolled to, as the user would.)
+    h.get_by_label(&crate::icons::ALIGN_LEFT.to_string()).scroll_to_me();
+    h.run();
+    h.get_by_label(&crate::icons::ALIGN_LEFT.to_string()).click();
+    h.run();
+    let s = h.state().state().active().unwrap().transform.as_ref().unwrap();
+    let left = s.frame.corners().map(|p| s.current.apply(p)[0]).into_iter().fold(f64::MAX, f64::min);
+    assert_eq!(left, 0.0);
+}
+
+#[test]
 fn the_selection_panel_lists_the_steps_and_takes_one_away() {
     let _gpu = gpu_lock();
     let mut h = harness();

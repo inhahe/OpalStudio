@@ -301,9 +301,9 @@ impl DocState {
 
     /// Selects every layer at the top level (a group as a whole), the topmost made active.
     pub fn select_all_layers(&mut self) {
-        let doc = self.history.doc();
-        self.selected = doc.layers.iter().map(|l| l.id).collect();
-        self.active = doc.layers.last().map(|l| l.id);
+        let ids: Vec<LayerId> = self.doc().layers.iter().map(|l| l.id).collect();
+        self.active = ids.last().copied();
+        self.selected = ids.into_iter().collect();
     }
 
     /// Selects no layer.
@@ -677,7 +677,8 @@ impl DocState {
                 return;
             }
         }
-        if self.active.is_some_and(|a| now.contains(&a)) {
+        // None active (Deselect Layers): none still, an edit adding no layer.
+        if self.active.is_none_or(|a| now.contains(&a)) {
             return;
         }
         let place = before.zip(self.active).and_then(|(b, a)| b.position(a));

@@ -572,6 +572,21 @@ impl AppState {
             return;
         }
         match cmd {
+            Cmd::AlignLeft
+            | Cmd::AlignHorizontalCenters
+            | Cmd::AlignRight
+            | Cmd::AlignTop
+            | Cmd::AlignVerticalCenters
+            | Cmd::AlignBottom
+            | Cmd::DistributeHorizontalCenters
+            | Cmd::DistributeVerticalCenters
+            | Cmd::DistributeHorizontalSpace
+            | Cmd::DistributeVerticalSpace => {
+                let how = crate::arrange::Arrange::of(cmd).expect("one of them");
+                if let Err(why) = self.arrange(how, crate::arrange::To::chosen(self)) {
+                    self.message(MessageKind::Info, cmd.info().name, why);
+                }
+            }
             Cmd::New => self.new_image = Some(self.last_new.clone()),
             Cmd::Open => self.open_dialog(),
             Cmd::Save => self.save_active(false, ctx),
@@ -702,21 +717,6 @@ impl AppState {
             Cmd::LayerViaCut => self.layer_via(true),
             Cmd::GroupLayers => self.group_layers(),
             Cmd::DeleteLayer => self.delete_layers(),
-            Cmd::AlignLeft
-            | Cmd::AlignHorizontalCenters
-            | Cmd::AlignRight
-            | Cmd::AlignTop
-            | Cmd::AlignVerticalCenters
-            | Cmd::AlignBottom
-            | Cmd::DistributeHorizontalCenters
-            | Cmd::DistributeVerticalCenters
-            | Cmd::DistributeHorizontalSpace
-            | Cmd::DistributeVerticalSpace => {
-                let how = crate::arrange::Arrange::of(cmd).expect("one of them");
-                if let Err(why) = self.arrange(how, crate::arrange::To::chosen(self)) {
-                    self.message(MessageKind::Info, cmd.info().name, why);
-                }
-            }
             Cmd::BringToFront => self.order_layers(crate::layer_ops::Order::Front),
             Cmd::SendToBack => self.order_layers(crate::layer_ops::Order::Back),
             Cmd::ReverseLayers => self.order_layers(crate::layer_ops::Order::Reverse),

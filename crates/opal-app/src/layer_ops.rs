@@ -676,15 +676,28 @@ pub(crate) fn order_refused(st: &AppState, cmd: crate::commands::Cmd) -> Result<
             Order::Reverse
         }
     };
-    let mut after = doc.clone();
-    reordered(&mut after, &ids, how).map_err(|e| e.to_string())?;
-    let order = |doc: &Document| ids.iter().map(|&id| doc.position(id)).collect::<Vec<_>>();
-    if order(&after) == order(doc) {
-        return Err(match how {
-            Order::Front => "They are at the top of their groups already.".into(),
-            Order::Back => "They are at the bottom of their groups already.".into(),
-            Order::Reverse => "Reversed, they would stay as they are.".into(),
+    // Already there: in each group, those of them in it are its topmost (or bottommost), one
+    // after another. (Two or more reversed always change.)
+    if how != Order::Reverse {
+        let mut groups: Vec<(Option<LayerId>, Vec<usize>)> = Vec::new();
+        for &id in &ids {
+            let pos = doc.position(id).ok_or("A selected layer has gone.")?;
+            match groups.iter_mut().find(|(p, _)| *p == pos.parent) {
+                Some((_, at)) => at.push(pos.index),
+                None => groups.push((pos.parent, vec![pos.index])),
+            }
+        }
+        let there = groups.iter().all(|(parent, at)| {
+            let n = doc.siblings(*parent).map_or(0, <[_]>::len);
+            let want = if how == Order::Front { n - at.len()..n } else { 0..at.len() };
+            at.iter().copied().eq(want)
         });
+        if there {
+            return Err(match how {
+                Order::Front => "They are at the top of their groups already.".into(),
+                _ => "They are at the bottom of their groups already.".into(),
+            });
+        }
     }
     Ok(())
 }
@@ -790,6 +803,21 @@ mod tests {
         assert_eq!((d.selected_layers(), d.active_layer()), (vec![c, b, background, a, g, top], Some(top)));
         d.deselect_layers();
         assert_eq!((d.selected_layers(), d.active_layer()), (vec![], None));
+        // An edit adding no layer leaves none selected; one adding a layer makes it active.
+        st.select_all();
+        let d = st.active().unwrap();
+        assert_eq!((d.selected_layers(), d.active_layer()), (vec![], None), "a layer selected again");
+        let added = add_layer(&mut st, None, true);
+        assert_eq!(st.active().unwrap().active_layer(), Some(added));
+        // A layer only in the edit under way (a paste's, its box open) is among all.
+        let d = st.active_mut().unwrap();
+        let mut doc = d.doc().clone();
+        let pasted = d.ids.layer();
+        let n = doc.layers.len();
+        doc.insert(Position { parent: None, index: n }, Layer::new_empty(pasted, "p")).unwrap();
+        d.pending = Some(crate::doc::Pending { doc, label: "Paste".into() });
+        d.select_all_layers();
+        assert_eq!(d.active_layer(), Some(pasted));
     }
 
     #[test]
