@@ -53,6 +53,7 @@ pub fn read_jpeg(bytes: &[u8]) -> Raw {
         raw.iptc = Some(iim);
         raw.iptc_changed = changed;
     }
+    raw.extended_segments = !extended.is_empty();
     // Extended XMP joined to the standard packet, if that names it.
     if let Some(xmp) = &raw.xmp
         && let Some(guid) = extended_guid(xmp)
@@ -473,6 +474,10 @@ fn raw_profile_data(kind: &str, bytes: &[u8]) -> Vec<u8> {
 /// Photoshop's resources in a "Raw profile type 8bim" chunk (`kind`, `data`), if they hold an
 /// IIM: the others, the IIM and its digest taken out (none, if that was all).
 fn photoshop_without_iim(kind: &[u8; 4], data: &[u8]) -> Option<Vec<u8>> {
+    // (Every text chunk begins with its keyword: no other is inflated or decoded for this.)
+    if !data.starts_with(b"Raw profile type 8bim\0") {
+        return None;
+    }
     let (keyword, text) = png_text(kind, data)?;
     let block = raw_profile(&text).filter(|_| keyword == "Raw profile type 8bim")?;
     iptc::from_resources(&block)?;
@@ -513,7 +518,7 @@ pub fn replace_png(png: &[u8], chunks: &[u8], parts: Parts) -> Option<Vec<u8>> {
     for (i, (kind, data, at)) in all.iter().enumerate() {
         let whole = &png[*at..at + 12 + data.len()];
         if !png_is_metadata(kind, data, parts) {
-            match photoshop_without_iim(kind, data).filter(|_| parts.iptc) {
+            match parts.iptc.then(|| photoshop_without_iim(kind, data)).flatten() {
                 // Photoshop's resources that held the IIM, written in a chunk of its own: the
                 // others kept.
                 Some(others) if others.is_empty() => {}

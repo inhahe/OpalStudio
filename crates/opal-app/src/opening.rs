@@ -162,6 +162,10 @@ impl AppState {
             self.take_down(&r.notice);
             let target = r.target.id;
             let gone = target.is_some_and(|t| self.doc(t).is_none());
+            // Whether the user is still on the image the call named, and the image they are on
+            // (asked before what it is for runs, which may show its own).
+            let stayed = target.is_some() && self.active_doc == target;
+            let user_on = self.active_doc;
             let result = if gone {
                 Err(format!("The image was closed before {} was read.", r.what))
             } else {
@@ -177,6 +181,17 @@ impl AppState {
                 }
                 result
             };
+            // Refused once read, the user is left where they were: as for a call refused at
+            // once, on the image they were on when it was made (it made the image it names the
+            // active one), if they stayed on that; else on the one they went to. Not their
+            // layers put back, which they may have chosen since.
+            let call_time = r.call.as_ref().and_then(|c| c.view.as_ref()).and_then(|v| v.0);
+            let back = if stayed { call_time } else { user_on };
+            if result.is_err()
+                && let Some(id) = back.filter(|&id| self.doc(id).is_some())
+            {
+                self.show_doc(id);
+            }
             match (r.answer, result) {
                 // A notification, which nobody hears the answer to: what it says goes to the user.
                 // Answered still: its connection waits for that before it reads its next request.
@@ -185,18 +200,7 @@ impl AppState {
                     self.message(crate::state::MessageKind::Error, name, why.clone());
                     self.answered.push((n, Err(why)));
                 }
-                (Some((n, _)), result) => {
-                    // Refused once read, as one refused at once, the call puts the user's view
-                    // back (it made the image it names the active one), unless the user has
-                    // moved on.
-                    if result.is_err()
-                        && let Some(view) =
-                            r.call.and_then(|c| c.view).filter(|_| target.is_some() && self.active_doc == target)
-                    {
-                        self.restore_view(view);
-                    }
-                    self.answered.push((n, result));
-                }
+                (Some((n, _)), result) => self.answered.push((n, result)),
                 // Said, if it went wrong: what was read for has said whatever else needs saying.
                 (None, Err(why)) => self.message(crate::state::MessageKind::Error, "Could not open", why),
                 (None, Ok(_)) => {}
@@ -438,8 +442,47 @@ mod tests {
         let mut st = AppState::new();
         let ctx = egui::Context::default();
         let apply = Some((3, Vec::new(), crate::api::BoxArgs::default(), false));
-        st.place_later(png("nowhere.png"), None, false, apply, &ctx);
+        let path = png("nowhere.png");
+        st.place_later(path.clone(), None, false, apply, &ctx);
+        std::fs::remove_file(&path).ok();
         assert!(matches!(st.answered.last(), Some((3, Err(_)))), "{:?}", st.answered);
         assert!(!st.reading_files());
+    }
+
+    #[test]
+    fn layers_read_into_an_image_closed_meanwhile_make_a_new_one() {
+        let mut st = AppState::new();
+        let path = png("closed-into.png");
+        let made = st.layers_read(read_files(std::slice::from_ref(&path)), Some(DocId(999))).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!((st.docs.len(), made.0.len()), (1, 1));
+    }
+
+    #[test]
+    fn a_reference_says_what_open_says_and_leaves_the_user_where_they_went_meanwhile() {
+        let mut st = image();
+        st.create_image(&NewImage { width: 40, height: 30, background: Background::White, resolution: 72.0 });
+        let ctx = egui::Context::default();
+        let [a, b] = [st.docs[0].id, st.docs[1].id];
+        st.show_doc(a);
+        let tall = std::env::temp_dir().join(format!("opal-opening-{}-tall.jpg", std::process::id()));
+        {
+            use image::codecs::jpeg::{JpegEncoder, PixelDensity, PixelDensityUnit};
+            let mut jpeg = Vec::new();
+            let mut encoder = JpegEncoder::new_with_quality(&mut jpeg, 90);
+            encoder.set_pixel_density(PixelDensity { density: (100, 200), unit: PixelDensityUnit::Inches });
+            image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8)).write_with_encoder(encoder).unwrap();
+            std::fs::write(&tall, jpeg).unwrap();
+        }
+        // Held by a dialog while the user goes to the other image.
+        st.rotate_by = Some(crate::image_ops::RotateBy { degrees: 30.0, grow: true });
+        st.open_reference(tall.clone(), &ctx);
+        st.show_doc(b);
+        st.rotate_by = None;
+        read(&mut st);
+        st.poll_files(false);
+        std::fs::remove_file(&tall).ok();
+        assert!(st.messages.iter().any(|m| m.body.contains("not square")), "{:?}", st.messages);
+        assert_eq!(st.pin.last().map(|p| p.1), Some(Some(b)), "pinned beside the image left");
     }
 }

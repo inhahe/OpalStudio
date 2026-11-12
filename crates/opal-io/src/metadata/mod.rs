@@ -30,6 +30,8 @@ pub struct Raw {
     /// Whether the IIM's digest said a program unaware of XMP changed it after the XMP was
     /// written.
     pub iptc_changed: bool,
+    /// Whether a JPEG has Extended XMP segments at all (read into `extended_xmp` or not).
+    pub extended_segments: bool,
 }
 
 impl Raw {
@@ -403,9 +405,16 @@ pub fn description(meta: &Metadata) -> Description {
 
 /// `meta` describing the image as `d` says: XMP (made if there is none) given every field;
 /// the IIM, if there is one, given those it has (its digest worked out again on writing);
-/// EXIF's description, artist and copyright, where it has them.
+/// EXIF's description, artist and copyright, where it has them (`sync::carried`). An IIM a
+/// program unaware of XMP changed since the XMP was written is carried to the XMP first, so
+/// that the digest written with it, which says they agree, is true.
 pub fn with_description(meta: &Metadata, d: &Description) -> Metadata {
     let mut x = meta.xmp.as_deref().and_then(Xmp::read).unwrap_or_default();
+    if meta.iptc_changed
+        && let Some(iim) = meta.iptc.as_deref().and_then(iptc::Iim::read)
+    {
+        sync::xmp_from_iim(&iim, &mut x);
+    }
     x.set_default_text(xmp::DC, "title", &d.title);
     x.set_default_text(xmp::DC, "description", &d.caption);
     x.set_texts(xmp::DC, "creator", ArrayKind::Seq, &d.creators);
@@ -418,36 +427,17 @@ pub fn with_description(meta: &Metadata, d: &Description) -> Metadata {
     }
     x.set_text(xmp::XMP_RIGHTS, "WebStatement", &d.copyright_url);
     x.set_texts(xmp::DC, "subject", ArrayKind::Bag, &d.keywords);
-    let iptc = meta.iptc.as_deref().and_then(iptc::Iim::read).map(|mut iim| {
-        let one = |t: &str| if t.is_empty() { Vec::new() } else { vec![t.to_owned()] };
-        iim.set_texts(2, 5, &one(&d.title));
-        iim.set_texts(2, 120, &one(&d.caption));
-        iim.set_texts(2, 80, &d.creators);
-        iim.set_texts(2, 116, &one(&d.copyright));
-        iim.set_texts(2, 25, &d.keywords);
-        Arc::from(iim.bytes())
-    });
-    let exif = meta.exif.as_deref().and_then(Exif::read).map(|mut e| {
-        for (tag, text) in
-            [(DESCRIPTION, d.caption.clone()), (ARTIST, d.creators.join("; ")), (COPYRIGHT, d.copyright.clone())]
-        {
-            if e.get(Ifd::Image, tag).is_some() {
-                if text.is_empty() {
-                    e.remove(Ifd::Image, tag);
-                } else {
-                    e.set(Ifd::Image, tag, &Value::Ascii(text));
-                }
-            }
-        }
-        Arc::from(e.into_bytes())
-    });
-    Metadata {
-        exif: exif.or_else(|| meta.exif.clone()),
+    let described = Metadata {
         xmp: (!x.properties.is_empty()).then(|| Arc::from(x.packet().into_bytes())),
-        iptc: iptc.or_else(|| meta.iptc.clone()),
         // Written together, they agree.
         iptc_changed: false,
-    }
+        ..meta.clone()
+    };
+    let set = sync::Set {
+        xmp: ["title", "description", "creator", "rights", "subject"].map(|p| Name::new(xmp::DC, p)).to_vec(),
+        ..sync::Set::default()
+    };
+    sync::carried(&described, &set)
 }
 
 #[cfg(test)]

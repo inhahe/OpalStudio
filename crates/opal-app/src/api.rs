@@ -5972,4 +5972,68 @@ mod tests {
         assert!(st.active().unwrap().transform.is_none(), "a refused box was left open");
         std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).ok();
     }
+
+    #[test]
+    fn a_place_refused_once_read_leaves_the_user_where_they_went_meanwhile() {
+        let mut st = AppState::new();
+        for _ in 0..3 {
+            now(&mut st, "new", json!({ "width": 40, "height": 20 })).unwrap();
+        }
+        let [a, b, c] = [st.docs[0].id, st.docs[1].id, st.docs[2].id];
+        st.show_doc(a);
+        // Held by a dialog while the user goes to another image.
+        st.rotate_by = Some(crate::image_ops::RotateBy { degrees: 30.0, grow: true });
+        let missing = file_in("place-moved-on", "missing.png");
+        let reply = st.call("place", &args(json!({ "document": b.0, "path": missing })), &egui::Context::default());
+        st.show_doc(c);
+        st.rotate_by = None;
+        assert!(answered(&mut st, reply).is_err());
+        assert_eq!(st.active_doc, Some(c), "taken back from where the user went");
+    }
+
+    #[test]
+    fn a_notification_s_layers_and_place_tell_the_user_what_reading_said() {
+        let mut st = AppState::new();
+        let ctx = egui::Context::default();
+        now(&mut st, "new", json!({ "width": 40, "height": 20 })).unwrap();
+        let file = |name: &str| file_in("notified", name);
+        let (good, missing) = (png_at(file("good.png"), 10, 10), file("missing.png"));
+        let params = args(json!({ "paths": [good, missing] }));
+        let reply = st.call_from(&[], false, "open_as_layers", &params, &ctx);
+        answered(&mut st, reply).unwrap();
+        assert!(st.messages.iter().any(|m| m.body.contains("Left out")), "{:?}", st.messages);
+        // Place: a color profile other than sRGB.
+        st.messages.clear();
+        use image::ImageEncoder;
+        let wide = file("wide-gamut.jpg");
+        let mut jpeg = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90);
+        encoder.set_icc_profile(b"Display P3, as a profile would name it".to_vec()).unwrap();
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8)).write_with_encoder(encoder).unwrap();
+        std::fs::write(&wide, jpeg).unwrap();
+        let reply = st.call_from(&[], false, "place", &args(json!({ "path": wide })), &ctx);
+        answered(&mut st, reply).unwrap();
+        assert!(st.messages.iter().any(|m| m.body.contains("color profile")), "{:?}", st.messages);
+    }
+
+    #[test]
+    fn a_place_refused_once_read_keeps_the_layers_chosen_meanwhile() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 40, "height": 20 })).unwrap();
+        now(&mut st, "new", json!({ "width": 40, "height": 20 })).unwrap();
+        now(&mut st, "new_layer", json!({ "name": "Upper" })).unwrap();
+        let (a, b) = (st.docs[0].id, st.docs[1].id);
+        let [lower, upper] = [st.docs[1].doc().layers[0].id, st.docs[1].doc().layers[1].id];
+        st.show_doc(a);
+        st.rotate_by = Some(crate::image_ops::RotateBy { degrees: 30.0, grow: true });
+        let missing = file_in("place-layers", "missing.png");
+        let reply = st.call("place", &args(json!({ "document": b.0, "path": missing })), &egui::Context::default());
+        // The user, still on b, chooses its lower layer while the file is read.
+        st.doc_mut(b).unwrap().select_only(lower);
+        st.rotate_by = None;
+        assert!(answered(&mut st, reply).is_err());
+        assert_eq!(st.active_doc, Some(a), "not put back on the image the user was on");
+        assert_eq!(st.doc(b).unwrap().active_layer(), Some(lower), "the layer chosen meanwhile undone");
+        let _ = upper;
+    }
 }

@@ -234,6 +234,11 @@ impl AppState {
                 self.message(kind, a.call.name, why.clone());
                 self.answered.push((a.n, Err(why)));
             }
+            // A notification's answer nobody reads: what was told stays for the user.
+            (Some(a), Ok(())) if !a.call.heard => {
+                let value = (a.with)(self, id);
+                self.answered.push((a.n, Ok(value)));
+            }
             (Some(a), Ok(())) => {
                 let value = (a.with)(self, id);
                 let (refusals, notes) = self.told_since(told, notice);
@@ -555,5 +560,28 @@ mod tests {
             "{:?}",
             st.answered
         );
+    }
+
+    #[test]
+    fn a_notification_s_edit_done_leaves_what_it_told_for_the_user() {
+        let mut st = app();
+        st.edit_wait = Duration::ZERO;
+        let doc = st.active_doc.unwrap();
+        let memory = crate::memory::Allowance::now();
+        st.edit_later(
+            doc,
+            "Tell",
+            memory,
+            |_, _, _| Ok::<u32, String>(1),
+            |st, _, _| {
+                st.message(crate::state::MessageKind::Warning, "Tell", "Worth knowing".to_owned());
+            },
+        );
+        let call = crate::api::Calling { name: "tell".into(), heard: false, view: None };
+        let answer = Answer { n: 5, call, with: Box::new(|_, _| serde_json::json!({})) };
+        st.doc_mut(doc).unwrap().busy.as_mut().unwrap().answer = Some(answer);
+        st.finish_edits();
+        assert!(matches!(st.answered.last(), Some((5, Ok(_)))), "{:?}", st.answered);
+        assert!(st.messages.iter().any(|m| m.body == "Worth knowing"), "taken into an answer no one reads");
     }
 }

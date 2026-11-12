@@ -52,12 +52,38 @@ fn image_panes(tiles: &Tiles<Pane>, order: &[DocId]) -> Vec<TileId> {
 }
 
 /// The container holding all of `panes` and nothing but images: the smallest one holding
-/// them all, if it holds nothing else. None if the images are spread among the panels.
-fn region_of(tiles: &Tiles<Pane>, panes: &[TileId]) -> Option<TileId> {
+/// them all, if it holds nothing else; or, where they lie in a run of the children of a row
+/// (or column) that holds panels too, those children gathered into a row of their own in
+/// their place (egui_tiles joins a row put in a row: the row a reference is pinned in, put
+/// where the images' tabs were in the starting layout's row). None if the images are spread
+/// among the panels.
+fn region_of(tiles: &mut Tiles<Pane>, panes: &[TileId]) -> Option<TileId> {
     let first = ancestry(tiles, *panes.first()?);
     // The first container above the first pane that holds every other.
     let common = first.into_iter().skip(1).find(|&c| panes.iter().all(|&p| ancestry(tiles, p).contains(&c)))?;
-    only_images(tiles, common).then_some(common)
+    if only_images(tiles, common) {
+        return Some(common);
+    }
+    let Some(Tile::Container(Container::Linear(l))) = tiles.get(common) else { return None };
+    let (dir, children) = (l.dir, l.children.clone());
+    let holds = |c: TileId| panes.iter().any(|&p| ancestry(tiles, p).contains(&c));
+    let from = children.iter().position(|&c| holds(c))?;
+    let to = children.iter().rposition(|&c| holds(c))?;
+    let run = children[from..=to].to_vec();
+    if run.len() < 2 || !run.iter().all(|&c| only_images(tiles, c)) {
+        return None;
+    }
+    let shares: Vec<f32> = run.iter().map(|&c| l.shares[c]).collect();
+    let mut gathered = egui_tiles::Linear::new(dir, run.clone());
+    for (&c, &share) in run.iter().zip(&shares) {
+        gathered.shares.set_share(c, share);
+    }
+    let gathered = tiles.insert_container(gathered);
+    let Some(Tile::Container(Container::Linear(l))) = tiles.get_mut(common) else { unreachable!("looked at above") };
+    l.children.splice(from..=to, [gathered]);
+    l.shares.retain(|c| !run.contains(&c));
+    l.shares.set_share(gathered, shares.iter().sum());
+    Some(gathered)
 }
 
 /// Puts `new` where `old` is in the tree, and removes `old` with the containers within it
@@ -113,8 +139,10 @@ pub fn columns(room: Vec2, aspects: &[f32]) -> usize {
 pub fn arrange(tree: &mut Tree<Pane>, images: &[(DocId, f32)], active: Option<DocId>, tiled: bool) -> bool {
     let order: Vec<DocId> = images.iter().map(|i| i.0).collect();
     let panes = image_panes(&tree.tiles, &order);
-    let Some(region) = region_of(&tree.tiles, &panes) else { return false };
-    let room = tree.tiles.rect(region);
+    let Some(region) = region_of(&mut tree.tiles, &panes) else { return false };
+    // (A region just gathered was never drawn: the room its images' panes took.)
+    let room =
+        tree.tiles.rect(region).or_else(|| panes.iter().filter_map(|&p| tree.tiles.rect(p)).reduce(|a, b| a.union(b)));
     let aspects: Vec<f32> = panes
         .iter()
         .map(|&p| match tree.tiles.get_pane(&p) {
@@ -153,7 +181,7 @@ pub fn pin_beside(tree: &mut Tree<Pane>, order: &[DocId], doc: DocId) -> bool {
     let Some(pane) = tree.tiles.find_pane(&Pane::Document(doc)) else { return false };
     let others: Vec<TileId> = image_panes(&tree.tiles, order).into_iter().filter(|&p| p != pane).collect();
     // (Nothing else to stand beside, or the others spread among the panels: left where it is.)
-    let Some(region) = region_of(&tree.tiles, &others) else { return false };
+    let Some(region) = region_of(&mut tree.tiles, &others) else { return false };
     detach(&mut tree.tiles, pane);
     // Its own tabs, beside a copy of the region's place.
     let pinned = tree.tiles.insert_tab_tile(vec![pane]);
@@ -182,12 +210,21 @@ impl crate::state::AppState {
     }
 
     /// Opens the file at `path` (read in the background, as Open reads) as an image pinned
-    /// beside the others, in a pane of its own; the image active now stays so.
+    /// beside the others, in a pane of its own; the image active once it is read stays so.
     pub(crate) fn open_reference(&mut self, path: std::path::PathBuf, ctx: &eframe::egui::Context) {
-        let editing = self.active_doc;
         let then: crate::opening::Then = Box::new(move |st: &mut crate::state::AppState, read| {
+            // The image the user is on once it is read (they may have gone to another meanwhile).
+            let editing = st.active_doc;
             for (path, file) in read {
-                let id = st.open_read(&path, file)?.0;
+                let (id, said) = st.open_read(&path, file)?;
+                // Told as Open tells it.
+                for w in said {
+                    st.message(
+                        crate::state::MessageKind::Warning,
+                        format!("Opened {}", crate::state::file_title(&path)),
+                        w,
+                    );
+                }
                 st.pin.push((id, editing));
             }
             Ok(serde_json::json!({}))

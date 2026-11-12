@@ -469,7 +469,7 @@ impl AppState {
                     .collect::<Vec<Layer>>()
             };
         let label = "Open as layers";
-        let made: Vec<LayerId> = match into.and_then(|id| self.doc_mut(id)) {
+        let (made, id): (Vec<LayerId>, DocId) = match into.and_then(|id| self.doc_mut(id)) {
             None => {
                 let first = &read[0].1;
                 let mut ids = IdGen::default();
@@ -482,9 +482,10 @@ impl AppState {
                     doc.insert(Position { parent: None, index }, layer).expect("an empty image takes its layers");
                 }
                 self.new_untitled(doc, ids, label);
-                made
+                (made, self.active_doc.expect("the new image"))
             }
             Some(d) => {
+                let id = d.id;
                 let at = AppState::above_active(d);
                 let mut made = Vec::new();
                 let result = d.apply(label, |doc, ids| {
@@ -499,12 +500,10 @@ impl AppState {
                 result.map_err(|e| {
                     std::iter::once(e.to_string()).chain(said.iter().cloned()).collect::<Vec<_>>().join("\n")
                 })?;
-                made
+                (made, id)
             }
         };
-        // The image they went into: `into`, or the new one, active now.
-        let id = into.or(self.active_doc).expect("one now");
-        let d = self.doc_mut(id).expect("open");
+        let d = self.doc_mut(id).expect("the image they went into");
         d.select_layers(&made, *made.last().expect("one read at least"));
         Ok((made, said))
     }
@@ -533,7 +532,8 @@ impl AppState {
         ctx: &egui::Context,
     ) {
         let target = self.active_doc;
-        let scripted = answer.is_some();
+        // A notification's answer nobody reads: what reading says goes to the user.
+        let scripted = answer.is_some() && self.calling.as_ref().is_none_or(|c| c.heard);
         let then: crate::opening::Then = Box::new(move |st: &mut AppState, read| {
             if let Some(t) = target {
                 st.show_doc(t);
@@ -586,6 +586,7 @@ impl AppState {
         ctx: &egui::Context,
     ) {
         let answer = apply.as_ref().map(|(n, groups, ..)| (*n, groups.clone()));
+        let heard = self.calling.as_ref().is_none_or(|c| c.heard);
         // (Place needs an image, which its availability sees to; a call is answered still.)
         let Some(target) = self.active_doc else {
             if let Some((n, _)) = answer {
@@ -608,7 +609,15 @@ impl AppState {
             };
             match (placed, apply) {
                 (Ok(warnings), Some((_, _, place, into))) => {
-                    let notes = warnings.into_iter().map(|w| format!("Placed: {w}")).collect();
+                    // A notification's answer nobody reads: what placing says goes to the user.
+                    let notes = if heard {
+                        warnings.into_iter().map(|w| format!("Placed: {w}")).collect()
+                    } else {
+                        for w in warnings {
+                            st.message(MessageKind::Warning, "Placed", w);
+                        }
+                        Vec::new()
+                    };
                     st.apply_box(&place, into).map(|v| crate::api::with_notes(v, notes))
                 }
                 (Err(why), Some(_)) => Err(format!("place: {why}")),

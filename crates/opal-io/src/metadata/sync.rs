@@ -177,10 +177,18 @@ fn date_of_xmp(text: &str) -> Option<(String, Option<String>)> {
     Some((format!("{year}{month}{day}"), time))
 }
 
+/// `x` made to say what `iim` says of every dataset of record 2 XMP holds too, where it says
+/// anything: the IIM a program unaware of XMP changed since the XMP was written being the
+/// newer, as its digest says (and as the guidelines have readers take it).
+pub(super) fn xmp_from_iim(iim: &Iim, x: &mut Xmp) {
+    iim_to_xmp(iim, x, |_| true, false);
+}
+
 /// `x` made to say what `iim` says of the datasets of record 2 that `numbers` picks (those XMP
 /// holds too): where the IIM has one, what it says; where it has none, removed if `removing`
 /// (a script removed it), kept if not (an IIM a program unaware of XMP changed says nothing
-/// of what it does not have).
+/// of what it does not have). The date created goes from XMP only with IIM's date: not for a
+/// time set alone, which XMP has nowhere to put.
 fn iim_to_xmp(iim: &Iim, x: &mut Xmp, numbers: impl Fn(u8) -> bool, removing: bool) {
     for &(n, ns, local, shape) in MAPPED {
         if numbers(n) {
@@ -193,7 +201,7 @@ fn iim_to_xmp(iim: &Iim, x: &mut Xmp, numbers: impl Fn(u8) -> bool, removing: bo
     if numbers(55) || numbers(60) {
         match iim_date(iim) {
             Some(date) => x.set_text(PHOTOSHOP, DATE_CREATED, &date),
-            None if removing => x.remove(PHOTOSHOP, DATE_CREATED),
+            None if removing && numbers(55) && iim.texts(2, 55).is_empty() => x.remove(PHOTOSHOP, DATE_CREATED),
             None => {}
         }
     }
@@ -261,10 +269,11 @@ pub fn carried(meta: &Metadata, set: &Set) -> Metadata {
     let (mut exif, mut iim, mut x) = (exif0.clone(), iim0.clone(), xmp0.clone());
     let xmp_set = |ns: &str, local: &str| set.xmp.iter().any(|n| n.ns == ns && n.local == local);
     let iim_set = |n: u8| set.iim.contains(&n);
-    // From EXIF.
-    if let Some(from) = &exif0 {
+    // From EXIF (a removal too, though it took EXIF's last tag with it).
+    {
+        let from = exif0.clone().unwrap_or_default();
         for (tag, n, local) in IN_EXIF.into_iter().filter(|(tag, ..)| set.exif.contains(tag)) {
-            let texts = exif_texts(from, tag);
+            let texts = exif_texts(&from, tag);
             if !xmp_set(DC, local) {
                 set_xmp(&mut x, DC, local, shape_of(n), &texts);
             }
@@ -273,8 +282,9 @@ pub fn carried(meta: &Metadata, set: &Set) -> Metadata {
             }
         }
     }
-    // From the IIM.
-    if let Some(from) = &iim0 {
+    // From the IIM (a removal too, though it took the IIM's last dataset with it).
+    if !set.iim.is_empty() {
+        let from = &iim0.clone().unwrap_or_default();
         let picked = |n: u8| iim_set(n) && !property_of(n).is_some_and(|(ns, local)| xmp_set(ns, local));
         iim_to_xmp(from, &mut x, picked, true);
         if let Some(e) = &mut exif {
@@ -314,18 +324,17 @@ pub fn carried(meta: &Metadata, set: &Set) -> Metadata {
 
 /// `meta`, its IIM carried to its XMP if a program unaware of XMP changed the IIM since the
 /// XMP was written (as its digest says): whatever the IIM says, the XMP is made to say too
-/// (and EXIF's texts, with what describes the image: see `with_description`), as the
-/// Metadata Working Group's guidelines have readers take it. Both then agree, as the digest
-/// written with the IIM says.
+/// (and EXIF's texts, with what describes the image), as the Metadata Working Group's
+/// guidelines have readers take it. Both then agree, as the digest written with the IIM says
+/// (see `with_description`, which does it).
 pub fn reconciled(meta: &Metadata) -> Metadata {
     if !meta.iptc_changed {
         return meta.clone();
     }
-    let mut out = super::with_description(meta, &super::description(meta));
-    if let Some(iim) = meta.iptc.as_deref().and_then(Iim::read) {
-        let mut x = out.xmp.as_deref().and_then(Xmp::read).unwrap_or_default();
-        iim_to_xmp(&iim, &mut x, |_| true, false);
-        out.xmp = (!x.properties.is_empty()).then(|| Arc::from(x.packet().into_bytes()));
-    }
-    out
+    super::with_description(meta, &super::description(meta))
+}
+
+/// Whether EXIF's IFD0 tag `tag` is one IIM and XMP hold too (see the module).
+pub fn held_elsewhere(tag: u16) -> bool {
+    IN_EXIF.iter().any(|&(t, ..)| t == tag)
 }

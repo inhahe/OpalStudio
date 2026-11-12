@@ -471,7 +471,9 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     }
     // A view taking a while (a huge image) says so, rather than look finished.
     const BEHIND: std::time::Duration = std::time::Duration::from_millis(150);
-    if let Some(t) = d.projector.behind_for() {
+    // (Before and After's state too, drawn by a projector of its own.)
+    let behind = [d.projector.behind_for(), d.compare.as_ref().and_then(|c| c.projector.behind_for())];
+    if let Some(t) = behind.into_iter().flatten().max() {
         if t >= BEHIND {
             let at = Rect::from_min_size(rect.right_top() + Vec2::new(-112.0, 8.0), Vec2::new(104.0, 22.0));
             // Painted, and one widget that only senses hovering (read out as a label), so it

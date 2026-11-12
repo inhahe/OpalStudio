@@ -4978,3 +4978,174 @@ fn a_turned_view_draws_all_of_the_image_it_shows() {
         assert_eq!(pixel_at_canvas(&h, &img, x, y), [255, 255, 255], "not drawn at {x}, {y}");
     }
 }
+
+/// Opens a 60 × 40 PNG as a reference (read and used, not yet pinned: the next frame does).
+fn open_reference_now(h: &mut Harness<'static, OpalApp>, name: &str) {
+    let dir = std::env::temp_dir().join(format!("opal-ui-reference-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.png"));
+    image::RgbaImage::from_pixel(60, 40, image::Rgba([20, 90, 200, 255])).save(&path).unwrap();
+    let ctx = h.ctx.clone();
+    h.state_mut().state_mut().open_reference(path, &ctx);
+    crate::opening::testing::wait(h.state_mut().state_mut());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn images_beside_a_reference_are_tiled_and_another_pinned_the_panels_kept_as_they_were() {
+    use crate::app::Pane;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    image_of(&mut h, 400, 300);
+    // The panels made narrower than they start.
+    h.state_mut().set_root_share(0.85);
+    h.run();
+    let layers = h.state().pane_rect(Pane::Layers);
+    open_reference_now(&mut h, "one");
+    h.run();
+    // (egui_tiles has joined the reference's row into the row the panels are in.)
+    open_reference_now(&mut h, "two");
+    h.run();
+    let ids = doc_ids(&h);
+    let shown = h.state().shown_docs();
+    assert!(
+        shown.contains(&ids[1]) && shown.contains(&ids[2]) && shown.contains(&ids[3]),
+        "the second reference not pinned beside: {shown:?}"
+    );
+    command(&mut h, Cmd::TileImages);
+    h.run();
+    assert_eq!(h.state().shown_docs().len(), 4, "not every image tiled");
+    assert_eq!(h.state().pane_rect(Pane::Layers), layers, "the panels put back as they start");
+}
+
+#[test]
+fn an_image_made_as_a_reference_is_pinned_goes_beside_the_one_being_edited() {
+    use crate::app::Pane;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    let editing = h.state().state().active_doc.unwrap();
+    let place = h.state().pane_rect(Pane::Document(editing));
+    open_reference_now(&mut h, "pinned");
+    // The frame that pins it; then, before the next, an image made.
+    h.step();
+    image_of(&mut h, 200, 100);
+    let made = *doc_ids(&h).last().unwrap();
+    let reference = doc_ids(&h)[1];
+    let (made_at, reference_at) =
+        (h.state().pane_rect(Pane::Document(made)), h.state().pane_rect(Pane::Document(reference)));
+    assert!(made_at.left() < place.center().x && made_at != reference_at, "with the reference: {made_at:?}");
+}
+
+#[test]
+fn esc_during_a_drag_on_a_compared_image_gives_up_the_drag_not_the_comparing() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    put_on_clipboard(&mut h, pasted(40, 30, [1.0, 0.0, 0.0, 1.0]));
+    command(&mut h, Cmd::Paste);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    command(&mut h, Cmd::BeforeAfter);
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Select);
+    h.run();
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let at = |x: f32, y: f32| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    h.hover_at(at(50.0, 50.0));
+    h.run();
+    h.drag_at(at(50.0, 50.0));
+    h.run();
+    h.hover_at(at(150.0, 120.0));
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.drop_at(at(150.0, 120.0));
+    h.run();
+    assert!(selected(&h).is_none(), "the drag went on");
+    assert!(h.state().state().active().unwrap().compare.is_some(), "Esc ended the comparing");
+}
+
+#[test]
+fn locked_views_follow_whichever_image_is_scrolled() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    image_of(&mut h, 400, 300);
+    let [other, active] = doc_ids(&h)[..] else { panic!("two images") };
+    command(&mut h, Cmd::TileImages);
+    command(&mut h, Cmd::LockViews);
+    // Two fingers over the image not active: it moves, and so does the active one.
+    let v = h.state().state().doc(other).unwrap().view;
+    h.hover_at(v.screen_rect.center());
+    h.run();
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(-30.0, 10.0),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Unknown,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    h.run();
+    assert_eq!(h.state().state().active_doc, Some(active));
+    let (a, b) = (middle_of(&h, active), middle_of(&h, other));
+    assert_ne!(b.0, middle_of_before(v), "the image scrolled did not move");
+    assert!((a.0 - b.0).length() <= 1.0 && a.1 == b.1, "the active one did not follow: {a:?} {b:?}");
+}
+
+/// The point of its image a view shows in its middle.
+fn middle_of_before(v: crate::doc::View) -> egui::Vec2 {
+    v.to_canvas(v.viewport * 0.5)
+}
+
+#[test]
+fn before_and_after_says_so_while_the_state_it_shows_is_drawn() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 256, 256);
+    put_on_clipboard(&mut h, pasted(40, 30, [1.0, 0.0, 0.0, 1.0]));
+    command(&mut h, Cmd::Paste);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    // The background threads held, so the state's first view cannot be done.
+    let held = crate::background::testing::hold(Some(crate::background::pool()));
+    h.state_mut().state_mut().queue.push(Cmd::BeforeAfter);
+    h.step();
+    // (Its projector made, not waiting for what it cannot do, as tests' otherwise do.)
+    let d = h.state_mut().state_mut().active_mut().unwrap();
+    d.compare.as_mut().expect("comparing").projector.wait = std::time::Duration::ZERO;
+    // The frame that asks for its first view, which falls behind; then a while.
+    h.step();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    h.step();
+    h.step();
+    assert!(h.query_by_label("Drawing…").is_some(), "the state being drawn did not say so");
+    drop(held);
+    let compared = |h: &Harness<'static, OpalApp>| {
+        h.state().state().active().unwrap().compare.as_ref().and_then(|c| c.projector.behind_for())
+    };
+    for _ in 0..400 {
+        if compared(&h).is_none() {
+            break;
+        }
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    h.run();
+    assert!(h.query_by_label("Drawing…").is_none(), "still said once the state was drawn");
+}
+
+#[test]
+fn an_image_opened_as_tile_all_is_asked_for_is_tiled_with_the_rest() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    image_of(&mut h, 400, 300);
+    // In the same frame: an image made, and Tile All.
+    new_image(&mut h, 200, 150, 72.0);
+    h.state_mut().state_mut().queue.push(Cmd::TileImages);
+    h.run();
+    assert_eq!(h.state().shown_docs().len(), 3, "the image made was not tiled");
+}

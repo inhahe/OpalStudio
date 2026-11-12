@@ -968,8 +968,13 @@ The View tab's Compare group (`compare`):
   were, of as many columns as shows the most of them, each fitted in a cell, given their
   shapes and the room (`compare::columns`: three photographs in a wide window, two rows;
   three tall ones, one row); **Consolidate to Tabs** puts them back in one set of tabs.
-  Images' tabs can also be dragged apart into panes, as any panel's. Where they are spread
-  among the panels, both start from the starting layout.
+  Images' tabs can also be dragged apart into panes, as any panel's. The images' region is
+  the smallest container holding them all and nothing else; or, where egui_tiles has joined
+  a row of them into a row that holds panels too (as it joins a row put in a row: a pinned
+  reference's, in the starting layout), their run of that row's children, gathered into a
+  row of their own (`compare::region_of`). Where they are spread among the panels, both
+  start from the starting layout. Images opened in the same frame get their panes first,
+  so that they are arranged with the rest.
 - Wherever images' tabs are (tiled, dragged apart, pinned), an image opened goes into the
   tabs of the active one (`app::find_docs_container`).
 - A view resized (a pane's border dragged, the panes tiled) keeps the point in its middle
@@ -981,20 +986,25 @@ The View tab's Compare group (`compare`):
 - **Match Zoom and Location** gives every other image shown the active one's zoom, and
   shows in the middle of its view the same place of its image (counted from the canvas's
   corner) the active one shows in the middle of its own. **Lock Views** (a toggle) keeps
-  doing so while the active image is zoomed or scrolled, so that versions of a photograph
-  are gone over together. Not kept between sessions.
+  doing so while the images are zoomed or scrolled, so that versions of a photograph are
+  gone over together: the others follow the active one when it moves (or becomes active),
+  else whichever shown one moved (the wheel scrolls the image under the pointer, active or
+  not); an image shown since takes the active one's view (`OpalApp::sync_views`). Not kept
+  between sessions.
 - **Open Reference** opens an image file beside the images being edited, in a pane of its
   own at the right of their tabs (a third of their room), there whichever of them is
-  chosen: to match its look by eye. The image active when it was asked for stays active,
-  in front. It is an image like any other (it can be edited, and closed).
+  chosen: to match its look by eye. The image active once it is read stays active, in
+  front; what opening it has to say is told as Open tells it. It is an image like any other
+  (it can be edited, and closed).
 - **Before and After** (a toggle, on the active image) splits its view by a line: left of
   it, the image as it was at a state of its history (the one it was opened or made as,
   unless Compare with This State, on a state's right-click menu in the History panel, chose
   another), right of it, as it
   is now. Both are drawn as the canvas draws (the state by a projector of its own,
   `DocState::compare`), clipped to their sides; the line is dragged by its handle, and a
-  label on each side says which is which. Off with the toggle, or Esc; gone if the state is
-  dropped from the history.
+  label on each side says which is which. Off with the toggle, or Esc (not during a drag,
+  which Esc gives up); gone if the state is dropped from the history. The "Drawing…" sign
+  shows while either side is drawn.
 
 ### Status bar
 
@@ -1397,10 +1407,13 @@ the selection itself (see *Transform Selection*).
   dialog, a drag, an edit under way on that image, a box opened there since); meanwhile the
   status bar says what it waits for. What was read is used between frames, never inside
   whatever asks for another file (a script's call would take what it tells the user as its
-  own). A script's call is answered once it has been used; refused then, it puts the user's
-  view back as a call refused at once does. A notification's failure, which no one hears,
-  goes to the user, as what opening a file has to say does, and its connection is answered
-  still (it reads its next request only then). A file asked for again while it is read
+  own). A script's call is answered once it has been used; refused then, the user is left
+  where they were: on the image they were on when it was made, if they stayed on the one it
+  named (as for a call refused at once), else on the one they went to; their layers not put
+  back, which they may have chosen since. A notification's failure, which no one hears, goes
+  to the user, as what opening, placing or Open as Layers has to say does, and its
+  connection is answered still (it reads its next request only then); so does what an edit
+  a notification began tells. A file asked for again while it is read
   opens once. A reader that fails unexpectedly (a decoder's panic) says so of its file; the
   others are read still. Files named on the command line are read before the window opens,
   there being nothing to keep answering yet.
@@ -1592,17 +1605,24 @@ export leave out what gives away more than the user means to.
   city, sublocation, state, country and its code, urgency, categories, the date and time
   created as one property, genre and subject codes taken from IIM's "source:number:name"),
   and EXIF's ImageDescription, Artist and Copyright. A script's change to one is carried to
-  the others (a removal too), unless it changed them as well (then each keeps what it was
-  given: XMP's, then IIM's, read first); EXIF is given only tags it has, an IIM is not made
-  where there is none, and genre and subject codes are not carried back to IIM, its numbers
-  and names not being known there. An IIM a program unaware of XMP changed is carried to the
-  XMP first. So the digest written with the IIM, which says the two agree, is true.
+  the others (a removal too, though it emptied its part), unless it changed them as well
+  (then each keeps what it was given: XMP's, then IIM's, read first); what a change names
+  but leaves as it was is carried nowhere (the query's EXIF given back carries no camera's
+  caption over the user's). EXIF is given only tags it has, an IIM is not made where there
+  is none, and genre and subject codes are not carried back to IIM, its numbers and names
+  not being known there. The date created goes from XMP only with IIM's date (a time set
+  alone has nowhere to go), and IIM's date and time must be as IIM writes them
+  (CCYYMMDD; HHMMSS and the zone). An IIM a program unaware of XMP changed is carried to
+  the XMP first, by whatever writes them (File Info's `with_description` included, which
+  the description is written through: XMP's fields set, and carried as a script's change
+  to them is). So the digest written with the IIM, which says the two agree, is true.
 - **Rewriting a file** keeps its parts in their places: written alone, XMP and IIM go after
   the EXIF kept, which readers look for right after SOI (JFIF aside); in a PNG, an IIM among
   ImageMagick's "Raw profile type 8bim" (Photoshop's resources) is taken out of them when the
   IIM is written (in its own chunk) or removed, the other resources kept. A change to a part
-  the file has but Opal Studio could not read (XMP no XML reader takes, say) is refused
-  rather than written over it, as is XMP made that would not read back. A JPEG's fill bytes
+  the file has but Opal Studio could not read (XMP no XML reader takes, say, or Extended XMP
+  that did not join) is refused rather than written over it, as is XMP made that would not
+  read back. A JPEG's fill bytes
   before a marker are skipped in reading only its head, as in reading it all.
 
 ## Thumbnails

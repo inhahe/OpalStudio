@@ -361,11 +361,10 @@ pub fn changed(original: &Metadata, changes: &Json) -> Result<Metadata, String> 
     // An IIM a program unaware of XMP changed since the XMP was written is carried to the XMP
     // first, so that what this changes is changed in an IIM and XMP that agree (see `sync`):
     // unless all it changes is EXIF that neither holds, which leaves them as they are.
-    let described = changes
-        .get("exif")
-        .and_then(|e| e.get("image"))
-        .and_then(Json::as_object)
-        .is_some_and(|tags| tags.keys().any(|k| ["ImageDescription", "Artist", "Copyright"].contains(&k.as_str())));
+    // (A tag as the change names it: in any case, or by its number.)
+    let described = changes.get("exif").and_then(|e| e.get("image")).and_then(Json::as_object).is_some_and(|given| {
+        given.keys().any(|k| tags::named(k, Some(Ifd::Image)).is_some_and(|(_, tag)| sync::held_elsewhere(tag)))
+    });
     let carries = described || ["description", "iptc", "xmp"].iter().any(|k| changes.contains_key(*k));
     let mut meta = if carries { sync::reconciled(original) } else { original.clone() };
     let mut set = sync::Set::default();
@@ -389,13 +388,20 @@ pub fn changed(original: &Metadata, changes: &Json) -> Result<Metadata, String> 
             for (name, v) in fields {
                 let (_, tag) = tags::named(name, Some(lookup))
                     .ok_or_else(|| format!("{name} is not a tag of exif's {ifd_name}"))?;
+                // A coded text given back as the query read it is left as it was, its code and
+                // padding with it.
+                let as_read = coded_text(ifd, tag)
+                    && matches!((v, exif.get(ifd, tag)), (Json::String(s), Some(Value::Undefined(b)))
+                        if text_of_coded(&b, big).as_deref() == Some(s.as_str()));
+                let before = exif.get(ifd, tag);
                 if v.is_null() {
                     exif.remove(ifd, tag);
-                } else {
+                } else if !as_read {
                     let existing = exif.kind_of(ifd, tag);
                     exif.set(ifd, tag, &exif_value(ifd, tag, existing, v, big)?);
                 }
-                if ifd == Ifd::Image {
+                // Carried only if it changed: given back as it was, it says nothing new.
+                if ifd == Ifd::Image && exif.get(ifd, tag) != before {
                     set.exif.push(tag);
                 }
             }
@@ -420,8 +426,26 @@ pub fn changed(original: &Metadata, changes: &Json) -> Result<Metadata, String> 
                     .collect::<Result<_, _>>()?,
                 _ => return Err(format!("iptc's {key} takes text, a list of texts, or null")),
             };
+            // The date and time created as IIM writes them, or neither IIM's readers nor XMP
+            // could take them.
+            let (well_formed, form): (fn(&[u8]) -> bool, &str) = match (r, n) {
+                (2, 55) => (|b| b.len() == 8 && b.iter().all(u8::is_ascii_digit), "CCYYMMDD, as 20240131"),
+                (2, 60) => (
+                    |b| {
+                        let zone =
+                            b.len() == 11 && matches!(b[6], b'+' | b'-') && b[7..].iter().all(u8::is_ascii_digit);
+                        (b.len() == 6 || zone) && b[..6].iter().all(u8::is_ascii_digit)
+                    },
+                    "HHMMSS and the zone, as 134501+0100",
+                ),
+                _ => (|_| true, ""),
+            };
+            if let Some(bad) = texts.iter().find(|t| !well_formed(t.as_bytes())) {
+                return Err(format!("iptc's {key} takes {form}, not \"{bad}\""));
+            }
+            let before = iim.texts(r, n);
             iim.set_texts(r, n, &texts);
-            if r == 2 {
+            if r == 2 && iim.texts(r, n) != before {
                 set.iim.push(n);
             }
         }
@@ -433,12 +457,14 @@ pub fn changed(original: &Metadata, changes: &Json) -> Result<Metadata, String> 
         for (key, v) in props {
             let name =
                 xmp_name(key).ok_or_else(|| format!("{key} is no XMP name (prefix:name, or {{namespace}}name)"))?;
-            set.xmp.push(name.clone());
+            let before = packet.get(&name.ns, &name.local).cloned();
             if v.is_null() {
                 packet.remove(&name.ns, &name.local);
             } else {
-                let value = xmp_value(&name, v)?;
-                packet.set(name, value);
+                packet.set(name.clone(), xmp_value(&name, v)?);
+            }
+            if packet.get(&name.ns, &name.local) != before.as_ref() {
+                set.xmp.push(name);
             }
         }
         meta.xmp = (!packet.properties.is_empty()).then(|| Arc::from(packet.packet().into_bytes()));
@@ -704,5 +730,116 @@ mod tests {
             assert!(changed(&meta, &same).unwrap() == meta, "{same} changed it");
         }
         assert!(changed(&meta, &json!({ "description": { "title": "Quay" } })).unwrap() != meta);
+    }
+
+    /// What `start` holds, its IIM's city since changed to "Rome" by a program unaware of XMP
+    /// (its digest no longer agreeing); XMP's city "Paris".
+    fn stale() -> Metadata {
+        let start = changed(
+            &Metadata::default(),
+            &json!({ "exif": { "image": { "Artist": "Ann", "Make": "Canon" } }, "iptc": { "2:5": "Old", "2:90": "Paris" } }),
+        )
+        .unwrap();
+        let mut iim = iptc::Iim::read(start.iptc.as_deref().unwrap()).unwrap();
+        iim.set_texts(2, 90, &["Rome".into()]);
+        Metadata { iptc: Some(Arc::from(iim.bytes())), iptc_changed: true, ..start }
+    }
+
+    fn city(meta: &Metadata) -> Option<String> {
+        Xmp::read(meta.xmp.as_deref()?)?.text(xmp::PHOTOSHOP, "City")
+    }
+
+    #[test]
+    fn what_describes_the_image_written_where_the_iim_is_newer_carries_the_iim_first() {
+        // As File Info writes it: the caption changed.
+        let meta = stale();
+        let mut d = description(&meta);
+        d.caption = "Boats".into();
+        let described = crate::metadata::with_description(&meta, &d);
+        assert!(!described.iptc_changed);
+        assert_eq!(city(&described).as_deref(), Some("Rome"), "the IIM's newer city lost");
+        // A described EXIF tag named as the change may name it: in any case, or by its number.
+        for name in ["artist", "0x013B"] {
+            let set = changed(&meta, &json!({ "exif": { "image": { name: "Bob" } } })).unwrap();
+            assert_eq!(city(&set).as_deref(), Some("Rome"), "{name}: the IIM's newer city lost");
+            assert_eq!(to_json(&set)["iptc"]["2:80"], json!(["Bob"]), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_time_set_alone_leaves_xmp_s_date_and_a_date_not_written_as_iim_writes_it_is_refused() {
+        let dated =
+            changed(&Metadata::default(), &json!({ "xmp": { "photoshop:DateCreated": "2024-01-31T10:00:00+01:00" } }))
+                .unwrap();
+        // (No IIM yet, so the date was carried nowhere: one made by the time set alone.)
+        let timed = changed(&dated, &json!({ "iptc": { "2:60": "120000+0000" } })).unwrap();
+        assert_eq!(to_json(&timed)["xmp"]["photoshop:DateCreated"], "2024-01-31T10:00:00+01:00");
+        for (key, bad) in [("2:55", "2024-01-31"), ("2:55", "202401"), ("2:60", "12:00"), ("2:60", "120000 0000")] {
+            let refused = changed(&dated, &json!({ "iptc": { key: bad } }));
+            assert!(refused.is_err(), "{key} {bad} taken");
+        }
+        assert!(changed(&dated, &json!({ "iptc": { "2:55": "20240131", "2:60": "120000" } })).is_ok());
+    }
+
+    #[test]
+    fn exif_s_last_described_tags_removed_are_removed_where_they_were_carried() {
+        let only = changed(
+            &Metadata::default(),
+            &json!({ "exif": { "image": { "Artist": "Ann", "Copyright": "(c) Ann" } }, "iptc": { "2:5": "Harbour" } }),
+        )
+        .unwrap();
+        let all = to_json(&only);
+        assert_eq!((all["iptc"]["2:80"].clone(), all["xmp"]["dc:creator"].clone()), (json!(["Ann"]), json!(["Ann"])));
+        let gone = changed(&only, &json!({ "exif": { "image": { "Artist": null, "Copyright": null } } })).unwrap();
+        assert!(gone.exif.is_none(), "EXIF left");
+        let all = to_json(&gone);
+        assert!(all["iptc"].get("2:80").is_none() && all["xmp"].get("dc:creator").is_none(), "{all}");
+        assert!(all["iptc"].get("2:116").is_none() && all["xmp"].get("dc:rights").is_none(), "{all}");
+    }
+
+    #[test]
+    fn a_comment_given_back_as_the_query_read_it_stays_as_it_was() {
+        // A camera's: no code (eight zeros) and a long run of padding.
+        let mut e = Exif::new();
+        e.set(Ifd::Exif, 0x9286, &Value::Undefined([&[0u8; 8][..], &[0u8; 64]].concat()));
+        let meta = Metadata { exif: Some(Arc::from(e.into_bytes())), ..Metadata::default() };
+        assert_eq!(to_json(&meta)["exif"]["exif"]["UserComment"], "");
+        let back = changed(&meta, &json!({ "exif": to_json(&meta)["exif"] })).unwrap();
+        assert!(back == meta, "the comment's bytes changed");
+    }
+
+    #[test]
+    fn a_part_given_back_unchanged_carries_nothing_and_a_removal_that_empties_the_iim_is_carried() {
+        // A camera's caption in EXIF; the user's in XMP.
+        let mut e = Exif::new();
+        e.set(Ifd::Image, 0x010E, &Value::Ascii("OLYMPUS DIGITAL CAMERA".into()));
+        let mut x = Xmp::default();
+        x.set_default_text(xmp::DC, "description", "Boats at dusk");
+        let meta = Metadata {
+            exif: Some(Arc::from(e.into_bytes())),
+            xmp: Some(Arc::from(x.packet().into_bytes())),
+            ..Metadata::default()
+        };
+        let back = changed(&meta, &json!({ "exif": to_json(&meta)["exif"] })).unwrap();
+        assert_eq!(to_json(&back)["xmp"]["dc:description"], json!({ "x-default": "Boats at dusk" }));
+        // Likewise an IIM's title, and an XMP's, given back as they were.
+        let mut iim = iptc::Iim::default();
+        iim.set_texts(2, 5, &["Quay".into()]);
+        let mut x = Xmp::default();
+        x.set_default_text(xmp::DC, "title", "Pier");
+        let apart = Metadata {
+            iptc: Some(Arc::from(iim.bytes())),
+            xmp: Some(Arc::from(x.packet().into_bytes())),
+            ..Metadata::default()
+        };
+        let back = changed(&apart, &json!({ "iptc": to_json(&apart)["iptc"] })).unwrap();
+        assert_eq!(to_json(&back)["xmp"]["dc:title"], json!({ "x-default": "Pier" }), "the IIM's title carried");
+        let back = changed(&apart, &json!({ "xmp": to_json(&apart)["xmp"] })).unwrap();
+        assert_eq!(to_json(&back)["iptc"]["2:5"], json!(["Quay"]), "the XMP's title carried");
+        // An IIM of a title alone, removed: the XMP's title goes too.
+        let titled = changed(&Metadata::default(), &json!({ "iptc": { "2:5": "Harbour" } })).unwrap();
+        let untitled = changed(&titled, &json!({ "iptc": { "2:5": null } })).unwrap();
+        assert!(untitled.iptc.is_none(), "the IIM left");
+        assert!(to_json(&untitled)["xmp"].get("dc:title").is_none(), "the XMP's title left");
     }
 }

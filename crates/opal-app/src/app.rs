@@ -60,9 +60,10 @@ pub struct OpalApp {
     status_given: Option<StatusSeen>,
     /// Whether settings are saved (not in tests).
     persist: bool,
-    /// The active image and its view when the views were last matched to it (Lock Views
-    /// matches them again when either changes).
-    views_from: Option<(DocId, crate::doc::View)>,
+    /// The images shown, and their views, at the end of the last frame, and the active one then
+    /// (Lock Views matches the others to whichever has moved since: see `sync_views`).
+    last_views: Vec<(DocId, crate::doc::View)>,
+    views_active: Option<DocId>,
     /// The image active at the end of the last frame: images opened go into its tabs.
     last_active: Option<DocId>,
     /// The API's connection for scripts and assistants (not in tests); `None` if it could
@@ -131,7 +132,8 @@ impl OpalApp {
             alt_down: false,
             field_had_keys: false,
             fitted_to_monitor: false,
-            views_from: None,
+            last_views: Vec::new(),
+            views_active: None,
             last_active: None,
             full_screen: false,
             full_screen_seen: false,
@@ -483,15 +485,17 @@ impl OpalApp {
         if rotate_tool
             && d.view.angle != 0.0
             && d.transform.is_none()
+            && !d.dragging()
             && !cropping
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
         {
             d.view.turn_to(0.0);
             return;
         }
-        // Before and After ends with Esc, when no box takes it.
+        // Before and After ends with Esc, when no box takes it, nor a drag (which gives itself up).
         if d.compare.is_some()
             && d.transform.is_none()
+            && !d.dragging()
             && !cropping
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
         {
@@ -750,7 +754,6 @@ impl OpalApp {
         {
             self.st.active_doc = Some(first);
         }
-        self.last_active = self.st.active_doc;
     }
 
     /// A digest of everything the window shows that can change without input: the
@@ -935,20 +938,42 @@ impl OpalApp {
     fn sync_views(&mut self) {
         let shown = shown_docs(&self.tree.tiles);
         self.st.shown.clone_from(&shown);
-        let Some(active) = self.st.active_doc.filter(|a| shown.contains(a)) else { return };
-        let Some(d) = self.st.doc(active) else { return };
+        let matching = std::mem::take(&mut self.st.match_views);
+        let view_of = |st: &AppState, id: DocId| st.doc(id).map(|d| d.view);
+        let was = |id: DocId| self.last_views.iter().find(|(i, _)| *i == id).map(|(_, v)| *v);
+        let moved = |id: DocId| was(id).is_some_and(|v| Some(v) != view_of(&self.st, id));
+        let active = self.st.active_doc.filter(|a| shown.contains(a));
+        // What the others are matched to: the active image (asked to, or, locked, become active
+        // or moved since); else, locked, another shown that moved (scrolling over an image
+        // moves it, active or not).
+        let source = if matching {
+            active
+        } else if self.st.lock_views {
+            active
+                .filter(|&a| self.views_active != Some(a) || moved(a))
+                .or_else(|| shown.iter().copied().find(|&id| moved(id)))
+        } else {
+            None
+        };
+        // Locked, an image shown since takes the active one's view.
+        let newly: Vec<DocId> = shown.iter().copied().filter(|&id| was(id).is_none()).collect();
+        let (from_id, to) = match (source, active) {
+            (Some(s), _) => (Some(s), shown.iter().copied().filter(|&o| o != s).collect::<Vec<_>>()),
+            (None, Some(a)) if self.st.lock_views => (Some(a), newly.into_iter().filter(|&o| o != a).collect()),
+            _ => (None, Vec::new()),
+        };
         let corner = |d: &crate::doc::DocState| egui::Vec2::new(d.doc().canvas.x as f32, d.doc().canvas.y as f32);
-        let (from, from_corner) = (d.view, corner(d));
-        let moved = self.views_from != Some((active, from));
-        if std::mem::take(&mut self.st.match_views) || (self.st.lock_views && moved) {
-            for other in shown.iter().filter(|&&o| o != active) {
-                if let Some(o) = self.st.doc_mut(*other) {
+        if let Some(d) = from_id.and_then(|id| self.st.doc(id)) {
+            let (from, from_corner) = (d.view, corner(d));
+            for other in to {
+                if let Some(o) = self.st.doc_mut(other) {
                     let to_corner = corner(o);
                     o.view = crate::compare::matched(&from, from_corner, &o.view, to_corner);
                 }
             }
         }
-        self.views_from = Some((active, from));
+        self.last_views = shown.iter().filter_map(|&id| view_of(&self.st, id).map(|v| (id, v))).collect();
+        self.views_active = active;
     }
 
     /// The image whose edit the status bar shows under way, if one is (see `edits`): the active
@@ -1309,8 +1334,12 @@ impl eframe::App for OpalApp {
         let mut rearranged = false;
         if std::mem::take(&mut self.st.reset_panels) {
             self.tree = default_tree(&self.st);
+            // (It has every image's pane, those just opened too.)
+            self.st.opened.clear();
             rearranged = true;
         }
+        // Images just opened given their panes first, so that they are arranged with the rest.
+        self.sync_panes(&ctx);
         if let Some(tiled) = self.st.arrange_images.take() {
             rearranged = true;
             let images: Vec<(DocId, f32)> = self
@@ -1325,7 +1354,6 @@ impl eframe::App for OpalApp {
                 crate::compare::arrange(&mut self.tree, &images, self.st.active_doc, tiled);
             }
         }
-        self.sync_panes(&ctx);
         // References opened, now their panes are in the tree. The image being edited stays
         // the active one, in front of its tabs.
         for (id, editing) in std::mem::take(&mut self.st.pin) {
@@ -1342,6 +1370,9 @@ impl eframe::App for OpalApp {
         if rearranged {
             ctx.request_repaint();
         }
+        // The image active now the panes are as they will be drawn (a reference pinned has
+        // given way to the image being edited): images opened go into its tabs.
+        self.last_active = self.st.active_doc;
         self.handle_exit(&ctx);
         self.save_settings_if_due(&ctx);
         self.st.between_frames(ctx.input(|i| i.pointer.any_down()));

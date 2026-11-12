@@ -104,6 +104,9 @@ pub fn rewrite(path: &Path, change: impl FnOnce(&Metadata) -> Result<Metadata, S
     }
     let raw = if is_jpeg(&bytes) { container::read_jpeg(&bytes) } else { container::read_png(&bytes) };
     let had = container::Parts { exif: raw.exif.is_some(), xmp: raw.xmp.is_some(), iptc: raw.iptc.is_some() };
+    // Extended XMP that did not join and read (a chunk missing, say): written over, it would
+    // be lost, though the standard packet was read.
+    let extended_unread = raw.extended_segments && raw.extended_xmp.as_deref().and_then(Xmp::read).is_none();
     let old = raw.into_metadata();
     let new = change(&old).map_err(unsupported)?;
     let parts = container::Parts {
@@ -116,7 +119,7 @@ pub fn rewrite(path: &Path, change: impl FnOnce(&Metadata) -> Result<Metadata, S
     }
     for (name, changed, unread) in [
         ("EXIF", parts.exif, had.exif && old.exif.is_none()),
-        ("XMP", parts.xmp, had.xmp && old.xmp.is_none()),
+        ("XMP", parts.xmp, (had.xmp && old.xmp.is_none()) || extended_unread),
         ("IPTC", parts.iptc, had.iptc && old.iptc.is_none()),
     ] {
         if changed && unread {
@@ -295,6 +298,32 @@ mod tests {
         assert!(refused.is_err(), "taken");
         let x = Xmp::read(of_file(&path).unwrap().xmp.as_deref().unwrap()).unwrap();
         assert_eq!(x.text(crate::metadata::xmp::DC, "title").as_deref(), Some("Kept"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn xmp_whose_extended_part_could_not_be_read_is_not_written_over() {
+        let (dir, path) = jpeg_in("extended");
+        // XMP too large for one segment: its largest properties in Extended XMP's segments.
+        let mut x = Xmp::default();
+        let many: Vec<String> = (0..12_000).map(|i| format!("keyword {i}")).collect();
+        x.set_texts(crate::metadata::xmp::DC, "subject", crate::metadata::xmp::ArrayKind::Bag, &many);
+        rewrite(&path, |m| Ok(Metadata { xmp: Some(Arc::from(x.packet().into_bytes())), ..m.clone() })).unwrap();
+        // One of them lost (a gap): the extended part no longer joins.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let header = b"http://ns.adobe.com/xmp/extension/\0";
+        let at: Vec<usize> = (0..bytes.len() - 4)
+            .filter(|&i| bytes[i] == 0xFF && bytes[i + 1] == 0xE1 && bytes[i + 4..].starts_with(header))
+            .collect();
+        assert!(at.len() >= 2, "not split: {}", at.len());
+        let len = usize::from(u16::from_be_bytes([bytes[at[0] + 2], bytes[at[0] + 3]]));
+        bytes.drain(at[0]..at[0] + 2 + len);
+        std::fs::write(&path, &bytes).unwrap();
+        let rating = serde_json::json!({ "xmp": { "xmp:Rating": 5 } });
+        let refused = rewrite(&path, |m| crate::metadata::json::changed(m, &rating));
+        assert!(refused.is_err(), "taken");
+        let kept = std::fs::read(&path).unwrap();
+        assert!(kept.windows(header.len()).filter(|w| w == header).count() == at.len() - 1, "segments lost");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
