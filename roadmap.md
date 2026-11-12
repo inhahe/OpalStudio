@@ -470,6 +470,10 @@ comes first.
   into a constraint. It uses the same syntax and parser as milestone E's expressions,
   which the solver differentiates. A placement's remembered expression can be made one
   too. Scripts make constraints with the same expressions.
+- *(new)* Arrange › Relax (`design.md`, *Constraints*): a command, not a third kind of unit.
+  The selected objects are moved to where none overlap and the springs among them are
+  stretched least, their unit's constraints still kept. For packing, untangling overlaps,
+  force-directed diagrams and scattering.
 - Then the layout solver, and nesting units of either kind.
 
 ## Later

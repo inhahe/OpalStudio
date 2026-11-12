@@ -2126,6 +2126,21 @@ For mathematically exact vector design, and later for layouts that adapt to thei
   constraint, it relates only objects within one unit. It uses the same
   syntax and parser as an expression worked out once. A placement's remembered expression
   can be made one too.
+- **Arrange › Relax**, a command rather than a third kind of unit, for what springs cannot
+  say: that things must not overlap. Packing shapes, untangling a pile of them, laying out
+  a diagram by its connections (force-directed), and scattering things organically all need
+  repulsion and inequalities, which neither solver handles.
+  - It moves the selected objects to an equilibrium. None overlaps another (they are kept a
+    gap apart, an expression). The springs among them (their unit's, and a connector
+    between two counts as one) are stretched least. Each is also pulled back toward where
+    it was, by a stiffness the command sets. Their unit's hard constraints still hold.
+  - Objects are moved only; turning them, or scaling them alike, is an option. They are
+    taken by their outlines (a shape's, or a layer's pixels') or by their boxes, as chosen.
+    They are kept within the canvas or a chosen boundary, or not held at all.
+  - Scatter starts each from a random place (a seed, so it can be repeated) rather than
+    from where it is.
+  - It is shown settling as it runs, and can be stopped there. It makes one history state,
+    and scripts call it with the same options (`relax`).
 - The geometry solver comes first.
 
 ## Scripting
