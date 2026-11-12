@@ -78,10 +78,12 @@ pub fn button_keytips(tab: usize) -> Vec<(Cmd, char)> {
 }
 
 /// The keytip a command has whatever comes before it on its tab, where one is usual: Cut's
-/// X, as in Ctrl+X and Office's ribbon, which leaves Copy its C.
+/// X, as in Ctrl+X and Office's ribbon, which leaves Copy its C; New Layer's N, which a
+/// command before it on the Home tab (Transform Again as a Copy) would otherwise take.
 fn own_keytip(cmd: Cmd) -> Option<char> {
     match cmd {
         Cmd::Cut => Some('X'),
+        Cmd::NewLayer => Some('N'),
         _ => None,
     }
 }
