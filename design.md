@@ -859,10 +859,12 @@ it would carry on past an undo or a deselect and leave states nobody meant.
   help page for its group, at that button; over a tool, the Tools page. A small ? appears while the pointer is over a group's label and opens the same
   page. Help pages ship with the application and work offline.
 - **Keytips:** pressing Alt shows a letter on every tab and button, so everything can be
-  reached from the keyboard without memorized shortcuts. A button's is the first of its
-  name's initials, then of its letters, not taken by one before it on its tab; a few have
-  their own whatever comes before (Cut's X, as in Office, so that Copy keeps C). Tools get
-  none: their own single keys (H, Z) already work without Alt.
+  reached from the keyboard without memorized shortcuts. A button's is fixed, tab by tab
+  (`ribbon::KEYTIPS`), so that a command added to a tab never moves those already learned:
+  mostly an initial of its name or another of its letters, Office's where there is one
+  (Cut's X, so that Copy keeps C), a digit where the tab has run out of letters; a command
+  added later takes a letter left free. A test holds every button on the table, and each
+  unique on its tab. Tools get none: their own single keys (H, Z) already work without Alt.
 - **Command search:** a search box at the ribbon's right end finds any command by name.
 - **Sizes:** full (icons and labels) or a single line. As the window narrows, groups shrink
   in steps, from the right: large buttons become small ones, small ones their icons alone
@@ -1208,12 +1210,21 @@ the selection itself (see *Transform Selection*).
   layers did. That is the same map of the image (`DocState::last_transform`, the box's
   `Session::delta`), so a turn about a point turns as far again about the same point. It is
   applied through a box as Transform's is, its pixels kept as pixels where they end on the
-  grid. A paste's placing and Transform Selection do not count. An undo leaves it, as in
-  Photoshop.
+  grid. A paste's placing, Transform Selection and Re-apply Placement do not count
+  (`Session::repeatable`). An undo leaves it, as in Photoshop. What turns or resizes the
+  whole image carries its coordinates (`image_ops::transform_all`), and the image keeps how,
+  since it was opened (`Document::carried`, not saved); the last transform is kept with the
+  image's `carried` when it was made, and done again through the change since (conjugated),
+  so a move made before Resize Image 50% moves half as far after it, and a turn turns about
+  the same place on the image, whatever has been undone since. Cropping and resizing the
+  canvas move the canvas, not the image's coordinates, so change nothing. While a box is
+  open, it is refused: apply or cancel the box first, as Photoshop has it.
 - **Transform Again as a Copy** (Ctrl+Shift+Alt+T) copies the selected layers first, each just
   above its layer, and transforms the copies, which become the selected ones. Pressed again,
-  the next copies go on from them: a few presses make a row, or a ring. The copying and the
-  transform are one history state.
+  the next copies go on from them: a few presses make a row, or a ring. The copies are made
+  in the box's own pending state (`begin_transform_of`), so the copying and the transform are
+  one history state, and a transform refused (one that would put an object past what a file
+  can hold) leaves no copies.
 
 - **Where a paste goes:** onto a new layer above the active one, as an image object. A
   button on the box puts it into the active layer instead, baked into that layer's pixels

@@ -150,10 +150,10 @@ pub struct DocState {
     pub revision: u64,
     /// The transform box, while one is open. Its document is the pending edit.
     pub transform: Option<crate::transform::Session>,
-    /// What the last transform box applied to layers did (Transform, or a script's transform),
-    /// as a map of the image: what Transform Again does again. Not part of its history, as in
-    /// Photoshop: an undo leaves it.
-    pub last_transform: Option<opal_core::geom::Affine>,
+    /// What the last transform box applied to layers did (Transform, or a script's transform):
+    /// what Transform Again does again (see [`transform_again_map`](Self::transform_again_map)).
+    /// Not part of its history, as in Photoshop: an undo leaves it.
+    pub last_transform: Option<LastTransform>,
     /// The Crop tool's box, while the tool is in use.
     pub crop: Option<crate::edit_box::EditBox>,
     /// The drag under way on its canvas, if one is (one at most), given up as one
@@ -198,6 +198,16 @@ pub struct DocState {
     /// An edit worked out off the interface thread, while one is (see `edits`): the image is
     /// not to be changed until it is applied or cancelled.
     pub busy: Option<crate::edits::Busy>,
+}
+
+/// What a transform box applied to layers did, kept for Transform Again.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LastTransform {
+    /// Its map of the image (the box's [`Session::delta`](crate::transform::Session::delta)).
+    pub delta: opal_core::geom::Affine,
+    /// The image's [`carried`](opal_core::document::Document::carried) when it was applied:
+    /// the coordinates `delta` is in.
+    pub carried: opal_core::geom::Affine,
 }
 
 /// Why [`DocState::apply`] made no history state.
@@ -509,6 +519,17 @@ impl DocState {
     /// Whether a drag on its canvas is under way: one of the tools', or on the transform box.
     pub fn dragging(&self) -> bool {
         self.drag.is_some() || self.transform.as_ref().is_some_and(|s| s.drag.is_some())
+    }
+
+    /// What Transform Again does to the image as it is now: the last transform, carried
+    /// through what has turned or resized the whole image since it was applied, or back
+    /// through what of that has been undone (conjugated by the change of coordinates), so that
+    /// it does to the image what it did then. None if no box has been applied to layers.
+    pub fn transform_again_map(&self) -> Option<opal_core::geom::Affine> {
+        let last = self.last_transform?;
+        // From the coordinates it was made in to those of now.
+        let change = last.carried.inverse()?.then(self.doc().carried);
+        Some(change.inverse()?.then(last.delta).then(change))
     }
 
     /// Gives up the drag under way, if one is, as Esc does: the edit it has pending

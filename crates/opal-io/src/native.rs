@@ -609,8 +609,15 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
     }
     // The selections saved in it; what was selected is not kept.
     let saved = read_selections(&mut zip, file.selections, &mask_sizes, path)?;
-    let doc =
-        Document { canvas: file.canvas, resolution: file.resolution, layers, selection: None, deselected: None, saved };
+    let doc = Document {
+        canvas: file.canvas,
+        resolution: file.resolution,
+        layers,
+        selection: None,
+        deselected: None,
+        saved,
+        carried: opal_core::geom::Affine::IDENTITY,
+    };
     let mut ids = IdGen::starting_at(file.next_id);
     ids.reserve_above(&doc);
     Ok(Loaded { doc, ids })

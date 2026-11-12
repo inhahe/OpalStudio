@@ -555,52 +555,29 @@ impl AppState {
         self.new_untitled(doc, ids, "Paste");
     }
 
-    /// Opens the transform box on the selected layers.
-    /// Transform Again: what the last transform box applied to layers did (`last_transform`),
-    /// done to the selected layers now, as one history state; with `copy`, to copies of them
-    /// made first, each just above its layer, which become the ones selected, so that pressed
-    /// again, the next copies go on from them: a row, or a ring.
+    /// Transform Again, or with `copy` as a Copy (see
+    /// [`DocState::transform_again`](crate::doc::DocState::transform_again)), saying why not
+    /// if it cannot be done.
     pub(crate) fn transform_again(&mut self, copy: bool) {
         let sampling = prefs::sampling(&self.prefs, "transform");
         let label = if copy { "Transform again as a copy" } else { "Transform again" };
-        let mut made = std::collections::HashSet::new();
-        if copy {
-            let copies = self.duplicate_layers();
-            let Some(&first) = copies.first() else { return };
-            let d = self.active_mut().expect("available");
-            made.insert(d.history.current());
-            d.select_only(first);
-            for &c in &copies[1..] {
-                d.toggle_selected(c);
-            }
-        }
         let d = self.active_mut().expect("available");
-        let delta = d.last_transform.expect("available");
-        if !d.begin_transform(sampling) {
+        // (Refused while an edit is under way, the status bar says why.)
+        if d.refused() {
             return;
         }
-        let m = d.transform.as_ref().expect("begun").start.then(delta);
-        if let Some(why) = d.box_refused(&m) {
-            d.cancel_transform();
-            return self.message(MessageKind::Info, label, why);
-        }
-        d.set_box(m, None);
-        if let Some(p) = d.pending.as_mut() {
-            p.label = label.to_owned();
-        }
-        d.commit_pending();
-        made.insert(d.history.current());
-        if made.len() > 1 {
-            d.join_states(&made, label);
+        if let Err(why) = d.transform_again(copy, sampling, label) {
+            self.message(MessageKind::Info, label, why);
         }
     }
 
+    /// Opens the transform box on the selected layers.
     pub(crate) fn transform(&mut self) {
         let sampling = prefs::sampling(&self.prefs, "transform");
         let d = self.active_mut().expect("available");
         // (Refused while an edit is under way, the status bar says why.)
         if !d.begin_transform(sampling) && d.busy.is_none() {
-            self.message(MessageKind::Info, "Transform", "The selected layers hold nothing to transform.");
+            self.message(MessageKind::Info, "Transform", crate::transform::NOTHING_TO_TRANSFORM);
         }
     }
 }

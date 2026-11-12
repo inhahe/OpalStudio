@@ -529,7 +529,7 @@ impl OpalApp {
                     }
                 }
                 Keytips::Buttons(t) => {
-                    if let Some((cmd, _)) = button_keytips(t).into_iter().find(|(_, k)| *k == c) {
+                    if let Some((cmd, _)) = button_keytips(t).iter().copied().find(|&(_, k)| k == c) {
                         self.st.queue.push(cmd);
                     }
                     self.st.ribbon.keytips = Keytips::Off;

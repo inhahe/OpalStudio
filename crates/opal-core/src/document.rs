@@ -475,6 +475,11 @@ pub struct Document {
     /// Selections saved by name (Save Selection), to load back: saved in the file, in the
     /// order they were first saved.
     pub saved: Vec<SavedSelection>,
+    /// How the image's coordinates have been carried since it was opened or made, by what
+    /// turned or resized the whole of it: what was at `p` then is at `carried.apply(p)` now.
+    /// Cropping and resizing the canvas move the canvas, not the coordinates. Not saved in the
+    /// file (a file opened starts again from the identity).
+    pub carried: Affine,
 }
 
 /// A selection kept aside (what Deselect took away; one saved by name), with how the image
@@ -524,6 +529,7 @@ impl Document {
             selection: None,
             deselected: None,
             saved: Vec::new(),
+            carried: Affine::IDENTITY,
         }
     }
 

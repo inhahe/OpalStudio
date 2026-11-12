@@ -2611,23 +2611,16 @@ impl AppState {
     /// Makes the layers `args` names the selected ones (the first named the active one, or
     /// the one `layer` names): each must be in the active image.
     fn target(&mut self, args: &Args) -> Result<(), String> {
-        let mut ids = match (args.layer(), args.layers()) {
+        let ids = match (args.layer(), args.layers()) {
             (Some(one), _) => vec![one],
             (None, Some(many)) => many,
             (None, None) => return Ok(()),
         };
-        // Each once: a repeated one would be toggled back out of the selection.
-        let mut seen = std::collections::HashSet::new();
-        ids.retain(|id| seen.insert(*id));
         let d = self.active_mut().ok_or("No image is open.")?;
         if let Some(missing) = ids.iter().find(|id| d.doc().layer(**id).is_none()) {
             return Err(format!("There is no layer {} in the image.", missing.0));
         }
-        d.select_only(ids[0]);
-        for &id in &ids[1..] {
-            d.toggle_selected(id);
-        }
-        d.make_active(ids[0]);
+        d.select_layers(&ids, ids[0]);
         Ok(())
     }
 
@@ -4261,6 +4254,45 @@ mod tests {
         let why = now(&mut st, "open_as_layers", json!({ "paths": [missing] })).unwrap_err();
         assert!(why.contains("Left out "), "{why}");
         std::fs::remove_dir_all(missing.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn transform_again_repeats_a_box_applied_not_a_placement_worked_out_again() {
+        use opal_core::document::{IdGen, Position};
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 400, "height": 300, "background": "transparent" })).unwrap();
+        let red = opal_core::tile::pixel_from_f32([1.0, 0.0, 0.0, 1.0]);
+        let mut ids = Vec::new();
+        st.active_mut()
+            .unwrap()
+            .apply("Layers", |doc, made: &mut IdGen| {
+                for (r, name) in [(IRect::new(10, 10, 50, 30), "A"), (IRect::new(100, 60, 120, 100), "B")] {
+                    let id = made.layer();
+                    let layer = Layer::new_raster(id, made.object(), name, RasterImage::filled(&r, red));
+                    doc.insert(Position { parent: None, index: doc.layers.len() }, layer)?;
+                    ids.push(id);
+                }
+                Ok::<(), opal_core::document::TreeError>(())
+            })
+            .unwrap();
+        let (a, b) = (ids[0], ids[1]);
+        // A placed beside B by a script's box; then B moved by the user's box, down 30.
+        now(&mut st, "transform", json!({ "layers": [a.0], "x": "layer(\"B\").right" })).unwrap();
+        now(&mut st, "transform", json!({ "layers": [b.0], "y": "90" })).unwrap();
+        let moves = |st: &AppState| st.active().unwrap().transform_again_map().unwrap().apply([0.0, 0.0]);
+        assert_eq!(moves(&st), [0.0, 30.0]);
+        // B moved right without a box, and A placed beside it again: still B's move.
+        st.active_mut()
+            .unwrap()
+            .apply("Move", |doc, _| {
+                crate::move_tool::shift(doc.layer_mut(b).unwrap(), [15, 0]);
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        now(&mut st, "reapply_placement", json!({ "layer": a.0 })).unwrap();
+        let left = st.active().unwrap().doc().layer(a).unwrap().bounds().unwrap().x0;
+        assert_eq!(left, 135.0, "not placed again");
+        assert_eq!(moves(&st), [0.0, 30.0], "Re-apply Placement became the transform done again");
     }
 
     #[test]

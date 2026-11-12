@@ -77,7 +77,8 @@ pub const PASTE: char = '\u{f2d5}';
 pub const PASTE_IN_PLACE: char = '\u{e356}';
 pub const COPY_MERGED: char = '\u{f380}';
 pub const TRANSFORM: char = '\u{f697}';
-pub const TRANSFORM_AGAIN: char = '\u{ef33}';
+/// A step done again (arrow_clockwise_dashes): not Re-apply Placement's repeat arrows.
+pub const TRANSFORM_AGAIN: char = '\u{e0ae}';
 pub const TRANSFORM_AGAIN_COPY: char = '\u{e422}';
 pub const MOVE: char = '\u{f8e5}';
 pub const CROP: char = '\u{e42b}';
@@ -139,3 +140,15 @@ pub const RECTANGLE: char = '\u{ea09}';
 pub const ELLIPSE: char = '\u{e8a2}';
 pub const SINGLE_ROW: char = '\u{eb59}';
 pub const SINGLE_COLUMN: char = '\u{eb60}';
+// Each of these tells a command from another on its tab that had the same icon (see the test
+// `ribbon::tests::no_two_commands_on_a_tab_look_alike`).
+/// A door left by (door_arrow_right): not Close's cross.
+pub const EXIT: char = '\u{e568}';
+/// Squares, one added (add_square_multiple): not Copy's.
+pub const DUPLICATE: char = '\u{e009}';
+/// A copy of a marquee's contents (copy_select): not New Layer's.
+pub const LAYER_VIA_COPY: char = '\u{e424}';
+/// A marquee cut out (screen_cut): not Cut's scissors.
+pub const LAYER_VIA_CUT: char = '\u{ea77}';
+/// A group packed into one (folder_zip): not New Group's.
+pub const MERGE_GROUP: char = '\u{f435}';

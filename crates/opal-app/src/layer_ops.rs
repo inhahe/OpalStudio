@@ -88,33 +88,14 @@ impl AppState {
         made
     }
 
-    /// Copies each selected layer, just above itself.
     /// Duplicates the selected layers of the active image, each copy just above its layer, as
-    /// one history state; the copies, in the order made (none, if it was refused).
-    pub(crate) fn duplicate_layers(&mut self) -> Vec<LayerId> {
+    /// one history state (see [`duplicate_in`]).
+    pub(crate) fn duplicate_layers(&mut self) {
         let d = self.active_mut().expect("available");
         let sel = d.selected_layers();
         let label = if sel.len() > 1 { "Duplicate layers" } else { "Duplicate layer" };
-        let mut made = Vec::new();
-        let result = d.apply(label, |doc, ids| {
-            // Copies put above the same locked group go each above the one before, keeping
-            // their order.
-            let mut above_same: std::collections::HashMap<(Option<LayerId>, usize), usize> = Default::default();
-            for src in sel {
-                let layer = doc.layer(src).ok_or(TreeError::NoSuchLayer(src))?;
-                let mut copy = copy_with_new_ids(layer, ids);
-                copy.name = format!("{} copy", layer.name);
-                made.push(copy.id);
-                let pos = above(doc, src).ok_or(TreeError::NoSuchLayer(src))?;
-                let before = above_same.entry((pos.parent, pos.index)).or_default();
-                doc.insert(Position { index: pos.index + *before, ..pos }, copy)?;
-                *before += 1;
-            }
-            Ok::<(), TreeError>(())
-        });
-        let done = result.is_ok();
+        let result = d.apply(label, |doc, ids| duplicate_in(doc, ids, &sel).map(|_| ()));
         self.report(result);
-        if done { made } else { Vec::new() }
     }
 
     pub(crate) fn delete_layers(&mut self) {
@@ -586,6 +567,30 @@ pub(crate) fn count_layers(doc: &Document) -> usize {
     n
 }
 
+/// Puts in `doc` a copy of each of `layers`, named "… copy", just above its layer (see
+/// [`above`]), given identifiers by `ids`. The copies, in the order of `layers`.
+pub(crate) fn duplicate_in(
+    doc: &mut opal_core::document::Document,
+    ids: &mut IdGen,
+    layers: &[LayerId],
+) -> Result<Vec<LayerId>, TreeError> {
+    // Copies put above the same locked group go each above the one before, keeping their
+    // order.
+    let mut above_same: std::collections::HashMap<(Option<LayerId>, usize), usize> = Default::default();
+    let mut made = Vec::new();
+    for &src in layers {
+        let layer = doc.layer(src).ok_or(TreeError::NoSuchLayer(src))?;
+        let mut copy = copy_with_new_ids(layer, ids);
+        copy.name = format!("{} copy", layer.name);
+        made.push(copy.id);
+        let pos = above(doc, src).ok_or(TreeError::NoSuchLayer(src))?;
+        let before = above_same.entry((pos.parent, pos.index)).or_default();
+        doc.insert(Position { index: pos.index + *before, ..pos }, copy)?;
+        *before += 1;
+    }
+    Ok(made)
+}
+
 /// A copy of `layer` (and, for a group, everything in it) with fresh identifiers. Pixels are
 /// shared until changed. A copy has not been placed: it has no placement to re-apply.
 pub(crate) fn copy_with_new_ids(layer: &Layer, ids: &mut IdGen) -> Layer {
@@ -899,6 +904,81 @@ mod tests {
         let r = bounds(&st, c);
         let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
         assert!(near(r.x0, 190.0) && near(r.y0, 190.0) && near(r.x1, 210.0) && near(r.y1, 200.0), "{r:?}");
+    }
+
+    #[test]
+    fn transform_again_goes_with_the_image_turned_or_resized_and_leaves_nothing_if_refused() {
+        use crate::commands::{Cmd, availability};
+        use crate::image_ops::{ResizeImage, Turn};
+        use opal_core::geom::{Affine, IRect};
+        let mut st = app(400, 300);
+        let d = st.active_mut().unwrap();
+        let mut a = None;
+        d.apply::<TreeError>("Add", |doc, ids| {
+            let l = ids.layer();
+            let red = pixel_from_f32([1.0, 0.0, 0.0, 1.0]);
+            let layer = Layer::new_raster(l, ids.object(), "a", RasterImage::filled(&IRect::new(10, 10, 30, 20), red));
+            a = Some(l);
+            doc.insert(Position { parent: None, index: 1 }, layer)
+        })
+        .unwrap();
+        let a = a.unwrap();
+        let sampling = opal_core::resample::Sampling::default();
+        let d = st.active_mut().unwrap();
+        d.select_only(a);
+        assert!(d.begin_transform(sampling));
+        // A box open: which transform is meant is the user's to say.
+        let why = availability(&st, Cmd::TransformAgain).unwrap_err();
+        assert!(why.contains("Apply or cancel the box"), "{why}");
+        let d = st.active_mut().unwrap();
+        let m = d.transform.as_ref().unwrap().start.then(Affine::translate(50.0, 20.0));
+        d.set_box(m, None);
+        d.commit_pending();
+        // How far Transform Again would move a point.
+        let moves = |st: &AppState| {
+            let m = st.active().unwrap().transform_again_map().unwrap();
+            let [x, y] = m.apply([7.0, 3.0]);
+            [x - 7.0, y - 3.0].map(|v| (v * 1e6).round() / 1e6)
+        };
+        assert_eq!(moves(&st), [50.0, 20.0]);
+        // Halved, half as far, the layer moving with the image; undone, as far as it was.
+        let half = ResizeImage { width: 200, height: 150, keep_aspect: true, resolution: 72.0, keep_print_size: false };
+        st.resize_image(&half, false);
+        assert_eq!(moves(&st), [25.0, 10.0]);
+        let before = st.active().unwrap().doc().layer(a).unwrap().bounds().unwrap();
+        st.transform_again(false);
+        let after = st.active().unwrap().doc().layer(a).unwrap().bounds().unwrap();
+        assert_eq!([after.x0 - before.x0, after.y0 - before.y0], [25.0, 10.0]);
+        let d = st.active_mut().unwrap();
+        assert!(d.undo() && d.undo());
+        assert_eq!(moves(&st), [50.0, 20.0]);
+        // Turned right, a move right is one down.
+        st.turn(Turn::Clockwise);
+        assert_eq!(moves(&st), [-20.0, 50.0]);
+        // A transform refused (past what a file can hold): as a copy, no copies left behind.
+        let d = st.active_mut().unwrap();
+        let carried = d.doc().carried;
+        d.last_transform = Some(crate::doc::LastTransform { delta: Affine::scale(1e12, 1e12), carried });
+        let (layers, state) = (d.doc().layers.len(), d.history.current());
+        st.transform_again(true);
+        let d = st.active().unwrap();
+        assert_eq!((d.doc().layers.len(), d.history.current(), d.transform.is_none()), (layers, state, true));
+        assert_eq!(d.selected_layers(), vec![a], "the selection not put back");
+        assert!(st.messages.back().is_some_and(|m| m.title == "Transform again as a copy"));
+        // A layer whose pixels hold nothing (all cleared, say): said so.
+        let d = st.active_mut().unwrap();
+        d.last_transform = Some(crate::doc::LastTransform { delta: Affine::translate(1.0, 0.0), carried });
+        let mut empty = None;
+        d.apply::<TreeError>("Add", |doc, ids| {
+            let l = ids.layer();
+            empty = Some(l);
+            doc.insert(Position { parent: None, index: 1 }, Layer::new_raster(l, ids.object(), "e", RasterImage::new()))
+        })
+        .unwrap();
+        st.active_mut().unwrap().select_only(empty.unwrap());
+        st.transform_again(false);
+        let said = st.messages.back().map(|m| m.body.as_str()).unwrap_or_default();
+        assert_eq!(said, crate::transform::NOTHING_TO_TRANSFORM);
     }
 
     #[test]

@@ -40,52 +40,181 @@ enum Style {
     Icon,
 }
 
+/// A tab's keytip, and its buttons' (see [`KEYTIPS`]).
+pub struct TabKeytips {
+    pub tab: &'static str,
+    pub key: char,
+    pub buttons: &'static [(Cmd, char)],
+}
+
+/// Each tab's keytip, and its buttons': fixed, so that a tab or command added never moves the
+/// letters of those already there, which a user learns. Mostly an initial of the name or
+/// another of its letters; Office's where it has one (Cut's X, so that Copy keeps C); a digit
+/// where a tab has run out of letters. One added later takes a letter left free. Each is
+/// unique where it is, and every tab and button has one (a test holds both).
+pub static KEYTIPS: &[TabKeytips] = &[
+    TabKeytips {
+        tab: "File",
+        key: 'F',
+        buttons: &[
+            (Cmd::New, 'N'),
+            (Cmd::Open, 'O'),
+            (Cmd::Save, 'S'),
+            (Cmd::Place, 'P'),
+            (Cmd::OpenAsLayers, 'L'),
+            (Cmd::SaveAs, 'A'),
+            (Cmd::Export, 'E'),
+            (Cmd::Close, 'C'),
+            (Cmd::RunScript, 'R'),
+            (Cmd::ConnectAssistant, 'T'),
+            (Cmd::Preferences, 'F'),
+            (Cmd::Exit, 'X'),
+        ],
+    },
+    TabKeytips {
+        tab: "Home",
+        key: 'H',
+        buttons: &[
+            (Cmd::Undo, 'U'),
+            (Cmd::Redo, 'R'),
+            (Cmd::Paste, 'P'),
+            (Cmd::Cut, 'X'),
+            (Cmd::Copy, 'C'),
+            (Cmd::CopyMerged, 'M'),
+            (Cmd::PasteInPlace, 'I'),
+            (Cmd::Transform, 'T'),
+            (Cmd::TransformAgain, 'G'),
+            (Cmd::TransformAgainCopy, 'O'),
+            (Cmd::ReapplyPlacement, 'A'),
+            (Cmd::ReapplyAllPlacements, 'E'),
+            (Cmd::NewLayer, 'N'),
+            (Cmd::Duplicate, 'D'),
+            (Cmd::DeleteLayer, 'L'),
+            (Cmd::ZoomFit, 'F'),
+            (Cmd::Zoom100, 'S'),
+        ],
+    },
+    TabKeytips {
+        tab: "Image",
+        key: 'I',
+        buttons: &[
+            (Cmd::ResizeImage, 'R'),
+            (Cmd::ResizeCanvas, 'C'),
+            (Cmd::CropToContent, 'T'),
+            (Cmd::RotateCw, 'O'),
+            (Cmd::RotateCcw, 'L'),
+            (Cmd::Rotate180, '1'),
+            (Cmd::RotateBy, 'B'),
+            (Cmd::FlipHorizontal, 'F'),
+            (Cmd::FlipVertical, 'V'),
+        ],
+    },
+    TabKeytips {
+        tab: "Select",
+        key: 'S',
+        buttons: &[
+            (Cmd::SelectAll, 'S'),
+            (Cmd::Deselect, 'D'),
+            (Cmd::Reselect, 'R'),
+            (Cmd::InvertSelection, 'I'),
+            (Cmd::SelectLayerPixels, 'L'),
+            (Cmd::SelectAllLayers, 'E'),
+            (Cmd::DeselectLayers, 'Y'),
+            (Cmd::GrowSelection, 'G'),
+            (Cmd::FeatherSelection, 'F'),
+            (Cmd::SmoothSelection, 'M'),
+            (Cmd::BorderSelection, 'B'),
+            (Cmd::TransformSelection, 'T'),
+            (Cmd::SaveSelection, 'N'),
+            (Cmd::LoadSelection, '1'),
+            (Cmd::Clear, 'C'),
+            (Cmd::Cut, 'X'),
+            (Cmd::CropToSelection, 'O'),
+            (Cmd::LayerViaCopy, 'V'),
+            (Cmd::LayerViaCut, 'A'),
+        ],
+    },
+    TabKeytips {
+        tab: "Layer",
+        key: 'L',
+        buttons: &[
+            (Cmd::NewLayer, 'N'),
+            (Cmd::NewGroup, 'G'),
+            (Cmd::Duplicate, 'D'),
+            (Cmd::LayerViaCopy, 'L'),
+            (Cmd::GroupLayers, 'R'),
+            (Cmd::MoveUp, 'M'),
+            (Cmd::MoveDown, 'O'),
+            (Cmd::BringToFront, 'B'),
+            (Cmd::SendToBack, 'K'),
+            (Cmd::ReverseLayers, '2'),
+            (Cmd::AlignLeft, 'I'),
+            (Cmd::AlignHorizontalCenters, 'Z'),
+            (Cmd::AlignRight, '3'),
+            (Cmd::AlignTop, 'P'),
+            (Cmd::AlignVerticalCenters, '4'),
+            (Cmd::AlignBottom, '5'),
+            (Cmd::DistributeHorizontalCenters, '6'),
+            (Cmd::DistributeVerticalCenters, '7'),
+            (Cmd::DistributeHorizontalSpace, '8'),
+            (Cmd::DistributeVerticalSpace, '9'),
+            (Cmd::MergeDown, 'E'),
+            (Cmd::MergeSelected, 'S'),
+            (Cmd::MergeVisible, 'V'),
+            (Cmd::MergeGroup, 'U'),
+            (Cmd::StampVisible, 'T'),
+            (Cmd::Flatten, 'F'),
+            (Cmd::Rasterize, 'A'),
+            (Cmd::ToggleVisible, 'H'),
+            (Cmd::ToggleLock, 'C'),
+            (Cmd::Rename, 'Y'),
+            (Cmd::DeleteLayer, '1'),
+        ],
+    },
+    TabKeytips {
+        tab: "View",
+        key: 'V',
+        buttons: &[
+            (Cmd::ZoomFit, 'F'),
+            (Cmd::Zoom100, 'A'),
+            (Cmd::ZoomIn, 'Z'),
+            (Cmd::ZoomOut, 'O'),
+            (Cmd::ToggleOffCanvas, 'S'),
+            (Cmd::ToggleRulers, 'R'),
+            (Cmd::ToggleSelectionOverlay, 'E'),
+            (Cmd::ScreenMode, 'M'),
+            (Cmd::ToggleTheme, 'D'),
+            (Cmd::ToggleRibbon, 'I'),
+            (Cmd::CycleToolsPlace, 'T'),
+            (Cmd::ResetPanels, 'P'),
+        ],
+    },
+    TabKeytips {
+        tab: "Help",
+        key: 'E',
+        buttons: &[
+            (Cmd::Help, 'H'),
+            (Cmd::Search, 'S'),
+            (Cmd::Shortcuts, 'K'),
+            (Cmd::About, 'A'),
+            (Cmd::WidgetGallery, 'W'),
+        ],
+    },
+];
+
 /// The keytip letters of the tabs, in tab order.
 pub fn tab_keytips() -> Vec<char> {
-    let mut used = Vec::new();
-    for t in RIBBON {
-        let c = t.name.chars().find(|c| c.is_alphabetic() && !used.contains(&c.to_ascii_uppercase())).unwrap_or('?');
-        used.push(c.to_ascii_uppercase());
-    }
-    used
+    RIBBON.iter().map(|t| keytips_of(t.name).0).collect()
 }
 
-/// The keytip letters of the commands on tab `tab`, each unique on the tab: first those with
-/// their own ([`own_keytip`]), then the others in order of appearance, each the first free
-/// initial of the name's words, else any free letter of the name, else a digit. (Look a
-/// command's up by the command: the order is not the buttons'.)
-pub fn button_keytips(tab: usize) -> Vec<(Cmd, char)> {
-    let mut out: Vec<(Cmd, char)> =
-        RIBBON[tab].groups.iter().flat_map(|g| g.cmds).filter_map(|&c| Some((c, own_keytip(c)?))).collect();
-    for g in RIBBON[tab].groups {
-        for &cmd in g.cmds {
-            if out.iter().any(|(c, _)| *c == cmd) {
-                continue;
-            }
-            let name = cmd.info().name.to_ascii_uppercase();
-            let taken = |c: char| out.iter().any(|(_, k)| *k == c);
-            let initials = name.split(|c: char| !c.is_alphanumeric()).filter_map(|w| w.chars().next());
-            let letters = name.chars().filter(|c| c.is_alphanumeric());
-            let key = initials
-                .chain(letters)
-                .find(|&c| !taken(c))
-                .or_else(|| ('1'..='9').find(|&c| !taken(c)))
-                .unwrap_or('?');
-            out.push((cmd, key));
-        }
-    }
-    out
+/// The keytip letters of the commands on tab `tab`. (Look a command's up by the command.)
+pub fn button_keytips(tab: usize) -> &'static [(Cmd, char)] {
+    keytips_of(RIBBON[tab].name).1
 }
 
-/// The keytip a command has whatever comes before it on its tab, where one is usual: Cut's
-/// X, as in Ctrl+X and Office's ribbon, which leaves Copy its C; New Layer's N, which a
-/// command before it on the Home tab (Transform Again as a Copy) would otherwise take.
-fn own_keytip(cmd: Cmd) -> Option<char> {
-    match cmd {
-        Cmd::Cut => Some('X'),
-        Cmd::NewLayer => Some('N'),
-        _ => None,
-    }
+/// Tab `name`'s keytip and its buttons' ([`KEYTIPS`]).
+fn keytips_of(name: &str) -> (char, &'static [(Cmd, char)]) {
+    KEYTIPS.iter().find(|t| t.tab == name).map_or(('?', &[]), |t| (t.key, t.buttons))
 }
 
 fn single_line(st: &AppState) -> bool {
@@ -273,7 +402,7 @@ fn stages(ui: &egui::Ui, groups: &[Group], width: f32, single: bool) -> Vec<Stag
 fn groups(ui: &mut egui::Ui, st: &mut AppState, tab: usize, area: Rect, single: bool) {
     let gs = RIBBON[tab].groups;
     let stages = stages(ui, gs, area.width(), single);
-    let keys = if st.ribbon.keytips == Keytips::Buttons(tab) { button_keytips(tab) } else { Vec::new() };
+    let keys = if st.ribbon.keytips == Keytips::Buttons(tab) { button_keytips(tab) } else { &[] };
     let key_of = |cmd: Cmd| keys.iter().find(|(c, _)| *c == cmd).map(|(_, k)| *k);
     let mut x = area.left();
     for (gi, (g, stage)) in gs.iter().zip(stages).enumerate() {
@@ -744,24 +873,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keytips_are_unique_per_tab() {
-        let tabs = tab_keytips();
-        let mut t = tabs.clone();
-        t.sort_unstable();
-        t.dedup();
-        assert_eq!(t.len(), tabs.len());
-        for (i, tab) in RIBBON.iter().enumerate() {
-            let keys: Vec<char> = button_keytips(i).into_iter().map(|(_, k)| k).collect();
-            let mut k = keys.clone();
+    fn no_two_commands_on_a_tab_look_alike() {
+        // Shrunk to its icons, a group shows nothing else to tell them apart by.
+        for tab in RIBBON {
+            let mut seen: Vec<(char, Cmd)> = Vec::new();
+            for &cmd in tab.groups.iter().flat_map(|g| g.cmds) {
+                let icon = cmd.info().icon;
+                if let Some(&(_, other)) = seen.iter().find(|&&(i, c)| i == icon && c != cmd) {
+                    panic!("on the {} tab, {cmd:?} has {other:?}'s icon", tab.name);
+                }
+                seen.push((icon, cmd));
+            }
+        }
+    }
+
+    #[test]
+    fn every_tab_and_button_has_a_keytip_of_its_own() {
+        let unique = |keys: &[char]| {
+            let mut k = keys.to_vec();
             k.sort_unstable();
             k.dedup();
-            assert_eq!(k.len(), keys.len(), "tab {}", tab.name);
-            assert!(!keys.contains(&'?'));
+            k.len() == keys.len()
+        };
+        let keytip = |k: char| k.is_ascii_uppercase() || ('1'..='9').contains(&k);
+        let tabs = tab_keytips();
+        assert!(unique(&tabs) && tabs.iter().all(|&k| keytip(k)), "{tabs:?}");
+        assert_eq!(KEYTIPS.len(), RIBBON.len(), "a tab on the table that the ribbon lacks");
+        for (i, tab) in RIBBON.iter().enumerate() {
+            // Each button on the table once, in the ribbon's order, nothing else.
+            let on_tab: Vec<Cmd> = tab.groups.iter().flat_map(|g| g.cmds).copied().collect();
+            let listed: Vec<Cmd> = button_keytips(i).iter().map(|&(c, _)| c).collect();
+            assert_eq!(listed, on_tab, "the keytips of tab {} (a button added needs a letter left free)", tab.name);
+            let keys: Vec<char> = button_keytips(i).iter().map(|&(_, k)| k).collect();
+            assert!(unique(&keys) && keys.iter().all(|&k| keytip(k)), "tab {}: {keys:?}", tab.name);
         }
-        // On the Home tab, the clipboard's as in Office (and their shortcuts), Cut before Copy.
+        // On the Home tab, the clipboard's as in Office (and their shortcuts), Cut before Copy;
+        // and those released in 0.1.0 as they were, the commands added beside them since
+        // notwithstanding.
         let home = button_keytips(RIBBON.iter().position(|t| t.name == "Home").expect("a Home tab"));
         let key = |cmd| home.iter().find(|(c, _)| *c == cmd).map(|(_, k)| *k);
         assert_eq!([key(Cmd::Paste), key(Cmd::Cut), key(Cmd::Copy)], [Some('P'), Some('X'), Some('C')]);
+        let kept = [Cmd::ReapplyPlacement, Cmd::ReapplyAllPlacements, Cmd::NewLayer, Cmd::DeleteLayer, Cmd::Zoom100];
+        assert_eq!(kept.map(key), [Some('A'), Some('E'), Some('N'), Some('L'), Some('S')]);
     }
 
     #[test]

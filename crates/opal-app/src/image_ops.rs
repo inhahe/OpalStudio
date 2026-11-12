@@ -104,7 +104,8 @@ impl Turn {
     }
 }
 
-/// Carries every object of `doc`, and its selection, through `m`. Pixel objects stay pixels
+/// Carries every object of `doc`, its selection, and its coordinates (`Document::carried`),
+/// through `m`. Pixel objects stay pixels
 /// where `m` is exact on the grid; otherwise they are resampled with `resample` if given, else
 /// become image objects drawn with `sampling`. Resampling keeps only the part within `keep` of
 /// what would reach too far (see `layer_ops::drawable`); returns whether it had to, or why
@@ -203,6 +204,7 @@ pub fn transform_all(
         selection.map(|s| s.transformed_within(m, b)).transpose()
     })?;
     doc.selection = carried.filter(|s| !s.is_empty()).map(Arc::new);
+    doc.carried = doc.carried.then(*m);
     progress.advance(1);
     Ok(to.clipped)
 }

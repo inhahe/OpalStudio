@@ -301,7 +301,7 @@ impl Cmd {
                 "Every setting that affects the interface, the canvas, navigation and export.",
                 const { &[ctrl(Key::Comma)] },
             ),
-            Cmd::Exit => i("Exit", icons::CLOSE, "Quit Opal Studio.", "Offers to save unsaved changes first.", &[]),
+            Cmd::Exit => i("Exit", icons::EXIT, "Quit Opal Studio.", "Offers to save unsaved changes first.", &[]),
             Cmd::RunScript => i(
                 "Run Script",
                 icons::SCRIPT,
@@ -476,7 +476,7 @@ impl Cmd {
             ),
             Cmd::Duplicate => i(
                 "Duplicate Layer",
-                icons::COPY,
+                icons::DUPLICATE,
                 "Copy the selected layers.",
                 "Each copy goes just above its original. It shares the original's pixels until \
                  one of them is changed, so duplicating is instant and costs no memory.",
@@ -484,7 +484,7 @@ impl Cmd {
             ),
             Cmd::LayerViaCopy => i(
                 "Layer via Copy",
-                icons::LAYER_ADD,
+                icons::LAYER_VIA_COPY,
                 "Put what is selected on the selected layers on a layer of its own (Ctrl+J).",
                 "What the selected layers show within the selection, as much of each pixel as it is \
                  selected (past the canvas too), becomes a new layer just above the topmost of them. \
@@ -493,7 +493,7 @@ impl Cmd {
             ),
             Cmd::LayerViaCut => i(
                 "Layer via Cut",
-                icons::CUT,
+                icons::LAYER_VIA_CUT,
                 "Move what is selected on the selected layers onto a layer of its own.",
                 "As Layer via Copy, and what it took is erased from the layers it came from, as \
                  much of each pixel as it is selected.",
@@ -653,7 +653,7 @@ impl Cmd {
             ),
             Cmd::MergeGroup => i(
                 "Merge Group",
-                icons::GROUP,
+                icons::MERGE_GROUP,
                 "Turn the active group into one pixel layer.",
                 "The layer keeps the group's name, opacity and visibility, and looks just as the \
                  group did. Hidden layers inside the group stay, just below it.",
@@ -1487,8 +1487,15 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             Ok(())
         }
         TransformAgain | TransformAgainCopy => {
-            if st.active().is_some_and(|d| d.last_transform.is_none()) {
-                return Err("Transform layers first (Ctrl+T): this does the same again.".into());
+            if let Some(d) = st.active() {
+                // Applying the box would make it the last transform: which one is meant is
+                // for the user to say, by applying or cancelling it.
+                if d.transform.is_some() {
+                    return Err("Apply or cancel the box first.".into());
+                }
+                if d.transform_again_map().is_none() {
+                    return Err(crate::transform::NOTHING_DONE_YET.into());
+                }
             }
             availability(st, Transform)
         }

@@ -49,6 +49,13 @@ impl Kind {
 pub const NO_BOX: &str =
     "The selection reaches past every edge of the image (it was inverted, say), so there is no box to put round it.";
 
+/// Why the selected layers cannot be transformed: none holds anything (a layer cleared of all
+/// it held, say).
+pub const NOTHING_TO_TRANSFORM: &str = "The selected layers hold nothing to transform.";
+
+/// Why Transform Again cannot be done: no box has been applied to layers in the image.
+pub const NOTHING_DONE_YET: &str = "Transform layers first (Ctrl+T): this does the same again.";
+
 /// An object the box moves.
 #[derive(Clone, Debug)]
 pub struct Target {
@@ -188,6 +195,9 @@ pub struct Session {
     /// The layers it places, which keep how: a paste's or a placed file's new layer, or
     /// those selected to transform (a group as itself, not its layers).
     pub placed: Vec<LayerId>,
+    /// Whether what it does, applied, becomes what Transform Again does again: a box on
+    /// layers, not one placing them again by how they were placed (Re-apply Placement).
+    pub repeatable: bool,
 }
 
 /// One of a box's numbers given as an expression, and how it was measured then.
@@ -606,6 +616,7 @@ impl DocState {
             sampling_changed: false,
             given: Vec::new(),
             placed: vec![layer_id],
+            repeatable: false,
         });
         self.select_only(layer_id);
         self.revision += 1;
@@ -619,10 +630,18 @@ impl DocState {
             return false;
         }
         self.commit_pending();
+        let doc = self.history.doc().clone();
+        let layers = self.selected_layers();
+        self.begin_transform_of(doc, &layers, sampling)
+    }
+
+    /// Starts transforming `layers` of `doc`: the current state, or one worked out from it
+    /// (with copies to transform, say) that applying the box makes the next state, and
+    /// cancelling it gives up; as [`begin_transform`](Self::begin_transform) does otherwise.
+    fn begin_transform_of(&mut self, mut doc: Document, layers: &[LayerId], sampling: Sampling) -> bool {
         let was_selected = self.selected_layers_active_last();
-        let mut doc = self.history.doc().clone();
         let (mut found, mut placed) = (Vec::new(), Vec::new());
-        for id in self.selected_layers() {
+        for &id in layers {
             if let Some(l) = doc.layer_mut(id) {
                 let had = found.len();
                 take_targets(l, sampling, &mut found);
@@ -664,6 +683,7 @@ impl DocState {
             sampling_changed: false,
             given: Vec::new(),
             placed,
+            repeatable: true,
         });
         self.revision += 1;
         true
@@ -704,6 +724,7 @@ impl DocState {
             sampling_changed: false,
             given: Vec::new(),
             placed: Vec::new(),
+            repeatable: false,
         });
         self.revision += 1;
         Ok(())
@@ -877,6 +898,47 @@ impl DocState {
         Ok(())
     }
 
+    /// Transform Again: what the last transform box applied to layers did
+    /// ([`transform_again_map`](Self::transform_again_map)), done to the selected layers now
+    /// through a box applied at once (drawn as `sampling` says, as a transform is), as one
+    /// history state labeled `label`; with `copy`, to copies of them made in that same state,
+    /// each just above its layer, which become the ones selected, so that done again, the next
+    /// copies go on from them. Why not, if it cannot be (nothing changed, no copies left).
+    pub(crate) fn transform_again(&mut self, copy: bool, sampling: Sampling, label: &str) -> Result<(), String> {
+        if let Some(b) = &self.busy {
+            return Err(b.why());
+        }
+        self.commit_pending();
+        let delta = self.transform_again_map().ok_or(NOTHING_DONE_YET)?;
+        let mut doc = self.history.doc().clone();
+        let mut layers = self.selected_layers();
+        if copy {
+            let mut ids = self.ids.clone();
+            layers = crate::layer_ops::duplicate_in(&mut doc, &mut ids, &layers).map_err(|e| e.to_string())?;
+            // (Given out whether or not the box is applied, as identifiers may be.)
+            self.ids = ids;
+        }
+        if !self.begin_transform_of(doc, &layers, sampling) {
+            return Err(NOTHING_TO_TRANSFORM.into());
+        }
+        if let Some(&last) = layers.last()
+            && copy
+        {
+            self.select_layers(&layers, last);
+        }
+        let m = self.transform.as_ref().expect("begun").start.then(delta);
+        if let Some(why) = self.box_refused(&m) {
+            self.cancel_transform();
+            return Err(why.into());
+        }
+        self.set_box(m, None);
+        if let Some(p) = self.pending.as_mut() {
+            p.label = label.to_owned();
+        }
+        self.commit_pending();
+        Ok(())
+    }
+
     /// Places `layer` (and the layers placed with it) again as the placement it was placed
     /// by says, worked out now, as one history state; drawn as `sampling` says, as a
     /// transform is. Why not, if it cannot (nothing changed).
@@ -889,6 +951,9 @@ impl DocState {
         let done = if self.begin_transform(sampling) {
             if let Some(p) = self.pending.as_mut() {
                 p.label = "Re-apply Placement".into();
+            }
+            if let Some(s) = self.transform.as_mut() {
+                s.repeatable = false;
             }
             let applied = self.apply_placement(&placement);
             if applied.is_err() {
@@ -1012,9 +1077,10 @@ impl DocState {
         out
     }
 
-    /// Makes `layers` (those still in the image) the selected ones, `active` the active one.
+    /// Makes `layers` (those in the image as shown, a pending edit's included) the selected
+    /// ones, `active` the active one.
     pub(crate) fn select_layers(&mut self, layers: &[LayerId], active: LayerId) {
-        let doc = self.history.doc();
+        let doc = self.doc();
         let kept: Vec<LayerId> = layers.iter().copied().filter(|&l| doc.layer(l).is_some()).collect();
         let Some(&first) = kept.first() else { return };
         self.select_only(first);
@@ -1023,7 +1089,7 @@ impl DocState {
                 self.toggle_selected(l);
             }
         }
-        if self.history.doc().layer(active).is_some() {
+        if self.doc().layer(active).is_some() {
             self.make_active(active);
         }
     }
@@ -1058,8 +1124,9 @@ impl DocState {
         if unchanged && !placed_anew {
             return self.cancel_transform();
         }
-        // What a box on layers did, for Transform Again.
-        let again = (s.kind == Kind::Transform && s.current != s.start).then(|| s.delta());
+        // What a box on layers did, for Transform Again, in the coordinates of now.
+        let again = (s.kind == Kind::Transform && s.repeatable && s.current != s.start)
+            .then(|| crate::doc::LastTransform { delta: s.delta(), carried: before.carried });
         // Placed by the box (moved, or new), its layers keep what it was given, or nothing;
         // only drawn another way where they are, they keep what they had. A paste drawn
         // into the active layer has no layer of its own to keep it.
@@ -1382,6 +1449,7 @@ mod tests {
             sampling_changed: false,
             given: Vec::new(),
             placed: Vec::new(),
+            repeatable: true,
         }
     }
 
