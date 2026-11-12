@@ -291,6 +291,134 @@ pub fn visible_bounds(doc: &Document) -> Option<IRect> {
     out.map(|b| IRect::covering(&b)).filter(|r| !r.is_empty())
 }
 
+/// The bounds of what every layer holds, hidden ones and those in hidden groups too, in
+/// whole pixels.
+pub fn all_bounds(doc: &Document) -> Option<IRect> {
+    fn walk(l: &Layer, out: &mut Option<FRect>) {
+        match &l.content {
+            LayerContent::Objects(objects) => {
+                for b in objects.iter().filter_map(|o| o.bounds()) {
+                    *out = Some(out.map_or(b, |a| a.union(&b)));
+                }
+            }
+            LayerContent::Group(c) => c.iter().for_each(|c| walk(c, out)),
+        }
+    }
+    let mut out = None;
+    doc.layers.iter().for_each(|l| walk(l, &mut out));
+    out.map(|b| IRect::covering(&b)).filter(|r| !r.is_empty())
+}
+
+/// What Trim takes as the border to cut away (see [`Trim`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrimBy {
+    /// Pixels transparent (within the tolerance, of alpha).
+    Transparent,
+    /// The colour of the top-left corner's pixel.
+    TopLeft,
+    /// The colour of the bottom-right corner's pixel.
+    BottomRight,
+}
+
+/// The Trim dialog's fields (design.md, *Image size, crop and rotation*): what the border is,
+/// how far a pixel may differ from it and still be border (0 to 255, the largest difference
+/// of a channel, alpha included, in 8-bit sRGB terms), and the sides cut in from: top,
+/// bottom, left, right.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Trim {
+    pub by: TrimBy,
+    pub tolerance: f64,
+    pub sides: [bool; 4],
+}
+
+impl Default for Trim {
+    fn default() -> Trim {
+        Trim { by: TrimBy::Transparent, tolerance: 0.0, sides: [true; 4] }
+    }
+}
+
+/// How many rows (or columns) are read at a time, from the edges in.
+const TRIM_STRIP: i64 = 64;
+
+/// `canvas` cut in to what is not border, as `spec` says, the image read through `read`
+/// (8-bit sRGB pixels with straight alpha, row by row, of a rectangle): from each side asked
+/// for, a row or column goes while every pixel of it (within what is left) is border. None
+/// if every pixel is.
+pub fn trimmed(canvas: IRect, spec: &Trim, read: &dyn Fn(&IRect) -> Vec<[u8; 4]>) -> Option<IRect> {
+    if canvas.is_empty() {
+        return None;
+    }
+    let corner = |x: i64, y: i64| read(&IRect::new(x, y, x + 1, y + 1))[0];
+    let reference = match spec.by {
+        TrimBy::Transparent => None,
+        TrimBy::TopLeft => Some(corner(canvas.x0, canvas.y0)),
+        TrimBy::BottomRight => Some(corner(canvas.x1 - 1, canvas.y1 - 1)),
+    };
+    let tol = spec.tolerance.round().clamp(0.0, 255.0) as i32;
+    let border = |p: &[u8; 4]| match reference {
+        None => i32::from(p[3]) <= tol,
+        // Transparent both: alike, whatever colour neither shows.
+        Some(r) if r[3] == 0 && i32::from(p[3]) <= tol => true,
+        Some(r) => (0..4).all(|c| (i32::from(p[c]) - i32::from(r[c])).abs() <= tol),
+    };
+    let mut r = canvas;
+    // From the top and the bottom: rows across all of it.
+    let rows = |r: &IRect, from_top: bool| -> i64 {
+        let mut gone = 0;
+        while gone < r.height() {
+            let n = TRIM_STRIP.min(r.height() - gone);
+            let (y0, y1) = if from_top { (r.y0 + gone, r.y0 + gone + n) } else { (r.y1 - gone - n, r.y1 - gone) };
+            let strip = read(&IRect::new(r.x0, y0, r.x1, y1));
+            let width = r.width() as usize;
+            let order: Vec<usize> = if from_top { (0..n as usize).collect() } else { (0..n as usize).rev().collect() };
+            for row in order {
+                if !strip[row * width..(row + 1) * width].iter().all(border) {
+                    return gone;
+                }
+                gone += 1;
+            }
+        }
+        gone
+    };
+    if spec.sides[0] {
+        r.y0 += rows(&r, true);
+    }
+    if r.is_empty() {
+        return None;
+    }
+    if spec.sides[1] {
+        r.y1 -= rows(&r, false);
+    }
+    // From the left and the right: columns down what is left.
+    let columns = |r: &IRect, from_left: bool| -> i64 {
+        let mut gone = 0;
+        while gone < r.width() {
+            let n = TRIM_STRIP.min(r.width() - gone);
+            let (x0, x1) = if from_left { (r.x0 + gone, r.x0 + gone + n) } else { (r.x1 - gone - n, r.x1 - gone) };
+            let strip = read(&IRect::new(x0, r.y0, x1, r.y1));
+            let width = n as usize;
+            let order: Vec<usize> = if from_left { (0..width).collect() } else { (0..width).rev().collect() };
+            for col in order {
+                if !strip.chunks(width).all(|row| border(&row[col])) {
+                    return gone;
+                }
+                gone += 1;
+            }
+        }
+        gone
+    };
+    if spec.sides[2] {
+        r.x0 += columns(&r, true);
+    }
+    if r.is_empty() {
+        return None;
+    }
+    if spec.sides[3] {
+        r.x1 -= columns(&r, false);
+    }
+    (!r.is_empty()).then_some(r)
+}
+
 /// The canvas size limit for the commands here, as for New Image.
 const MAX_SIDE: u32 = crate::dialogs::MAX_SIDE;
 
@@ -378,6 +506,42 @@ impl AppState {
     }
 
     /// Shrinks (or grows) the canvas to what the visible layers hold.
+    /// Trim (see [`Trim`]): the active image's canvas cut in to what is not border, worked
+    /// out off the interface thread from the image as it shows (its visible layers
+    /// composited), a strip at a time from the edges in. One history state; told why not,
+    /// if there is nothing to trim or nothing but border.
+    pub(crate) fn trim(&mut self, spec: &Trim) {
+        let doc = self.active_doc.expect("available");
+        let spec = spec.clone();
+        let work = move |doc: &mut Document, _: &mut IdGen, _: &Progress| {
+            let layers = doc.layers.clone();
+            let read = |r: &IRect| {
+                let px = opal_core::composite::flatten(&layers, r);
+                px.into_iter().map(opal_io::pixels::to_srgb8).collect::<Vec<[u8; 4]>>()
+            };
+            let canvas = doc.canvas.rect();
+            let Some(r) = trimmed(canvas, &spec, &read) else {
+                return Err("The image is all border: there would be nothing left.".to_owned());
+            };
+            if r == canvas {
+                return Err("There is no border to trim.".to_owned());
+            }
+            doc.canvas = Canvas { x: r.x0, y: r.y0, width: r.width() as u32, height: r.height() as u32 };
+            Ok(())
+        };
+        self.edit_later(doc, "Trim", Allowance::now(), work, |_, _, ()| {});
+    }
+
+    /// Reveal All: the active image's canvas grown to hold every layer's content, hidden
+    /// layers too, as well as what it holds now (never shrunk). One history state; told so,
+    /// if all is shown already.
+    pub(crate) fn reveal_all(&mut self) {
+        let d = self.active().expect("available");
+        let canvas = d.doc().canvas.rect();
+        let all = all_bounds(d.doc()).map_or(canvas, |b| b.union(&canvas));
+        self.crop_canvas_to(&all, "Reveal all", "Everything there is shows already.");
+    }
+
     pub(crate) fn crop_to_content(&mut self) {
         let d = self.active().expect("available");
         let Some(b) = visible_bounds(d.doc()) else {
@@ -698,5 +862,115 @@ mod tests {
     fn visible_bounds_are_the_content() {
         let d = corners();
         assert_eq!(visible_bounds(&d), Some(IRect::new(10, 20, 13, 22)));
+    }
+
+    /// What an image `w` × `h` at the origin shows, as Trim reads it: `at(x, y)` each pixel.
+    fn reader(w: i64, h: i64, at: impl Fn(i64, i64) -> [u8; 4]) -> impl Fn(&IRect) -> Vec<[u8; 4]> {
+        move |r: &IRect| {
+            assert!(r.x0 >= 0 && r.y0 >= 0 && r.x1 <= w && r.y1 <= h, "read past the image: {r:?}");
+            (r.y0..r.y1).flat_map(|y| (r.x0..r.x1).map(move |x| (x, y))).map(|(x, y)| at(x, y)).collect()
+        }
+    }
+
+    #[test]
+    fn trim_cuts_in_from_each_side_asked_while_rows_and_columns_are_border() {
+        let canvas = IRect::new(0, 0, 300, 200);
+        // A white margin, a little uneven (a scan's), round a red block.
+        let read = reader(300, 200, |x, y| match (x, y) {
+            _ if (70..230).contains(&x) && (40..170).contains(&y) => [200, 0, 0, 255],
+            _ if (x + y) % 7 == 0 => [247, 250, 252, 255],
+            _ => [255, 255, 255, 255],
+        });
+        let by_corner = |tolerance: f64, sides: [bool; 4]| Trim { by: TrimBy::TopLeft, tolerance, sides };
+        assert_eq!(trimmed(canvas, &by_corner(10.0, [true; 4]), &read), Some(IRect::new(70, 40, 230, 170)));
+        // Too strict for the scan's unevenness: stopped by its first uneven row and column.
+        assert_eq!(trimmed(canvas, &by_corner(0.0, [true; 4]), &read), Some(canvas));
+        // Only the top and the left.
+        let some = by_corner(10.0, [true, false, true, false]);
+        assert_eq!(trimmed(canvas, &some, &read), Some(IRect::new(70, 40, 300, 200)));
+        // By the bottom-right corner's colour: a dark corner, nothing else of it.
+        let cornered = reader(300, 200, |x, y| if (x, y) == (299, 199) { [0, 0, 0, 255] } else { [255; 4] });
+        let dark = Trim { by: TrimBy::BottomRight, tolerance: 10.0, sides: [true; 4] };
+        assert_eq!(trimmed(canvas, &dark, &cornered), Some(canvas));
+        // By the top-left's (white), on the same: all but that dark pixel goes.
+        let light = Trim { by: TrimBy::TopLeft, ..dark };
+        assert_eq!(trimmed(canvas, &light, &cornered), Some(IRect::new(299, 199, 300, 200)));
+        // Transparent pixels round a block; and all border, none left.
+        let clear =
+            reader(
+                300,
+                200,
+                |x, y| {
+                    if (10..20).contains(&x) && (5..9).contains(&y) { [9, 9, 9, 255] } else { [0, 0, 0, 0] }
+                },
+            );
+        assert_eq!(trimmed(canvas, &Trim::default(), &clear), Some(IRect::new(10, 5, 20, 9)));
+        let empty = reader(300, 200, |_, _| [0, 0, 0, 0]);
+        assert_eq!(trimmed(canvas, &Trim::default(), &empty), None);
+    }
+
+    #[test]
+    fn trim_cuts_the_image_s_canvas_in_and_reveal_all_brings_back_hidden_layers_too() {
+        use crate::state::{Background, NewImage};
+        let mut st = AppState::new();
+        st.create_image(&NewImage { width: 300, height: 200, background: Background::White, resolution: 72.0 });
+        // A block of red on a layer of its own; and a hidden layer reaching past the canvas.
+        let d = st.active_mut().unwrap();
+        d.apply("Paint", |doc, ids| {
+            let mut block = RasterImage::new();
+            let mut far = RasterImage::new();
+            for y in 40..170 {
+                for x in 70..230 {
+                    block.set_pixel(x, y, pixel_from_f32([0.6, 0.0, 0.0, 1.0]));
+                }
+            }
+            far.set_pixel(-50, 250, pixel_from_f32([0.0, 0.0, 1.0, 1.0]));
+            let mut hidden = Layer::new_raster(ids.layer(), ids.object(), "far", far);
+            hidden.visible = false;
+            doc.insert(
+                Position { parent: None, index: 1 },
+                Layer::new_raster(ids.layer(), ids.object(), "block", block),
+            )?;
+            doc.insert(Position { parent: None, index: 2 }, hidden)?;
+            Ok::<(), opal_core::document::TreeError>(())
+        })
+        .unwrap();
+        st.trim(&Trim { by: TrimBy::TopLeft, tolerance: 0.0, sides: [true; 4] });
+        st.finish_edits();
+        let d = st.active().unwrap();
+        assert_eq!(d.doc().canvas.rect(), IRect::new(70, 40, 230, 170));
+        assert_eq!(d.history.undo_label(), Some("Trim"));
+        // Trimmed again by its corner: all of it is border now, and nothing is trimmed. By
+        // transparency: there is none.
+        st.trim(&Trim { by: TrimBy::TopLeft, tolerance: 0.0, sides: [true; 4] });
+        st.finish_edits();
+        assert!(st.messages.back().is_some_and(|m| m.body.contains("all border")), "{:?}", st.messages);
+        st.trim(&Trim::default());
+        st.finish_edits();
+        assert!(st.messages.back().is_some_and(|m| m.body.contains("no border")), "{:?}", st.messages);
+        assert_eq!(st.active().unwrap().doc().canvas.rect(), IRect::new(70, 40, 230, 170));
+        // Reveal All: the white background's, and the hidden layer's pixel past it.
+        st.reveal_all();
+        let d = st.active().unwrap();
+        assert_eq!(d.doc().canvas.rect(), IRect::new(-50, 0, 300, 251));
+        assert_eq!(d.history.undo_label(), Some("Reveal all"));
+        st.reveal_all();
+        assert_eq!(st.active().unwrap().history.undo_label(), Some("Reveal all"));
+        assert!(st.notice.as_ref().is_some_and(|n| n.0.contains("shows already")), "{:?}", st.notice);
+        // Content smaller than the canvas: the canvas is not shrunk to it.
+        st.create_image(&NewImage { width: 100, height: 100, background: Background::Transparent, resolution: 72.0 });
+        st.active_mut()
+            .unwrap()
+            .apply("Dot", |doc, ids| {
+                let mut dot = RasterImage::new();
+                dot.set_pixel(5, 5, pixel_from_f32([1.0, 1.0, 1.0, 1.0]));
+                doc.insert(
+                    Position { parent: None, index: 1 },
+                    Layer::new_raster(ids.layer(), ids.object(), "dot", dot),
+                )
+            })
+            .unwrap();
+        st.reveal_all();
+        assert_eq!(st.active().unwrap().doc().canvas.rect(), IRect::new(0, 0, 100, 100), "shrunk");
     }
 }

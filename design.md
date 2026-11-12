@@ -982,7 +982,8 @@ The View tab's Compare group (`compare`):
   drift.
 - Panels rearranged by a command (tiled, put back, pinned, reset) are drawn as they were in
   that frame, as commands run at its end: another is asked for. Lock Views and Match Zoom
-  and Location are in the frame's signature, for the same reason.
+  and Location are in the frame's signature, for the same reason, as is whether a dialog
+  is open (one a command opens shows in the next frame, not at the next input).
 - **Match Zoom and Location** gives every other image shown the active one's zoom, and
   shows in the middle of its view the same place of its image (counted from the canvas's
   corner) the active one shows in the middle of its own. **Lock Views** (a toggle) keeps
@@ -1450,6 +1451,21 @@ the selection itself (see *Transform Selection*).
   cropped pixels* is set. A crop box larger than the canvas enlarges it. Straightening and
   deleting cropped pixels change every layer, so they wait while a layer is locked.
 - **Crop to Content** shrinks the canvas to the visible content.
+- **Trim** (Image › Trim…, as Photoshop's): the canvas cut in to the image's content, by
+  what its borders are: transparent pixels (as Crop to Content does at once), or the colour
+  of its top-left or bottom-right corner, within a tolerance (0 to 255, the largest
+  difference of a channel, in the image's 8-bit sRGB terms: a scan's slightly uneven white
+  margin is trimmed with 10 or so); and from which sides (top, bottom, left, right; all, by
+  default). Worked out off the interface thread, on the image as it shows (its visible layers
+  composited a strip of 64 rows or columns at a time, from each side inwards: only what
+  borders is read): a row or column goes while every pixel of it is the border's
+  (`image_ops::trimmed`). One history state ("Trim"); nothing to trim, or nothing but
+  border, says so. The dialog starts as it was last left. Scripts: `trim(based_on,
+  tolerance, top, bottom, left, right)`, answered with the canvas.
+- **Reveal All** (Image): the canvas grown to hold all there is, every layer's content,
+  hidden layers too, as well as what it holds now (it never shrinks): what a move or a
+  paste left past its edges comes back into view. One history state; already all shown,
+  says so. Scripts: `reveal_all()`, answered with the canvas (as `crop_to_content` is).
 - **Resize Image:** a size in any unit or in percent (aspect ratio locked by default), a
   resolution, and a resampling method. A new resolution keeps the pixels and changes how
   large they print (one history state, "Change resolution", and no pixel touched, so it

@@ -695,6 +695,28 @@ Shrink (or grow) the canvas to fit what the visible layers hold.
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 
+### `trim`
+
+Cut the canvas in to the content, by transparency or the colour of a corner.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `based_on` | `transparent`, `top_left`, `bottom_right` | What the border is: transparent pixels, or the colour of the top-left or bottom-right pixel. Default: "transparent". |
+| `tolerance` | number | How far a pixel may differ from the border and be border still: the largest difference of a channel (alpha included), from 0 to 255, in 8-bit sRGB terms. From 0.0 to 255.0. Default: 0. |
+| `top` | bool | Trim the top. Default: true. |
+| `bottom` | bool | Trim the bottom. Default: true. |
+| `left` | bool | Trim the left. Default: true. |
+| `right` | bool | Trim the right. Default: true. |
+
+### `reveal_all`
+
+Grow the canvas to show everything its layers hold, hidden ones too.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+
 ### `resize_image`
 
 Change the image's size, scaling everything in it.

@@ -34,6 +34,8 @@ pub fn show_all(ctx: &egui::Context, st: &mut AppState) {
         resize_canvas(ctx, st);
     } else if st.rotate_by.is_some() {
         rotate_by(ctx, st);
+    } else if st.trim.is_some() {
+        trim(ctx, st);
     } else if st.save_selection.is_some() {
         save_selection(ctx, st);
     } else if st.load_selection.is_some() {
@@ -618,6 +620,56 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
         }
         Some(false) => st.resize_canvas = None,
         None => st.resize_canvas = Some(spec),
+    }
+}
+
+fn trim(ctx: &egui::Context, st: &mut AppState) {
+    use crate::image_ops::TrimBy;
+    let Some(mut spec) = st.trim.clone() else { return };
+    let palette = st.palette;
+    let doc = st.active().map(|d| d.doc());
+    let ppi = doc.map_or(opal_core::units::DEFAULT_PPI, |d| d.resolution);
+    let scope = lengths::image_scope(doc, st.unit(), ppi);
+    let mut done = None;
+    egui::Modal::new(egui::Id::unique("trim")).show(ctx, |ui| {
+        ui.heading("Trim the canvas");
+        ui.add_space(4.0);
+        ui.label("Trim away a border of");
+        for (by, name) in [
+            (TrimBy::Transparent, "Transparent pixels"),
+            (TrimBy::TopLeft, "The top-left pixel's colour"),
+            (TrimBy::BottomRight, "The bottom-right pixel's colour"),
+        ] {
+            ui.radio_value(&mut spec.by, by, name);
+        }
+        ui.horizontal(|ui| {
+            let label = ui.label("Tolerance");
+            let field = NumberField::number(&mut spec.tolerance, scope).range(0.0..=255.0).decimals(0, 0);
+            ui.add(field.remember("trim.tolerance")).labelled_by(label.id);
+            ui.label(RichText::new("of 255, any channel").color(palette.weak_text));
+        });
+        ui.add_space(4.0);
+        ui.label("From");
+        ui.horizontal(|ui| {
+            for (side, name) in ["Top", "Bottom", "Left", "Right"].into_iter().enumerate() {
+                ui.checkbox(&mut spec.sides[side], name);
+            }
+        });
+        ui.label(
+            RichText::new("Only the canvas changes: Reveal All brings back what is trimmed.")
+                .small()
+                .color(palette.weak_text),
+        );
+        done = ok_cancel(ui, "Trim");
+    });
+    match done {
+        Some(true) => {
+            st.trim = None;
+            st.last_trim = spec.clone();
+            st.trim(&spec);
+        }
+        Some(false) => st.trim = None,
+        None => st.trim = Some(spec),
     }
 }
 

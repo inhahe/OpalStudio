@@ -89,6 +89,10 @@ pub const TRANSFORM_AGAIN_COPY: char = '\u{e422}';
 pub const MOVE: char = '\u{f8e5}';
 pub const CROP: char = '\u{e42b}';
 pub const CROP_TO_CONTENT: char = '\u{e42c}';
+/// Shrinking in (resize_small): Trim.
+pub const TRIM: char = '\u{ea19}';
+/// Arrows out to every corner (arrow_expand_all): Reveal All.
+pub const REVEAL_ALL: char = '\u{f0623}';
 pub const RESIZE_IMAGE: char = '\u{ea14}';
 pub const RESIZE_CANVAS: char = '\u{eb25}';
 pub const ROTATE_CW: char = '\u{f185}';

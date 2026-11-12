@@ -5149,3 +5149,50 @@ fn an_image_opened_as_tile_all_is_asked_for_is_tiled_with_the_rest() {
     h.run();
     assert_eq!(h.state().shown_docs().len(), 3, "the image made was not tiled");
 }
+
+#[test]
+fn the_trim_dialog_trims_by_a_corner_s_colour_from_the_sides_chosen_and_remembers_them() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    // A red block in the middle: 100 × 60 from (100, 70).
+    put_on_clipboard(&mut h, pasted(100, 60, [1.0, 0.0, 0.0, 1.0]));
+    command(&mut h, Cmd::Paste);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    command(&mut h, Cmd::Trim);
+    assert!(h.state().state().dialog_open(), "no dialog");
+    h.get_by_label("The top-left pixel's colour").click();
+    h.run();
+    h.get_by_label("Bottom").click();
+    h.run();
+    h.get_by_label("Trim").click();
+    h.run();
+    h.state_mut().state_mut().finish_edits();
+    h.run();
+    let d = h.state().state().active().unwrap();
+    assert_eq!(d.doc().canvas.rect(), opal_core::geom::IRect::new(100, 70, 200, 200), "not trimmed as asked");
+    assert_eq!(d.history.undo_label(), Some("Trim"));
+    // Asked for again, it starts as it was left.
+    command(&mut h, Cmd::Trim);
+    let spec = h.state().state().trim.clone().expect("the dialog");
+    assert_eq!((spec.by, spec.sides), (crate::image_ops::TrimBy::TopLeft, [true, false, true, true]));
+    h.key_press(egui::Key::Escape);
+    h.run();
+}
+
+#[test]
+fn a_dialog_a_command_opens_at_the_end_of_a_frame_shows_without_waiting_for_input() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 40, 30);
+    for (cmd, shows) in [(Cmd::FileInfo, "Caption"), (Cmd::SaveSelection, "Name")] {
+        if cmd == Cmd::SaveSelection {
+            select_rect(&mut h, [0.0, 0.0, 10.0, 10.0]);
+        }
+        command(&mut h, cmd);
+        assert!(h.query_by_label(shows).is_some(), "{cmd:?}'s dialog not shown");
+        h.key_press(egui::Key::Escape);
+        h.run();
+    }
+}

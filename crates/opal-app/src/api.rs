@@ -392,9 +392,30 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
                 otherwise: Otherwise::Value("false"),
             },
         ],
-        Undo | Redo | Copy | CopyMerged | MergeVisible | StampVisible | Flatten | CropToContent | RotateCw
-        | RotateCcw | Rotate180 | FlipHorizontal | FlipVertical | ReapplyAllPlacements | SelectAll | Deselect
-        | Reselect | InvertSelection | CropToSelection => &[DOCUMENT],
+        Trim => &[
+            DOCUMENT,
+            Param {
+                name: "based_on",
+                kind: Kind::Choice(&["transparent", "top_left", "bottom_right"]),
+                help: "What the border is: transparent pixels, or the colour of the top-left or bottom-right \
+                       pixel.",
+                otherwise: Otherwise::Value("\"transparent\""),
+            },
+            Param {
+                name: "tolerance",
+                kind: Kind::Number { min: 0.0, max: 255.0 },
+                help: "How far a pixel may differ from the border and be border still: the largest difference \
+                       of a channel (alpha included), from 0 to 255, in 8-bit sRGB terms.",
+                otherwise: Otherwise::Value("0"),
+            },
+            Param { name: "top", kind: Kind::Bool, help: "Trim the top.", otherwise: Otherwise::Value("true") },
+            Param { name: "bottom", kind: Kind::Bool, help: "Trim the bottom.", otherwise: Otherwise::Value("true") },
+            Param { name: "left", kind: Kind::Bool, help: "Trim the left.", otherwise: Otherwise::Value("true") },
+            Param { name: "right", kind: Kind::Bool, help: "Trim the right.", otherwise: Otherwise::Value("true") },
+        ],
+        Undo | Redo | Copy | CopyMerged | MergeVisible | StampVisible | Flatten | CropToContent | RevealAll
+        | RotateCw | RotateCcw | Rotate180 | FlipHorizontal | FlipVertical | ReapplyAllPlacements | SelectAll
+        | Deselect | Reselect | InvertSelection | CropToSelection => &[DOCUMENT],
         SelectLayerPixels => &[DOCUMENT, LAYER, COMBINE],
         Clear | Cut => &[DOCUMENT, LAYERS],
         GrowSelection => &[
@@ -2525,6 +2546,22 @@ impl AppState {
                 self.resize_canvas(&spec);
                 now(Ok(self.canvas_json()))
             }
+            Cmd::Trim => {
+                use crate::image_ops::{Trim, TrimBy};
+                let by = match args.text("based_on") {
+                    Some("top_left") => TrimBy::TopLeft,
+                    Some("bottom_right") => TrimBy::BottomRight,
+                    _ => TrimBy::Transparent,
+                };
+                let side = |name: &str| args.flag(name).unwrap_or(true);
+                let spec = Trim {
+                    by,
+                    tolerance: args.opt_number("tolerance").unwrap_or(0.0),
+                    sides: [side("top"), side("bottom"), side("left"), side("right")],
+                };
+                self.trim(&spec);
+                self.reply_when_done(|st, id| st.canvas_json_of(id))
+            }
             Cmd::RotateBy => {
                 let degrees = args.number("degrees");
                 if degrees != 0.0 {
@@ -2698,6 +2735,11 @@ impl AppState {
             Cmd::Reselect => {
                 self.run(cmd, ctx);
                 self.reply_when_done(|st, id| selection_json(st.doc(id).expect("open")))
+            }
+            // The canvas they leave.
+            Cmd::CropToContent | Cmd::RevealAll => {
+                self.run(cmd, ctx);
+                now(Ok(self.canvas_json()))
             }
             _ => {
                 // The rest take no more than the image and layers set above.
@@ -6035,5 +6077,37 @@ mod tests {
         assert_eq!(st.active_doc, Some(a), "not put back on the image the user was on");
         assert_eq!(st.doc(b).unwrap().active_layer(), Some(lower), "the layer chosen meanwhile undone");
         let _ = upper;
+    }
+
+    #[test]
+    fn scripts_trim_by_a_corner_s_colour_and_reveal_all() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 300, "height": 200 })).unwrap();
+        // A grey block from (100, 70), 100 by 60, on a layer of its own.
+        st.active_mut()
+            .unwrap()
+            .apply("Paint", |doc, ids| {
+                let mut block = opal_core::raster::RasterImage::new();
+                for y in 70..130 {
+                    for x in 100..200 {
+                        block.set_pixel(x, y, opal_core::tile::pixel_from_f32([0.2, 0.2, 0.2, 1.0]));
+                    }
+                }
+                let layer = opal_core::document::Layer::new_raster(ids.layer(), ids.object(), "block", block);
+                doc.insert(opal_core::document::Position { parent: None, index: 1 }, layer)?;
+                Ok::<(), opal_core::document::TreeError>(())
+            })
+            .unwrap();
+        let trimmed =
+            call(&mut st, "trim", json!({ "based_on": "top_left", "tolerance": 3, "bottom": false })).unwrap();
+        assert_eq!((trimmed["width"].clone(), trimmed["height"].clone()), (json!(100), json!(130)), "{trimmed}");
+        let c = st.active().unwrap().doc().canvas;
+        assert_eq!((c.x, c.y), (100, 70));
+        let revealed = call(&mut st, "reveal_all", json!({})).unwrap();
+        assert_eq!((revealed["width"].clone(), revealed["height"].clone()), (json!(300), json!(200)), "{revealed}");
+        // An image that is all border is refused, and said why.
+        now(&mut st, "new", json!({ "width": 30, "height": 20 })).unwrap();
+        let why = call(&mut st, "trim", json!({ "based_on": "top_left" })).unwrap_err();
+        assert!(why.contains("all border"), "{why}");
     }
 }

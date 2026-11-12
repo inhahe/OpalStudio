@@ -492,6 +492,22 @@ class Editor:
 
         document: The image, by id. Default: the active image.
         """
+    def trim(self, *, document: int | None = None, based_on: Literal["transparent", "top_left", "bottom_right"] = "transparent", tolerance: float | str | Expr = 0, top: bool = True, bottom: bool = True, left: bool = True, right: bool = True) -> Any:
+        """Cut the canvas in to the content, by transparency or the colour of a corner.
+
+        document: The image, by id. Default: the active image.
+        based_on: What the border is: transparent pixels, or the colour of the top-left or bottom-right pixel. Default: "transparent".
+        tolerance: How far a pixel may differ from the border and be border still: the largest difference of a channel (alpha included), from 0 to 255, in 8-bit sRGB terms. From 0.0 to 255.0. Default: 0.
+        top: Trim the top. Default: true.
+        bottom: Trim the bottom. Default: true.
+        left: Trim the left. Default: true.
+        right: Trim the right. Default: true.
+        """
+    def reveal_all(self, *, document: int | None = None) -> Any:
+        """Grow the canvas to show everything its layers hold, hidden ones too.
+
+        document: The image, by id. Default: the active image.
+        """
     def resize_image(self, *, document: int | None = None, width: float | str | Expr | None = None, height: float | str | Expr | None = None, resolution: float | str | Expr | None = None, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px", resample: bool | None = None) -> Any:
         """Change the image's size, scaling everything in it.
 

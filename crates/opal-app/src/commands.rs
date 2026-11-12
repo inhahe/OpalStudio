@@ -80,6 +80,8 @@ pub enum Cmd {
     SaveSelection,
     LoadSelection,
     CropToContent,
+    Trim,
+    RevealAll,
     ResizeImage,
     ResizeCanvas,
     RotateCw,
@@ -153,7 +155,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 108] = [
+    pub const ALL: [Cmd; 110] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -224,6 +226,8 @@ impl Cmd {
         Cmd::SaveSelection,
         Cmd::LoadSelection,
         Cmd::CropToContent,
+        Cmd::Trim,
+        Cmd::RevealAll,
         Cmd::ResizeImage,
         Cmd::ResizeCanvas,
         Cmd::RotateCw,
@@ -840,6 +844,25 @@ impl Cmd {
                  brings back anything cropped away. For a crop of your own, use the Crop tool (C).",
                 &[],
             ),
+            Cmd::Trim => i(
+                "Trim",
+                icons::TRIM,
+                "Cut the canvas in to the content, by transparency or the colour of a corner.",
+                "Asks what the border is: transparent pixels, or the colour of the top-left or \
+                 bottom-right corner, within a tolerance (a scan's uneven white margin, say), and \
+                 which sides to trim. Rows and columns go from each side while every pixel of them \
+                 is border, as the image shows (its visible layers together). Only the canvas \
+                 changes: Reveal All brings back what was trimmed.",
+                &[],
+            ),
+            Cmd::RevealAll => i(
+                "Reveal All",
+                icons::REVEAL_ALL,
+                "Grow the canvas to show everything its layers hold, hidden ones too.",
+                "What a move or a paste left past the canvas's edges comes back into view. The \
+                 canvas only grows: what it holds now stays.",
+                &[],
+            ),
             Cmd::ResizeImage => i(
                 "Resize Image",
                 icons::RESIZE_IMAGE,
@@ -1265,7 +1288,7 @@ pub static RIBBON: &[Tab] = &[
                 description: "The size of the image, and of the canvas it is shown on.",
                 large: 2,
                 icons: false,
-                cmds: &[Cmd::ResizeImage, Cmd::ResizeCanvas, Cmd::CropToContent],
+                cmds: &[Cmd::ResizeImage, Cmd::ResizeCanvas, Cmd::CropToContent, Cmd::Trim, Cmd::RevealAll],
             },
             Group {
                 name: "Rotate",
@@ -1580,9 +1603,8 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             Ok(())
         }
         Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup | CopyMerged
-        | StampVisible | ResizeCanvas | CropToContent | Place | SelectAll | RotateViewLeft | RotateViewRight => {
-            needs_doc()
-        }
+        | StampVisible | ResizeCanvas | CropToContent | Trim | RevealAll | Place | SelectAll | RotateViewLeft
+        | RotateViewRight => needs_doc(),
         ResetRotation => {
             if st.active().ok_or("Open or create an image first.")?.view.angle == 0.0 {
                 return Err("The view is straight already.".into());

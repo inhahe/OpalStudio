@@ -795,6 +795,8 @@ impl OpalApp {
         (st.assistant_open, &st.mcp_http).hash(&mut h);
         (st.resize_image.is_some(), st.resize_canvas.is_some(), st.rotate_by.is_some(), st.modifying.is_some())
             .hash(&mut h);
+        // Any dialog (a command opens one at the end of a frame, which the next must show).
+        st.dialog_open().hash(&mut h);
         st.reading.is_some().hash(&mut h);
         st.writer.busy().hash(&mut h);
         (st.lock_views, st.match_views).hash(&mut h);

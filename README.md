@@ -109,7 +109,10 @@ cargo test --workspace                     # all tests, interface tests included
   on the canvas).
 - **The image.** The Crop tool, with aspect ratios, guides and straightening, and its box's
   exact numbers by it as for the transform box; Crop to
-  Content; Resize Image and Resize Canvas; quarter turns, flips and rotation by any angle.
+  Content; Trim, by transparency or a corner's colour within a tolerance (a scan's white
+  margin), from the sides you choose; Reveal All, which grows the canvas to show everything
+  the layers hold; Resize Image and Resize Canvas; quarter turns, flips and rotation by any
+  angle.
   Cropping and resizing the canvas never delete anything unless asked to. Canvases go up
   to 300,000 pixels a side; anything that would need more memory than the computer has
   free (counting room on disk for the parts that can go there) is refused, with how much

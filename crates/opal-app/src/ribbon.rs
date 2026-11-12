@@ -101,6 +101,8 @@ pub static KEYTIPS: &[TabKeytips] = &[
             (Cmd::ResizeImage, 'R'),
             (Cmd::ResizeCanvas, 'C'),
             (Cmd::CropToContent, 'T'),
+            (Cmd::Trim, 'M'),
+            (Cmd::RevealAll, 'A'),
             (Cmd::RotateCw, 'O'),
             (Cmd::RotateCcw, 'L'),
             (Cmd::Rotate180, '1'),

@@ -257,6 +257,9 @@ pub struct AppState {
     pub resize_image: Option<ResizeImage>,
     pub resize_canvas: Option<ResizeCanvas>,
     pub rotate_by: Option<RotateBy>,
+    /// The Trim dialog, while it is open; and what it was last given.
+    pub trim: Option<crate::image_ops::Trim>,
+    pub last_trim: crate::image_ops::Trim,
     /// The Save Selection and Load Selection dialogs, while open.
     pub save_selection: Option<crate::select::SaveSelection>,
     pub load_selection: Option<crate::select::LoadSelection>,
@@ -462,6 +465,8 @@ impl AppState {
             resize_image: None,
             resize_canvas: None,
             rotate_by: None,
+            trim: None,
+            last_trim: crate::image_ops::Trim::default(),
             save_selection: None,
             load_selection: None,
             modifying: None,
@@ -515,6 +520,7 @@ impl AppState {
                 || self.resize_image.is_some()
                 || self.resize_canvas.is_some()
                 || self.rotate_by.is_some()
+                || self.trim.is_some()
                 || self.save_selection.is_some()
                 || self.load_selection.is_some()
                 || self.modifying.is_some()
@@ -756,6 +762,8 @@ impl AppState {
                 });
             }
             Cmd::RotateBy => self.rotate_by = Some(RotateBy { degrees: 0.0, grow: true }),
+            Cmd::Trim => self.trim = Some(self.last_trim.clone()),
+            Cmd::RevealAll => self.reveal_all(),
             Cmd::SaveSelection => {
                 let name = crate::select::next_selection_name(self.active().expect("available").doc());
                 self.save_selection = Some(crate::select::SaveSelection { name });
