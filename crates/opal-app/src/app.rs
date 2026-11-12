@@ -241,14 +241,17 @@ impl OpalApp {
         }
         // Esc typed into a field leaves the field, not the box the field is about.
         let typing = ctx.egui_wants_keyboard_input() || self.field_had_keys;
-        // While a mouse button is held on an image, keys that would change it do nothing (as in
-        // Photoshop): a drag works its edit out again from where it began, and would carry on
-        // past what they did. Esc still gives up what it gives up, and the view's keys act.
-        if !typing && self.st.canvas_held && ctx.input(|i| i.pointer.any_down()) {
-            let held = keys_held_back(ctx) + paste_presses;
-            if held > 0 {
+        // While a mouse button is held on an image, or a drag on it is under way (one may
+        // outlive the button, Space making the tool the hand), keys that would change it do
+        // nothing (as in Photoshop): a drag works its edit out again from where it began, and
+        // would carry on past what they did. Esc still gives up what it gives up (a paste being
+        // read first, as ever), and the view's keys act.
+        let held = self.st.canvas_held && ctx.input(|i| i.pointer.any_down());
+        if !typing && (held || self.st.active().is_some_and(crate::doc::DocState::dragging)) {
+            if keys_held_back(ctx) || paste_presses > 0 {
                 self.st.notify(KEYS_WAIT);
             }
+            self.cancel_paste_key(ctx);
             self.editing_keys(ctx);
             // Alt held with the button is not alone (and is down, when let go of after it).
             (self.alt_down, self.alt_alone) = (ctx.input(|i| i.modifiers.alt), false);
@@ -288,7 +291,7 @@ impl OpalApp {
         if typing {
             return;
         }
-        for (s, cmd) in shortcuts_most_specific_first() {
+        for &(s, cmd) in shortcuts_most_specific_first() {
             if ctx.input_mut(|i| i.consume_shortcut(&s)) {
                 self.st.queue.push(cmd);
             }
@@ -303,7 +306,7 @@ impl OpalApp {
     /// The view's commands' shortcuts (zooming, screen modes, what the canvas shows), which
     /// act even while a mouse button is held on an image.
     fn view_keys(&mut self, ctx: &egui::Context) {
-        for (s, cmd) in shortcuts_most_specific_first().into_iter().filter(|(_, c)| acts_during_drag(*c)) {
+        for &(s, cmd) in shortcuts_most_specific_first().iter().filter(|(_, c)| acts_during_drag(*c)) {
             if ctx.input_mut(|i| i.consume_shortcut(&s)) {
                 self.st.queue.push(cmd);
             }
@@ -373,6 +376,13 @@ impl OpalApp {
         // While an edit is under way on the image, they change nothing (see `edits`).
         if d.busy.is_some() {
             return;
+        }
+        // Esc gives up a Move drag, the layers back where they were (the tools' own drags see
+        // to their Esc themselves).
+        if matches!(d.drag, Some(crate::doc::Drag::Move(_)))
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            return d.give_up_drag();
         }
         let cropping = crop_tool && d.crop.is_some();
         // An outline being drawn takes Enter (closing it), Esc (giving it up) and Backspace
@@ -1244,14 +1254,13 @@ impl eframe::App for OpalApp {
     }
 }
 
-/// Every command shortcut with its command, those with more modifiers first. egui matches a
-/// shortcut ignoring extra Shift and Alt, so Ctrl+S, tried first, would take Ctrl+Shift+S.
 /// What the status bar says when keys are held back during a drag on the image.
 pub const KEYS_WAIT: &str =
     "Keys that would change the image do nothing while a mouse button is held on it: let go first.";
 
 /// Whether `cmd` acts while a mouse button is held on an image: the view's commands, which
-/// change nothing a drag works out its edit from.
+/// change nothing a drag works out its edit from. (Not the screen modes: the canvas is drawn
+/// elsewhere in another, and would no longer know the button held on it.)
 fn acts_during_drag(cmd: Cmd) -> bool {
     matches!(
         cmd,
@@ -1259,43 +1268,71 @@ fn acts_during_drag(cmd: Cmd) -> bool {
             | Cmd::ZoomOut
             | Cmd::ZoomFit
             | Cmd::Zoom100
+            | Cmd::ToggleRulers
             | Cmd::ToggleOffCanvas
             | Cmd::ToggleSelectionOverlay
-            | Cmd::ScreenMode
     )
 }
 
-/// Takes out of this frame's input, while a mouse button is held on an image, every key press
-/// that would change it, and the clipboard's events: all but Esc (which gives a drag up), Space
-/// (the hand, to scroll) and the view's commands' shortcuts (see [`acts_during_drag`]). How
-/// many it took.
-fn keys_held_back(ctx: &egui::Context) -> u32 {
-    let view: Vec<egui::KeyboardShortcut> =
-        shortcuts_most_specific_first().into_iter().filter(|(_, c)| acts_during_drag(*c)).map(|(s, _)| s).collect();
+/// Takes out of this frame's input, while a drag on an image is under way, every key press but
+/// Esc (which gives a drag up), Space (the hand, to scroll) and the view's commands' shortcuts
+/// (see [`acts_during_drag`]), and the clipboard's events. Whether any of them would have done
+/// something: a command's shortcut, a tool's key, an editing key (arrows, Enter, Delete,
+/// Backspace) or a clipboard event; not a key's repeats (R, say, held for R+drag) nor one that
+/// does nothing.
+fn keys_held_back(ctx: &egui::Context) -> bool {
+    let shortcuts = shortcuts_most_specific_first();
+    let matches = |s: &egui::KeyboardShortcut, key: Key, modifiers: Modifiers| {
+        s.logical_key == key && modifiers.matches_logically(s.modifiers)
+    };
+    let view = |key: Key, modifiers: Modifiers| {
+        shortcuts.iter().any(|(s, c)| acts_during_drag(*c) && matches(s, key, modifiers))
+    };
+    let acts = |key: Key, modifiers: Modifiers| {
+        shortcuts.iter().any(|(s, _)| matches(s, key, modifiers))
+            || (modifiers.is_none() && ToolId::ALL.iter().any(|t| t.info().key == key))
+            || matches!(
+                key,
+                Key::ArrowLeft
+                    | Key::ArrowRight
+                    | Key::ArrowUp
+                    | Key::ArrowDown
+                    | Key::Enter
+                    | Key::Delete
+                    | Key::Backspace
+            )
+    };
     ctx.input_mut(|i| {
-        let mut held = 0;
-        i.events.retain(|e| {
-            let keep = match e {
-                Event::Key { key: Key::Escape | Key::Space, .. } | Event::Key { pressed: false, .. } => true,
-                Event::Key { key, modifiers, .. } => {
-                    view.iter().any(|s| s.logical_key == *key && modifiers.matches_logically(s.modifiers))
-                }
-                Event::Copy | Event::Cut | Event::Paste(_) | Event::PasteImage(_) => false,
-                _ => true,
-            };
-            held += u32::from(!keep);
-            keep
+        let mut held = false;
+        i.events.retain(|e| match e {
+            Event::Key { key: Key::Escape | Key::Space, .. } | Event::Key { pressed: false, .. } => true,
+            Event::Key { key, modifiers, repeat, .. } => {
+                let kept = view(*key, *modifiers);
+                held |= !kept && !*repeat && acts(*key, *modifiers);
+                kept
+            }
+            Event::Copy | Event::Cut | Event::Paste(_) | Event::PasteImage(_) => {
+                held = true;
+                false
+            }
+            _ => true,
         });
         held
     })
 }
 
-fn shortcuts_most_specific_first() -> Vec<(egui::KeyboardShortcut, Cmd)> {
-    let mut all: Vec<(egui::KeyboardShortcut, Cmd)> =
-        Cmd::ALL.iter().flat_map(|&c| c.info().shortcuts.iter().map(move |s| (*s, c))).collect();
-    let count = |m: Modifiers| u8::from(m.alt) + u8::from(m.shift) + u8::from(m.command || m.ctrl);
-    all.sort_by_key(|(s, _)| std::cmp::Reverse(count(s.modifiers)));
-    all
+/// Every command shortcut with its command, those with more modifiers first. egui matches a
+/// shortcut ignoring extra Shift and Alt, so Ctrl+S, tried first, would take Ctrl+Shift+S.
+/// Made once.
+fn shortcuts_most_specific_first() -> &'static [(egui::KeyboardShortcut, Cmd)] {
+    static ALL: std::sync::OnceLock<Vec<(egui::KeyboardShortcut, Cmd)>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut all: Vec<(egui::KeyboardShortcut, Cmd)> =
+            Cmd::ALL.iter().flat_map(|&c| c.info().shortcuts.iter().map(move |s| (*s, c))).collect();
+        let count = |m: Modifiers| u8::from(m.alt) + u8::from(m.shift) + u8::from(m.command || m.ctrl);
+        all.sort_by_key(|(s, _)| std::cmp::Reverse(count(s.modifiers)));
+        all
+    })
 }
 
 /// The documents whose tabs are in front, in their containers.

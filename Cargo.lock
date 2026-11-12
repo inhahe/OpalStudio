@@ -2425,7 +2425,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "opal-app"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "arboard",
  "bytemuck",
@@ -2452,14 +2452,14 @@ dependencies = [
 
 [[package]]
 name = "opal-color"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "opal-core"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "bytemuck",
  "half",
@@ -2473,7 +2473,7 @@ dependencies = [
 
 [[package]]
 name = "opal-io"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "bytemuck",
  "half",

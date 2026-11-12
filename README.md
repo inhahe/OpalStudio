@@ -153,7 +153,7 @@ cargo test --workspace                     # all tests, interface tests included
   - Alt shows a letter on every tab and button; Ctrl+K searches for any command; F1
     opens help for the button under the pointer.
   - While a mouse button is held on the image, keys that would change it do nothing (the
-    status bar says so); Esc, Space and the zoom and view keys still work.
+    status bar says so); Esc, Space, the zoom keys and Ctrl+R (the rulers) still work.
   - Tools are pinned to the ribbon or a side strip.
   - Every preference shows its default, marks changes and can be reset, and tool
     settings can be saved as named presets.

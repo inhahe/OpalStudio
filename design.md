@@ -811,24 +811,34 @@ shortcut, and the condition under which it is available, with the reason shown w
 not. The ribbon, command search, context menus, keyboard shortcuts, keytips and the help
 pages are all generated from it, so a command looks and behaves the same everywhere.
 
-**Keys during a drag.** While a mouse button pressed on an image is held, keys that would
-change it do nothing, as in Photoshop, and the status bar says so. This covers commands'
-shortcuts, tool keys, the editing keys (arrows, Enter, Delete, Backspace) and the clipboard's
-events. A drag works its edit out again from where it began, so it would carry on past an
-undo or a deselect and leave states nobody meant.
+**Keys during a drag.** While a mouse button pressed on an image is held, or a drag on it is
+under way (one may outlive the button, Space making the tool the hand meanwhile), keys that
+would change it do nothing, as in Photoshop. This covers commands' shortcuts, tool keys, the
+editing keys (arrows, Enter, Delete, Backspace) and the clipboard's events. The status bar
+says so for a key that would have done something; not for a key's repeats (R held for
+R+drag) nor a key bound to nothing. A drag works its edit out again from where it began, so
+it would carry on past an undo or a deselect and leave states nobody meant.
 
-- What still acts: Esc, which gives up what is under way; Space, the hand, to scroll; Tab
-  during a redrawing (*Reshaping an outline*); and the view's commands, which change
-  nothing a drag works out its edit from: zoom, screen modes, off-canvas content, the
-  selection overlay (`app::acts_during_drag`).
+- What still acts:
+  - Esc, which gives up what is under way: a paste being read, first, as the status bar
+    promises; then the drag. Every kind gives itself up, the Move tool's (the layers back)
+    included; the crop box goes, and egui itself ends the drag on it.
+  - Space, the hand, to scroll.
+  - Tab during a redrawing (*Reshaping an outline*).
+  - The view's commands, which change nothing a drag works out its edit from: zoom, the
+    rulers, off-canvas content, the selection overlay (`app::acts_during_drag`). Not the
+    screen modes: they draw the canvas elsewhere, which would no longer know the button
+    held on it.
 - The canvas notes whether a button pressed on it is held (`AppState::canvas_held_now`).
-  The keys, handled before the canvas is drawn, go by the frame before's
-  (`canvas_held`), and take the rest out of the frame's input (`app::keys_held_back`).
+  The keys, handled before the canvas is drawn, go by the frame before's (`canvas_held`)
+  and by `DocState::dragging`, and take the rest out of the frame's input
+  (`app::keys_held_back`).
 - Scripts likewise wait while a button is held (`AppState::scripts_wait`).
 - An image has at most one drag under way, whatever the tool (`DocState::drag`, a
   `doc::Drag`: the Move tool's, on the crop box, the Select tool's, on the box round the
   last shape, on the outline edited, redrawing it, on its symmetry). `give_up_drag` gives
-  up any of them, as Esc does, discarding the edit it has pending. It is used for an image
+  up any of them, as Esc does, discarding the edit it has pending (and a drag of the
+  symmetry puts the image's center and axis back where they were). It is used for an image
   no longer drawn (`AppState::leave_undrawn`), and by each tool when it is no longer the
   one chosen. A new kind of drag is a variant, and its pending edit is discarded in that
   one place.
@@ -1979,11 +1989,13 @@ kaleidoscope of 2n parts.
   drawing it stops where its whole outline would pass a million segments (its copies, and
   the sides joining them, counted). The slice is what is edited (its points, sides and handles
   as any outline's, its ends with one side each; an outline left with fewer than two points
-  goes), the copies following. It may be edited on any copy: every copy's points are shown,
-  those picked on each, and a press on a copy's point, handle or side is on the slice's, the
-  slice moved as that copy is (`part_at` tries each of `Symmetry::maps`, the slice first so
-  that it wins where a copy lies on it; a drag carries the pointer's move back through the
-  copy's map). Alt+drag moves the whole outline as dragged, from any copy. An end made smooth gets its handle at right angles to the
+  goes), the copies following. It may be edited on any copy: every copy's points are shown
+  (where they crowd closer than 6 screen points, those not picked only that far apart, so
+  that the squares stay few), those picked on each. A press on a copy's point, handle or side
+  is on the slice's, the slice moved as that copy is: `part_at` tries each of
+  `Symmetry::maps` that can be carried back, the slice first, so that it wins where a copy
+  lies on it (to within a hundredth of a screen point, as rounding leaves them). A drag
+  carries the pointer's move back through the copy's map. Alt+drag moves the whole outline as dragged, from any copy. An end made smooth gets its handle at right angles to the
   mirror line it lies on, or, turned without a mirror, in line with the handle of the copy
   it meets, so that the whole passes smoothly through the seam; moving it whole moves its
   center too. A symmetry making no copies (order 1, no mirror) is as none, and refused where

@@ -231,6 +231,8 @@ pub fn shown_symmetry(d: &DocState, options: Options) -> Option<(Symmetry, Shown
 pub struct SymmetryDrag {
     center: bool,
     edited: Option<(Outline, Combine, opal_core::selection::Selection)>,
+    /// The image's center and axis as it began, put back if it is given up.
+    pub(crate) was: (Option<[f64; 2]>, f64),
 }
 
 /// What a frame's presses and drags on the canvas do to the symmetry shown (`shown`, see
@@ -251,7 +253,8 @@ fn guide(
     let (s, whose) = shown;
     if let Some(Drag::Symmetry(drag)) = d.drag.take_if(|g| matches!(g, Drag::Symmetry(_))) {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            d.discard_pending(MOVE_SYMMETRY);
+            d.drag = Some(Drag::Symmetry(drag));
+            d.give_up_drag();
             return true;
         }
         if !ctx.input(|i| i.pointer.primary_down()) {
@@ -306,7 +309,8 @@ fn guide(
         let (o, combine) = edited(d).expect("an outline edited");
         (o.clone(), combine, d.pixel_selection().expect("one with an outline").before_last())
     });
-    d.drag = Some(Drag::Symmetry(SymmetryDrag { center: on, edited }));
+    let was = (d.symmetry_center, d.symmetry_angle);
+    d.drag = Some(Drag::Symmetry(SymmetryDrag { center: on, edited, was }));
     true
 }
 
@@ -500,8 +504,7 @@ fn reshape(
     // outline there and back.
     let nearest = copies(&outline)
         .into_iter()
-        .filter_map(|map| {
-            let back = map.inverse()?;
+        .filter_map(|(map, back)| {
             let (side, t, _) = outline.nearest(back.apply(to_doc(origin)))?;
             let on = map.apply(outline.along(side, t));
             Some((to_screen(on).distance(origin), (side, t), on, map, back))
@@ -647,17 +650,24 @@ pub enum Part {
     Side(usize, f64),
 }
 
-/// What carries outline `o` to each of the copies of it drawn: those of its symmetry, itself
-/// first (only itself, without one).
-fn copies(o: &Outline) -> Vec<Affine> {
-    o.symmetric().map_or_else(|| vec![Affine::IDENTITY], |s| s.maps())
+/// What carries outline `o` to each of the copies of it drawn, and back: those of its
+/// symmetry, itself first (only itself, without one); none that could not be carried back (a
+/// center so far that the numbers overflow, as a file may give).
+fn copies(o: &Outline) -> Vec<(Affine, Affine)> {
+    let maps = o.symmetric().map_or_else(|| vec![Affine::IDENTITY], |s| s.maps());
+    maps.into_iter().filter_map(|map| Some((map, map.inverse()?))).collect()
 }
+
+/// How much nearer (screen points) a part on a copy must be than one on the outline itself (or
+/// a handle than a point, or a later copy than an earlier) to be taken instead: where a copy
+/// lies on the outline, the two differ only by rounding.
+const TIE: f32 = 0.01;
 
 /// The part of `o` (its points `nodes`, those `picked` in order) at `at` (screen points), on
 /// it or on any copy of it drawn (see [`copies`]): the point or picked point's handle nearest
-/// it (the point, where a handle lies on it; itself, where a copy lies on it), else a side,
-/// unless the `reach` leaves sides out; each within the reach. With it, what carries `o` to
-/// the copy it is on.
+/// it, else a side, unless the `reach` leaves sides out; each within the reach. Of those as
+/// near (within [`TIE`]), a point before a handle lying on it, and the outline itself before
+/// a copy lying on it. With it, what carries the copy it is on back to `o`.
 fn part_at(
     o: &Outline,
     nodes: &[Node],
@@ -668,32 +678,32 @@ fn part_at(
     to_screen: &dyn Fn([f64; 2]) -> Pos2,
 ) -> Option<(Part, Affine)> {
     let maps = copies(o);
-    let on = |map: Affine| {
+    // The first of `found` (distance, part, back) as near as the nearest.
+    let first_nearest = |found: Vec<(f32, Part, Affine)>| {
+        let least = found.iter().map(|f| f.0).fold(f32::INFINITY, f32::min);
+        found.into_iter().find(|f| f.0 <= least + TIE).map(|(_, part, back)| (part, back))
+    };
+    let on = |(map, back): (Affine, Affine)| {
         let far = move |p: [f64; 2]| to_screen(map.apply(p)).distance(at);
         let handles = picked.iter().flat_map(move |&i| {
             let n = nodes[i];
             [(n.into, End::In), (n.out, End::Out)]
                 .into_iter()
-                .filter_map(move |(h, end)| Some((far(h?), Part::Handle(i, end), map)))
+                .filter_map(move |(h, end)| Some((far(h?), Part::Handle(i, end), back)))
         });
-        let points = nodes.iter().enumerate().map(move |(i, n)| (far(n.at), Part::Point(i), map));
+        let points = nodes.iter().enumerate().map(move |(i, n)| (far(n.at), Part::Point(i), back));
         points.chain(handles)
     };
-    // Points first, and the outline itself before its copies, so that the first wins a tie.
-    let nearest =
-        maps.iter().flat_map(|&map| on(map)).filter(|(d, _, _)| *d <= reach.near).min_by(|a, b| a.0.total_cmp(&b.0));
-    if let Some((_, part, map)) = nearest {
-        return Some((part, map));
+    let found: Vec<_> = maps.iter().flat_map(|&m| on(m)).filter(|(d, _, _)| *d <= reach.near).collect();
+    if !found.is_empty() || !reach.sides {
+        return first_nearest(found);
     }
-    if !reach.sides {
-        return None;
-    }
-    let sides = maps.iter().filter_map(|&map| {
-        let (side, t, _) = o.nearest(map.inverse()?.apply(to_doc(at)))?;
+    let sides = maps.iter().filter_map(|&(map, back)| {
+        let (side, t, _) = o.nearest(back.apply(to_doc(at)))?;
         let d = to_screen(map.apply(o.along(side, t))).distance(at);
-        (d <= reach.near).then_some((d, Part::Side(side, t), map))
+        (d <= reach.near).then_some((d, Part::Side(side, t), back))
     });
-    sides.min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, part, map)| (part, map))
+    first_nearest(sides.collect())
 }
 
 /// A drag on the outline edited.
@@ -845,7 +855,7 @@ fn edit(
         |at: Pos2| part_at(&outline, &nodes, &points, Reach { near: options.near, sides }, at, to_doc, to_screen);
     if response.drag_started_by(primary)
         && let Some(origin) = ctx.input(|i| i.pointer.press_origin())
-        && let Some((part, map)) = part(origin)
+        && let Some((part, back)) = part(origin)
     {
         // A point not picked, dragged: picked alone (with Shift, besides the others).
         let mut points = points;
@@ -861,7 +871,6 @@ fn edit(
         let before = d.pixel_selection().expect("one with an outline").before_last();
         pick(d, points.clone(), None);
         let alt = modifiers.alt;
-        let back = map.inverse().expect("a copy is turned, or mirrored, from the outline");
         let drag = EditDrag { part, from: to_doc(origin), start: outline, combine, before, picked: points, alt, back };
         d.drag = Some(Drag::Outline(drag));
         return true;
@@ -911,8 +920,11 @@ fn edit(
     true
 }
 
-/// The outline edited `o` on `rect` (by `to_screen`): its points, those `picked` (in order)
-/// filled in `accent`, with their handles drawn out of them.
+/// The outline edited `o` on `rect` (by `to_screen`), and each copy of it drawn: its points,
+/// those `picked` (in order) filled in `accent`, with their handles drawn out of them. Where
+/// points crowd closer than [`SPACED`] on screen (a freehand stretch's, every 2 points), those
+/// not picked are drawn only that far apart, so that the squares stay few however many the
+/// points and copies.
 pub fn draw_edited(
     ui: &egui::Ui,
     o: &Outline,
@@ -924,7 +936,7 @@ pub fn draw_edited(
     let painter = ui.painter().with_clip_rect(rect);
     let line = egui::Stroke::new(1.0, accent);
     let nodes = o.nodes();
-    for map in copies(o) {
+    for (map, _) in copies(o) {
         let to_screen = |p: [f64; 2]| to_screen(map.apply(p));
         for &i in picked {
             let p = to_screen(nodes[i].at);
@@ -934,13 +946,24 @@ pub fn draw_edited(
                 painter.circle(h, 3.5, egui::Color32::WHITE, line);
             }
         }
+        let mut last: Option<Pos2> = None;
         for (i, n) in nodes.iter().enumerate() {
-            let fill = if picked.binary_search(&i).is_ok() { accent } else { egui::Color32::WHITE };
-            let square = Rect::from_center_size(to_screen(n.at), egui::vec2(7.0, 7.0));
+            let at = to_screen(n.at);
+            let is_picked = picked.binary_search(&i).is_ok();
+            if !is_picked && last.is_some_and(|l| l.distance(at) < SPACED) {
+                continue;
+            }
+            last = Some(at);
+            let fill = if is_picked { accent } else { egui::Color32::WHITE };
+            let square = Rect::from_center_size(at, egui::vec2(7.0, 7.0));
             painter.rect(square, 0.0, fill, line, egui::StrokeKind::Middle);
         }
     }
 }
+
+/// How far apart (screen points) the points of the outline edited are drawn at least, but
+/// those picked (see [`draw_edited`]).
+const SPACED: f32 = 6.0;
 
 /// What the outline tool does with a frame of the canvas's `response` on document `d`:
 /// `to_doc` turns a screen point into document pixels, and `to_screen` back.
@@ -1201,7 +1224,7 @@ mod tests {
             shown: None,
             shown_for: (0, false),
         }));
-        let symmetry = Drag::Symmetry(SymmetryDrag { center: true, edited: None });
+        let symmetry = Drag::Symmetry(SymmetryDrag { center: true, edited: None, was: (None, 0.0) });
         let moving = Drag::Move(crate::move_tool::MoveDrag {
             from: [0.0, 0.0],
             bounds: None,
@@ -1220,7 +1243,7 @@ mod tests {
                 let moved = Step::Outline { outline: o.moved(&[0], [5.0, 0.0]), combine: replace };
                 crate::select_tool::reshape_with(d, &before, moved, label);
             }
-            (d.drag, d.drawn) = (Some(drag), pass);
+            (d.drag, d.drawn, d.symmetry_center) = (Some(drag), pass, Some([5.0, 5.0]));
             // Drawn in the pass before: kept.
             st.leave_undrawn(pass + 1);
             assert!(st.active().unwrap().drag.is_some());
@@ -1228,6 +1251,9 @@ mod tests {
             st.leave_undrawn(pass + 2);
             let d = st.active().unwrap();
             assert!(d.drag.is_none(), "the drag was left");
+            // The symmetry's, the image's center put back where it began (none).
+            let center = if label == Some(MOVE_SYMMETRY) { None } else { Some([5.0, 5.0]) };
+            assert_eq!(d.symmetry_center, center);
             assert_eq!((d.pending_label(), edited(d).map(|(e, _)| e.clone())), (None, Some(o.clone())));
         }
     }
@@ -1267,9 +1293,24 @@ mod tests {
             let reach = Reach { near: 7.0, sides: true };
             part_at(&slice, &slice.nodes(), &[], reach, Pos2::new(p[0], p[1]), &to_doc, &to_screen)
         };
-        let (part, map) = on([200.0, 200.0]).expect("on a copy's point");
-        assert_eq!((part, map.apply([250.0, 150.0]).map(f64::round)), (Part::Point(1), [200.0, 200.0]));
+        let (part, back) = on([200.0, 200.0]).expect("on a copy's point");
+        assert_eq!((part, back.apply([200.0, 200.0]).map(f64::round)), (Part::Point(1), [250.0, 150.0]));
         assert_eq!(on([250.0, 150.0]), Some((Part::Point(1), Affine::IDENTITY)));
+        // Turned a fifth of the way at a slant, the slice's end a thousandth of a pixel from where
+        // its next copy begins (as rounding may leave them): the slice's own end.
+        let fifth = Symmetry { order: 5, mirror: false, center: [200.0, 150.0], angle: 17.0 };
+        let end = fifth.turn(1).apply([200.0, 100.0]);
+        let ends = vec![Segment::Line { to: [end[0] + 1e-3, end[1]] }];
+        let slanted = Outline { symmetry: Some(fifth), ..Outline::new([200.0, 100.0], ends, false) };
+        let reach = Reach { near: 7.0, sides: true };
+        let press = Pos2::new(end[0] as f32, end[1] as f32);
+        let found = part_at(&slanted, &slanted.nodes(), &[], reach, press, &to_doc, &to_screen);
+        assert_eq!(found, Some((Part::Point(1), Affine::IDENTITY)));
+        // A center so far that turning about it overflows: only the copies that can be carried
+        // back are tried (here, the outline itself).
+        let far = Symmetry { center: [1e308, 1e308], ..sym };
+        let unturnable = Outline { symmetry: Some(far), ..slice.clone() };
+        assert_eq!(copies(&unturnable).len(), 1);
         // A copy's side: the slice's, as far along.
         let (part, _) = on([175.0, 175.0]).expect("on a copy's side");
         assert!(matches!(part, Part::Side(0, t) if (t - 0.5).abs() < 1e-9), "{part:?}");

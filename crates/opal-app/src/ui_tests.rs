@@ -3922,8 +3922,13 @@ fn a_right_drag_redraws_a_stretch_of_the_outline_the_nearer_or_with_tab_the_othe
     assert_eq!(h.ctx.memory(|m| m.focused()), None);
     // Keys that would change the image do nothing mid-drag, and the status bar says why: Delete
     // neither the picked points' nor Clear's, Ctrl+Z no undo, M no other tool.
-    for (modifiers, key) in [(none, egui::Key::Delete), (egui::Modifiers::COMMAND, egui::Key::Z), (none, egui::Key::M)]
-    {
+    let held = [
+        (none, egui::Key::Delete),
+        (egui::Modifiers::COMMAND, egui::Key::Z),
+        (none, egui::Key::M),
+        (none, egui::Key::F),
+    ];
+    for (modifiers, key) in held {
         square(&mut h);
         h.state_mut().state_mut().notice = None;
         drag(&mut h, egui::PointerButton::Secondary, &bump, Some(Mid::Key(1, modifiers, key)));
@@ -3932,9 +3937,28 @@ fn a_right_drag_redraws_a_stretch_of_the_outline_the_nearer_or_with_tab_the_othe
         let said = h.state().state().notice.as_ref().map(|n| n.0.clone());
         assert_eq!(said.as_deref(), Some(crate::app::KEYS_WAIT));
         assert_eq!(h.state().state().tool(), crate::tools::ToolId::Outline);
+        assert_eq!(h.state().state().screen, crate::state::ScreenMode::Standard);
         h.state_mut().state_mut().active_mut().unwrap().undo();
         h.run();
         assert_ne!(label(&h), "Clear");
+    }
+    // A key that does nothing, or the repeats of R held for R+drag: held back without a word.
+    let repeat: fn(&mut Harness<'static, OpalApp>) = |h| {
+        let modifiers = egui::Modifiers::NONE;
+        h.input_mut().events.push(egui::Event::Key {
+            key: egui::Key::R,
+            physical_key: None,
+            pressed: true,
+            repeat: true,
+            modifiers,
+        });
+    };
+    for mid in [Mid::Key(1, none, egui::Key::Q), Mid::Do(1, repeat)] {
+        square(&mut h);
+        h.state_mut().state_mut().notice = None;
+        drag(&mut h, egui::PointerButton::Secondary, &bump, Some(mid));
+        assert_eq!(label(&h), crate::outline_tool::RESHAPE);
+        assert_eq!(h.state().state().notice, None);
     }
     // Let go away from it: nothing redrawn, and said why.
     square(&mut h);
@@ -4004,6 +4028,118 @@ fn a_right_drag_redraws_a_stretch_of_the_outline_the_nearer_or_with_tab_the_othe
     assert!(h.state().state().active().unwrap().view.zoom > zoom);
     let said = h.state().state().notice.as_ref().map(|n| n.0.clone());
     assert_ne!(said.as_deref(), Some(crate::app::KEYS_WAIT));
+    // And Ctrl+R, the rulers.
+    let rulers = h.state().state().prefs.bool("canvas.rulers");
+    drag(&mut h, egui::PointerButton::Secondary, &bump, Some(Mid::Key(1, egui::Modifiers::COMMAND, egui::Key::R)));
+    assert_ne!(h.state().state().prefs.bool("canvas.rulers"), rulers);
+}
+
+#[test]
+fn esc_gives_up_any_drag_and_keys_wait_for_one_outliving_its_button() {
+    use crate::tools::ToolId;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 200, 100);
+    let none = egui::Modifiers::NONE;
+    let key = |key, pressed| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: none };
+    // A drag from `from` to `to` (document pixels), the button left held.
+    let begin = |h: &mut Harness<'static, OpalApp>, from: [f32; 2], to: [f32; 2]| {
+        let (v, ppp) = (h.state().state().active().unwrap().view, h.ctx.pixels_per_point());
+        let at = |[x, y]: [f32; 2]| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+        h.hover_at(at(from));
+        h.run();
+        h.drag_at(at(from));
+        h.run();
+        for k in 1..=3 {
+            let t = k as f32 / 3.0;
+            h.hover_at(at([from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t]));
+            h.run();
+        }
+        at(to)
+    };
+    // The Move tool's: Esc mid-drag puts the layers back, and lets go of nothing more.
+    h.state_mut().state_mut().set_tool(ToolId::Move);
+    h.run();
+    let at = begin(&mut h, [100.0, 50.0], [130.0, 50.0]);
+    assert!(h.state().state().active().unwrap().pending.is_some(), "nothing moved");
+    // A paste being read meanwhile: Esc is its first, as the status bar says.
+    let st = h.state_mut().state_mut();
+    st.reading = Some(crate::state::Reading {
+        rx: std::sync::mpsc::channel().1,
+        result: None,
+        in_place: false,
+        target: st.active_doc,
+        box_then: None,
+        crop_then: None,
+        notice: String::new(),
+        answer: None,
+    });
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(h.state().state().reading.is_none(), "the paste not given up");
+    assert!(h.state().state().active().unwrap().pending.is_some(), "the move given up instead");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.drop_at(at);
+    h.run();
+    let d = h.state().state().active().unwrap();
+    assert!(d.drag.is_none() && d.pending.is_none(), "the move kept");
+    assert_ne!(d.history.undo_label(), Some(crate::move_tool::MOVE));
+    // On the crop box: Esc mid-drag gives the box up, the drag with it (not put back as dragged).
+    h.state_mut().state_mut().set_tool(ToolId::Crop);
+    h.run();
+    let b = crate::edit_box::EditBox { center: [60.0, 50.0], size: [50.0, 30.0], angle: 0.0 };
+    h.state_mut().state_mut().active_mut().unwrap().crop = Some(b);
+    h.run();
+    let at = begin(&mut h, [60.0, 50.0], [80.0, 50.0]);
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.drop_at(at);
+    h.run();
+    let d = h.state().state().active().unwrap();
+    assert!(d.drag.is_none());
+    assert_eq!(d.crop.map(|b| b.size), Some([200.0, 100.0]), "the box dragged kept, not the tool's fresh one");
+    // The symmetry's center dragged: Esc puts it back where it was.
+    let st = h.state_mut().state_mut();
+    st.set_tool(ToolId::Outline);
+    st.tool_settings.get_mut(&ToolId::Outline).unwrap().set("outline.symmetry", crate::settings::Value::Float(4.0));
+    h.run();
+    let at = begin(&mut h, [100.0, 50.0], [120.0, 60.0]);
+    assert!(h.state().state().active().unwrap().symmetry_center.is_some(), "the center not dragged");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.drop_at(at);
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().symmetry_center, None);
+    // A point of an outline dragged, Space held, and the button let go of first: the drag waits
+    // for Space, and Delete then is neither Clear nor the points'.
+    h.state_mut()
+        .state_mut()
+        .tool_settings
+        .get_mut(&ToolId::Outline)
+        .unwrap()
+        .set("outline.symmetry", crate::settings::Value::Float(1.0));
+    h.run();
+    for p in [[20.0, 20.0], [80.0, 20.0], [80.0, 80.0], [20.0, 80.0]] {
+        click_image(&mut h, p, none);
+    }
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let at = begin(&mut h, [80.0, 20.0], [90.0, 20.0]);
+    h.event(key(egui::Key::Space, true));
+    h.run();
+    h.drop_at(at);
+    h.run();
+    h.state_mut().state_mut().notice = None;
+    h.key_press(egui::Key::Delete);
+    h.run();
+    let said = h.state().state().notice.as_ref().map(|n| n.0.clone());
+    assert_eq!(said.as_deref(), Some(crate::app::KEYS_WAIT));
+    h.event(key(egui::Key::Space, false));
+    h.run();
+    let d = h.state().state().active().unwrap();
+    assert_eq!(d.history.undo_label(), Some(crate::outline_tool::EDIT));
+    assert_eq!(crate::outline_tool::edited(d).map(|(o, _)| o.point_count()), Some(4));
 }
 
 #[test]

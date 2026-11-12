@@ -488,15 +488,23 @@ impl DocState {
         }
     }
 
+    /// Whether a drag on its canvas is under way: one of the tools', or on the transform box.
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some() || self.transform.as_ref().is_some_and(|s| s.drag.is_some())
+    }
+
     /// Gives up the drag under way, if one is, as Esc does: the edit it has pending
-    /// discarded.
+    /// discarded (and the image's symmetry, a drag of it, put back where it began).
     pub fn give_up_drag(&mut self) {
         let label = match self.drag.take() {
             None => return,
             Some(Drag::Move(_)) => Some(crate::move_tool::MOVE),
             Some(Drag::Shape(s)) => Some(crate::select_tool::ShapeDrag::label(s.drag.part)),
             Some(Drag::Outline(_)) => Some(crate::outline_tool::EDIT),
-            Some(Drag::Symmetry(_)) => Some(crate::outline_tool::MOVE_SYMMETRY),
+            Some(Drag::Symmetry(s)) => {
+                (self.symmetry_center, self.symmetry_angle) = s.was;
+                Some(crate::outline_tool::MOVE_SYMMETRY)
+            }
             Some(Drag::Crop(_) | Drag::Select(_) | Drag::Reshape(_)) => None,
         };
         match label {
