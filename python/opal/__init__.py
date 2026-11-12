@@ -272,6 +272,9 @@ class Editor:
             if kind == "path":
                 return os.path.abspath(os.fspath(v))
             if kind == "paths":
+                # One path alone is a list of one (a string is not taken letter by letter).
+                if isinstance(v, (str, bytes, os.PathLike)):
+                    v = [v]
                 return [os.path.abspath(os.fspath(p)) for p in v]
             return v
 

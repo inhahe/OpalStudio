@@ -912,18 +912,9 @@ impl AppState {
             match image_files::import(path, crate::memory::free()) {
                 Ok(imported) => {
                     let mut ids = IdGen::default();
-                    let mut doc = Document::new(imported.width, imported.height);
-                    doc.resolution = self.default_resolution();
+                    let (mut doc, said) = self.image_for(imported.width, imported.height, imported.resolution);
                     let mut warnings = imported.warnings;
-                    if let Some([x, y]) = imported.resolution {
-                        doc.resolution = x;
-                        if (x - y).abs() > x.max(y) * 1e-3 {
-                            warnings.push(format!(
-                                "This image's pixels are not square ({x} by {y} per inch). Opal Studio's are, \
-                                 so it takes the resolution across ({x} pixels per inch) for both."
-                            ));
-                        }
-                    }
+                    warnings.extend(said);
                     let layer = Layer::new_raster(ids.layer(), ids.object(), "Background", imported.image);
                     doc.insert(Position { parent: None, index: 0 }, layer).expect("an empty document takes a layer");
                     self.add_doc(title, doc, ids, "Open");
@@ -934,6 +925,26 @@ impl AppState {
                 Err(e) => self.message(MessageKind::Error, "Could not open the image", e.to_string()),
             }
         }
+    }
+
+    /// A new image `width × height` for a file's pixels, at the resolution across the file
+    /// gives (`resolution`, across and down, if it gives one that can be), else the default;
+    /// and what should be said: that the file's pixels are not square, which Opal Studio's
+    /// are.
+    pub(crate) fn image_for(&self, width: u32, height: u32, resolution: Option<[f64; 2]>) -> (Document, Vec<String>) {
+        let mut doc = Document::new(width, height);
+        doc.resolution = self.default_resolution();
+        let mut said = Vec::new();
+        if let Some([x, y]) = resolution.filter(|&[x, _]| opal_core::units::valid_ppi(x)) {
+            doc.resolution = x;
+            if (x - y).abs() > x.max(y) * 1e-3 {
+                said.push(format!(
+                    "This image's pixels are not square ({x} by {y} per inch). Opal Studio's are, so it \
+                     takes the resolution across ({x} pixels per inch) for both."
+                ));
+            }
+        }
+        (doc, said)
     }
 
     fn save_active(&mut self, choose: bool, ctx: &egui::Context) {

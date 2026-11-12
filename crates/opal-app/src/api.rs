@@ -2325,7 +2325,7 @@ impl AppState {
                     Ok((made, said)) => {
                         let ids: Vec<u64> = made.iter().map(|l| l.0).collect();
                         let document = self.active_doc.expect("one now").0;
-                        now(Ok(json!({ "document": document, "layers": ids, "notes": said })))
+                        now(Ok(with_notes(json!({ "document": document, "layers": ids }), said)))
                     }
                     Err(why) => now(Err(format!("open_as_layers: {why}"))),
                 }
@@ -3528,7 +3528,8 @@ mod tests {
             "any" => "Any".into(),
             "text" => "str".into(),
             "path" => "str | os.PathLike[str]".into(),
-            "paths" => "list[str | os.PathLike[str]]".into(),
+            // Any sequence (a list is invariant: a list[str] would not do), or one path alone.
+            "paths" => "str | os.PathLike[str] | Sequence[str | os.PathLike[str]]".into(),
             "layers" => "list[int]".into(),
             "points" => "list[tuple[float, float]]".into(),
             "outline" => "dict[str, Any]".into(),
@@ -3567,7 +3568,7 @@ mod tests {
             "# The editor's methods, for editors and type checkers. Made from its command\n\
              # registry by the test `api::tests::the_python_stubs_and_api_page_are_current`: run\n\
              # it with OPAL_WRITE_STUBS=1 to make this again. Do not edit by hand.\n\n\
-             import contextlib\nimport os\nfrom pathlib import Path\nfrom typing import Any, Literal\n\n\
+             import contextlib\nimport os\nfrom collections.abc import Sequence\nfrom pathlib import Path\nfrom typing import Any, Literal\n\n\
              from opal.expr import Expr as Expr, box as box, canvas as canvas, cm as cm, deg as deg, fn as fn, \
              ft as ft, inch as inch, layer as layer, m as m, mm as mm, pc as pc, pi as pi, ppi as ppi, pt as pt, \
              px as px, rad as rad, yd as yd\n\n\
@@ -4234,7 +4235,9 @@ mod tests {
         // Into the image open: above the active layer, the first lowest, as one history state.
         st.active_mut().unwrap().select_only(LayerId(made[0]));
         let (c, e) = (png_at(file("layers-c.png"), 6, 4), png_at(file("layers-e.png"), 2, 2));
-        let more = ids(&now(&mut st, "open_as_layers", json!({ "paths": [c, e] })).unwrap());
+        let r = now(&mut st, "open_as_layers", json!({ "paths": [&c, &e] })).unwrap();
+        assert!(r.get("notes").is_none(), "notes with nothing to say: {r}");
+        let more = ids(&r);
         let order = |st: &AppState| st.active().unwrap().doc().layers.iter().map(|l| l.id.0).collect::<Vec<u64>>();
         assert_eq!(order(&st), vec![made[0], more[0], more[1], made[1]]);
         assert_eq!(bounds(&st, more[0]), opal_core::geom::FRect::new(17.0, 8.0, 23.0, 12.0));
@@ -4248,11 +4251,28 @@ mod tests {
         crate::paste::testing::white_jpeg(&jpeg, 8, 8, Some([150, 150]));
         now(&mut fresh, "open_as_layers", json!({ "paths": [jpeg] })).unwrap();
         assert_eq!(fresh.active().unwrap().doc().resolution, 150.0);
+        // Its pixels not square: said, as Open says it.
+        let mut fresh = AppState::new();
+        let tall = file("layers-tall.jpg");
+        crate::paste::testing::white_jpeg(&tall, 8, 8, Some([300, 150]));
+        let r = now(&mut fresh, "open_as_layers", json!({ "paths": [tall] })).unwrap();
+        assert_eq!(fresh.active().unwrap().doc().resolution, 300.0);
+        assert!(r["notes"].to_string().contains("not square"), "{r}");
         // A path not absolute, or none that can be read: refused.
         let why = now(&mut st, "open_as_layers", json!({ "paths": ["relative.png"] })).unwrap_err();
         assert!(why.contains("absolute"), "{why}");
         let why = now(&mut st, "open_as_layers", json!({ "paths": [missing] })).unwrap_err();
         assert!(why.contains("Left out "), "{why}");
+        // Refused while an edit is under way on the image: what was left out is said too.
+        st.edit_wait = std::time::Duration::ZERO;
+        let held = crate::background::testing::hold(Some(crate::edits::pool()));
+        now(&mut st, "select_rectangle", json!({ "x": 5, "y": 5, "width": 10, "height": 10 })).unwrap();
+        let busy = st.call_from(&[], false, "grow_selection", &args(json!({ "by": 2 })), &egui::Context::default());
+        assert!(matches!(busy, Reply::Later(_)), "the grow did not wait");
+        let why = st.open_as_layers(&[c.clone(), missing.clone()]).unwrap_err();
+        assert!(why.contains("under way") && why.contains("Left out "), "{why}");
+        drop(held);
+        st.finish_edits();
         std::fs::remove_dir_all(missing.parent().unwrap()).ok();
     }
 

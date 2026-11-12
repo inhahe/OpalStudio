@@ -624,21 +624,35 @@ impl DocState {
 
     /// Starts transforming the selected layers. Pixel objects become image objects for the
     /// session, drawn with `sampling` (image objects keep their own). Returns whether there
-    /// was anything to transform.
+    /// was anything to transform. What the box does, applied, is what Transform Again does
+    /// again.
     pub fn begin_transform(&mut self, sampling: Sampling) -> bool {
+        self.begin_transform_as(sampling, true)
+    }
+
+    /// [`begin_transform`](Self::begin_transform), the box `repeatable` (see
+    /// [`Session::repeatable`]) or not.
+    fn begin_transform_as(&mut self, sampling: Sampling, repeatable: bool) -> bool {
         if self.refused() {
             return false;
         }
         self.commit_pending();
         let doc = self.history.doc().clone();
         let layers = self.selected_layers();
-        self.begin_transform_of(doc, &layers, sampling)
+        self.begin_transform_of(doc, &layers, sampling, repeatable)
     }
 
     /// Starts transforming `layers` of `doc`: the current state, or one worked out from it
     /// (with copies to transform, say) that applying the box makes the next state, and
-    /// cancelling it gives up; as [`begin_transform`](Self::begin_transform) does otherwise.
-    fn begin_transform_of(&mut self, mut doc: Document, layers: &[LayerId], sampling: Sampling) -> bool {
+    /// cancelling it gives up; as [`begin_transform_as`](Self::begin_transform_as) does
+    /// otherwise.
+    fn begin_transform_of(
+        &mut self,
+        mut doc: Document,
+        layers: &[LayerId],
+        sampling: Sampling,
+        repeatable: bool,
+    ) -> bool {
         let was_selected = self.selected_layers_active_last();
         let (mut found, mut placed) = (Vec::new(), Vec::new());
         for &id in layers {
@@ -683,7 +697,7 @@ impl DocState {
             sampling_changed: false,
             given: Vec::new(),
             placed,
-            repeatable: true,
+            repeatable,
         });
         self.revision += 1;
         true
@@ -904,10 +918,10 @@ impl DocState {
     /// history state labeled `label`; with `copy`, to copies of them made in that same state,
     /// each just above its layer, which become the ones selected, so that done again, the next
     /// copies go on from them. Why not, if it cannot be (nothing changed, no copies left).
+    /// Not while the image is busy with an edit (the caller refuses first, the status bar
+    /// saying why).
     pub(crate) fn transform_again(&mut self, copy: bool, sampling: Sampling, label: &str) -> Result<(), String> {
-        if let Some(b) = &self.busy {
-            return Err(b.why());
-        }
+        debug_assert!(self.busy.is_none(), "Transform Again asked of an image busy with an edit");
         self.commit_pending();
         let delta = self.transform_again_map().ok_or(NOTHING_DONE_YET)?;
         let mut doc = self.history.doc().clone();
@@ -918,7 +932,7 @@ impl DocState {
             // (Given out whether or not the box is applied, as identifiers may be.)
             self.ids = ids;
         }
-        if !self.begin_transform_of(doc, &layers, sampling) {
+        if !self.begin_transform_of(doc, &layers, sampling, true) {
             return Err(NOTHING_TO_TRANSFORM.into());
         }
         if let Some(&last) = layers.last()
@@ -948,12 +962,10 @@ impl DocState {
         let placement = placement.clone();
         let selected = self.layer_selection_state();
         self.select_layers(&layers, layer);
-        let done = if self.begin_transform(sampling) {
+        // A placement worked out again is not what Transform Again does again.
+        let done = if self.begin_transform_as(sampling, false) {
             if let Some(p) = self.pending.as_mut() {
                 p.label = "Re-apply Placement".into();
-            }
-            if let Some(s) = self.transform.as_mut() {
-                s.repeatable = false;
             }
             let applied = self.apply_placement(&placement);
             if applied.is_err() {

@@ -537,12 +537,14 @@ impl Document {
     /// (its layers alike: see [`Layer::same_as`]; its saved selections the same ones, each made
     /// anew when saved), whatever either has selected, which files do not keep.
     pub fn saves_as(&self, other: &Document) -> bool {
-        self.canvas == other.canvas
-            && self.resolution == other.resolution
-            && self.layers.len() == other.layers.len()
-            && self.layers.iter().zip(&other.layers).all(|(a, b)| Arc::ptr_eq(a, b) || a.same_as(b))
-            && self.saved.len() == other.saved.len()
-            && self.saved.iter().zip(&other.saved).all(|(a, b)| {
+        // Each field named, so that one added is weighed here too (the rest: see `same_as`).
+        let Document { canvas, resolution, layers, selection: _, deselected: _, saved, carried: _ } = self;
+        *canvas == other.canvas
+            && *resolution == other.resolution
+            && layers.len() == other.layers.len()
+            && layers.iter().zip(&other.layers).all(|(a, b)| Arc::ptr_eq(a, b) || a.same_as(b))
+            && saved.len() == other.saved.len()
+            && saved.iter().zip(&other.saved).all(|(a, b)| {
                 a.name == b.name && Arc::ptr_eq(&a.kept.selection, &b.kept.selection) && a.kept.since == b.kept.since
             })
     }
@@ -559,10 +561,14 @@ impl Document {
         self.selection.iter().chain(kept.map(|k| &k.selection))
     }
 
-    /// Whether it is `other` as far as an edit can tell: what saving it keeps, and what is
-    /// selected.
+    /// Whether it is `other` as far as an edit can tell: what saving it keeps, what is
+    /// selected, and how its coordinates have been carried (a flip of an image whose layers
+    /// it leaves alike still flips them for Transform Again).
     pub fn same_as(&self, other: &Document) -> bool {
-        self.saves_as(other) && self.selection == other.selection && self.deselected == other.deselected
+        self.saves_as(other)
+            && self.selection == other.selection
+            && self.deselected == other.deselected
+            && self.carried == other.carried
     }
 
     /// Visits every layer depth first, bottom to top, with its depth (0 for top level).

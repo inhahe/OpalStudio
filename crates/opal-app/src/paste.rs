@@ -7,7 +7,7 @@ use crate::state::{AppState, MessageKind, PasteAnswer, Reading};
 use crate::transform::{Kind, PasteAs, PrintSize};
 use eframe::egui;
 use opal_core::composite::composite_within;
-use opal_core::document::{Document, IdGen, Layer, LayerId, Position};
+use opal_core::document::{IdGen, Layer, LayerId, Position};
 use opal_core::geom::Affine;
 use serde_json::json;
 use std::sync::Arc;
@@ -433,15 +433,13 @@ impl AppState {
         &mut self,
         paths: &[std::path::PathBuf],
     ) -> Result<(Vec<LayerId>, Vec<String>), String> {
-        let named = |p: &std::path::Path| {
-            p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())
-        };
         let mut said = Vec::new();
         let mut read = Vec::new();
         for path in paths {
             match opal_io::image_files::import(path, crate::memory::free()) {
                 Ok(imported) => {
-                    said.extend(imported.warnings.iter().map(|w| format!("{}: {w}", named(path))));
+                    let named = crate::state::file_title(path);
+                    said.extend(imported.warnings.iter().map(|w| format!("{named}: {w}")));
                     let name =
                         path.file_stem().map_or_else(|| "Layer".to_owned(), |s| s.to_string_lossy().into_owned());
                     read.push((name, imported));
@@ -474,9 +472,8 @@ impl AppState {
             None => {
                 let first = &read[0].1;
                 let mut ids = IdGen::default();
-                let mut doc = Document::new(first.width, first.height);
-                let ppi = first.resolution.map(|[across, _]| across).filter(|&r| opal_core::units::valid_ppi(r));
-                doc.resolution = ppi.unwrap_or(self.default_resolution());
+                let (mut doc, warnings) = self.image_for(first.width, first.height, first.resolution);
+                said.extend(warnings);
                 let canvas = doc.canvas.rect();
                 let layers = layers_of(read, canvas, &mut ids);
                 let made: Vec<LayerId> = layers.iter().map(|l| l.id).collect();
@@ -497,7 +494,10 @@ impl AppState {
                     }
                     Ok::<(), opal_core::document::TreeError>(())
                 });
-                result.map_err(|e| e.to_string())?;
+                // What was gathered said too: which files were left out.
+                result.map_err(|e| {
+                    std::iter::once(e.to_string()).chain(said.iter().cloned()).collect::<Vec<_>>().join("\n")
+                })?;
                 made
             }
         };
@@ -548,8 +548,10 @@ impl AppState {
     /// Opens the clipboard's image as a new image of its own size.
     fn new_image_from(&mut self, pasted: &Pasted) {
         let mut ids = IdGen::default();
-        let mut doc = Document::new(pasted.width, pasted.height);
-        doc.resolution = pasted.ppi().map_or(self.default_resolution(), |[across, _]| across);
+        let (mut doc, warnings) = self.image_for(pasted.width, pasted.height, pasted.ppi());
+        for w in warnings {
+            self.message(MessageKind::Warning, "Paste", w);
+        }
         let layer = Layer::new_raster(ids.layer(), ids.object(), "Pasted image", pasted.image.clone());
         doc.insert(Position { parent: None, index: 0 }, layer).expect("an empty document takes a layer");
         self.new_untitled(doc, ids, "Paste");

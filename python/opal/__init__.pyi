@@ -4,6 +4,7 @@
 
 import contextlib
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -151,7 +152,7 @@ class Editor:
         into_active: Draw it into the pixels of the active layer (a plain, unlocked one) rather than onto a new layer. Default: false.
         unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
-    def open_as_layers(self, *, paths: list[str | os.PathLike[str]]) -> Any:
+    def open_as_layers(self, *, paths: str | os.PathLike[str] | Sequence[str | os.PathLike[str]]) -> Any:
         """Open image files as layers of this image, one each.
 
         paths: The files, PNG or JPEG, by their absolute paths, the first the lowest layer: into the active image, or a new one if none is open.

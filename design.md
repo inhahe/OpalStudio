@@ -1211,9 +1211,11 @@ the selection itself (see *Transform Selection*).
   `Session::delta`), so a turn about a point turns as far again about the same point. It is
   applied through a box as Transform's is, its pixels kept as pixels where they end on the
   grid. A paste's placing, Transform Selection and Re-apply Placement do not count
-  (`Session::repeatable`). An undo leaves it, as in Photoshop. What turns or resizes the
-  whole image carries its coordinates (`image_ops::transform_all`), and the image keeps how,
-  since it was opened (`Document::carried`, not saved); the last transform is kept with the
+  (`Session::repeatable`, chosen when the box opens: `begin_transform_as`). An undo leaves
+  it, as in Photoshop. What turns or resizes the whole image carries its coordinates
+  (`image_ops::transform_all`), and the image keeps how, since it was opened
+  (`Document::carried`, not saved, but compared by `same_as`, so that a flip of an image
+  whose layers it leaves alike is still a state of its own); the last transform is kept with the
   image's `carried` when it was made, and done again through the change since (conjugated),
   so a move made before Resize Image 50% moves half as far after it, and a turn turns about
   the same place on the image, whatever has been undone since. Cropping and resizing the
@@ -1304,13 +1306,15 @@ the selection itself (see *Transform Selection*).
   first file lowest, all as one history state ("Open as layers"); the new layers are
   selected and the topmost made active, ready to align or arrange. With no image open, a
   new untitled one is made the size of the first file, at its resolution if it says one
-  (the default resolution if not). A file that cannot be read is left out and said, with
-  what reading the others warned of; if none can be read nothing is opened. Files are read
-  as Open and Place read them, on the main thread. Place remains the way to bring in one
-  file to position and size. Scripts: `open_as_layers(paths)`, a parameter of the kind
-  `paths` (a list of absolute paths, at least one; the Python package makes each absolute
-  against its own folder, as it does a `path`; MCP's schema is an array of strings),
-  returning `{document, layers, notes}`.
+  (the default resolution if not), as Open and a paste make one (`AppState::image_for`,
+  which says too when the file's pixels are not square). A file that cannot be read is left
+  out and said, with what reading the others warned of, refused or not; if none can be read
+  nothing is opened. Files are read as Open and Place read them, on the interface thread
+  (`known-issues.md`). Place remains the way to bring in one file to position and size.
+  Scripts: `open_as_layers(paths)`, a parameter of the kind `paths` (a list of absolute
+  paths, at least one; the Python package takes any sequence, or one path alone, and makes
+  each absolute against its own folder, as it does a `path`; MCP's schema is an array of
+  strings), returning `{document, layers}` and `notes` if there is anything to say.
 - **One history state:** the whole session in the box, from paste to commit, is one entry
   ("Paste" or "Transform"). Cancel leaves the document as it was.
 - **The clipboard:** PNG first (keeping 16-bit color and transparency), then the other

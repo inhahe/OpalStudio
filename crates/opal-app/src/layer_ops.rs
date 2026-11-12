@@ -907,6 +907,34 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_image_turn_that_leaves_every_layer_alike_still_carries_its_coordinates() {
+        use crate::image_ops::Turn;
+        use opal_core::geom::Affine;
+        // Nothing but an empty layer: flipped, its layers are as they were.
+        let mut st = AppState::new();
+        st.create_image(&NewImage {
+            width: 40,
+            height: 20,
+            background: Background::Transparent,
+            resolution: opal_core::units::DEFAULT_PPI,
+        });
+        let d = st.active_mut().unwrap();
+        // A layer holding no object at all: nothing a flip changes.
+        d.apply::<TreeError>("Empty", |doc, ids| {
+            doc.layers.clear();
+            doc.insert(Position { parent: None, index: 0 }, Layer::new_empty(ids.layer(), "e"))
+        })
+        .unwrap();
+        let carried = d.doc().carried;
+        d.last_transform = Some(crate::doc::LastTransform { delta: Affine::translate(5.0, 0.0), carried });
+        st.turn(Turn::FlipHorizontal);
+        let d = st.active().unwrap();
+        assert_ne!(d.doc().carried, carried, "the flip was dropped as making no change");
+        let m = d.transform_again_map().unwrap();
+        assert_eq!(m.apply([0.0, 0.0]), [-5.0, 0.0], "a move right made before the flip, not mirrored");
+    }
+
+    #[test]
     fn transform_again_goes_with_the_image_turned_or_resized_and_leaves_nothing_if_refused() {
         use crate::commands::{Cmd, availability};
         use crate::image_ops::{ResizeImage, Turn};
