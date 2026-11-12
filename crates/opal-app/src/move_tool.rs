@@ -7,6 +7,17 @@ use opal_core::document::{Document, Layer, LayerContent, LayerId, ObjectKind};
 use opal_core::geom::{Affine, FRect};
 use std::sync::Arc;
 
+/// The edit a Move tool drag makes, pending while it goes.
+pub const MOVE: &str = "Move";
+
+/// The Move tool's drag under way on `d`, if one is.
+pub fn moving(d: &DocState) -> Option<&MoveDrag> {
+    match &d.drag {
+        Some(crate::doc::Drag::Move(m)) => Some(m),
+        _ => None,
+    }
+}
+
 /// A Move tool drag in progress.
 #[derive(Clone, Debug)]
 pub struct MoveDrag {
@@ -85,11 +96,11 @@ impl DocState {
     /// Shows the selected layers moved by `d` from where they are in history, as a pending
     /// "Move" (committed when the drag ends). Moving by nothing leaves no pending edit.
     pub fn move_selected_layers_to(&mut self, d: [i64; 2]) {
-        if self.pending_label().is_some_and(|l| l != "Move") || self.transform.is_some() {
+        if self.pending_label().is_some_and(|l| l != MOVE) || self.transform.is_some() {
             self.commit_pending();
         }
         self.pending = (d != [0, 0])
-            .then(|| Pending { doc: moved(self.history.doc(), &self.selected_layers(), d), label: "Move".into() });
+            .then(|| Pending { doc: moved(self.history.doc(), &self.selected_layers(), d), label: MOVE.into() });
         self.revision += 1;
     }
 

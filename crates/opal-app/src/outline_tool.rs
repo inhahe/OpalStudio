@@ -6,7 +6,7 @@
 //! up. It combines with what is selected as the keys held as it begins, or the tool's
 //! setting, say, as the Select tool's shapes do.
 
-use crate::doc::DocState;
+use crate::doc::{DocState, Drag};
 use crate::settings::Settings;
 use eframe::egui::{self, PointerButton, Pos2, Rect, Response};
 use opal_core::geom::Affine;
@@ -67,7 +67,7 @@ pub fn symmetry(d: &DocState, options: Options) -> Option<Symmetry> {
 
 /// What a drag under way does to an outline drawn point by point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Drag {
+pub enum Drawing {
     /// From its last point: pulling the side to it into a curve.
     Pulling,
     /// From elsewhere: drawing a freehand stretch.
@@ -84,7 +84,7 @@ pub struct Outlining {
     /// Whether it is drawn freehand, closed once the button is let go (else point by point).
     pub freehand: bool,
     /// The drag under way, point by point.
-    pub dragging: Option<Drag>,
+    pub dragging: Option<Drawing>,
     /// The handle the last point gives the side after it (a curve pulled at it), if any.
     pub onward: Option<[f64; 2]>,
     /// Where the pointer is, to show the side to it.
@@ -249,7 +249,7 @@ fn guide(
     to_screen: &dyn Fn([f64; 2]) -> Pos2,
 ) -> bool {
     let (s, whose) = shown;
-    if let Some(drag) = d.symmetry_drag.take() {
+    if let Some(Drag::Symmetry(drag)) = d.drag.take_if(|g| matches!(g, Drag::Symmetry(_))) {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             d.discard_pending(MOVE_SYMMETRY);
             return true;
@@ -281,7 +281,7 @@ fn guide(
                 }
             }
         }
-        d.symmetry_drag = Some(drag);
+        d.drag = Some(Drag::Symmetry(drag));
         return true;
     }
     if whose == Shown::Drawn || !response.drag_started_by(PointerButton::Primary) {
@@ -306,7 +306,7 @@ fn guide(
         let (o, combine) = edited(d).expect("an outline edited");
         (o.clone(), combine, d.pixel_selection().expect("one with an outline").before_last())
     });
-    d.symmetry_drag = Some(SymmetryDrag { center: on, edited });
+    d.drag = Some(Drag::Symmetry(SymmetryDrag { center: on, edited }));
     true
 }
 
@@ -429,7 +429,12 @@ impl Reshaping {
 /// out of `raw`, the frame's input, before egui sees it, which would move the keyboard focus to
 /// a widget.
 pub fn take_reshape_keys(docs: &mut [DocState], raw: &mut egui::RawInput) {
-    let Some(r) = docs.iter_mut().find_map(|d| d.reshaping.as_mut()) else { return };
+    let Some(r) = docs.iter_mut().find_map(|d| match &mut d.drag {
+        Some(Drag::Reshape(r)) => Some(r),
+        _ => None,
+    }) else {
+        return;
+    };
     raw.events.retain(|e| match e {
         egui::Event::Key { key: egui::Key::Tab, pressed, repeat, modifiers, .. } if modifiers.is_none() => {
             if *pressed && !*repeat {
@@ -455,7 +460,7 @@ fn reshape(
     to_doc: &dyn Fn(Pos2) -> [f64; 2],
     to_screen: &dyn Fn([f64; 2]) -> Pos2,
 ) -> bool {
-    if let Some(mut r) = d.reshaping.take() {
+    if let Some(Drag::Reshape(mut r)) = d.drag.take_if(|g| matches!(g, Drag::Reshape(_))) {
         if !d.pixel_selection().is_some_and(|s| std::sync::Weak::ptr_eq(&r.of, &Arc::downgrade(s))) {
             return true;
         }
@@ -469,7 +474,7 @@ fn reshape(
                 r.line.push(to_doc(p));
             }
             r.show(to_screen);
-            d.reshaping = Some(r);
+            d.drag = Some(Drag::Reshape(r));
             return true;
         }
         // Let go: where it was let go the line's end (the last move and the release may come
@@ -509,7 +514,7 @@ fn reshape(
     }
     let s = d.pixel_selection().expect("one with an outline");
     let (before, of) = (s.before_last(), Arc::downgrade(s));
-    d.reshaping = Some(Reshaping {
+    d.drag = Some(Drag::Reshape(Box::new(Reshaping {
         start: outline,
         combine,
         before,
@@ -523,7 +528,7 @@ fn reshape(
         of,
         shown: None,
         shown_for: (1, false),
-    });
+    })));
     true
 }
 
@@ -580,12 +585,8 @@ pub fn give_up(d: &mut DocState) {
     if d.outlining.take().is_some() {
         d.revision += 1;
     }
-    if d.outline_drag.take().is_some() {
-        d.discard_pending(EDIT);
-    }
-    d.reshaping = None;
-    if d.symmetry_drag.take().is_some() {
-        d.discard_pending(MOVE_SYMMETRY);
+    if matches!(d.drag, Some(Drag::Outline(_) | Drag::Reshape(_) | Drag::Symmetry(_))) {
+        d.give_up_drag();
     }
 }
 
@@ -609,7 +610,7 @@ pub struct Picked {
 /// The points picked on the outline edited now, in order: those a drag under way began with,
 /// else those picked on the selection as it is (none once it is another, after an undo, say).
 pub fn picked(d: &DocState) -> Vec<usize> {
-    if let Some(drag) = &d.outline_drag {
+    if let Some(Drag::Outline(drag)) = &d.drag {
         return drag.picked.clone();
     }
     match (&d.picked, d.pixel_selection()) {
@@ -780,7 +781,7 @@ fn edit(
     options: Options,
 ) -> bool {
     let modifiers = ctx.input(|i| i.modifiers);
-    if let Some(drag) = d.outline_drag.take() {
+    if let Some(Drag::Outline(drag)) = d.drag.take_if(|g| matches!(g, Drag::Outline(_))) {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             d.discard_pending(EDIT);
             pick(d, drag.picked, None);
@@ -799,7 +800,7 @@ fn edit(
                     crate::select_tool::reshape_with(d, &drag.before, step, EDIT);
                 }
             }
-            d.outline_drag = Some(drag);
+            d.drag = Some(Drag::Outline(drag));
         }
         return true;
     }
@@ -836,8 +837,8 @@ fn edit(
         let before = d.pixel_selection().expect("one with an outline").before_last();
         pick(d, points.clone(), None);
         let alt = modifiers.alt;
-        d.outline_drag =
-            Some(EditDrag { part, from: to_doc(origin), start: outline, combine, before, picked: points, alt });
+        let drag = EditDrag { part, from: to_doc(origin), start: outline, combine, before, picked: points, alt };
+        d.drag = Some(Drag::Outline(drag));
         return true;
     }
     let Some(at) = response.interact_pointer_pos() else { return false };
@@ -991,9 +992,9 @@ pub fn canvas(
         && let Some(origin) = ctx.input(|i| i.pointer.press_origin())
     {
         if near(o.last(), origin) && !o.segments.is_empty() {
-            o.dragging = Some(Drag::Pulling);
+            o.dragging = Some(Drawing::Pulling);
         } else {
-            o.dragging = Some(Drag::Stretch);
+            o.dragging = Some(Drawing::Stretch);
             o.add(to_doc(origin));
         }
         changed = true;
@@ -1001,7 +1002,7 @@ pub fn canvas(
     if let Some(p) = pointer.filter(|_| held) {
         let at = to_doc(p);
         match o.dragging {
-            Some(Drag::Pulling) => {
+            Some(Drawing::Pulling) => {
                 // The handle pulled from the last point goes on past it; the side to it bends
                 // the other way, as smoothly through the point.
                 let last = o.last();
@@ -1019,7 +1020,7 @@ pub fn canvas(
                     changed = true;
                 }
             }
-            Some(Drag::Stretch) if to_screen(o.last()).distance(p) >= STEP => changed |= o.add(at),
+            Some(Drawing::Stretch) if to_screen(o.last()).distance(p) >= STEP => changed |= o.add(at),
             _ => {}
         }
     }
@@ -1145,20 +1146,18 @@ mod tests {
         d.set_pixel_selection(Some(Selection::new(Step::Outline { outline: o.clone(), combine: replace })), "Outline");
         let s = d.pixel_selection().unwrap();
         let (before, of) = (s.before_last(), Arc::downgrade(s));
-        // A point's drag, its edit pending, and a redrawing; the image drawn in pass 10.
-        let moved = Step::Outline { outline: o.moved(&[0], [5.0, 0.0]), combine: replace };
-        crate::select_tool::reshape_with(d, &before, moved, EDIT);
-        let (start, picked) = (o.clone(), vec![0]);
-        d.outline_drag = Some(EditDrag {
+        // Each drag, its edit pending (as its label says), the image drawn in a pass: a
+        // point's, a redrawing, the symmetry's, and the Move tool's.
+        let point = Drag::Outline(EditDrag {
             part: Part::Point(0),
             from: [10.0, 10.0],
-            start,
+            start: o.clone(),
             combine: replace,
             before: before.clone(),
-            picked,
+            picked: vec![0],
             alt: false,
         });
-        d.reshaping = Some(Reshaping {
+        let reshaping = Drag::Reshape(Box::new(Reshaping {
             start: o.clone(),
             combine: replace,
             before: before.clone(),
@@ -1172,23 +1171,36 @@ mod tests {
             of,
             shown: None,
             shown_for: (0, false),
+        }));
+        let symmetry = Drag::Symmetry(SymmetryDrag { center: true, edited: None });
+        let moving = Drag::Move(crate::move_tool::MoveDrag {
+            from: [0.0, 0.0],
+            bounds: None,
+            guides: Default::default(),
+            shown: None,
         });
-        d.drawn = 10;
-        // Drawn in the pass before: kept.
-        st.leave_undrawn(11);
-        assert!(st.active().unwrap().outline_drag.is_some());
-        // Not: given up, the edit with them.
-        st.leave_undrawn(12);
-        let d = st.active_mut().unwrap();
-        assert!(d.outline_drag.is_none() && d.reshaping.is_none(), "the drags were left");
-        assert_eq!((d.pending_label(), edited(d).map(|(e, _)| e.clone())), (None, Some(o.clone())));
-        // The symmetry's drag, its edit pending: the same.
-        let turned = Step::Outline { outline: o.moved(&[1], [0.0, 5.0]), combine: replace };
-        crate::select_tool::reshape_with(d, &before, turned, MOVE_SYMMETRY);
-        d.symmetry_drag = Some(SymmetryDrag { center: true, edited: None });
-        st.leave_undrawn(13);
-        let d = st.active().unwrap();
-        assert!(d.symmetry_drag.is_none() && d.pending_label().is_none(), "the drag was left");
+        let drags = [
+            (point, Some(EDIT)),
+            (reshaping, None),
+            (symmetry, Some(MOVE_SYMMETRY)),
+            (moving, Some(crate::move_tool::MOVE)),
+        ];
+        for (pass, (drag, label)) in (10..).step_by(10).zip(drags) {
+            let d = st.active_mut().unwrap();
+            if let Some(label) = label {
+                let moved = Step::Outline { outline: o.moved(&[0], [5.0, 0.0]), combine: replace };
+                crate::select_tool::reshape_with(d, &before, moved, label);
+            }
+            (d.drag, d.drawn) = (Some(drag), pass);
+            // Drawn in the pass before: kept.
+            st.leave_undrawn(pass + 1);
+            assert!(st.active().unwrap().drag.is_some());
+            // Not: given up, its edit with it.
+            st.leave_undrawn(pass + 2);
+            let d = st.active().unwrap();
+            assert!(d.drag.is_none(), "the drag was left");
+            assert_eq!((d.pending_label(), edited(d).map(|(e, _)| e.clone())), (None, Some(o.clone())));
+        }
     }
 
     #[test]
@@ -1238,7 +1250,7 @@ mod tests {
         pick(d, vec![1, 2], None);
         // A drag under way: its picks, though the selection it makes is another.
         let before = d.pixel_selection().unwrap().before_last();
-        d.outline_drag = Some(EditDrag {
+        d.drag = Some(Drag::Outline(EditDrag {
             part: Part::Point(1),
             from: [120.0, 20.0],
             start: square.clone(),
@@ -1246,11 +1258,11 @@ mod tests {
             before: before.clone(),
             picked: vec![1, 2],
             alt: false,
-        });
+        }));
         let moved = square.moved(&[1, 2], [5.0, 5.0]);
         crate::select_tool::reshape_with(d, &before, Step::Outline { outline: moved, combine: Combine::Replace }, EDIT);
         assert_eq!(picked(d), vec![1, 2], "the points picked lost mid-drag");
-        d.outline_drag = None;
+        d.drag = None;
         d.commit_pending();
         // A box open: the buttons change nothing.
         pick(d, vec![1], None);
@@ -1364,7 +1376,7 @@ mod tests {
         assert!(o.take_back());
         assert_eq!(o.onward, None);
         // A drag under way ends with the point it pulled from taken back.
-        o.dragging = Some(Drag::Pulling);
+        o.dragging = Some(Drawing::Pulling);
         assert!(o.take_back());
         assert_eq!((o.dragging, o.segments.len()), (None, 0));
         assert!(!o.take_back(), "the first point was taken back");

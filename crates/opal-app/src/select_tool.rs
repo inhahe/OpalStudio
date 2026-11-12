@@ -5,7 +5,7 @@
 //! whose handles move, size and turn it, and whose numbers (`box_fields::selection`) give it
 //! exactly.
 
-use crate::doc::{DocId, DocState};
+use crate::doc::{DocId, DocState, Drag};
 use crate::edit_box::{BoxDrag, EditBox, OnScreen, Part};
 use crate::settings::Settings;
 use crate::state::AppState;
@@ -233,14 +233,8 @@ pub fn canvas(
 ) {
     let modifiers = ctx.input(|i| i.modifiers);
     // (A drag on an image no longer drawn is given up by `AppState::leave_undrawn`.)
-    let escape = ctx.input(|i| i.key_pressed(Key::Escape));
-    if d.select_drag.is_some() && escape {
-        d.select_drag = None;
-        return;
-    }
-    if d.shape_drag.is_some() && escape {
-        let s = d.shape_drag.take().expect("checked");
-        d.discard_pending(ShapeDrag::label(s.drag.part));
+    if ctx.input(|i| i.key_pressed(Key::Escape)) && matches!(d.drag, Some(Drag::Select(_) | Drag::Shape(_))) {
+        d.give_up_drag();
         return;
     }
     // A drag on the box round the last shape edits it, unless what a drag does now is
@@ -255,17 +249,18 @@ pub fn canvas(
         if part != Part::New {
             let before = d.pixel_selection().expect("one with a shape").before_last();
             let drag = BoxDrag { part, from: to_doc(origin), start };
-            d.shape_drag = Some(ShapeDrag { drag, shape, combine, before });
+            d.drag = Some(Drag::Shape(ShapeDrag { drag, shape, combine, before }));
         }
     }
-    if let Some(s) = d.shape_drag.clone() {
+    if let Some(Drag::Shape(s)) = d.drag.take_if(|g| matches!(g, Drag::Shape(_))) {
         if !ctx.input(|i| i.pointer.primary_down()) {
             // Let go: the edit is a history state of its own.
-            d.shape_drag = None;
             if d.pending_label() == Some(ShapeDrag::label(s.drag.part)) {
                 d.commit_pending();
             }
-        } else if let Some(p) = response.interact_pointer_pos() {
+            return;
+        }
+        if let Some(p) = response.interact_pointer_pos() {
             // Shift keeps its proportions; upright, its sides stay on the pixels' edges.
             let keep = modifiers.shift.then(|| s.drag.start.size[0] / s.drag.start.size[1]);
             let b = EditBox::dragged(&s.drag, to_doc(p), keep).on_pixels(&s.drag.start, s.drag.part);
@@ -274,6 +269,7 @@ pub fn canvas(
                 reshape(d, &s.before, shape, s.combine, ShapeDrag::label(s.drag.part));
             }
         }
+        d.drag = Some(Drag::Shape(s));
         return;
     }
     let combine = combine_held(modifiers, options.combine);
@@ -283,9 +279,9 @@ pub fn canvas(
         && !modifiers.command
         && let Some(origin) = ctx.input(|i| i.pointer.press_origin())
     {
-        d.select_drag = Some(SelectDrag::begun(point(origin), combine, modifiers));
+        d.drag = Some(Drag::Select(SelectDrag::begun(point(origin), combine, modifiers)));
     }
-    if let Some(drag) = &mut d.select_drag {
+    if let Some(Drag::Select(drag)) = &mut d.drag {
         drag.shift_held &= modifiers.shift;
         drag.alt_held &= modifiers.alt;
         drag.square = modifiers.shift && !drag.shift_held;
@@ -295,8 +291,9 @@ pub fn canvas(
         }
     }
     // Let go: what it draws is selected, unless it has no width or height (a click).
-    if d.select_drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
-        let drag = d.select_drag.take().expect("checked");
+    if !ctx.input(|i| i.pointer.primary_down())
+        && let Some(Drag::Select(drag)) = d.drag.take_if(|g| matches!(g, Drag::Select(_)))
+    {
         select(d, &drag, options);
         return;
     }
@@ -330,13 +327,17 @@ pub fn draw_box(
     let options = Options::of(st.tool_settings(crate::tools::ToolId::Select));
     let Some(d) = st.doc(id) else { return };
     // Not round a row or column: see `edits_box`.
-    let Some((shape, _)) = editable(d).filter(|_| d.select_drag.is_none() && !options.line()) else { return };
+    let drawing = matches!(d.drag, Some(Drag::Select(_)));
+    let Some((shape, _)) = editable(d).filter(|_| !drawing && !options.line()) else { return };
     let corners = EditBox::of_shape(&shape).corners().map(to_screen);
     let screen = OnScreen { corners };
     let painter = ui.painter().with_clip_rect(rect);
     painter.add(egui::Shape::closed_line(corners.to_vec(), Stroke::new(1.0, accent.gamma_multiply(0.6))));
     crate::edit_box::draw_handles(&painter, &screen, accent);
-    let dragging = d.shape_drag.as_ref().map(|s| s.drag.part);
+    let dragging = match &d.drag {
+        Some(Drag::Shape(s)) => Some(s.drag.part),
+        _ => None,
+    };
     let hovered = response.hover_pos().filter(|_| edits_box(ctx.input(|i| i.modifiers), options));
     if let Some(part) = dragging.or_else(|| hovered.map(|p| screen.part_at(p))) {
         // Elsewhere, or with a drag combining a new shape, the tool's own pointer.

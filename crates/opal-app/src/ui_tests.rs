@@ -1778,7 +1778,7 @@ fn a_move_drag_released_while_space_is_held_ends() {
         h.hover_at(at(x, 150.0));
         h.run();
     }
-    assert!(h.state().state().active().unwrap().moving.is_some(), "the drag began");
+    assert!(crate::move_tool::moving(h.state().state().active().unwrap()).is_some(), "the drag began");
     let space = |pressed| egui::Event::Key {
         key: egui::Key::Space,
         physical_key: None,
@@ -1793,7 +1793,7 @@ fn a_move_drag_released_while_space_is_held_ends() {
     h.event(space(false));
     h.run();
     let d = h.state().state().active().unwrap();
-    assert!(d.moving.is_none(), "the drag never ended, so the view stays a preview");
+    assert!(crate::move_tool::moving(d).is_none(), "the drag never ended, so the view stays a preview");
     assert!(d.pending.is_none());
     assert_eq!(d.history.undo_label(), Some("Move"));
 }
@@ -3028,7 +3028,7 @@ fn the_ants_march_while_seen_and_focused_and_keep_no_selection_gone() {
     h.run();
     h.hover_at(at(200.0, 150.0));
     h.run();
-    assert!(h.state().state().active().unwrap().select_drag.is_some());
+    assert!(matches!(h.state().state().active().unwrap().drag, Some(crate::doc::Drag::Select(_))));
     assert!(next(&h) <= step, "the drag's ants did not march: {:?}", next(&h));
     h.drop_at(at(200.0, 150.0));
     h.run();
@@ -3243,7 +3243,8 @@ fn a_select_drag_given_up_elsewhere_or_changing_nothing_leaves_no_history_state(
     h.run();
     h.hover_at(at(200.0, 120.0));
     h.run();
-    assert!(h.state().state().active().unwrap().select_drag.is_some(), "no drag begun");
+    let drag = &h.state().state().active().unwrap().drag;
+    assert!(matches!(drag, Some(crate::doc::Drag::Select(_))), "no drag begun");
     image_of(&mut h, 50, 50);
     assert_ne!(h.state().state().active_doc, first);
     h.drop_at(at(20.0, 20.0));

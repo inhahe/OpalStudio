@@ -5,7 +5,7 @@
 //! enlarging the canvas again brings back what was cropped away, unless the tool's *Delete
 //! cropped pixels* is set.
 
-use crate::doc::{DocId, DocState};
+use crate::doc::{DocId, DocState, Drag};
 use crate::edit_box::{BoxDrag, EditBox, OnScreen, Part};
 use crate::icons;
 use crate::image_ops::transform_all;
@@ -229,9 +229,9 @@ pub fn canvas_crop(
         && response.drag_started_by(egui::PointerButton::Primary)
         && let Some(origin) = ctx.input(|i| i.pointer.press_origin())
     {
-        d.crop_drag = Some(BoxDrag { part: screen.part_at(origin), from: to_doc(origin), start: b });
+        d.drag = Some(Drag::Crop(BoxDrag { part: screen.part_at(origin), from: to_doc(origin), start: b }));
     }
-    if let Some(drag) = d.crop_drag
+    if let Some(&Drag::Crop(drag)) = d.drag.as_ref()
         && interactive
         && response.dragged_by(egui::PointerButton::Primary)
         && let Some(p) = response.interact_pointer_pos()
@@ -247,8 +247,8 @@ pub fn canvas_crop(
             d.revision += 1;
         }
     }
-    if response.drag_stopped() {
-        d.crop_drag = None;
+    if response.drag_stopped() && matches!(d.drag, Some(Drag::Crop(_))) {
+        d.drag = None;
     }
     // A double-click inside the box crops (outside it, it does nothing).
     let apply = interactive
@@ -297,10 +297,13 @@ pub fn canvas_crop(
     if let Some(p) = response.hover_pos()
         && interactive
     {
-        let part = d.crop_drag.map_or_else(|| screen.part_at(p), |g| g.part);
+        let part = match &d.drag {
+            Some(Drag::Crop(g)) => g.part,
+            _ => screen.part_at(p),
+        };
         ctx.set_cursor_icon(crate::edit_box::cursor(part));
     }
-    if d.crop_drag.is_some()
+    if matches!(d.drag, Some(Drag::Crop(_)))
         && let Some(p) = response.interact_pointer_pos()
     {
         let canvas = b.canvas();

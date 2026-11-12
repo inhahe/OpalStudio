@@ -104,6 +104,26 @@ pub struct Pending {
     pub label: String,
 }
 
+/// A drag under way on an image's canvas (see [`DocState::drag`]).
+#[derive(Clone, Debug)]
+pub enum Drag {
+    /// The Move tool's, moving the selected layers (its edit, [`MOVE`](crate::move_tool::MOVE),
+    /// pending).
+    Move(crate::move_tool::MoveDrag),
+    /// On the Crop tool's box.
+    Crop(crate::edit_box::BoxDrag),
+    /// The Select tool's, drawing a new shape.
+    Select(crate::select_tool::SelectDrag),
+    /// On the box round the selection's last shape (its edit pending).
+    Shape(crate::select_tool::ShapeDrag),
+    /// On the outline the outline tool edits (its edit pending).
+    Outline(crate::outline_tool::EditDrag),
+    /// Redrawing a stretch of that outline (boxed: it is by far the largest).
+    Reshape(Box<crate::outline_tool::Reshaping>),
+    /// Of the symmetry's center or axis (the outline edited's: its edit pending).
+    Symmetry(crate::outline_tool::SymmetryDrag),
+}
+
 pub struct DocState {
     pub id: DocId,
     /// Shown in the document's tab: the file name, or "Untitled 1".
@@ -130,31 +150,21 @@ pub struct DocState {
     pub revision: u64,
     /// The transform box, while one is open. Its document is the pending edit.
     pub transform: Option<crate::transform::Session>,
-    /// A Move tool drag in progress.
-    pub moving: Option<crate::move_tool::MoveDrag>,
-    /// The Crop tool's box, while the tool is in use, and a drag on it.
+    /// The Crop tool's box, while the tool is in use.
     pub crop: Option<crate::edit_box::EditBox>,
-    pub crop_drag: Option<crate::edit_box::BoxDrag>,
-    /// A Select tool drag in progress, drawing a new shape, and one on the box round the
-    /// selection's last shape.
-    pub select_drag: Option<crate::select_tool::SelectDrag>,
-    pub shape_drag: Option<crate::select_tool::ShapeDrag>,
+    /// The drag under way on its canvas, if one is (one at most), given up as one
+    /// ([`give_up_drag`](Self::give_up_drag)).
+    pub drag: Option<Drag>,
     /// An outline being drawn with the outline tool.
     pub outlining: Option<crate::outline_tool::Outlining>,
     /// The points picked on the outline the outline tool edits (the selection's last step,
     /// when it is one), with that outline: none once the last step is another.
     pub picked: Option<crate::outline_tool::Picked>,
-    /// A drag on the outline the outline tool edits.
-    pub outline_drag: Option<crate::outline_tool::EditDrag>,
-    /// A stretch of that outline being drawn again.
-    pub reshaping: Option<crate::outline_tool::Reshaping>,
     /// Where the symmetry the outline tool draws with is centered, once moved (the canvas's
     /// middle until then), and its axis's angle (degrees clockwise from up); not part of the
     /// image's history, nor kept in its file.
     pub symmetry_center: Option<[f64; 2]>,
     pub symmetry_angle: f64,
-    /// A drag moving the symmetry's center or turning its axis.
-    pub symmetry_drag: Option<crate::outline_tool::SymmetryDrag>,
     /// The rectangle the transform box's fields fit it into (its top-left corner from the
     /// canvas's, and its size), once one has been typed; the canvas, whatever it is then,
     /// until then.
@@ -224,24 +234,18 @@ impl DocState {
             projector: crate::projector::Projector::new(),
             revision: 0,
             transform: None,
-            moving: None,
+            drag: None,
             crop: None,
             fit_rect: None,
             origin: crate::box_fields::Origin::default(),
-            crop_drag: None,
             notice: None,
             outline: None,
             overlay: Default::default(),
             drawn: 0,
-            select_drag: None,
             outlining: None,
             picked: None,
-            outline_drag: None,
-            reshaping: None,
             symmetry_center: None,
             symmetry_angle: 0.0,
-            symmetry_drag: None,
-            shape_drag: None,
             told_dropped: false,
             groups: Vec::new(),
             made_by: HashMap::new(),
@@ -481,6 +485,23 @@ impl DocState {
         if self.pending_label() == Some(label) {
             self.pending = None;
             self.revision += 1;
+        }
+    }
+
+    /// Gives up the drag under way, if one is, as Esc does: the edit it has pending
+    /// discarded.
+    pub fn give_up_drag(&mut self) {
+        let label = match self.drag.take() {
+            None => return,
+            Some(Drag::Move(_)) => Some(crate::move_tool::MOVE),
+            Some(Drag::Shape(s)) => Some(crate::select_tool::ShapeDrag::label(s.drag.part)),
+            Some(Drag::Outline(_)) => Some(crate::outline_tool::EDIT),
+            Some(Drag::Symmetry(_)) => Some(crate::outline_tool::MOVE_SYMMETRY),
+            Some(Drag::Crop(_) | Drag::Select(_) | Drag::Reshape(_)) => None,
+        };
+        match label {
+            Some(label) => self.discard_pending(label),
+            None => self.revision += 1,
         }
     }
 

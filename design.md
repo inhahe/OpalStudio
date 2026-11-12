@@ -825,6 +825,13 @@ undo or a deselect and leave states nobody meant.
   The keys, handled before the canvas is drawn, go by the frame before's
   (`canvas_held`), and take the rest out of the frame's input (`app::keys_held_back`).
 - Scripts likewise wait while a button is held (`AppState::scripts_wait`).
+- An image has at most one drag under way, whatever the tool (`DocState::drag`, a
+  `doc::Drag`: the Move tool's, on the crop box, the Select tool's, on the box round the
+  last shape, on the outline edited, redrawing it, on its symmetry). `give_up_drag` gives
+  up any of them, as Esc does, discarding the edit it has pending. It is used for an image
+  no longer drawn (`AppState::leave_undrawn`), and by each tool when it is no longer the
+  one chosen. A new kind of drag is a variant, and its pending edit is discarded in that
+  one place.
 
 ### Ribbon
 

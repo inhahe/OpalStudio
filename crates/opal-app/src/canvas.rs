@@ -1,7 +1,7 @@
 //! The canvas: one document's view, its navigation, and handing tiles to the GPU.
 
 use crate::commands::Cmd;
-use crate::doc::DocId;
+use crate::doc::{DocId, Drag};
 use crate::gpu::{CanvasCallback, TileDraw, ViewUniforms};
 use crate::settings::Settings;
 use crate::state::AppState;
@@ -222,12 +222,12 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
                 Some(name) => notice = Some(format!("\"{name}\" is locked, so it cannot be moved. Unlock it first.")),
                 None => {
                     let bounds = d.selected_layers_bounds();
-                    d.moving =
-                        Some(crate::move_tool::MoveDrag { from, bounds, guides: Default::default(), shown: None });
+                    let m = crate::move_tool::MoveDrag { from, bounds, guides: Default::default(), shown: None };
+                    d.drag = Some(Drag::Move(m));
                 }
             }
         }
-        if let Some(drag) = d.moving.clone()
+        if let Some(drag) = crate::move_tool::moving(d).cloned()
             && response.dragged_by(PointerButton::Primary)
             && let Some(p) = response.interact_pointer_pos()
         {
@@ -237,7 +237,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
             if drag.shown != Some(delta) {
                 d.move_selected_layers_to(delta);
             }
-            if let Some(m) = d.moving.as_mut() {
+            if let Some(Drag::Move(m)) = &mut d.drag {
                 m.guides = guides;
                 m.shown = Some(delta);
             }
@@ -245,9 +245,9 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     }
     // A Move drag ends with the button, whatever the pointer is doing by then: Space may
     // have made it the hand, or a key another tool.
-    if d.moving.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
-        d.moving = None;
-        if d.pending_label() == Some("Move") {
+    if matches!(d.drag, Some(Drag::Move(_))) && !ctx.input(|i| i.pointer.primary_down()) {
+        d.drag = None;
+        if d.pending_label() == Some(crate::move_tool::MOVE) {
             d.commit_pending();
         }
     }
@@ -257,11 +257,8 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         crate::select_tool::canvas(&ctx, d, &response, &|p| to_doc(p, &v), &to_screen, select);
     } else {
         // The tool changed (or Space made it the hand) mid-drag: the drag is given up.
-        if d.select_drag.take().is_some() {
-            d.revision += 1;
-        }
-        if let Some(s) = d.shape_drag.take() {
-            d.discard_pending(crate::select_tool::ShapeDrag::label(s.drag.part));
+        if matches!(d.drag, Some(Drag::Select(_) | Drag::Shape(_))) {
+            d.give_up_drag();
         }
     }
     if tool == ToolId::Outline && !boxed {
@@ -323,7 +320,9 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     }
     if !cropping && d.crop.take().is_some() {
         // The crop box goes when the tool does; it was only a proposal.
-        d.crop_drag = None;
+        if matches!(d.drag, Some(Drag::Crop(_))) {
+            d.drag = None;
+        }
         d.revision += 1;
     }
     let cursor_canvas = pointer_px.map(|p| {
@@ -345,7 +344,8 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     // keeps up however large the image. The frame the button is let go is drawn as a view
     // at rest is, whether or not the code that ends the drag has run yet.
     let held = ctx.input(|i| i.pointer.primary_down());
-    let dragging = held && (d.moving.is_some() || d.transform.as_ref().is_some_and(|s| s.drag.is_some()));
+    let dragging =
+        held && (matches!(d.drag, Some(Drag::Move(_))) || d.transform.as_ref().is_some_and(|s| s.drag.is_some()));
     let quality = if dragging { opal_core::composite::Quality::Preview } else { opal_core::composite::Quality::Exact };
     d.projector.ask(&layers, level, &wider, quality, Some(cache_budget), &ctx);
     // What was asked for, or, if it is not done in time, the last view done (at the level it
@@ -468,7 +468,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         let at = |p: [f64; 2]| to_screen(carried.map_or(p, |m| m.apply(p)));
         march(&ctx, draw_ants(ui, &lines, rect, &at, ctx.input(|i| i.time)));
     }
-    if let Some(drag) = &d.select_drag {
+    if let Some(Drag::Select(drag)) = &d.drag {
         crate::select_tool::draw(ui, drag, select, &d.doc().canvas.rect(), rect, &to_screen);
     }
     if let Some(o) = &d.outlining {
@@ -478,7 +478,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     {
         crate::outline_tool::draw_edited(ui, o, &crate::outline_tool::picked(d), palette.accent, rect, &to_screen);
     }
-    if let Some(r) = &d.reshaping {
+    if let Some(Drag::Reshape(r)) = &d.drag {
         crate::outline_tool::draw_reshaping(ui, r, palette.accent, rect, &to_screen);
     }
     if tool == ToolId::Outline
@@ -486,7 +486,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     {
         crate::outline_tool::draw_symmetry(ui, &s, palette.accent, rect, &to_screen);
     }
-    if let Some(m) = &d.moving {
+    if let Some(Drag::Move(m)) = &d.drag {
         draw_guides(ui, &m.guides, rect, &to_screen);
     }
     // Where the context menu was opened, for listing the layers there.

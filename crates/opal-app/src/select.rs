@@ -262,16 +262,15 @@ impl crate::doc::DocState {
 }
 
 impl AppState {
-    /// Leaves the images not drawn in the pass before `pass` (shown in no pane): a Select or
-    /// Outline tool drag on one is given up, as on Esc (its button may have been let go over
-    /// another, and a call acting on it would commit its edit), as is an outline being drawn,
-    /// and the textures of its selection overlay go.
+    /// Leaves the images not drawn in the pass before `pass` (shown in no pane): a drag on one
+    /// is given up, as on Esc (its button may have been let go over another, and a call acting
+    /// on it would commit its edit), as is an outline being drawn, and the textures of its
+    /// selection overlay go.
     pub(crate) fn leave_undrawn(&mut self, pass: u64) {
         for d in self.docs.iter_mut().filter(|d| d.drawn + 1 < pass) {
-            d.select_drag = None;
-            crate::outline_tool::give_up(d);
-            if let Some(s) = d.shape_drag.take() {
-                d.discard_pending(crate::select_tool::ShapeDrag::label(s.drag.part));
+            d.give_up_drag();
+            if d.outlining.take().is_some() {
+                d.revision += 1;
             }
             d.overlay = Default::default();
         }
@@ -1748,15 +1747,15 @@ mod tests {
         let before = d.pixel_selection().unwrap().before_last();
         let moved = Shape::rectangle(&IRect::new(20, 0, 120, 100).to_f(), true);
         crate::select_tool::reshape(d, &before, moved, Combine::Replace, "Move selection");
-        d.shape_drag = Some(crate::select_tool::ShapeDrag::testing(a));
+        d.drag = Some(crate::doc::Drag::Shape(crate::select_tool::ShapeDrag::testing(a)));
         d.drawn = 10;
         // Drawn in the pass before: kept.
         st.leave_undrawn(11);
-        assert!(st.active().unwrap().shape_drag.is_some());
+        assert!(st.active().unwrap().drag.is_some());
         // Not: given up, its edit with it.
         st.leave_undrawn(12);
         let d = st.active().unwrap();
-        assert!(d.shape_drag.is_none() && d.pending_label().is_none(), "the drag was left");
+        assert!(d.drag.is_none() && d.pending_label().is_none(), "the drag was left");
         assert_eq!(crate::select_tool::editable(d), Some((a, Combine::Replace)));
     }
 
