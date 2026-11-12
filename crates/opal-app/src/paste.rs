@@ -317,10 +317,14 @@ impl AppState {
             (true, None) => Affine::translate(canvas.x0 as f64, canvas.y0 as f64),
             (false, _) => {
                 // Centered on the part of the canvas in view.
-                let v = d.view;
-                let a = v.to_canvas(eframe::egui::Vec2::ZERO);
-                let b = v.to_canvas(v.viewport);
-                let seen = opal_core::geom::IRect::new(a.x as i64, a.y as i64, b.x.ceil() as i64, b.y.ceil() as i64);
+                // (All the view shows, turned or not.)
+                let v = d.view.shown();
+                let seen = opal_core::geom::IRect::new(
+                    v.min.x.floor() as i64,
+                    v.min.y.floor() as i64,
+                    v.max.x.ceil() as i64,
+                    v.max.y.ceil() as i64,
+                );
                 let seen = seen.intersect(&canvas);
                 let [cx, cy] = if seen.is_empty() { canvas.to_f().center() } else { seen.to_f().center() };
                 let [kx, ky] = match how.print {

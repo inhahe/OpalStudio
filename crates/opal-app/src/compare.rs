@@ -14,7 +14,7 @@ pub fn matched(from: &View, from_corner: Vec2, to: &View, to_corner: Vec2) -> Vi
     let middle = from.to_canvas(from.viewport * 0.5) - from_corner;
     let mut v = *to;
     v.zoom = from.zoom;
-    v.angle = from.angle;
+    v.turn_to(from.angle);
     v.offset = to.viewport * 0.5 - (middle + to_corner) * v.zoom;
     v.placed = true;
     v.snap();

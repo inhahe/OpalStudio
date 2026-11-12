@@ -115,13 +115,25 @@ fn xmp_texts(x: &Xmp, ns: &str, local: &str, shape: Shape) -> Option<Vec<String>
     }
 }
 
-/// IIM's date and time created (2:55, "CCYYMMDD", 00 for a month or day not known; 2:60,
-/// "HHMMSS±HHMM") as XMP's (photoshop:DateCreated: "CCYY-MM-DDTHH:MM:SS±HH:MM", as much of
-/// it as is known). None if there is no date, or it is not one.
+/// Whether `b` is a date as IIM writes it (2:55): "CCYYMMDD", 00 for a month or day not known.
+pub fn is_iim_date(b: &[u8]) -> bool {
+    b.len() == 8 && b.iter().all(u8::is_ascii_digit)
+}
+
+/// Whether `b` is a time as IIM writes it (2:60): "HHMMSS", and its zone, "±HHMM" (which some
+/// writers leave off).
+pub fn is_iim_time(b: &[u8]) -> bool {
+    let zone = b.len() == 11 && matches!(b[6], b'+' | b'-') && b[7..].iter().all(u8::is_ascii_digit);
+    (b.len() == 6 || zone) && b[..6].iter().all(u8::is_ascii_digit)
+}
+
+/// IIM's date and time created (2:55 and 2:60: see [`is_iim_date`], [`is_iim_time`]) as
+/// XMP's (photoshop:DateCreated: "CCYY-MM-DDTHH:MM:SS±HH:MM", as much of it as is known; a
+/// time not as IIM writes it left off). None if there is no date, or it is not one.
 fn iim_date(iim: &Iim) -> Option<String> {
     let date = iim.texts(2, 55).into_iter().next()?;
     let date = date.trim();
-    if date.len() != 8 || !date.bytes().all(|c| c.is_ascii_digit()) {
+    if !is_iim_date(date.as_bytes()) {
         return None;
     }
     let (year, month, day) = (&date[..4], &date[4..6], &date[6..]);
@@ -132,10 +144,10 @@ fn iim_date(iim: &Iim) -> Option<String> {
             out = format!("{out}-{day}");
             let time = iim.texts(2, 60).into_iter().next().unwrap_or_default();
             let t = time.trim().as_bytes();
-            if t.len() >= 6 && t[..6].iter().all(u8::is_ascii_digit) {
+            if is_iim_time(t) {
                 let s = |a: usize, b: usize| String::from_utf8_lossy(&t[a..b]).into_owned();
                 out = format!("{out}T{}:{}:{}", s(0, 2), s(2, 4), s(4, 6));
-                if t.len() == 11 && matches!(t[6], b'+' | b'-') && t[7..].iter().all(u8::is_ascii_digit) {
+                if t.len() == 11 {
                     out = format!("{out}{}{}:{}", s(6, 7), s(7, 9), s(9, 11));
                 }
             }

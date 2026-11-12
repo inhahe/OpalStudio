@@ -2252,6 +2252,15 @@ impl AppState {
         reply
     }
 
+    /// Puts the user back on image `id`, if it is open still, as a call refused after the
+    /// user may have done more (an edit, a file read) leaves them: not their layers, which
+    /// they may have chosen since (see [`restore_view`](Self::restore_view)).
+    pub(crate) fn back_to(&mut self, id: DocId) {
+        if self.doc(id).is_some() {
+            self.show_doc(id);
+        }
+    }
+
     /// Puts the user's view back as `view` had it: the active image, and each image's
     /// selected and active layers.
     pub(crate) fn restore_view(&mut self, (active, selections): View) {
@@ -6053,6 +6062,7 @@ mod tests {
         st.rotate_by = None;
         assert!(answered(&mut st, reply).is_err());
         assert_eq!(st.active_doc, Some(c), "taken back from where the user went");
+        std::fs::remove_dir_all(missing.parent().unwrap()).ok();
     }
 
     #[test]
@@ -6078,6 +6088,7 @@ mod tests {
         let reply = st.call_from(&[], false, "place", &args(json!({ "path": wide })), &ctx);
         answered(&mut st, reply).unwrap();
         assert!(st.messages.iter().any(|m| m.body.contains("color profile")), "{:?}", st.messages);
+        std::fs::remove_dir_all(wide.parent().unwrap()).ok();
     }
 
     #[test]
@@ -6087,7 +6098,7 @@ mod tests {
         now(&mut st, "new", json!({ "width": 40, "height": 20 })).unwrap();
         now(&mut st, "new_layer", json!({ "name": "Upper" })).unwrap();
         let (a, b) = (st.docs[0].id, st.docs[1].id);
-        let [lower, upper] = [st.docs[1].doc().layers[0].id, st.docs[1].doc().layers[1].id];
+        let lower = st.docs[1].doc().layers[0].id;
         st.show_doc(a);
         st.rotate_by = Some(crate::image_ops::RotateBy { degrees: 30.0, grow: true });
         let missing = file_in("place-layers", "missing.png");
@@ -6098,7 +6109,7 @@ mod tests {
         assert!(answered(&mut st, reply).is_err());
         assert_eq!(st.active_doc, Some(a), "not put back on the image the user was on");
         assert_eq!(st.doc(b).unwrap().active_layer(), Some(lower), "the layer chosen meanwhile undone");
-        let _ = upper;
+        std::fs::remove_dir_all(missing.parent().unwrap()).ok();
     }
 
     #[test]

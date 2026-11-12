@@ -30,7 +30,8 @@ pub struct Raw {
     /// Whether the IIM's digest said a program unaware of XMP changed it after the XMP was
     /// written.
     pub iptc_changed: bool,
-    /// Whether a JPEG has Extended XMP segments at all (read into `extended_xmp` or not).
+    /// Whether a JPEG has Extended XMP segments of the GUID its standard packet names (read
+    /// into `extended_xmp` or not).
     pub extended_segments: bool,
 }
 

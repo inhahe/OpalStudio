@@ -696,7 +696,8 @@ fn view_angle(ui: &mut egui::Ui, st: &mut AppState) {
         ui.horizontal(|ui| {
             let label = ui.label("Angle");
             let field = crate::number_field::NumberField::angle(&mut angle, scope);
-            ui.add(field.range(-180.0..=180.0).speed(0.5).remember("view.angle")).labelled_by(label.id);
+            // (Past half a turn either way, wrapped round by `turn_to`.)
+            ui.add(field.range(-360.0..=360.0).speed(0.5).remember("view.angle")).labelled_by(label.id);
             ui.label(RichText::new("clockwise").color(palette.weak_text));
         });
         (angle != f64::from(d.view.angle)).then_some(angle)

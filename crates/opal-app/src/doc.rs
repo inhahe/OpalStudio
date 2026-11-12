@@ -18,8 +18,12 @@ pub struct DocId(pub u64);
 pub struct View {
     pub zoom: f32,
     pub offset: Vec2,
-    /// How far the view is turned, in degrees clockwise (-180 to 180).
+    /// How far the view is turned, in degrees clockwise (-180 to 180): set by
+    /// [`turn_to`](View::turn_to), which keeps `turning` with it.
     pub angle: f32,
+    /// The angle's cosine and sine (see [`turning`](View::turning)): set with the angle, by
+    /// `turn_to`, and by nothing else.
+    pub(crate) turned: [f32; 2],
     /// The viewport's size in device pixels when last shown.
     pub viewport: Vec2,
     /// Where the viewport was on screen when last shown, in points.
@@ -34,6 +38,7 @@ impl Default for View {
             zoom: 1.0,
             offset: Vec2::ZERO,
             angle: 0.0,
+            turned: [1.0, 0.0],
             viewport: Vec2::ZERO,
             screen_rect: eframe::egui::Rect::NOTHING,
             placed: false,
@@ -50,15 +55,11 @@ pub const MIN_ZOOM: f32 = 1.0 / 1024.0;
 pub const MAX_ZOOM: f32 = 128.0;
 
 impl View {
-    /// The cosine and sine of the angle: exactly 1 and 0 when it is 0, so that a view not
-    /// turned maps points exactly as it did before views turned.
+    /// The cosine and sine of the angle: exactly 1 and 0 when it is 0, so that a straight
+    /// view maps points exactly, its pixels the screen's at a whole zoom. Kept as the angle
+    /// is set, not worked out for each point mapped.
     pub fn turning(self) -> (f32, f32) {
-        if self.angle == 0.0 {
-            (1.0, 0.0)
-        } else {
-            let a = self.angle.to_radians();
-            (a.cos(), a.sin())
-        }
+        (self.turned[0], self.turned[1])
     }
 
     /// `v` (a direction, in device pixels) turned as the view is: clockwise on the screen,
@@ -124,6 +125,8 @@ impl View {
         let a = (angle + 180.0).rem_euclid(360.0) - 180.0;
         // Straight again exactly, not nearly, and crisp again at a whole zoom.
         self.angle = if a.abs() < 1e-3 { 0.0 } else { a };
+        let r = self.angle.to_radians();
+        self.turned = if self.angle == 0.0 { [1.0, 0.0] } else { [r.cos(), r.sin()] };
         self.snap();
     }
 
@@ -191,6 +194,16 @@ pub enum Drag {
     Reshape(Box<crate::outline_tool::Reshaping>),
     /// Of the symmetry's center or axis (the outline edited's: its edit pending).
     Symmetry(crate::outline_tool::SymmetryDrag),
+    /// Turning the view (the Rotate View tool's, or with R held): where it began.
+    TurnView(TurnDrag),
+}
+
+/// Where a drag turning the view began: the pointer's bearing from the view's middle
+/// (degrees, clockwise) and the view's angle then, which giving it up puts back.
+#[derive(Clone, Copy, Debug)]
+pub struct TurnDrag {
+    pub bearing: f32,
+    pub angle: f32,
 }
 
 pub struct DocState {
@@ -633,6 +646,10 @@ impl DocState {
             Some(Drag::Symmetry(s)) => {
                 (self.symmetry_center, self.symmetry_angle) = s.was;
                 Some(crate::outline_tool::MOVE_SYMMETRY)
+            }
+            Some(Drag::TurnView(t)) => {
+                self.view.turn_to(t.angle);
+                None
             }
             Some(Drag::Crop(_) | Drag::Select(_) | Drag::Reshape(_)) => None,
         };

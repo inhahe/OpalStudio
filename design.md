@@ -891,32 +891,43 @@ The view, not the image, can be turned (`View::angle`, degrees clockwise, each i
 own), as a drawing is turned on a desk; painting needs it most.
 
 - **The Rotate View tool** (R): dragging turns the view about its middle by the angle the
-  pointer sweeps round it; Shift makes the angle a multiple of its step (15°, a setting).
-  Its settings show the angle, typed in as any field takes it, and the commands below; Esc,
-  while it is chosen, puts the view straight.
-- **R, as in Photoshop** (`OpalApp::rotate_key`): tapped, it chooses the tool, once let go;
-  held, it chooses nothing, and a drag on the image while it is held turns the view with
-  whichever tool is chosen (as Space scrolls it), the tool staying; but the outline tool's
-  R+drag still redraws the outline. So R alone among the tools' keys acts when let go, and a
-  press of it during a drag is held back without a word.
+  pointer sweeps round it (a drag of its own, `Drag::TurnView`, which Esc gives up, putting
+  the angle back, and which ends with its button); Shift makes the angle a multiple of its
+  step (15°, a setting), going round past half a turn. Its settings show the angle, typed in
+  as any field takes it (past ±180° it goes round: 270 is -90), and the commands below;
+  Esc, while it is chosen and nothing is dragged, puts the view straight.
+- **R, as in Photoshop** (`OpalApp::rotate_key`): tapped (let go within half a second,
+  nothing else pressed meanwhile, no drag under way), it chooses the tool, once let go; held,
+  it chooses nothing, and a drag begun on the image while it is held turns the view with
+  whichever tool is chosen (as Space scrolls it), the tool staying, a box open (a paste's,
+  the crop box) left where it is; but the outline tool's R+drag still redraws the outline.
+  Whether a drag turns is decided as its button goes down: R pressed during another drag
+  leaves that drag going, and R let go during a turn does not end it. So R alone among the
+  tools' keys acts when let go, and a press of it during a drag is held back without a
+  word.
 - **The View tab's commands** (its Rotate group): Rotate View Left and Right (a step at a
   time) and Reset Rotation, which puts it straight again. While the view is turned, the
-  status bar shows its angle, which can be typed into there too.
+  status bar shows its angle, which can be typed into or dragged there too (and stays while
+  it is, so a drag through straight goes on).
 - **What turns with it:** everything drawn on the canvas, the image (the shader turns its
   tiles about the viewport's middle, and works out the checkerboard and what lies past the
   canvas in the canvas's own axes, so neither turns with the screen), the selection's
   outline and overlay (drawn as meshes cut to the canvas in its own pixels, so cut along its
   edge however it is turned, and with no seams between them), the boxes, the guides, which
-  reach across the view through their two canvas points; and every tool takes the pointer
-  through the turned view. Zooming keeps the point under the pointer where it is; scrolling
-  moves the image on the screen as the pointer moves; fitting fits the turned canvas. Its
+  reach across the view through their two canvas points, a symmetry's seams and the handle
+  turning its axis (whose angle is the canvas's, however the view turns); and every tool
+  takes the pointer through the turned view. A paste or a placed file is centred on what the
+  view shows of the canvas (`View::shown`). Zooming keeps the point under the pointer where
+  it is; scrolling moves the image on the screen as the pointer moves; fitting fits the
+  turned canvas. Its
   pixels are lined up with the screen's at whole zooms only while it is straight (and again
   once it is put straight).
 - **The rulers** count the canvas's own axes, so they show them while the view is turned
   by a multiple of 90° (either axis along either ruler, counting either way); turned by
   another angle, no axis runs along them, and they show only where the pointer is.
 - **Comparing:** Match Zoom and Location, and Lock Views, give the other images the
-  active one's angle too.
+  active one's angle too. Asked for before the active image is shown (a script naming one
+  behind a tab), matching waits until it is.
 - Not kept in the file, nor between sessions: it is how the image is looked at.
 
 ### Tool settings panel
@@ -1057,8 +1068,9 @@ nothing). Their memory is checked before they begin.
 - **A script's call** that begins one is answered once it is applied, with what it would
   have been answered with at once, of the image the edit was of (whichever is active by
   then), and what applying it said as its notes or its failure. If the edit fails then,
-  the user's view is put back as the call found it, as for a call refused at once, unless
-  another image has been made active since. Its failure is named by the call however soon
+  the user is put back on the image the call found active, unless another has been made
+  active since (`AppState::back_to`): not the layers chosen there, which the user may have
+  chosen since (a call refused at once puts those back too). Its failure is named by the call however soon
   it comes (`grow_selection: ...`), a refusal told as one (not memory enough, nothing
   selected to copy), a panic as an error; a notification's, which no answer carries, is
   told to the user (`api::Calling`, known to the edit as it begins).
@@ -1651,8 +1663,10 @@ export leave out what gives away more than the user means to.
   caption over the user's). EXIF is given only tags it has, an IIM is not made where there
   is none, and genre and subject codes are not carried back to IIM, its numbers and names
   not being known there. The date created goes from XMP only with IIM's date (a time set
-  alone has nowhere to go), and IIM's date and time must be as IIM writes them
-  (CCYYMMDD; HHMMSS and the zone). An IIM a program unaware of XMP changed is carried to
+  alone has nowhere to go), and IIM's date and time, changed, must be as IIM writes them
+  (CCYYMMDD; HHMMSS and the zone; a file's own given back unchanged is taken as it is,
+  `sync::is_iim_date`, `is_iim_time`). A time not as IIM writes it is left off XMP's
+  date. An IIM a program unaware of XMP changed is carried to
   the XMP first, by whatever writes them (File Info's `with_description` included, which
   the description is written through: XMP's fields set, and carried as a script's change
   to them is). So the digest written with the IIM, which says the two agree, is true.
@@ -1661,7 +1675,8 @@ export leave out what gives away more than the user means to.
   ImageMagick's "Raw profile type 8bim" (Photoshop's resources) is taken out of them when the
   IIM is written (in its own chunk) or removed, the other resources kept. A change to a part
   the file has but Opal Studio could not read (XMP no XML reader takes, say, or Extended XMP
-  that did not join) is refused rather than written over it, as is XMP made that would not
+  that did not join: segments of the GUID the standard packet names, not those of another a
+  program left behind, rewriting the packet) is refused rather than written over it, as is XMP made that would not
   read back. A JPEG's fill bytes
   before a marker are skipped in reading only its head, as in reading it all.
 

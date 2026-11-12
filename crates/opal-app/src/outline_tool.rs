@@ -190,8 +190,21 @@ const AXIS_HANDLE: f32 = 60.0;
 /// Where the center of `s` and the handle turning its axis are on screen.
 fn guide_handles(s: &Symmetry, to_screen: &dyn Fn([f64; 2]) -> Pos2) -> (Pos2, Pos2) {
     let center = to_screen(s.center);
-    let [x, y] = s.axis();
-    (center, center + egui::vec2(x as f32, y as f32) * AXIS_HANDLE)
+    (center, center + on_screen(s.center, s.axis(), to_screen) * AXIS_HANDLE)
+}
+
+/// Which way on screen the canvas direction `dir` at canvas point `at` goes, as `to_screen`
+/// maps the canvas (a view may be turned): through two points far apart, whose difference
+/// keeps its precision.
+fn on_screen(at: [f64; 2], dir: [f64; 2], to_screen: &dyn Fn([f64; 2]) -> Pos2) -> egui::Vec2 {
+    const FAR: f64 = 1e3;
+    (to_screen([at[0] + dir[0] * FAR, at[1] + dir[1] * FAR]) - to_screen(at)).normalized()
+}
+
+/// The axis angle (degrees, clockwise from up, as `Symmetry::angle` is) pointing from canvas
+/// point `center` to canvas point `to`.
+fn axis_angle(center: [f64; 2], to: [f64; 2]) -> f64 {
+    (to[0] - center[0]).atan2(-(to[1] - center[1])).to_degrees()
 }
 
 /// Whose symmetry the canvas shows (see [`shown_symmetry`]).
@@ -268,8 +281,8 @@ fn guide(
             if drag.center {
                 center = to_doc(p);
             } else {
-                let v = p - guide_handles(&s, to_screen).0;
-                angle = f64::from(v.x).atan2(-f64::from(v.y)).to_degrees();
+                // In the canvas's own axes, however the view turns them.
+                angle = axis_angle(s.center, to_doc(p));
                 if ctx.input(|i| i.modifiers.shift) {
                     angle = (angle / 15.0).round() * 15.0;
                 }
@@ -349,7 +362,7 @@ pub fn draw_symmetry(
     let rays = s.copies();
     for k in 0..rays {
         let turned = (s.angle + 360.0 * k as f64 / rays as f64).to_radians();
-        let dir = egui::vec2(turned.sin() as f32, -turned.cos() as f32);
+        let dir = on_screen(s.center, [turned.sin(), -turned.cos()], to_screen);
         let stroke =
             if k == 0 { egui::Stroke::new(1.5, accent) } else { egui::Stroke::new(1.0, accent.gamma_multiply(0.45)) };
         painter.line_segment([center, center + dir * reach], stroke);
@@ -1127,6 +1140,27 @@ fn shown(o: &Outlining) -> Vec<[f64; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_symmetry_s_guide_and_its_handle_go_through_a_turned_view() {
+        use egui::Vec2;
+        // A view turned a quarter clockwise: canvas up is the screen's right.
+        let mut v = crate::doc::View { viewport: Vec2::new(400.0, 300.0), ..crate::doc::View::default() };
+        v.turn_to(90.0);
+        let to_screen = |p: [f64; 2]| v.to_screen(Vec2::new(p[0] as f32, p[1] as f32)).to_pos2();
+        let s = Symmetry { order: 1, mirror: true, center: [100.0, 80.0], angle: 0.0 };
+        let (center, handle) = guide_handles(&s, &to_screen);
+        let along = handle - center;
+        assert!((along - Vec2::new(AXIS_HANDLE, 0.0)).length() < 1e-2, "the handle is {along:?} from the center");
+        // A point dragged to on the screen's right of the center is the canvas's up: angle 0;
+        // below it, the canvas's right: 90.
+        let to_doc = |p: Pos2| {
+            let c = v.to_canvas(p.to_vec2());
+            [f64::from(c.x), f64::from(c.y)]
+        };
+        assert!(axis_angle(s.center, to_doc(center + Vec2::new(50.0, 0.0))).abs() < 1e-3);
+        assert!((axis_angle(s.center, to_doc(center + Vec2::new(0.0, 50.0))) - 90.0).abs() < 1e-3);
+    }
 
     #[test]
     fn a_redrawing_too_large_or_selecting_nothing_is_said_so() {

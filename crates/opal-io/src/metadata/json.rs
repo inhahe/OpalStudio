@@ -426,24 +426,19 @@ pub fn changed(original: &Metadata, changes: &Json) -> Result<Metadata, String> 
                     .collect::<Result<_, _>>()?,
                 _ => return Err(format!("iptc's {key} takes text, a list of texts, or null")),
             };
-            // The date and time created as IIM writes them, or neither IIM's readers nor XMP
-            // could take them.
+            // The date and time created, changed, as IIM writes them, or neither IIM's readers
+            // nor XMP could take them (given back as they were, as the file has them).
+            let before = iim.texts(r, n);
             let (well_formed, form): (fn(&[u8]) -> bool, &str) = match (r, n) {
-                (2, 55) => (|b| b.len() == 8 && b.iter().all(u8::is_ascii_digit), "CCYYMMDD, as 20240131"),
-                (2, 60) => (
-                    |b| {
-                        let zone =
-                            b.len() == 11 && matches!(b[6], b'+' | b'-') && b[7..].iter().all(u8::is_ascii_digit);
-                        (b.len() == 6 || zone) && b[..6].iter().all(u8::is_ascii_digit)
-                    },
-                    "HHMMSS and the zone, as 134501+0100",
-                ),
+                (2, 55) => (sync::is_iim_date, "CCYYMMDD, as 20240131"),
+                (2, 60) => (sync::is_iim_time, "HHMMSS and the zone, as 134501+0100"),
                 _ => (|_| true, ""),
             };
-            if let Some(bad) = texts.iter().find(|t| !well_formed(t.as_bytes())) {
+            if texts != before
+                && let Some(bad) = texts.iter().find(|t| !well_formed(t.as_bytes()))
+            {
                 return Err(format!("iptc's {key} takes {form}, not \"{bad}\""));
             }
-            let before = iim.texts(r, n);
             iim.set_texts(r, n, &texts);
             if r == 2 && iim.texts(r, n) != before {
                 set.iim.push(n);
@@ -779,6 +774,20 @@ mod tests {
             assert!(refused.is_err(), "{key} {bad} taken");
         }
         assert!(changed(&dated, &json!({ "iptc": { "2:55": "20240131", "2:60": "120000" } })).is_ok());
+        // A file's own date, not as IIM writes it, given back unchanged with something else
+        // (as File Info gives every field back): taken. Its time not as IIM writes it either,
+        // carried to XMP (a program unaware of XMP having written it): the day alone.
+        let mut iim = iptc::Iim::default();
+        iim.set_texts(2, 55, &["20240131".into()]);
+        iim.set_texts(2, 60, &["134501Z".into()]);
+        let theirs = Metadata { iptc: Some(Arc::from(iim.bytes())), iptc_changed: true, ..Metadata::default() };
+        let mut odd = iim.clone();
+        odd.set_texts(2, 55, &["2024-01-31".into()]);
+        let odd = Metadata { iptc: Some(Arc::from(odd.bytes())), ..Metadata::default() };
+        let kept = changed(&odd, &json!({ "iptc": { "2:55": "2024-01-31", "2:5": "Quay" } })).unwrap();
+        assert_eq!(to_json(&kept)["iptc"]["2:5"], json!(["Quay"]));
+        let titled = changed(&theirs, &json!({ "xmp": { "dc:title": "Quay" } })).unwrap();
+        assert_eq!(to_json(&titled)["xmp"]["photoshop:DateCreated"], "2024-01-31");
     }
 
     #[test]

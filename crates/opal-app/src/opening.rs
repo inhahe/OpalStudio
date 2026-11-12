@@ -188,9 +188,9 @@ impl AppState {
             let call_time = r.call.as_ref().and_then(|c| c.view.as_ref()).and_then(|v| v.0);
             let back = if stayed { call_time } else { user_on };
             if result.is_err()
-                && let Some(id) = back.filter(|&id| self.doc(id).is_some())
+                && let Some(id) = back
             {
-                self.show_doc(id);
+                self.back_to(id);
             }
             match (r.answer, result) {
                 // A notification, which nobody hears the answer to: what it says goes to the user.

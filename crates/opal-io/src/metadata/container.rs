@@ -53,13 +53,14 @@ pub fn read_jpeg(bytes: &[u8]) -> Raw {
         raw.iptc = Some(iim);
         raw.iptc_changed = changed;
     }
-    raw.extended_segments = !extended.is_empty();
-    // Extended XMP joined to the standard packet, if that names it.
+    // Extended XMP joined to the standard packet, if that names it (segments of another, a
+    // packet since rewritten, are nothing a reader reads).
     if let Some(xmp) = &raw.xmp
         && let Some(guid) = extended_guid(xmp)
     {
         let mut chunks: Vec<(u32, Vec<u8>)> =
             extended.into_iter().filter(|(g, ..)| *g == guid).map(|(_, o, d)| (o, d)).collect();
+        raw.extended_segments = !chunks.is_empty();
         chunks.sort_by_key(|(o, _)| *o);
         let mut joined = Vec::new();
         for (offset, data) in chunks {
@@ -601,6 +602,16 @@ mod tests {
         let mut read = Xmp::read(raw.xmp.as_deref().unwrap()).unwrap();
         read.join(Xmp::read(raw.extended_xmp.as_deref().unwrap()).unwrap());
         assert_eq!(read.texts(DC, "subject").len(), 12_000);
+        assert!(raw.extended_segments);
+        // The standard packet naming another GUID (rewritten by a program that left the old
+        // extended segments): those segments are nobody's, and not counted as unread.
+        let guid = extended_guid(raw.xmp.as_deref().unwrap()).unwrap();
+        let at = with.windows(guid.len()).position(|w| w == guid).unwrap();
+        let mut orphaned = with.clone();
+        orphaned[at..at + guid.len()].copy_from_slice(&[b'0'; 32]);
+        let raw = read_jpeg(&orphaned);
+        assert!(raw.xmp.is_some());
+        assert_eq!((raw.extended_segments, raw.extended_xmp), (false, None));
     }
 
     #[test]

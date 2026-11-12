@@ -3810,6 +3810,29 @@ fn the_outline_tool_draws_symmetric_outlines_about_a_center_moved_and_turned_on_
     h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
     h.run();
     assert_eq!(h.state().state().active().unwrap().symmetry_angle, 90.0);
+    // The view turned a quarter clockwise: the handle (the canvas's right) is below the center
+    // on screen, and dragged to its left there, points down the canvas: half a turn.
+    h.state_mut().state_mut().active_mut().unwrap().view.turn_to(90.0);
+    h.run();
+    let v = h.state().state().active().unwrap().view;
+    let center = v.screen_rect.min + v.to_screen(egui::vec2(100.0, 150.0)) / ppp;
+    let handle = center + egui::vec2(0.0, 60.0);
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    h.hover_at(handle);
+    h.run();
+    h.drag_at(handle);
+    h.run();
+    for p in [center + egui::vec2(-40.0, 40.0), center + egui::vec2(-60.0, 3.0)] {
+        h.hover_at(p);
+        h.run();
+    }
+    h.drop_at(center + egui::vec2(-60.0, 3.0));
+    h.run();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().symmetry_angle.abs(), 180.0);
+    h.state_mut().state_mut().active_mut().unwrap().view.turn_to(0.0);
+    h.run();
     // A slice begun at the center: a drag from there moves its point, not the center.
     h.key_press(egui::Key::Escape);
     h.run();
@@ -4136,6 +4159,12 @@ fn esc_gives_up_any_drag_and_keys_wait_for_one_outliving_its_button() {
     h.run();
     let said = h.state().state().notice.as_ref().map(|n| n.0.clone());
     assert_eq!(said.as_deref(), Some(crate::app::KEYS_WAIT));
+    // R tapped meanwhile waits likewise: not the Rotate View tool part-way.
+    h.event(key(egui::Key::R, true));
+    h.run();
+    h.event(key(egui::Key::R, false));
+    h.run();
+    assert_eq!(h.state().state().tool(), ToolId::Outline, "R chose its tool part-way");
     h.event(key(egui::Key::Space, false));
     h.run();
     let d = h.state().state().active().unwrap();
@@ -5217,4 +5246,299 @@ fn the_defringe_dialog_takes_a_width_and_remembers_it() {
     assert_eq!(h.state().state().defringe, Some(3.0), "the width not remembered");
     h.key_press(egui::Key::Escape);
     h.run();
+}
+
+/// R pressed (`true`) or let go, no modifier held.
+fn r_key(h: &mut Harness<'static, OpalApp>, pressed: bool) {
+    let modifiers = egui::Modifiers::NONE;
+    h.event(egui::Event::Key { key: egui::Key::R, physical_key: None, pressed, repeat: false, modifiers });
+    h.run();
+}
+
+/// A drag on the view round its middle, from `from` to `to` degrees (clockwise from the right),
+/// 150 points out, in steps, let go at its end.
+fn drag_round(h: &mut Harness<'static, OpalApp>, from: f32, to: f32) {
+    let middle = h.state().state().active().unwrap().view.screen_rect.center();
+    let round = |deg: f32| middle + egui::Vec2::angled(deg.to_radians()) * 150.0;
+    h.hover_at(round(from));
+    h.run();
+    h.drag_at(round(from));
+    h.run();
+    for k in 1..=4 {
+        h.hover_at(round(from + (to - from) * k as f32 / 4.0));
+        h.run();
+    }
+    h.drop_at(round(to));
+    h.run();
+}
+
+#[test]
+fn r_held_over_a_box_turns_the_view_and_leaves_the_box_where_it_was() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    // The crop box.
+    h.key_press(egui::Key::C);
+    h.run();
+    let crop = h.state().state().active().unwrap().crop;
+    r_key(&mut h, true);
+    drag_round(&mut h, 0.0, 40.0);
+    r_key(&mut h, false);
+    let d = h.state().state().active().unwrap();
+    assert!((d.view.angle - 40.0).abs() < 1.0, "not turned: {}", d.view.angle);
+    assert_eq!(d.crop, crop, "the crop box moved");
+    // A paste's box.
+    command(&mut h, Cmd::ResetRotation);
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Move);
+    put_on_clipboard(&mut h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
+    command(&mut h, Cmd::Paste);
+    let placed = h.state().state().active().unwrap().transform.as_ref().unwrap().current;
+    r_key(&mut h, true);
+    drag_round(&mut h, 0.0, 40.0);
+    r_key(&mut h, false);
+    let d = h.state().state().active().unwrap();
+    assert!((d.view.angle - 40.0).abs() < 1.0, "not turned with a box open: {}", d.view.angle);
+    assert_eq!(d.transform.as_ref().unwrap().current, placed, "the box moved");
+    h.key_press(egui::Key::Escape);
+    h.run();
+}
+
+#[test]
+fn r_or_ctrl_r_pressed_during_another_drag_leaves_it_going() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Select);
+    h.run();
+    let rulers = h.state().state().prefs.bool("canvas.rulers");
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let at = |x: f32, y: f32| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    h.hover_at(at(50.0, 50.0));
+    h.run();
+    h.drag_at(at(50.0, 50.0));
+    h.run();
+    h.hover_at(at(100.0, 80.0));
+    h.run();
+    // Ctrl+R (the rulers), then R, part-way.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::R);
+    h.run();
+    r_key(&mut h, true);
+    h.hover_at(at(150.0, 120.0));
+    h.run();
+    h.drop_at(at(150.0, 120.0));
+    h.run();
+    r_key(&mut h, false);
+    assert_eq!(h.state().state().active().unwrap().view.angle, 0.0, "turned");
+    assert_ne!(h.state().state().prefs.bool("canvas.rulers"), rulers, "Ctrl+R did nothing");
+    assert!(matches!(selected(&h), Some(opal_core::mask::Extent::Within(_))), "the drag was given up");
+    // Ctrl and R still held (Ctrl+R pressed a moment before) as a drag begins: not R alone.
+    let ctrl = egui::Modifiers::COMMAND;
+    h.event(egui::Event::ModifiersChanged(ctrl));
+    h.event(egui::Event::Key { key: egui::Key::R, physical_key: None, pressed: true, repeat: false, modifiers: ctrl });
+    h.run();
+    h.hover_at(at(200.0, 150.0));
+    h.run();
+    h.drag_at(at(200.0, 150.0));
+    h.run();
+    for k in 1..=3 {
+        h.hover_at(at(200.0 + 30.0 * k as f32, 150.0 + 20.0 * k as f32));
+        h.run();
+    }
+    h.drop_at(at(290.0, 210.0));
+    h.run();
+    h.event(egui::Event::Key { key: egui::Key::R, physical_key: None, pressed: false, repeat: false, modifiers: ctrl });
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().view.angle, 0.0, "turned with Ctrl held");
+}
+
+#[test]
+fn a_turn_dragged_is_given_up_by_esc_and_ends_with_its_button() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    put_on_clipboard(&mut h, pasted(40, 30, [1.0, 0.0, 0.0, 1.0]));
+    command(&mut h, Cmd::Paste);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    command(&mut h, Cmd::BeforeAfter);
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::RotateView);
+    h.run();
+    // Esc part-way: the turn given up, Before and After going on.
+    let middle = h.state().state().active().unwrap().view.screen_rect.center();
+    let round = |deg: f32| middle + egui::Vec2::angled(deg.to_radians()) * 150.0;
+    h.hover_at(round(0.0));
+    h.run();
+    h.drag_at(round(0.0));
+    h.run();
+    h.hover_at(round(30.0));
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.hover_at(round(40.0));
+    h.run();
+    h.drop_at(round(40.0));
+    h.run();
+    let d = h.state().state().active().unwrap();
+    assert_eq!(d.view.angle, 0.0, "the turn not given up");
+    assert!(d.compare.is_some(), "Esc ended Before and After");
+    // R let go before the button: the drag ends with the button; one under way later is not
+    // turned by an R pressed in it.
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Hand);
+    r_key(&mut h, true);
+    h.hover_at(round(0.0));
+    h.run();
+    h.drag_at(round(0.0));
+    h.run();
+    h.hover_at(round(20.0));
+    h.run();
+    r_key(&mut h, false);
+    h.drop_at(round(20.0));
+    h.run();
+    let turned = h.state().state().active().unwrap().view.angle;
+    assert!(h.state().state().active().unwrap().drag.is_none(), "the turn outlived its button");
+    h.drag_at(round(60.0));
+    h.run();
+    h.hover_at(round(70.0));
+    h.run();
+    r_key(&mut h, true);
+    h.hover_at(round(90.0));
+    h.run();
+    h.drop_at(round(90.0));
+    h.run();
+    r_key(&mut h, false);
+    assert_eq!(h.state().state().active().unwrap().view.angle, turned, "turned by an R pressed part-way");
+}
+
+#[test]
+fn r_held_long_or_with_another_key_chooses_nothing_and_shift_steps_wrap_round() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Select);
+    h.run();
+    // Held past a tap.
+    r_key(&mut h, true);
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    r_key(&mut h, false);
+    assert_eq!(h.state().state().tool(), crate::tools::ToolId::Select, "a long hold chose the tool");
+    // V pressed while R is held: the Move tool, which stays.
+    r_key(&mut h, true);
+    h.key_press(egui::Key::V);
+    h.run();
+    r_key(&mut h, false);
+    assert_eq!(h.state().state().tool(), crate::tools::ToolId::Move, "R let go after V chose Rotate View");
+    // Steps of 25°: from 175°, 20° more with Shift is -175°, a multiple, not -160°.
+    {
+        let st = h.state_mut().state_mut();
+        st.tool_settings
+            .get_mut(&crate::tools::ToolId::RotateView)
+            .unwrap()
+            .set("rotate_view.step", crate::settings::Value::Float(25.0));
+        st.active_mut().unwrap().view.turn_to(175.0);
+        st.set_tool(crate::tools::ToolId::RotateView);
+    }
+    h.run();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    drag_round(&mut h, 0.0, 20.0);
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().view.angle, -175.0);
+    // An angle typed past half a turn goes round.
+    type_into(&mut h, egui_kittest::kittest::by().label("Angle"), "270");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().view.angle, -90.0);
+}
+
+#[test]
+fn the_status_bar_s_angle_is_dragged_through_straight() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    command(&mut h, Cmd::RotateViewRight);
+    let field = h
+        .query_all(
+            egui_kittest::kittest::by().predicate(|n| n.numeric_value().is_some_and(|v| (v - 15.0).abs() < 1e-6)),
+        )
+        .map(|n| n.rect())
+        .find(|r| r.top() > 800.0)
+        .expect("the status bar's angle");
+    let at = field.center();
+    h.hover_at(at);
+    h.run();
+    h.drag_at(at);
+    h.run();
+    // Half a degree a point: 60 points left is 30° less.
+    for k in 1..=6 {
+        h.hover_at(at - egui::vec2(10.0 * k as f32, 0.0));
+        h.run();
+    }
+    h.drop_at(at - egui::vec2(60.0, 0.0));
+    h.run();
+    let angle = h.state().state().active().unwrap().view.angle;
+    assert!((angle + 15.0).abs() < 1.0, "stopped at {angle}");
+    // Typed past half a turn there: round, too.
+    h.query_all(
+        egui_kittest::kittest::by()
+            .predicate(move |n| n.numeric_value().is_some_and(|v| (v - f64::from(angle)).abs() < 1e-3)),
+    )
+    .find(|n| n.rect().top() > 800.0)
+    .expect("the status bar's angle")
+    .click();
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.get(focused()).type_text("270");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().view.angle, -90.0);
+}
+
+#[test]
+fn a_paste_is_centred_on_what_a_turned_view_shows() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 4000, 3000);
+    // At full size, (1500, 1200) in the view's middle, a quarter turn round: all it shows
+    // the canvas.
+    {
+        let v = &mut h.state_mut().state_mut().active_mut().unwrap().view;
+        v.zoom = 1.0;
+        v.offset = v.viewport * 0.5 - egui::vec2(1500.0, 1200.0);
+        v.turn_to(90.0);
+    }
+    h.run();
+    put_on_clipboard(&mut h, pasted(50, 40, [1.0, 0.0, 0.0, 1.0]));
+    command(&mut h, Cmd::Paste);
+    let t = h.state().state().active().unwrap().transform.as_ref().unwrap().current;
+    assert_eq!((t.e, t.f), (1475.0, 1180.0), "not centred on what is shown");
+    h.key_press(egui::Key::Escape);
+    h.run();
+}
+
+#[test]
+fn match_views_asked_for_with_an_image_behind_a_tab_waits_until_it_is_shown() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    image_of(&mut h, 400, 300);
+    let [other, active] = doc_ids(&h)[..] else { panic!("two images") };
+    h.state_mut().state_mut().queue.push(Cmd::TileImages);
+    h.run();
+    // A third, a tab in front of `active`, which is then zoomed in; `other` not.
+    image_of(&mut h, 400, 300);
+    h.run();
+    assert!(!h.state().state().shown.contains(&active), "the third not in front of it");
+    h.state_mut().state_mut().doc_mut(active).unwrap().view.zoom *= 2.0;
+    // Shown and matched at once, as a script's call naming it does (between frames: the
+    // image shown in the next one's panes, after its views are looked at).
+    let st = h.state_mut().state_mut();
+    st.show_doc(active);
+    st.match_views = true;
+    h.run();
+    h.run();
+    let (a, b) = (middle_of(&h, active), middle_of(&h, other));
+    assert!(a.1 == b.1 && (a.0 - b.0).length() <= 1.0, "not matched: {a:?} {b:?}");
 }

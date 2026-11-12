@@ -252,8 +252,8 @@ impl AppState {
             (Some(a), Err(why)) => {
                 self.answered.push((a.n, Err(format!("{}: {why}", a.call.name))));
                 // As a call refused at once has it put back, unless the user has moved on.
-                if let Some(view) = a.call.view.filter(|_| self.active_doc == Some(id)) {
-                    self.restore_view(view);
+                if let Some(back) = a.call.view.filter(|_| self.active_doc == Some(id)).and_then(|v| v.0) {
+                    self.back_to(back);
                 }
             }
             // Told under the name of the call carrying it out, if one is (as its refusal).
@@ -583,5 +583,38 @@ mod tests {
         st.finish_edits();
         assert!(matches!(st.answered.last(), Some((5, Ok(_)))), "{:?}", st.answered);
         assert!(st.messages.iter().any(|m| m.body == "Worth knowing"), "taken into an answer no one reads");
+    }
+
+    #[test]
+    fn a_refused_edit_puts_back_the_image_not_the_layers_chosen_meanwhile() {
+        let mut st = app();
+        st.edit_wait = Duration::ZERO;
+        let first = st.active_doc.unwrap();
+        // A second image of two layers, its upper one chosen when the call was made.
+        st.create_image(&NewImage { width: 10, height: 10, background: Background::White, resolution: 72.0 });
+        let other = st.active_doc.unwrap();
+        st.run(Cmd::NewLayer, &egui::Context::default());
+        let (lower, upper) = {
+            let d = st.doc(other).unwrap();
+            (d.doc().layers[0].id, d.doc().layers[1].id)
+        };
+        assert_eq!(st.doc(other).unwrap().active_layer(), Some(upper));
+        st.show_doc(first);
+        let view = (Some(first), vec![(other, st.doc(other).unwrap().layer_selection_state())]);
+        // The call's edit on the first image; the user, meanwhile, chooses the other's lower layer.
+        st.edit_later(
+            first,
+            "Refuse",
+            crate::memory::Allowance::now(),
+            |_, _, _| Err::<u32, String>("No".into()),
+            |_, _, _| {},
+        );
+        let call = crate::api::Calling { name: "refuse".into(), heard: true, view: Some(view) };
+        st.doc_mut(first).unwrap().busy.as_mut().unwrap().answer =
+            Some(Answer { n: 4, call, with: Box::new(|_, _| serde_json::json!({})) });
+        st.doc_mut(other).unwrap().select_only(lower);
+        st.finish_edits();
+        assert_eq!(st.active_doc, Some(first));
+        assert_eq!(st.doc(other).unwrap().active_layer(), Some(lower), "the layer chosen meanwhile undone");
     }
 }

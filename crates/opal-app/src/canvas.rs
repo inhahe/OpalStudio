@@ -29,14 +29,6 @@ struct ZoomDrag {
     zoom: f32,
 }
 
-/// Where a Rotate View drag started: the pointer's bearing from the view's middle (degrees,
-/// clockwise) and the view's angle then.
-#[derive(Clone, Copy)]
-struct RotateDrag {
-    bearing: f32,
-    angle: f32,
-}
-
 /// The preferences the canvas uses, read once per frame.
 struct CanvasPrefs {
     fit_max: f32,
@@ -125,24 +117,33 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let palette = st.palette;
     let unit = st.unit();
     let space = ctx.input(|i| i.key_down(Key::Space)) && !ctx.egui_wants_keyboard_input();
-    // R held turns the view with any tool, for as long as it is (but the outline tool's, whose
-    // R+drag redraws the outline).
-    let turning = ctx.input(|i| i.key_down(ToolId::RotateView.info().key)) && !ctx.egui_wants_keyboard_input();
+    // R held (not with Ctrl or Alt: Ctrl+R shows the rulers) turns the view with any tool but
+    // the outline tool, whose R+drag redraws the outline: a drag begun while it is held, which
+    // goes on as one whether or not it still is; not a drag already under way.
+    let r_held = ctx.input(|i| i.key_down(ToolId::RotateView.info().key) && !i.modifiers.command && !i.modifiers.alt)
+        && !ctx.egui_wants_keyboard_input();
     let chosen = st.tool();
+    let mut notice = None;
+    let Some(d) = st.doc_mut(id) else { return };
+    // (A button down before this frame, or let go in it, is a drag under way: R pressed in it
+    // starts no turn.)
+    let held_before = ctx.input(|i| (i.pointer.any_down() && !i.pointer.any_pressed()) || i.pointer.any_released());
+    let turning = matches!(d.drag, Some(Drag::TurnView(_))) || (r_held && chosen != ToolId::Outline && !held_before);
     let tool = if space {
         ToolId::Hand
-    } else if turning && chosen != ToolId::Outline {
+    } else if turning {
         ToolId::RotateView
     } else {
         chosen
     };
-    let mut notice = None;
-    let Some(d) = st.doc_mut(id) else { return };
     d.drawn = ctx.cumulative_pass_nr();
     // While the transform box is open, it takes the pointer (Space and the middle button
     // still scroll the view, and the box stays, waiting).
     let boxed = d.transform.is_some();
-    let box_active = boxed && !space;
+    // R held over a box turns the view, as Space scrolls it; the Rotate View tool chosen
+    // leaves a box (a paste's) the pointer.
+    let held_turn = tool == ToolId::RotateView && chosen != ToolId::RotateView;
+    let box_active = boxed && !space && !held_turn;
     // While an edit is under way on the image, it may only be looked at: every tool is the
     // hand, but the zoom (see `edits`).
     let frozen = d.busy.is_some();
@@ -326,28 +327,34 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         }
     }
     // The Rotate View tool: the view turned about its middle by the angle the pointer sweeps
-    // round it (to whole steps with Shift).
-    if tool == ToolId::RotateView && !boxed {
-        let drag_id = response.id.with("rotate-drag");
-        let bearing = |p: Vec2| {
-            let from = p - vp * 0.5;
-            from.y.atan2(from.x).to_degrees()
-        };
-        if response.dragged_by(PointerButton::Primary)
-            && let Some(p) = response.interact_pointer_pos()
+    // round it (to whole steps with Shift), a drag of its own, which Esc gives up.
+    let bearing = |p: Vec2| {
+        let from = p - vp * 0.5;
+        from.y.atan2(from.x).to_degrees()
+    };
+    // Begun as the button is pressed (whether R was held is known then, not once the pointer
+    // has moved far enough for a drag).
+    if tool == ToolId::RotateView
+        && !box_active
+        && ctx.input(|i| i.pointer.primary_pressed())
+        && response.contains_pointer()
+        && let Some(p) = ctx.input(|i| i.pointer.press_origin())
+    {
+        let start = bearing(to_px(p));
+        d.drag = Some(Drag::TurnView(crate::doc::TurnDrag { bearing: start, angle: d.view.angle }));
+    }
+    if let Some(Drag::TurnView(t)) = d.drag {
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            d.give_up_drag();
+        } else if ctx.input(|i| i.pointer.primary_down())
+            && let Some(p) = ctx.input(|i| i.pointer.latest_pos())
         {
-            if response.drag_started() {
-                let start = RotateDrag { bearing: bearing(to_px(p - response.drag_delta())), angle: d.view.angle };
-                ctx.data_mut(|m| m.insert_temp(drag_id, start));
-            }
-            if let Some(start) = ctx.data(|m| m.get_temp::<RotateDrag>(drag_id)) {
-                let a = start.angle + bearing(to_px(p)) - start.bearing;
-                let a = if modifiers.shift { (a / turn_step).round() * turn_step } else { a };
-                d.view.turn_to(a);
-            }
+            // Within a turn, then to a whole step: a multiple of it either side of straight.
+            let a = (t.angle + bearing(to_px(p)) - t.bearing + 180.0).rem_euclid(360.0) - 180.0;
+            d.view.turn_to(if modifiers.shift { (a / turn_step).round() * turn_step } else { a });
         }
-        if response.drag_stopped() {
-            ctx.data_mut(|m| m.remove::<RotateDrag>(drag_id));
+        if !ctx.input(|i| i.pointer.primary_down()) {
+            d.drag = None;
         }
     }
     let cursor = match tool {
@@ -581,9 +588,10 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         st.cursor_canvas = cursor_canvas;
     }
     if boxed {
-        crate::transform_ui::canvas_box(ui, st, id, &response, rect, !space);
+        crate::transform_ui::canvas_box(ui, st, id, &response, rect, !space && !held_turn);
     } else if cropping && !frozen {
-        crate::crop::canvas_crop(ui, st, id, &response, rect, !space);
+        // (Not while the view is turned by R held, as by Space scrolled.)
+        crate::crop::canvas_crop(ui, st, id, &response, rect, !space && !held_turn);
     } else if tool == ToolId::Select {
         crate::select_tool::draw_box(ui, st, id, &response, rect, &to_screen);
     }
@@ -770,8 +778,10 @@ pub fn draw_guides(ui: &egui::Ui, guides: &crate::transform::Guides, rect: Rect,
 
 /// Where `guides` are drawn: each across the whole view `rect`, however the view turns it.
 fn guide_lines(guides: &crate::transform::Guides, rect: Rect, to_screen: &dyn Fn([f64; 2]) -> Pos2) -> Vec<[Pos2; 2]> {
-    let xs = guides.xs.iter().map(|&x| across(rect, to_screen([x, 0.0]), to_screen([x, 1.0])));
-    let ys = guides.ys.iter().map(|&y| across(rect, to_screen([0.0, y]), to_screen([1.0, y])));
+    // Each through two of its points far apart, whose direction keeps its precision far out.
+    const FAR: f64 = 1e4;
+    let xs = guides.xs.iter().map(|&x| across(rect, to_screen([x, -FAR]), to_screen([x, FAR])));
+    let ys = guides.ys.iter().map(|&y| across(rect, to_screen([-FAR, y]), to_screen([FAR, y])));
     xs.chain(ys).collect()
 }
 

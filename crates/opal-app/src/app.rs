@@ -43,9 +43,12 @@ pub struct OpalApp {
     /// Whether Alt was down last frame, and whether it has been pressed alone (for keytips).
     alt_down: bool,
     alt_alone: bool,
-    /// While R is held (pressed outside a field): whether anything was dragged meanwhile (see
-    /// [`OpalApp::rotate_key`]).
-    r_held: Option<bool>,
+    /// While R is held (pressed outside a field): when it was pressed, and whether anything
+    /// else (a button, another key) was pressed meanwhile (see [`OpalApp::rotate_key`]).
+    r_held: Option<(std::time::Instant, bool)>,
+    /// Whether the status bar's angle was being dragged or typed into last frame: shown still,
+    /// though the view is straight now, so that a drag through straight goes on.
+    angle_in_use: bool,
     /// Whether a field had the keyboard at the end of the last frame: the keys pressed since
     /// are its, though egui lets go of the focus on Esc before the frame begins.
     field_had_keys: bool,
@@ -142,6 +145,7 @@ impl OpalApp {
             work_area,
             alt_alone: false,
             r_held: None,
+            angle_in_use: false,
             persist,
             server,
             server_waits,
@@ -323,28 +327,32 @@ impl OpalApp {
         }
     }
 
-    /// R, the Rotate View tool's key, as in Photoshop: tapped, it chooses the tool, once let
-    /// go; held, it chooses nothing (while it is held, a drag on the image with any other tool
-    /// turns the view, and the outline tool's redraws: R+drag), so a drag meanwhile keeps the
-    /// tool there was.
+    /// R, the Rotate View tool's key, as in Photoshop: tapped (let go within [`TAP`], nothing
+    /// else pressed meanwhile), it chooses the tool, once let go; held, it chooses nothing
+    /// (while it is held, a drag on the image with any other tool turns the view, and the
+    /// outline tool's redraws: R+drag), so the tool there was stays.
     fn rotate_key(&mut self, ctx: &egui::Context) {
         let typing = ctx.egui_wants_keyboard_input() || self.field_had_keys;
         let key = ToolId::RotateView.info().key;
-        let (pressed, released, pointer) = ctx.input(|i| {
+        let (pressed, released, pointer, others) = ctx.input(|i| {
             let pressed = i.events.iter().any(|e| {
                 matches!(e, Event::Key { key: k, pressed: true, repeat: false, modifiers, .. } if *k == key && modifiers.is_none())
             });
             let released = i.events.iter().any(|e| matches!(e, Event::Key { key: k, pressed: false, .. } if *k == key));
-            (pressed, released, i.pointer.any_down())
+            let others = i.events.iter().any(|e| matches!(e, Event::Key { key: k, pressed: true, .. } if *k != key));
+            (pressed, released, i.pointer.any_down(), others)
         });
         // (Not a keytip's R, nor one typed or pressed behind a dialog.)
         if pressed && !typing && !self.st.dialog_open() && self.st.ribbon.keytips == Keytips::Off {
-            self.r_held = Some(false);
+            self.r_held = Some((std::time::Instant::now(), false));
         }
-        if let Some(dragged) = &mut self.r_held {
-            *dragged |= pointer;
+        if let Some((_, more)) = &mut self.r_held {
+            *more |= pointer || others;
         }
-        if released && self.r_held.take() == Some(false) {
+        // (Not during a drag, which a tool's key waits for, as every other's does.)
+        let dragging = self.st.active().is_some_and(crate::doc::DocState::dragging);
+        let tapped = self.r_held.take_if(|_| released).is_some_and(|(at, more)| !more && at.elapsed() < TAP);
+        if tapped && !dragging {
             self.st.set_tool(ToolId::RotateView);
         }
     }
@@ -940,7 +948,9 @@ impl OpalApp {
     fn sync_views(&mut self) {
         let shown = shown_docs(&self.tree.tiles);
         self.st.shown.clone_from(&shown);
-        let matching = std::mem::take(&mut self.st.match_views);
+        // (Asked for before the active image is shown, it waits until it is.)
+        let shown_active = self.st.active_doc.is_some_and(|a| shown.contains(&a));
+        let matching = shown_active && std::mem::take(&mut self.st.match_views);
         let view_of = |st: &AppState, id: DocId| st.doc(id).map(|d| d.view);
         let was = |id: DocId| self.last_views.iter().find(|(i, _)| *i == id).map(|(_, v)| *v);
         let moved = |id: DocId| was(id).is_some_and(|v| Some(v) != view_of(&self.st, id));
@@ -1004,8 +1014,8 @@ impl OpalApp {
             parts.push(StatusPart::Gpu);
         }
         if let Some(d) = self.st.active() {
-            // The view's angle, while it is turned.
-            if d.view.angle != 0.0 {
+            // The view's angle, while it is turned (or the field is in use).
+            if d.view.angle != 0.0 || self.angle_in_use {
                 parts.push(StatusPart::Angle);
             }
             parts.extend([StatusPart::Zoom, StatusPart::Size, StatusPart::Resolution]);
@@ -1157,10 +1167,12 @@ impl OpalApp {
                 let mut angle = f64::from(d.view.angle);
                 let scope = crate::lengths::image_scope(Some(d.doc()), unit, d.doc().resolution);
                 let field = crate::number_field::NumberField::angle(&mut angle, scope);
-                let r = ui.add(field.range(-180.0..=180.0).speed(0.5).remember("view.angle"));
+                // (Past half a turn either way, wrapped round by `turn_to`.)
+                let r = ui.add(field.range(-360.0..=360.0).speed(0.5).remember("view.angle"));
                 if r.changed() {
                     d.view.turn_to(angle as f32);
                 }
+                self.angle_in_use = r.dragged() || r.has_focus();
                 r.on_hover_text(
                     "The view is turned (not the image): drag or type a value; Reset Rotation puts it straight",
                 );
@@ -1436,6 +1448,9 @@ impl eframe::App for OpalApp {
         }
     }
 }
+
+/// The longest R may be held and count as tapped (see `OpalApp::rotate_key`).
+const TAP: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// What the status bar says when keys are held back during a drag on the image.
 pub const KEYS_WAIT: &str =
