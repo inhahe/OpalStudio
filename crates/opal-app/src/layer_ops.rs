@@ -352,6 +352,32 @@ impl AppState {
 
     /// Turns the image objects of the selected layers (and of the layers inside selected
     /// groups) into pixel objects, drawn as the canvas shows them.
+    /// Defringe, Remove Black Matte or Remove White Matte (`m`) on the selected layers, off
+    /// the interface thread, as one history state (see design.md, *Matting*).
+    pub(crate) fn matte(&mut self, m: Matting) {
+        let d = self.active().expect("available");
+        let sel = d.selected_layers();
+        // Each tile with content is a piece of the work.
+        let total: u64 = sel
+            .iter()
+            .filter_map(|&l| d.doc().layer(l))
+            .flat_map(|l| l.all_objects())
+            .map(|o| match &o.kind {
+                ObjectKind::Pixels(p) => p.image.tile_count() as u64,
+                ObjectKind::Image(i) => i.image.tile_count() as u64,
+            })
+            .sum();
+        let work = move |doc: &mut Document, _: &mut IdGen, progress: &Progress| {
+            progress.begin(total);
+            for id in sel {
+                let layer = doc.layer_mut(id).ok_or_else(|| TreeError::NoSuchLayer(id).to_string())?;
+                matte_layer(layer, m, progress)?;
+            }
+            Ok(())
+        };
+        self.edit_later(d.id, m.label(), Allowance::now(), work, |_, _, ()| {});
+    }
+
     pub(crate) fn rasterize(&mut self) {
         let d = self.active().expect("available");
         let sel = d.selected_layers();
@@ -424,6 +450,95 @@ impl AppState {
         });
         self.report(result);
     }
+}
+
+/// What a matting command does (see design.md, *Matting*): Defringe, so many pixels in; or
+/// a matte taken back out (0, black; 1, white).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Matting {
+    Defringe(u32),
+    RemoveMatte(f64),
+}
+
+impl Matting {
+    /// What the history state it makes is called.
+    pub fn label(self) -> &'static str {
+        match self {
+            Matting::Defringe(_) => "Defringe",
+            Matting::RemoveMatte(m) if m < 0.5 => "Remove black matte",
+            Matting::RemoveMatte(_) => "Remove white matte",
+        }
+    }
+
+    /// How far round a pixel what it becomes can come from: Defringe's colours come from at
+    /// most twice its width in (and a step for each side's edge).
+    fn margin(self) -> i64 {
+        match self {
+            Matting::Defringe(w) => 2 * i64::from(w) + 2,
+            Matting::RemoveMatte(_) => 0,
+        }
+    }
+}
+
+/// `image` matted as `m` says: tile by tile (those with content), each read with the margin
+/// round it that its result depends on, so that it is what the whole bitmap at once would
+/// give; `None` if it was cancelled.
+pub fn matted(image: &RasterImage, m: Matting, progress: &Progress) -> Option<RasterImage> {
+    use rayon::prelude::*;
+    let coords: Vec<opal_core::tile::TileCoord> = image.tiles().map(|(c, _)| c).collect();
+    let margin = m.margin();
+    let done: Vec<(IRect, Vec<opal_core::tile::Pixel>)> = coords
+        .par_iter()
+        .map(|c| {
+            if progress.is_cancelled() {
+                return None;
+            }
+            let tile = c.rect(0);
+            let around = IRect::new(tile.x0 - margin, tile.y0 - margin, tile.x1 + margin, tile.y1 + margin);
+            let mut px = image.read_rect(&around);
+            match m {
+                Matting::Defringe(w) => {
+                    opal_core::matting::defringe(&mut px, around.width() as usize, around.height() as usize, w)
+                }
+                Matting::RemoveMatte(matte) => opal_core::matting::remove_matte(&mut px, matte),
+            }
+            // The tile's own pixels, out of the margin.
+            let (w, m) = (around.width() as usize, margin as usize);
+            let own: Vec<opal_core::tile::Pixel> = (0..tile.height() as usize)
+                .flat_map(|y| px[(y + m) * w + m..(y + m) * w + m + tile.width() as usize].to_vec())
+                .collect();
+            progress.advance(1);
+            Some((tile, own))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mut out = image.clone();
+    for (tile, px) in done {
+        out.write_rect(&tile, &px);
+    }
+    Some(out)
+}
+
+/// `layer` and the layers inside it matted as `m` says: their pixel objects, and the bitmaps
+/// their placed images are drawn from (the colours were wrong in the file, not in the
+/// placing), telling `progress` as each tile is done; an error if it was cancelled.
+fn matte_layer(layer: &mut Layer, m: Matting, progress: &Progress) -> Result<(), String> {
+    match &mut layer.content {
+        LayerContent::Objects(objects) => {
+            for o in objects {
+                let image = match &mut o.kind {
+                    ObjectKind::Pixels(p) => &mut p.image,
+                    ObjectKind::Image(i) => &mut i.image,
+                };
+                *image = Arc::new(matted(image, m, progress).ok_or_else(|| crate::edits::CANCELLED.to_owned())?);
+            }
+        }
+        LayerContent::Group(children) => {
+            for c in children {
+                matte_layer(Arc::make_mut(c), m, progress)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Turns every image object in `layer`, and in the layers inside it, into a pixel object,
@@ -1179,5 +1294,87 @@ mod tests {
         assert!(fits(&both, &canvas, Allowance::memory(Some(four))).is_ok());
         let why = fits(&both, &canvas, Allowance::memory(Some(four - 1))).unwrap_err();
         assert!(why.contains("memory"), "{why}");
+    }
+
+    /// A bitmap spanning several tiles: a 300 × 300 block from (100, 100), its outer two
+    /// pixels red, within them blue going green across (so that where a colour comes from
+    /// shows), its edge half transparent.
+    fn fringed() -> RasterImage {
+        let mut img = RasterImage::new();
+        for y in 100..400 {
+            for x in 100..400 {
+                let from_edge = (x - 100).min(y - 100).min(399 - x).min(399 - y);
+                let a = if from_edge == 0 { 0.5 } else { 1.0 };
+                let g = (x - 100) as f32 / 300.0;
+                let c = if from_edge < 2 { [a, 0.0, 0.0, a] } else { [0.0, g * a, a, a] };
+                img.set_pixel(x, y, pixel_from_f32(c));
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn matting_tile_by_tile_gives_what_the_whole_bitmap_at_once_would() {
+        let img = fringed();
+        let bounds = IRect::new(98, 98, 402, 402);
+        for m in [Matting::Defringe(2), Matting::Defringe(9), Matting::RemoveMatte(0.0)] {
+            let tiled = matted(&img, m, &Progress::default()).unwrap();
+            let mut whole = img.read_rect(&bounds);
+            match m {
+                Matting::Defringe(w) => {
+                    opal_core::matting::defringe(&mut whole, bounds.width() as usize, bounds.height() as usize, w)
+                }
+                Matting::RemoveMatte(matte) => opal_core::matting::remove_matte(&mut whole, matte),
+            }
+            assert!(tiled.read_rect(&bounds) == whole, "{m:?}: tiles disagree with the whole");
+        }
+        // Defringed by two, the red is gone.
+        let p = matted(&img, Matting::Defringe(2), &Progress::default()).unwrap().pixel(150, 101);
+        assert!(p[0].to_f32() < 1e-3 && p[2].to_f32() > 0.99, "{p:?}");
+    }
+
+    #[test]
+    fn matting_works_on_the_selected_layers_pixels_and_placed_images_one_state() {
+        let mut st = app(500, 500);
+        let layer = add_layer(&mut st, None, true);
+        // The layer's bitmap a fringed block, beside a placed image of one.
+        st.active_mut()
+            .unwrap()
+            .apply::<TreeError>("Fringed", |doc, ids| {
+                let l = doc.layer_mut(layer).ok_or(TreeError::NoSuchLayer(layer))?;
+                let placed = opal_core::document::ImageObject {
+                    image: Arc::new(fringed()),
+                    frame: IRect::new(100, 100, 400, 400),
+                    transform: Affine::translate(10.0, 0.0),
+                    sampling: Sampling::default(),
+                };
+                if let LayerContent::Objects(objects) = &mut l.content {
+                    objects[0].kind = ObjectKind::Pixels(PixelObject { image: Arc::new(fringed()), offset: [0, 0] });
+                    objects.push(opal_core::document::Object { id: ids.object(), kind: ObjectKind::Image(placed) });
+                }
+                Ok(())
+            })
+            .unwrap();
+        st.active_mut().unwrap().select_only(layer);
+        let states = st.active().unwrap().history.nodes().count();
+        st.run(crate::commands::Cmd::Defringe, &eframe::egui::Context::default());
+        assert_eq!(st.defringe, Some(1.0), "no dialog");
+        st.defringe = None;
+        st.matte(Matting::Defringe(2));
+        st.finish_edits();
+        let d = st.active().unwrap();
+        assert_eq!((d.history.nodes().count(), d.history.undo_label()), (states + 1, Some("Defringe")));
+        let objects = d.doc().layer(layer).unwrap().all_objects();
+        for o in objects {
+            let image = match &o.kind {
+                ObjectKind::Pixels(p) => &p.image,
+                ObjectKind::Image(i) => &i.image,
+            };
+            assert!(image.pixel(150, 101)[0].to_f32() < 1e-3, "an object not defringed");
+        }
+        // Locked, it is refused.
+        st.set_layer_flag(layer, false);
+        let why = crate::commands::availability(&st, crate::commands::Cmd::RemoveWhiteMatte).unwrap_err();
+        assert!(why.contains("locked"), "{why}");
     }
 }

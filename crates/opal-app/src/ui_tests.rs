@@ -5196,3 +5196,25 @@ fn a_dialog_a_command_opens_at_the_end_of_a_frame_shows_without_waiting_for_inpu
         h.run();
     }
 }
+
+#[test]
+fn the_defringe_dialog_takes_a_width_and_remembers_it() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    put_on_clipboard(&mut h, pasted(100, 60, [1.0, 0.0, 0.0, 1.0]));
+    command(&mut h, Cmd::Paste);
+    h.key_press(egui::Key::Enter);
+    h.run();
+    command(&mut h, Cmd::Defringe);
+    type_into(&mut h, egui_kittest::kittest::by().label("Width"), "3");
+    h.get_by_label("Defringe").click();
+    h.run();
+    h.state_mut().state_mut().finish_edits();
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().history.undo_label(), Some("Defringe"));
+    command(&mut h, Cmd::Defringe);
+    assert_eq!(h.state().state().defringe, Some(3.0), "the width not remembered");
+    h.key_press(egui::Key::Escape);
+    h.run();
+}

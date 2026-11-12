@@ -36,6 +36,8 @@ pub fn show_all(ctx: &egui::Context, st: &mut AppState) {
         rotate_by(ctx, st);
     } else if st.trim.is_some() {
         trim(ctx, st);
+    } else if st.defringe.is_some() {
+        defringe(ctx, st);
     } else if st.save_selection.is_some() {
         save_selection(ctx, st);
     } else if st.load_selection.is_some() {
@@ -620,6 +622,39 @@ fn resize_canvas(ctx: &egui::Context, st: &mut AppState) {
         }
         Some(false) => st.resize_canvas = None,
         None => st.resize_canvas = Some(spec),
+    }
+}
+
+fn defringe(ctx: &egui::Context, st: &mut AppState) {
+    let Some(mut width) = st.defringe else { return };
+    let palette = st.palette;
+    let doc = st.active().map(|d| d.doc());
+    let ppi = doc.map_or(opal_core::units::DEFAULT_PPI, |d| d.resolution);
+    let scope = lengths::image_scope(doc, st.unit(), ppi);
+    let mut done = None;
+    egui::Modal::new(egui::Id::unique("defringe")).show(ctx, |ui| {
+        ui.heading("Defringe the layers");
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let label = ui.label("Width");
+            let field = NumberField::number(&mut width, scope).range(1.0..=200.0).decimals(0, 0).suffix(" px");
+            ui.add(field.remember("defringe.width")).labelled_by(label.id);
+        });
+        ui.label(
+            RichText::new("Edge pixels this close to transparency take the colour of those further in.")
+                .small()
+                .color(palette.weak_text),
+        );
+        done = ok_cancel(ui, "Defringe");
+    });
+    match done {
+        Some(true) => {
+            st.defringe = None;
+            st.last_defringe = width;
+            st.matte(crate::layer_ops::Matting::Defringe(width.round() as u32));
+        }
+        Some(false) => st.defringe = None,
+        None => st.defringe = Some(width),
     }
 }
 

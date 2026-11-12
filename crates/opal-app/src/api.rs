@@ -392,6 +392,18 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
                 otherwise: Otherwise::Value("false"),
             },
         ],
+        Defringe => &[
+            DOCUMENT,
+            LAYERS,
+            Param {
+                name: "width",
+                kind: Kind::Int { min: 1, max: 200 },
+                help: "How close to transparency (in pixels, diagonals one) an edge pixel is to be given the \
+                       colour of those further in.",
+                otherwise: Otherwise::Value("1"),
+            },
+        ],
+        RemoveBlackMatte | RemoveWhiteMatte => &[DOCUMENT, LAYERS],
         Trim => &[
             DOCUMENT,
             Param {
@@ -2545,6 +2557,16 @@ impl AppState {
                 };
                 self.resize_canvas(&spec);
                 now(Ok(self.canvas_json()))
+            }
+            Cmd::Defringe | Cmd::RemoveBlackMatte | Cmd::RemoveWhiteMatte => {
+                use crate::layer_ops::Matting;
+                let m = match cmd {
+                    Cmd::Defringe => Matting::Defringe(args.opt_int("width").unwrap_or(1) as u32),
+                    Cmd::RemoveBlackMatte => Matting::RemoveMatte(0.0),
+                    _ => Matting::RemoveMatte(1.0),
+                };
+                self.matte(m);
+                self.reply_when_done(|st, id| st.selected_layers_json_of(id))
             }
             Cmd::Trim => {
                 use crate::image_ops::{Trim, TrimBy};
@@ -6109,5 +6131,50 @@ mod tests {
         now(&mut st, "new", json!({ "width": 30, "height": 20 })).unwrap();
         let why = call(&mut st, "trim", json!({ "based_on": "top_left" })).unwrap_err();
         assert!(why.contains("all border"), "{why}");
+    }
+
+    #[test]
+    fn scripts_defringe_and_remove_mattes_from_the_layers_they_name() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 40, "height": 30 })).unwrap();
+        let empty = now(&mut st, "new_layer", json!({ "name": "Empty" })).unwrap()["layer"].as_u64().unwrap();
+        let why = call(&mut st, "defringe", json!({ "layers": [empty] })).unwrap_err();
+        assert!(why.contains("no pixels"), "{why}");
+        // The background: a block whose outer two pixels are red, blue within.
+        let layer = st.active().unwrap().doc().layers[0].id;
+        st.active_mut()
+            .unwrap()
+            .apply("Block", |doc, _| {
+                let l = doc.layer_mut(layer).ok_or(opal_core::document::TreeError::NoSuchLayer(layer))?;
+                let mut block = opal_core::raster::RasterImage::new();
+                for y in 5..25 {
+                    for x in 5..35 {
+                        let edge = (x - 5).min(y - 5).min(34 - x).min(24 - y) < 2;
+                        let c = if edge { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 0.0, 1.0, 1.0] };
+                        block.set_pixel(x, y, opal_core::tile::pixel_from_f32(c));
+                    }
+                }
+                if let opal_core::document::LayerContent::Objects(o) = &mut l.content {
+                    o[0].kind = opal_core::document::ObjectKind::Pixels(opal_core::document::PixelObject {
+                        image: std::sync::Arc::new(block),
+                        offset: [0, 0],
+                    });
+                }
+                Ok::<(), opal_core::document::TreeError>(())
+            })
+            .unwrap();
+        let layer = layer.0;
+        let before = st.active().unwrap().history.nodes().count();
+        call(&mut st, "defringe", json!({ "layers": [layer], "width": 2 })).unwrap();
+        // Two pixels in, blue now.
+        let l = st.active().unwrap().doc().layers[0].all_objects();
+        let opal_core::document::ObjectKind::Pixels(p) = &l[0].kind else { panic!("pixels") };
+        assert!(p.image.pixel(20, 6)[0].to_f32() < 1e-3, "not defringed two pixels in");
+        call(&mut st, "remove_black_matte", json!({ "layers": [layer] })).unwrap();
+        call(&mut st, "remove_white_matte", json!({ "layers": [layer] })).unwrap();
+        let d = st.active().unwrap();
+        assert_eq!(d.history.nodes().count(), before + 3);
+        assert_eq!(d.history.undo_label(), Some("Remove white matte"));
+        assert!(call(&mut st, "defringe", json!({ "width": 0 })).is_err(), "a width of nought taken");
     }
 }

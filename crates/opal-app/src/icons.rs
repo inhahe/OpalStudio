@@ -105,6 +105,12 @@ pub const MERGE_SELECTED: char = '\u{f760}';
 pub const MERGE_VISIBLE: char = '\u{eaa2}';
 pub const STAMP: char = '\u{e71a}';
 pub const RASTERIZE: char = '\u{f462}';
+/// An edge drawn inside (border_inside): Defringe.
+pub const DEFRINGE: char = '\u{f03af}';
+/// No dark (weather_moon_off): Remove Black Matte.
+pub const REMOVE_BLACK_MATTE: char = '\u{ee47}';
+/// A low sun (weather_sunny_low): Remove White Matte.
+pub const REMOVE_WHITE_MATTE: char = '\u{ee52}';
 pub const GROUP_LAYERS: char = '\u{f465}';
 pub const FIT: char = '\u{f689}';
 pub const FILL: char = '\u{ea4f}';

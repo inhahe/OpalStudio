@@ -260,6 +260,9 @@ pub struct AppState {
     /// The Trim dialog, while it is open; and what it was last given.
     pub trim: Option<crate::image_ops::Trim>,
     pub last_trim: crate::image_ops::Trim,
+    /// The Defringe dialog's width (pixels), while it is open; and what it was last given.
+    pub defringe: Option<f64>,
+    pub last_defringe: f64,
     /// The Save Selection and Load Selection dialogs, while open.
     pub save_selection: Option<crate::select::SaveSelection>,
     pub load_selection: Option<crate::select::LoadSelection>,
@@ -467,6 +470,8 @@ impl AppState {
             rotate_by: None,
             trim: None,
             last_trim: crate::image_ops::Trim::default(),
+            defringe: None,
+            last_defringe: 1.0,
             save_selection: None,
             load_selection: None,
             modifying: None,
@@ -521,6 +526,7 @@ impl AppState {
                 || self.resize_canvas.is_some()
                 || self.rotate_by.is_some()
                 || self.trim.is_some()
+                || self.defringe.is_some()
                 || self.save_selection.is_some()
                 || self.load_selection.is_some()
                 || self.modifying.is_some()
@@ -764,6 +770,9 @@ impl AppState {
             Cmd::RotateBy => self.rotate_by = Some(RotateBy { degrees: 0.0, grow: true }),
             Cmd::Trim => self.trim = Some(self.last_trim.clone()),
             Cmd::RevealAll => self.reveal_all(),
+            Cmd::Defringe => self.defringe = Some(self.last_defringe),
+            Cmd::RemoveBlackMatte => self.matte(crate::layer_ops::Matting::RemoveMatte(0.0)),
+            Cmd::RemoveWhiteMatte => self.matte(crate::layer_ops::Matting::RemoveMatte(1.0)),
             Cmd::SaveSelection => {
                 let name = crate::select::next_selection_name(self.active().expect("available").doc());
                 self.save_selection = Some(crate::select::SaveSelection { name });

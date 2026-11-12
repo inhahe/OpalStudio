@@ -65,6 +65,9 @@ pub enum Cmd {
     StampVisible,
     Flatten,
     Rasterize,
+    Defringe,
+    RemoveBlackMatte,
+    RemoveWhiteMatte,
     SelectAll,
     Deselect,
     Reselect,
@@ -155,7 +158,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 110] = [
+    pub const ALL: [Cmd; 113] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -211,6 +214,9 @@ impl Cmd {
         Cmd::StampVisible,
         Cmd::Flatten,
         Cmd::Rasterize,
+        Cmd::Defringe,
+        Cmd::RemoveBlackMatte,
+        Cmd::RemoveWhiteMatte,
         Cmd::SelectAll,
         Cmd::Deselect,
         Cmd::Reselect,
@@ -696,6 +702,33 @@ impl Cmd {
                 icons::STACK,
                 "Combine all visible layers into one.",
                 "Hidden layers are discarded. Undo brings everything back.",
+                &[],
+            ),
+            Cmd::Defringe => i(
+                "Defringe",
+                icons::DEFRINGE,
+                "Give the selected layers' edge pixels the colour of the pixels further in.",
+                "Asks how wide the fringe is (in pixels). Each pixel that shows and lies that close \
+                 to a transparent one takes the colour of the pixels further in, its transparency \
+                 kept: a halo of the old background round a cut-out goes. Placed images are \
+                 defringed in their own pixels.",
+                &[],
+            ),
+            Cmd::RemoveBlackMatte => i(
+                "Remove Black Matte",
+                icons::REMOVE_BLACK_MATTE,
+                "Take black back out of the selected layers' partly transparent edge pixels.",
+                "For an edge anti-aliased against black (a cut-out from a black background, or an \
+                 image premultiplied with black): each partly transparent pixel's colour is worked \
+                 out as it was before black was blended into it, so no dark rim shows.",
+                &[],
+            ),
+            Cmd::RemoveWhiteMatte => i(
+                "Remove White Matte",
+                icons::REMOVE_WHITE_MATTE,
+                "Take white back out of the selected layers' partly transparent edge pixels.",
+                "For an edge anti-aliased against white: each partly transparent pixel's colour is \
+                 worked out as it was before white was blended into it, so no light rim shows.",
                 &[],
             ),
             Cmd::Rasterize => i(
@@ -1423,6 +1456,14 @@ pub static RIBBON: &[Tab] = &[
                 cmds: &[Cmd::Rasterize],
             },
             Group {
+                name: "Matting",
+                description: "Setting right the edge colours of something cut out of one background \
+                              and put on another.",
+                large: 0,
+                icons: false,
+                cmds: &[Cmd::Defringe, Cmd::RemoveBlackMatte, Cmd::RemoveWhiteMatte],
+            },
+            Group {
                 name: "Properties",
                 description: "Changing the active layer's visibility, protection and name.",
                 large: 0,
@@ -1779,6 +1820,17 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         ToggleVisible | ToggleLock | Rename => active_layer(st).map(|_| ()),
         Duplicate | LayerViaCopy => selected_layers(st).map(|_| ()),
         LayerViaCut => crate::select::clear_refused(st.active().ok_or("Open or create an image first.")?),
+        Defringe | RemoveBlackMatte | RemoveWhiteMatte => {
+            let (d, sel) = selected_layers(st)?;
+            let layers: Vec<&opal_core::document::Layer> = sel.iter().filter_map(|&l| d.doc().layer(l)).collect();
+            if let Some(l) = layers.iter().find_map(|l| locked_for(d.doc(), l)) {
+                return Err(format!("\"{}\" is locked. Unlock it first.", l.name));
+            }
+            if layers.iter().all(|l| l.all_objects().is_empty()) {
+                return Err("The layers selected hold no pixels.".into());
+            }
+            Ok(())
+        }
         DeleteLayer => {
             let (d, sel) = selected_layers(st)?;
             match sel.iter().filter_map(|&l| d.doc().layer(l)).find_map(|l| locked_for(d.doc(), l)) {

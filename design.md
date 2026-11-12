@@ -1217,6 +1217,30 @@ nothing). Their memory is checked before they begin.
   bitmap and 4 bytes a pixel, and 4 of tiles). (Merging layers that are not adjacent moves the lower ones above whatever lay
   between them, which can change the look where those overlap; the status bar says so.)
 
+### Matting
+
+The edge colours of something cut out of one background and put on another, set right (the
+Layer tab's Matting group; `opal_core::matting`). Each works on the selected layers (those in
+a group selected too), their pixel objects and the bitmaps their placed images are drawn
+from (not the placing: the colours were wrong in the file), as one history state, off the
+interface thread, cancelled with Esc; a locked layer stops it, and says so.
+
+- **Defringe…** (a width, 1 to 200 pixels; 1 by default): each pixel that shows and lies
+  within that many steps of a transparent one (diagonals one step) is given the colour of
+  the pixels further in, its alpha kept: ring by ring outwards from those, each pixel the
+  mean of its neighbours already given one. A halo of the old background round a cut-out
+  goes. Content no wider than twice the width has nothing further in, and is left as it is.
+  Worked tile by tile, each read with a margin of twice the width and two pixels round it,
+  which is all its pixels' colours can come from, so the result is the same as the whole
+  bitmap's at once.
+- **Remove Black Matte** and **Remove White Matte**: the colour a partly transparent pixel
+  was blended with (black or white) taken back out of it, as if it had been laid over that
+  at its alpha: in sRGB terms, as images are blended where mattes come from,
+  `true = (seen − matte × (1 − alpha)) / alpha`. Opaque and transparent pixels are left as
+  they are. An anti-aliased edge cut from black (white) then shows no dark (light) rim.
+- Scripts: `defringe(width, layers)`, `remove_black_matte(layers)`,
+  `remove_white_matte(layers)`.
+
 ### Performance with many layers
 
 Editable content does not mean recomputing everything on each change.

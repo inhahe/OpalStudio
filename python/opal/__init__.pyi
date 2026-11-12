@@ -388,6 +388,25 @@ class Editor:
         document: The image, by id. Default: the active image.
         layers: The layers, by id. Default: the selected layers.
         """
+    def defringe(self, *, document: int | None = None, layers: list[int] | None = None, width: int | str | Expr = 1) -> Any:
+        """Give the selected layers' edge pixels the colour of the pixels further in.
+
+        document: The image, by id. Default: the active image.
+        layers: The layers, by id. Default: the selected layers.
+        width: How close to transparency (in pixels, diagonals one) an edge pixel is to be given the colour of those further in. From 1 to 200. Default: 1.
+        """
+    def remove_black_matte(self, *, document: int | None = None, layers: list[int] | None = None) -> Any:
+        """Take black back out of the selected layers' partly transparent edge pixels.
+
+        document: The image, by id. Default: the active image.
+        layers: The layers, by id. Default: the selected layers.
+        """
+    def remove_white_matte(self, *, document: int | None = None, layers: list[int] | None = None) -> Any:
+        """Take white back out of the selected layers' partly transparent edge pixels.
+
+        document: The image, by id. Default: the active image.
+        layers: The layers, by id. Default: the selected layers.
+        """
     def select_all(self, *, document: int | None = None) -> Any:
         """Select the whole canvas.
 

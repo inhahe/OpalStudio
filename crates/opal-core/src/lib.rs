@@ -39,6 +39,7 @@ pub mod expr;
 pub mod geom;
 pub mod history;
 pub mod mask;
+pub mod matting;
 pub mod modify;
 pub mod outline;
 pub mod raster;

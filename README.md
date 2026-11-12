@@ -155,6 +155,10 @@ cargo test --workspace                     # all tests, interface tests included
   (Ctrl+Alt+A), or none; merge down, merge selected, merge visible, merge a group, stamp visible,
   flatten; rasterize; thumbnails. Layers have no edges: content past the canvas is kept and
   shown dimmed.
+- **Matting.** Set right the edges of something cut out of one background and put on
+  another: Defringe gives the outer pixels the colour of those further in, and Remove Black
+  Matte and Remove White Matte take back out of a soft edge the black or white it was
+  blended with.
 - **Long edits in the background.** Merging, flattening, rasterizing, rotating, flipping,
   resizing and straightening a large image are worked out in the background: the window
   stays usable, and the status bar shows how far the edit has got, with Cancel. That image

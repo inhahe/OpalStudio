@@ -546,6 +546,34 @@ Turn the selected layers' images into plain pixels.
 | `document` | document | The image, by id. Default: the active image. |
 | `layers` | layers | The layers, by id. Default: the selected layers. |
 
+### `defringe`
+
+Give the selected layers' edge pixels the colour of the pixels further in.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `layers` | layers | The layers, by id. Default: the selected layers. |
+| `width` | int | How close to transparency (in pixels, diagonals one) an edge pixel is to be given the colour of those further in. From 1 to 200. Default: 1. |
+
+### `remove_black_matte`
+
+Take black back out of the selected layers' partly transparent edge pixels.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `layers` | layers | The layers, by id. Default: the selected layers. |
+
+### `remove_white_matte`
+
+Take white back out of the selected layers' partly transparent edge pixels.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `layers` | layers | The layers, by id. Default: the selected layers. |
+
 ### `select_all`
 
 Select the whole canvas.
