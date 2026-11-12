@@ -613,10 +613,10 @@ class Editor:
         """Changes an image's metadata (see the metadata query) as one step of history, as File Info does, and answers with all of it as the metadata query does. Export writes it as its metadata setting says.
 
         document: The image, by id. Default: the active image.
-        changes: What to change, as the metadata query tells it: description (the fields given; those not given kept), exif ({ifd: {tag: value}}), iptc ({"record:number": text or texts}) and xmp ({key: value}); null removes what it names. The description is written to XMP, IPTC and EXIF alike, as File Info writes it; the rest as given.
+        changes: What to change, as the metadata query tells it: description (the fields given; those not given kept), exif ({ifd: {tag: value}}), iptc ({"record:number": text or texts}) and xmp ({key: value}); null removes what it names. The description is written to XMP, IPTC and EXIF alike, as File Info writes it; the rest as given, and where another part holds the same (an IPTC dataset XMP holds too, as the city or the date created; EXIF's ImageDescription, Artist and Copyright), changed there too, unless the changes change that as well.
         """
     def set_file_metadata(self, *, path: str | os.PathLike[str], changes: Any) -> Any:
-        """Rewrites a JPEG's or PNG's metadata in place, its image data untouched (not decoded, nor encoded again: no quality lost), and answers with all of it as file_metadata does. How a folder of photographs has its capture times shifted, or its captions filled in, without opening them.
+        """Rewrites a JPEG's or PNG's metadata in place, its image data untouched (not decoded, nor encoded again: no quality lost), and answers with all of it as file_metadata does. How a folder of photographs has its capture times shifted, or its captions filled in, without opening them. A part the file has that Opal Studio could not read (XMP no XML reader takes, say) is not written over: a change to it is refused, the file left as it is.
 
         path: The file, by its absolute path.
         changes: What to change, as set_metadata takes it.

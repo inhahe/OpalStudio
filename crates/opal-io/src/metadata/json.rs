@@ -4,7 +4,7 @@
 
 use super::exif::{Exif, Ifd, Value};
 use super::xmp::{self, ArrayKind, Name, Xmp};
-use super::{Description, capture, description, iptc, tags};
+use super::{Description, capture, description, iptc, sync, tags};
 use opal_core::document::Metadata;
 use serde_json::{Map, Value as Json, json};
 use std::sync::Arc;
@@ -20,8 +20,11 @@ pub fn to_json(meta: &Metadata) -> Json {
     let mut exif = Map::new();
     if let Some(e) = meta.exif.as_deref().and_then(Exif::read) {
         for ifd in Ifd::ALL {
-            let fields: Map<String, Json> =
-                e.tags(ifd).into_iter().map(|(tag, v)| (tags::name(ifd, tag), exif_json(&v))).collect();
+            let fields: Map<String, Json> = e
+                .tags(ifd)
+                .into_iter()
+                .map(|(tag, v)| (tags::name(ifd, tag), exif_json(ifd, tag, &v, e.big_endian())))
+                .collect();
             if !fields.is_empty() {
                 exif.insert(ifd.name().to_owned(), Json::Object(fields));
             }
@@ -66,11 +69,55 @@ pub fn description_json(d: &Description) -> Json {
     })
 }
 
-/// An EXIF value as JSON: text as a string; one number as a number, several as a list; a
-/// rational as its value (a fraction worked out); bytes (UNDEFINED, BYTE) as a list of numbers,
-/// or text if they are printable ASCII (a version, "0230").
-fn exif_json(v: &Value) -> Json {
+/// Whether tag `tag` of `ifd` holds text after an 8-byte code saying how it is written (EXIF
+/// 2.32, 4.6.5): the user's comment, and GPS's processing method and area.
+fn coded_text(ifd: Ifd, tag: u16) -> bool {
+    matches!((ifd, tag), (Ifd::Exif, 0x9286) | (Ifd::Gps, 0x001B | 0x001C))
+}
+
+/// Such a tag's text, as its code says it is written: ASCII; Unicode (UCS-2, in the
+/// structure's byte order, big-endian if `big`); or undefined (read as UTF-8). Its padding
+/// taken off. None for another code (JIS), or bytes that are not what it says.
+fn text_of_coded(b: &[u8], big: bool) -> Option<String> {
+    let (code, text) = (b.get(..8)?, &b[8..]);
+    let text = if code == b"ASCII\0\0\0" || code == [0; 8] {
+        std::str::from_utf8(text).ok()?.to_owned()
+    } else if code == b"UNICODE\0" {
+        let units: Vec<u16> = text
+            .chunks_exact(2)
+            .map(|p| if big { u16::from_be_bytes([p[0], p[1]]) } else { u16::from_le_bytes([p[0], p[1]]) })
+            .collect();
+        String::from_utf16(&units).ok()?
+    } else {
+        return None;
+    };
+    Some(text.trim_end_matches(['\0', ' ']).to_owned())
+}
+
+/// `text` as such a tag holds it (see [`text_of_coded`]): ASCII if it is, else Unicode.
+fn coded(text: &str, big: bool) -> Vec<u8> {
+    if text.is_ascii() {
+        return [&b"ASCII\0\0\0"[..], text.as_bytes()].concat();
+    }
+    let mut out = b"UNICODE\0".to_vec();
+    for u in text.encode_utf16() {
+        out.extend_from_slice(&if big { u.to_be_bytes() } else { u.to_le_bytes() });
+    }
+    out
+}
+
+/// An EXIF value (tag `tag` of `ifd`, in a structure that is big-endian if `big`) as JSON:
+/// text as a string (a coded text's too: see [`coded_text`]); one number as a number,
+/// several as a list; a rational as its value (a fraction worked out); bytes (UNDEFINED,
+/// BYTE) as a list of numbers, or text if they are printable ASCII (a version, "0230").
+fn exif_json(ifd: Ifd, tag: u16, v: &Value, big: bool) -> Json {
     if let Some(t) = v.text() {
+        return Json::from(t);
+    }
+    if let Value::Undefined(b) = v
+        && coded_text(ifd, tag)
+        && let Some(t) = text_of_coded(b, big)
+    {
         return Json::from(t);
     }
     match v {
@@ -116,9 +163,23 @@ fn xmp_name(key: &str) -> Option<Name> {
     };
     // Written as an element's name, it must be one XML takes, or the packet would not read.
     let mut chars = local.chars();
-    let first = chars.next()?;
-    let name = (first.is_alphabetic() || first == '_') && chars.all(|c| c.is_alphanumeric() || "-._".contains(c));
+    let name = chars.next().is_some_and(name_start) && chars.all(name_char);
     (name && !ns.is_empty()).then(|| Name::new(ns, local))
+}
+
+/// Whether `c` may begin an XML name (XML 1.0, fifth edition, but the colon, which a
+/// namespace's prefix ends with).
+fn name_start(c: char) -> bool {
+    matches!(c,
+        'A'..='Z' | '_' | 'a'..='z' | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}'
+        | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}' | '\u{200C}'..='\u{200D}' | '\u{2070}'..='\u{218F}'
+        | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}' | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}'
+        | '\u{10000}'..='\u{EFFFF}')
+}
+
+/// Whether `c` may be in an XML name after its first character (see [`name_start`]).
+fn name_char(c: char) -> bool {
+    name_start(c) || matches!(c, '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
 }
 
 /// An XMP value as JSON: text as a string; an alternative as {language: text}; another array
@@ -199,8 +260,14 @@ fn looks_like_language(k: &str) -> bool {
 /// reads: text as ASCII; a whole number as a SHORT (or a LONG past 65535); another number as
 /// a RATIONAL; a list of numbers likewise each. So what the metadata query gives comes back as
 /// it was: bytes (UNDEFINED, BYTE: a maker note, a version) given as a list of numbers, or as
-/// text, stay bytes.
-fn exif_value(ifd: Ifd, tag: u16, existing: Option<u16>, v: &Json) -> Result<Value, String> {
+/// text, stay bytes; a coded text given as text (see [`coded_text`]) is written with its code
+/// (in a structure that is big-endian if `big`).
+fn exif_value(ifd: Ifd, tag: u16, existing: Option<u16>, v: &Json, big: bool) -> Result<Value, String> {
+    if let Json::String(s) = v
+        && coded_text(ifd, tag)
+    {
+        return Ok(Value::Undefined(coded(s, big)));
+    }
     let numbers = |v: &Json| -> Result<Vec<f64>, String> {
         match v {
             Json::Number(n) => Ok(vec![n.as_f64().unwrap_or(0.0)]),
@@ -284,14 +351,24 @@ fn tag_type(ifd: Ifd, tag: u16) -> Option<u16> {
 /// as `to_json` gives them; those not given kept), `exif` ({ifd: {tag: value or null}}),
 /// `iptc` ({"record:number": text, list of texts, or null}), `xmp` ({key: value or null}),
 /// null removing what it names.
-pub fn changed(meta: &Metadata, changes: &Json) -> Result<Metadata, String> {
+pub fn changed(original: &Metadata, changes: &Json) -> Result<Metadata, String> {
     let changes = changes.as_object().ok_or("the changes must be an object")?;
     for key in changes.keys() {
         if !["description", "exif", "iptc", "xmp"].contains(&key.as_str()) {
             return Err(format!("{key} is not one of description, exif, iptc and xmp"));
         }
     }
-    let mut meta = meta.clone();
+    // An IIM a program unaware of XMP changed since the XMP was written is carried to the XMP
+    // first, so that what this changes is changed in an IIM and XMP that agree (see `sync`):
+    // unless all it changes is EXIF that neither holds, which leaves them as they are.
+    let described = changes
+        .get("exif")
+        .and_then(|e| e.get("image"))
+        .and_then(Json::as_object)
+        .is_some_and(|tags| tags.keys().any(|k| ["ImageDescription", "Artist", "Copyright"].contains(&k.as_str())));
+    let carries = described || ["description", "iptc", "xmp"].iter().any(|k| changes.contains_key(*k));
+    let mut meta = if carries { sync::reconciled(original) } else { original.clone() };
+    let mut set = sync::Set::default();
     if let Some(d) = changes.get("description") {
         let mut desc = description(&meta);
         set_description(&mut desc, d)?;
@@ -300,6 +377,7 @@ pub fn changed(meta: &Metadata, changes: &Json) -> Result<Metadata, String> {
     if let Some(e) = changes.get("exif") {
         let ifds = e.as_object().ok_or("exif must be an object of IFDs")?;
         let mut exif = meta.exif.as_deref().and_then(Exif::read).unwrap_or_default();
+        let big = exif.big_endian();
         for (ifd_name, fields) in ifds {
             let ifd = Ifd::ALL
                 .into_iter()
@@ -315,7 +393,10 @@ pub fn changed(meta: &Metadata, changes: &Json) -> Result<Metadata, String> {
                     exif.remove(ifd, tag);
                 } else {
                     let existing = exif.kind_of(ifd, tag);
-                    exif.set(ifd, tag, &exif_value(ifd, tag, existing, v)?);
+                    exif.set(ifd, tag, &exif_value(ifd, tag, existing, v, big)?);
+                }
+                if ifd == Ifd::Image {
+                    set.exif.push(tag);
                 }
             }
         }
@@ -340,12 +421,11 @@ pub fn changed(meta: &Metadata, changes: &Json) -> Result<Metadata, String> {
                 _ => return Err(format!("iptc's {key} takes text, a list of texts, or null")),
             };
             iim.set_texts(r, n, &texts);
+            if r == 2 {
+                set.iim.push(n);
+            }
         }
         meta.iptc = (!iim.is_empty()).then(|| Arc::from(iim.bytes()));
-        // Changed alone, the IIM is the newer: what describes the image is carried to XMP and
-        // EXIF, so that the digest written with it, which says they agree, is true.
-        meta.iptc_changed = true;
-        meta = super::with_description(&meta, &description(&meta));
     }
     if let Some(x) = changes.get("xmp") {
         let props = x.as_object().ok_or("xmp must be an object of properties")?;
@@ -353,6 +433,7 @@ pub fn changed(meta: &Metadata, changes: &Json) -> Result<Metadata, String> {
         for (key, v) in props {
             let name =
                 xmp_name(key).ok_or_else(|| format!("{key} is no XMP name (prefix:name, or {{namespace}}name)"))?;
+            set.xmp.push(name.clone());
             if v.is_null() {
                 packet.remove(&name.ns, &name.local);
             } else {
@@ -362,7 +443,27 @@ pub fn changed(meta: &Metadata, changes: &Json) -> Result<Metadata, String> {
         }
         meta.xmp = (!packet.properties.is_empty()).then(|| Arc::from(packet.packet().into_bytes()));
     }
-    Ok(meta)
+    // Each change carried to what holds the same elsewhere.
+    Ok(as_it_was_where_unchanged(original, sync::carried(&meta, &set)))
+}
+
+/// `new` with each part that holds what `old`'s does given back `old`'s bytes (written anew,
+/// XMP differs from a file's in its form; EXIF in where its values lie), so that a part a
+/// change did not change is not taken, or written, as changed.
+fn as_it_was_where_unchanged(old: &Metadata, mut new: Metadata) -> Metadata {
+    let exif = |m: &Metadata| m.exif.as_deref().and_then(Exif::read).map(|e| Ifd::ALL.map(|ifd| e.tags(ifd)));
+    if new.exif.is_some() == old.exif.is_some() && exif(&new) == exif(old) {
+        new.exif.clone_from(&old.exif);
+    }
+    let xmp = |m: &Metadata| m.xmp.as_deref().and_then(Xmp::read).map(|x| x.properties);
+    if new.xmp.is_some() == old.xmp.is_some() && xmp(&new) == xmp(old) {
+        new.xmp.clone_from(&old.xmp);
+    }
+    let iim = |m: &Metadata| m.iptc.as_deref().and_then(iptc::Iim::read);
+    if new.iptc.is_some() == old.iptc.is_some() && iim(&new) == iim(old) {
+        new.iptc.clone_from(&old.iptc);
+    }
+    new
 }
 
 /// Changes `d` as `given` (an object of [`description_json`]'s fields) says.
@@ -476,7 +577,8 @@ mod tests {
             Exif::read(again.exif.as_deref().unwrap()).unwrap().get(Ifd::Exif, 0xC000),
             Some(Value::Undefined(vec![7, 8, 9]))
         );
-        for bad in ["dc:my title", "dc:1st", "{}x", "dc:"] {
+        assert!(changed(&meta, &json!({ "xmp": { "dc:café": "x" } })).is_ok(), "a letter XML takes refused");
+        for bad in ["dc:my title", "dc:1st", "{}x", "dc:", "dc:x²", "dc:ªb", "dc:½"] {
             assert!(changed(&meta, &json!({ "xmp": { bad: "x" } })).is_err(), "{bad} taken");
         }
         // An IIM title set alone reaches XMP, which a reader takes first.
@@ -485,5 +587,122 @@ mod tests {
         let x = Xmp::read(retitled.xmp.as_deref().unwrap()).unwrap();
         assert_eq!(x.text(xmp::DC, "title").as_deref(), Some("Quay"));
         assert_eq!(to_json(&retitled)["description"]["title"], "Quay");
+    }
+
+    #[test]
+    fn a_change_to_what_another_holds_too_is_carried_there_unless_it_was_changed_too() {
+        // A photograph as a program keeping them in step left it: the title, caption and city
+        // in both IIM and XMP, the caption in EXIF too.
+        let start = changed(
+            &Metadata::default(),
+            &json!({
+                "exif": { "image": { "ImageDescription": "Boats" } },
+                "iptc": { "2:5": "Harbour", "2:120": "Boats", "2:90": "Paris" },
+            }),
+        )
+        .unwrap();
+        let all = to_json(&start);
+        assert_eq!(all["xmp"]["dc:title"], json!({ "x-default": "Harbour" }));
+        assert_eq!(all["xmp"]["dc:description"], json!({ "x-default": "Boats" }));
+        assert_eq!(all["xmp"]["photoshop:City"], "Paris");
+        // A dataset removed is removed from XMP too, not brought back from it.
+        let untitled = changed(&start, &json!({ "iptc": { "2:5": null } })).unwrap();
+        let all = to_json(&untitled);
+        assert!(all["xmp"].get("dc:title").is_none(), "{all}");
+        assert_eq!(all["description"]["title"], "");
+        // Any dataset XMP holds is carried, not only the description's.
+        let moved = changed(&start, &json!({ "iptc": { "2:90": "Lyon" } })).unwrap();
+        assert_eq!(to_json(&moved)["xmp"]["photoshop:City"], "Lyon");
+        // EXIF's caption changed beside a keyword: kept, and carried to the IIM and XMP.
+        let both = changed(
+            &start,
+            &json!({ "exif": { "image": { "ImageDescription": "New caption" } }, "iptc": { "2:25": ["boat"] } }),
+        )
+        .unwrap();
+        let all = to_json(&both);
+        assert_eq!(all["exif"]["image"]["ImageDescription"], "New caption");
+        assert_eq!(all["iptc"]["2:120"], json!(["New caption"]));
+        assert_eq!(all["description"]["caption"], "New caption");
+        assert_eq!(all["xmp"]["dc:subject"], json!(["boat"]));
+        // EXIF's and IIM's captions changed at once: each keeps its own.
+        let captions = changed(
+            &start,
+            &json!({ "exif": { "image": { "ImageDescription": "Mine" } }, "iptc": { "2:120": "Theirs" } }),
+        )
+        .unwrap();
+        let all = to_json(&captions);
+        assert_eq!(all["exif"]["image"]["ImageDescription"], "Mine");
+        assert_eq!(all["iptc"]["2:120"], json!(["Theirs"]));
+        // Both changed at once: each keeps what it was given (and readers take XMP's).
+        let apart = changed(&start, &json!({ "iptc": { "2:5": "Quay" }, "xmp": { "dc:title": "Pier" } })).unwrap();
+        let all = to_json(&apart);
+        assert_eq!(all["iptc"]["2:5"], json!(["Quay"]));
+        assert_eq!(all["description"]["title"], "Pier");
+        // The date and time created, one property in XMP.
+        let dated = changed(&start, &json!({ "iptc": { "2:55": "20240131", "2:60": "134501+0100" } })).unwrap();
+        assert_eq!(to_json(&dated)["xmp"]["photoshop:DateCreated"], "2024-01-31T13:45:01+01:00");
+        let redated = changed(&dated, &json!({ "xmp": { "photoshop:DateCreated": "2023-07-04T09:30Z" } })).unwrap();
+        let all = to_json(&redated);
+        assert_eq!(all["iptc"]["2:55"], json!(["20230704"]));
+        assert_eq!(all["iptc"]["2:60"], json!(["093000+0000"]));
+    }
+
+    #[test]
+    fn xmp_changed_where_a_program_unaware_of_it_changed_the_iim_since_keeps_what_the_iim_says() {
+        let start = changed(&Metadata::default(), &json!({ "iptc": { "2:5": "Old", "2:90": "Paris" } })).unwrap();
+        // Then a program unaware of XMP changed the IIM's city (its digest no longer agrees).
+        let mut iim = iptc::Iim::read(start.iptc.as_deref().unwrap()).unwrap();
+        iim.set_texts(2, 90, &["Rome".into()]);
+        let stale = Metadata { iptc: Some(Arc::from(iim.bytes())), iptc_changed: true, ..start };
+        let retitled = changed(&stale, &json!({ "xmp": { "dc:title": "New" } })).unwrap();
+        assert!(!retitled.iptc_changed, "the IIM and XMP do not agree");
+        let all = to_json(&retitled);
+        assert_eq!(all["description"]["title"], "New");
+        assert_eq!(all["iptc"]["2:5"], json!(["New"]));
+        assert_eq!(all["xmp"]["photoshop:City"], "Rome", "the IIM's newer city lost");
+        // An export of it, likewise: the IIM's city, which a reader would have taken.
+        let out = crate::metadata::Exported {
+            width: 1,
+            height: 1,
+            ppi: 72.0,
+            exif_now: "2024:01:01 00:00:00".into(),
+            exif_zone: "+00:00".into(),
+            xmp_now: "2024-01-01T00:00:00Z".into(),
+            software: "Opal Studio".into(),
+        };
+        let prepared = crate::metadata::for_export(&stale, crate::metadata::Keep::All, &out);
+        assert_eq!(prepared.xmp.unwrap().text(xmp::PHOTOSHOP, "City").as_deref(), Some("Rome"));
+    }
+
+    #[test]
+    fn a_comment_is_written_with_its_character_code_and_read_without_it() {
+        for (text, code, rest) in [
+            ("Shot at dawn", &b"ASCII\0\0\0"[..], b"Shot at dawn".to_vec()),
+            ("Café", b"UNICODE\0", b"C\0a\0f\0\xe9\0".to_vec()),
+        ] {
+            let meta = changed(
+                &Metadata::default(),
+                &json!({ "exif": { "exif": { "UserComment": text }, "gps": { "GPSProcessingMethod": text } } }),
+            )
+            .unwrap();
+            let e = Exif::read(meta.exif.as_deref().unwrap()).unwrap();
+            for (ifd, tag) in [(Ifd::Exif, 0x9286), (Ifd::Gps, 0x001B)] {
+                assert_eq!(e.get(ifd, tag), Some(Value::Undefined([code, &rest[..]].concat())), "{text}");
+            }
+            let all = to_json(&meta);
+            assert_eq!(all["exif"]["exif"]["UserComment"], text);
+            assert_eq!(all["exif"]["gps"]["GPSProcessingMethod"], text);
+        }
+    }
+
+    #[test]
+    fn a_change_that_changes_nothing_leaves_the_bytes_as_they_were() {
+        // XMP as another program writes it: no wrapper, no padding.
+        let packet = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title><rdf:Alt><rdf:li xml:lang="x-default">Harbour</rdf:li></rdf:Alt></dc:title></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+        let meta = Metadata { xmp: Some(Arc::from(packet.as_bytes())), ..Metadata::default() };
+        for same in [json!({ "description": { "title": "Harbour" } }), json!({ "xmp": { "dc:title": "Harbour" } })] {
+            assert!(changed(&meta, &same).unwrap() == meta, "{same} changed it");
+        }
+        assert!(changed(&meta, &json!({ "description": { "title": "Quay" } })).unwrap() != meta);
     }
 }

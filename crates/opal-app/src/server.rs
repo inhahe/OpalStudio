@@ -1394,20 +1394,40 @@ mod tests {
         doc.insert(opal_core::document::Position { parent: None, index: 0 }, layer).unwrap();
         opal_io::image_files::export(&doc, &png, &opal_io::image_files::ExportFormat::Png { sixteen_bit: false }, None)
             .unwrap();
-        assert!(hand_to_running(&file, std::slice::from_ref(&png)));
+        // Before it, one that cannot be opened and one whose pixels are not square: the user
+        // is told of both, and the rest open though the first could not.
+        let missing = std::env::temp_dir().join(format!("opal-api-hand-missing-{}.png", std::process::id()));
+        let tall = std::env::temp_dir().join(format!("opal-api-hand-tall-{}.jpg", std::process::id()));
+        {
+            use image::codecs::jpeg::{JpegEncoder, PixelDensity, PixelDensityUnit};
+            let mut jpeg = Vec::new();
+            let mut encoder = JpegEncoder::new_with_quality(&mut jpeg, 90);
+            encoder.set_pixel_density(PixelDensity { density: (100, 200), unit: PixelDensityUnit::Inches });
+            image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8)).write_with_encoder(encoder).unwrap();
+            std::fs::write(&tall, jpeg).unwrap();
+        }
+        assert!(hand_to_running(&file, &[missing, tall.clone(), png.clone()]));
         let mut st = AppState::new();
         let ctx = egui::Context::default();
+        let mut messages = Vec::new();
         for _ in 0..500 {
             server.serve(&mut st, &ctx, false);
             // As the window's frames do: the file is read in the background (`opening`).
             st.poll_files(false);
-            if !st.docs.is_empty() {
+            // The user reads what is told and closes it, which what is opened waits for.
+            messages.extend(st.messages.drain(..));
+            if st.docs.len() == 2 {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert_eq!(st.docs.len(), 1, "not opened");
+        assert_eq!(st.docs.len(), 2, "not opened");
+        let told =
+            |kind, says: &str| messages.iter().any(|m: &crate::state::Message| m.kind == kind && m.body.contains(says));
+        assert!(told(crate::state::MessageKind::Error, "opal-api-hand-missing"), "{messages:?}");
+        assert!(told(crate::state::MessageKind::Warning, "not square"), "{messages:?}");
         std::fs::remove_file(&png).ok();
+        std::fs::remove_file(&tall).ok();
         drop(server);
         assert!(!hand_to_running(&file, &[png]), "handed to an editor that is gone");
     }

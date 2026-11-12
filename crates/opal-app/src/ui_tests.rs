@@ -1931,9 +1931,7 @@ fn a_late_paste_waits_for_a_crop_box_changed_meanwhile() {
         rx: std::sync::mpsc::channel().1,
         result: Some(Ok(Some(pasted(20, 10, [1.0; 4])))),
         in_place: false,
-        target: st.active_doc,
-        box_then: None,
-        crop_then: st.active().unwrap().crop,
+        target: st.target_now(st.active_doc),
         notice: String::new(),
         answer: None,
     };
@@ -2012,14 +2010,11 @@ fn letting_go_of_the_box_draws_exactly_at_once() {
 /// A paste for document `target` whose reading has come back with `result`, asked for
 /// when `target`'s box (if any) and crop box were as they are now.
 fn read_back(st: &crate::state::AppState, result: crate::clipboard::ReadResult) -> crate::state::Reading {
-    let d = st.active();
     crate::state::Reading {
         rx: std::sync::mpsc::channel().1,
         result: Some(result),
         in_place: false,
-        target: st.active_doc,
-        box_then: d.and_then(|d| d.transform.as_ref()).map(|s| s.serial),
-        crop_then: d.and_then(|d| d.crop),
+        target: st.target_now(st.active_doc),
         notice: String::new(),
         answer: None,
     }
@@ -2694,9 +2689,7 @@ fn escape_cancels_a_paste_being_read_unless_a_box_takes_it() {
         rx,
         result: None,
         in_place: false,
-        target: st.active_doc,
-        box_then: None,
-        crop_then: None,
+        target: st.target_now(st.active_doc),
         notice: String::new(),
         answer: None,
     };
@@ -4078,9 +4071,7 @@ fn esc_gives_up_any_drag_and_keys_wait_for_one_outliving_its_button() {
         rx: std::sync::mpsc::channel().1,
         result: None,
         in_place: false,
-        target: st.active_doc,
-        box_then: None,
-        crop_then: None,
+        target: st.target_now(st.active_doc),
         notice: String::new(),
         answer: None,
     });

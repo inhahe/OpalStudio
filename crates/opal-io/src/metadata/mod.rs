@@ -9,6 +9,7 @@ pub mod exif;
 pub mod file;
 pub mod iptc;
 pub mod json;
+mod sync;
 pub mod tags;
 pub mod xmp;
 
@@ -215,14 +216,9 @@ pub fn for_export(meta: &Metadata, keep: Keep, out: &Exported) -> Prepared {
     }
     // An IIM a program unaware of XMP changed since the XMP was written is the newer: XMP (and
     // EXIF) are made to say what it says, as the guidelines would have it, before the IIM's
-    // digest is worked out again on writing (which says they agree).
-    let synced;
-    let meta = if meta.iptc_changed {
-        synced = with_description(meta, &description(meta));
-        &synced
-    } else {
-        meta
-    };
+    // digest is worked out again on writing (which says they agree: see `sync`).
+    let synced = sync::reconciled(meta);
+    let meta = &synced;
     let mut prepared = Prepared::default();
     // EXIF.
     let exif = meta.exif.as_deref().and_then(Exif::read);

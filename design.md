@@ -1356,12 +1356,19 @@ the selection itself (see *Transform Selection*).
   files on a worker thread, so the window keeps answering while a large one is read; the
   status bar says what is being read and that Esc gives it up. What was read is used as a
   paste is (`read_then`, `poll_files`): in the order asked for, into the image that was
-  active then (dropped, and said, if it was closed meanwhile), once nothing the user is in
-  the middle of would be ended by it (a dialog, a drag, an edit under way on that image, a
-  box opened there since); meanwhile the status bar says what it waits for. A script's call
-  is answered once it has been used (a notification's failure, which no one hears, goes to
-  the user). Files named on the command line are read before the window opens, there being
-  nothing to keep answering yet.
+  active then (dropped, and said, if it was closed meanwhile; Open as Layers asked for with
+  none open makes a new one, whatever is active by then), once nothing the user is in the
+  middle of would be ended by it (`AppState::waits_for`, which a paste waits by too: a
+  dialog, a drag, an edit under way on that image, a box opened there since); meanwhile the
+  status bar says what it waits for. What was read is used between frames, never inside
+  whatever asks for another file (a script's call would take what it tells the user as its
+  own). A script's call is answered once it has been used; refused then, it puts the user's
+  view back as a call refused at once does. A notification's failure, which no one hears,
+  goes to the user, as what opening a file has to say does, and its connection is answered
+  still (it reads its next request only then). A file asked for again while it is read
+  opens once. A reader that fails unexpectedly (a decoder's panic) says so of its file; the
+  others are read still. Files named on the command line are read before the window opens,
+  there being nothing to keep answering yet.
 - **One history state:** the whole session in the box, from paste to commit, is one entry
   ("Paste" or "Transform"). Cancel leaves the document as it was.
 - **The clipboard:** PNG first (keeping 16-bit color and transparency), then the other
@@ -1485,7 +1492,8 @@ export leave out what gives away more than the user means to.
   XMP's `xmp:Thumbnails`) are dropped, as they show the image as it was, cropped-away parts
   included. Of Photoshop's APP13 block only the IIM goes out, with its digest worked out
   again; an IIM whose digest said it was newer than the XMP is first carried to the XMP (and
-  EXIF), as the guidelines would have it, so that the new digest's saying they agree is true.
+  EXIF), as the guidelines would have it, so that the new digest's saying they agree is true
+  (`metadata::sync::reconciled`: every dataset XMP holds too, where the IIM has it).
   XMP too large for a JPEG's segment is split into Extended XMP, its largest
   properties moved, as XMP's part 3 says.
 - **Export chooses what goes out** (the `export.metadata` preference, shown in the Export
@@ -1537,9 +1545,30 @@ export leave out what gives away more than the user means to.
   in a JPEG, Photoshop's other resources stay too (a clipping path, say). Replaced
   atomically. Reading a file's metadata reads only what comes before and between its image
   data. A tag set keeps the type it has (or EXIF gives it), so what the query gave goes
-  back as it was; an IIM changed alone is carried to XMP, as File Info would; a key that is
-  no XML name is refused. That is how a folder of photographs has its capture times shifted, or is
+  back as it was; a comment (EXIF's UserComment, GPS's processing method and area) is
+  read and given as text, written with its character code (ASCII, or Unicode in the
+  structure's byte order); a key that is no XML name (XML 1.0's characters) is refused.
+  A part a change leaves as it was keeps its bytes, so it is neither a history state nor
+  written. That is how a folder of photographs has its capture times shifted, or is
   renamed by them.
+- **What more than one part holds is kept in step** (`metadata::sync`): IIM's datasets that
+  XMP holds too (IPTC Core's mapping: title, caption, its writer, headline, keywords,
+  creators and their title, credit, source, copyright, instructions, job id, the place's
+  city, sublocation, state, country and its code, urgency, categories, the date and time
+  created as one property, genre and subject codes taken from IIM's "source:number:name"),
+  and EXIF's ImageDescription, Artist and Copyright. A script's change to one is carried to
+  the others (a removal too), unless it changed them as well (then each keeps what it was
+  given: XMP's, then IIM's, read first); EXIF is given only tags it has, an IIM is not made
+  where there is none, and genre and subject codes are not carried back to IIM, its numbers
+  and names not being known there. An IIM a program unaware of XMP changed is carried to the
+  XMP first. So the digest written with the IIM, which says the two agree, is true.
+- **Rewriting a file** keeps its parts in their places: written alone, XMP and IIM go after
+  the EXIF kept, which readers look for right after SOI (JFIF aside); in a PNG, an IIM among
+  ImageMagick's "Raw profile type 8bim" (Photoshop's resources) is taken out of them when the
+  IIM is written (in its own chunk) or removed, the other resources kept. A change to a part
+  the file has but Opal Studio could not read (XMP no XML reader takes, say) is refused
+  rather than written over it, as is XMP made that would not read back. A JPEG's fill bytes
+  before a marker are skipped in reading only its head, as in reading it all.
 
 ## Thumbnails
 

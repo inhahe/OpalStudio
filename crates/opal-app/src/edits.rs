@@ -229,7 +229,11 @@ impl AppState {
         };
         match (b.answer, result) {
             // A notification, which nobody hears the answer to: what it says goes to the user.
-            (Some(a), Err(why)) if !a.call.heard => self.message(kind, a.call.name, why),
+            // Answered still: its connection waits for that before it reads its next request.
+            (Some(a), Err(why)) if !a.call.heard => {
+                self.message(kind, a.call.name, why.clone());
+                self.answered.push((a.n, Err(why)));
+            }
             (Some(a), Ok(())) => {
                 let value = (a.with)(self, id);
                 let (refusals, notes) = self.told_since(told, notice);
@@ -532,5 +536,24 @@ mod tests {
         st.finish_edits();
         assert!(st.messages.back().is_some_and(|m| m.body.contains("broken")));
         assert_eq!(st.active().unwrap().history.nodes().count(), states);
+    }
+
+    #[test]
+    fn a_notification_s_edit_that_fails_is_told_to_the_user_and_its_connection_answered() {
+        let mut st = app();
+        st.edit_wait = Duration::ZERO;
+        let doc = st.active_doc.unwrap();
+        let memory = crate::memory::Allowance::now();
+        st.edit_later(doc, "Refuse", memory, |_, _, _| Err::<u32, String>("Not this time".into()), |_, _, _| {});
+        let call = crate::api::Calling { name: "refuse".into(), heard: false, view: None };
+        let answer = Answer { n: 9, call, with: Box::new(|_, _| serde_json::json!({})) };
+        st.doc_mut(doc).unwrap().busy.as_mut().unwrap().answer = Some(answer);
+        st.finish_edits();
+        assert!(st.messages.iter().any(|m| m.body.contains("Not this time")), "not told");
+        assert!(
+            matches!(st.answered.last(), Some((9, Err(why))) if why.contains("Not this time")),
+            "{:?}",
+            st.answered
+        );
     }
 }

@@ -583,7 +583,7 @@ impl DocState {
     ) {
         let PasteAs { kind, name, print } = how;
         debug_assert!(kind != Kind::Transform, "a paste is placed, not transformed");
-        // A paste waits for the edit under way (`AppState::paste_waits`).
+        // A paste waits for the edit under way (`AppState::waits_for`).
         if self.refused() {
             return;
         }

@@ -38,21 +38,36 @@ pub fn read_file(path: &Path) -> Result<ReadFile, String> {
 
 /// Reads each of `paths` (see [`read_file`]).
 pub fn read_files(paths: &[PathBuf]) -> Read {
-    paths.iter().map(|p| (p.clone(), read_file(p))).collect()
+    read_files_with(paths, read_file)
+}
+
+/// Reads each of `paths` with `read`: one whose reading fails unexpectedly (a decoder's bug
+/// that panics) said to have, the others read still.
+fn read_files_with(paths: &[PathBuf], read: impl Fn(&Path) -> Result<ReadFile, String>) -> Read {
+    paths
+        .iter()
+        .map(|p| {
+            let file = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read(p))).unwrap_or_else(|panic| {
+                Err(format!(
+                    "Reading {} went wrong: {}.",
+                    crate::state::file_title(p),
+                    crate::background::panic_message(&*panic)
+                ))
+            });
+            (p.clone(), file)
+        })
+        .collect()
 }
 
 /// Files being read on a worker thread, and what is then done with them.
 pub struct FileReading {
     rx: mpsc::Receiver<Read>,
+    /// The files being read.
+    paths: Vec<PathBuf>,
     /// What reading gave, once it has come back, while what it is for waits.
     result: Option<Read>,
-    /// The image what was read goes into, if any: the one active when it was asked for.
-    target: Option<DocId>,
-    /// The transform box `target` had open then (its session's serial), and its crop box: a
-    /// box opened (or crop box changed) since is the user's newer work, which this waits for
-    /// rather than ending it.
-    box_then: Option<u64>,
-    crop_then: Option<crate::edit_box::EditBox>,
+    /// The image what was read goes into, if any, as it was when this was asked for.
+    target: crate::state::Target,
     /// What it is called in the status bar ("photo.jpg", "3 files").
     what: String,
     /// The status bar's notice it put up, taken down when it is done.
@@ -84,22 +99,21 @@ impl AppState {
             many => format!("{} files", many.len()),
         };
         let (tx, rx) = mpsc::channel();
-        let ctx = ctx.clone();
+        let waker = ctx.clone();
+        let reading = paths.clone();
         std::thread::Builder::new()
             .name("reading files".into())
             .spawn(move || {
                 // Given up meanwhile (Esc), the receiver is gone, and what was read dropped.
-                let _ = tx.send(read_files(&paths));
-                ctx.request_repaint();
+                let _ = tx.send(read_files(&reading));
+                waker.request_repaint();
             })
             .expect("starting a thread to read files");
-        let d = target.and_then(|t| self.doc(t));
         let reading = FileReading {
             rx,
+            paths,
             result: None,
-            target,
-            box_then: d.and_then(|d| d.transform.as_ref()).map(|s| s.serial),
-            crop_then: d.and_then(|d| d.crop),
+            target: self.target_now(target),
             notice: String::new(),
             what,
             then,
@@ -107,7 +121,10 @@ impl AppState {
             call: self.calling.clone(),
         };
         self.file_readings.push(reading);
-        self.poll_files(false);
+        // Its notice put up by the next frame: what was read already is used between frames,
+        // not inside whatever asked for this (a script's call, which would take what that
+        // tells the user as its own).
+        ctx.request_repaint();
     }
 
     /// Does what each file read was read for (see [`read_then`](Self::read_then)), in the
@@ -125,42 +142,61 @@ impl AppState {
                         let text = format!("Reading {}…{esc}", r.what);
                         return self.file_notice(text);
                     }
-                    Err(mpsc::TryRecvError::Disconnected) => r.result = Some(Vec::new()),
+                    // (Its thread always sends before it ends; were it not to, each file is
+                    // said to have failed rather than to have been read as nothing.)
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        let failed = |p: &PathBuf| Err(format!("Reading {} stopped.", crate::state::file_title(p)));
+                        r.result = Some(r.paths.iter().map(|p| (p.clone(), failed(p))).collect());
+                    }
                 }
             }
             if pointer_held {
                 return;
             }
-            if let Some(until) = self.file_waits() {
+            if let Some(until) = self.file_readings.first().and_then(|r| self.waits_for(&r.target)) {
                 let r = self.file_readings.first().expect("there");
                 let text = format!("{} will be used when {until}.", r.what);
                 return self.file_notice(text);
             }
             let r = self.file_readings.remove(0);
             self.take_down(&r.notice);
-            let gone = r.target.is_some_and(|t| self.doc(t).is_none());
+            let target = r.target.id;
+            let gone = target.is_some_and(|t| self.doc(t).is_none());
             let result = if gone {
                 Err(format!("The image was closed before {} was read.", r.what))
             } else {
                 // A history state it makes joins the call's.
                 let groups = r.answer.as_ref().map(|(_, g)| g.clone());
-                let before = match (r.target.and_then(|t| self.doc_mut(t)), groups) {
+                let before = match (target.and_then(|t| self.doc_mut(t)), groups) {
                     (Some(d), Some(g)) => Some(std::mem::replace(&mut d.groups, g)),
                     _ => None,
                 };
                 let result = (r.then)(self, r.result.unwrap_or_default());
-                if let (Some(before), Some(d)) = (before, r.target.and_then(|t| self.doc_mut(t))) {
+                if let (Some(before), Some(d)) = (before, target.and_then(|t| self.doc_mut(t))) {
                     d.groups = before;
                 }
                 result
             };
             match (r.answer, result) {
                 // A notification, which nobody hears the answer to: what it says goes to the user.
-                (Some(_), Err(why)) if r.call.as_ref().is_some_and(|c| !c.heard) => {
+                // Answered still: its connection waits for that before it reads its next request.
+                (Some((n, _)), Err(why)) if r.call.as_ref().is_some_and(|c| !c.heard) => {
                     let name = r.call.map(|c| c.name).unwrap_or_default();
-                    self.message(crate::state::MessageKind::Error, name, why);
+                    self.message(crate::state::MessageKind::Error, name, why.clone());
+                    self.answered.push((n, Err(why)));
                 }
-                (Some((n, _)), result) => self.answered.push((n, result)),
+                (Some((n, _)), result) => {
+                    // Refused once read, as one refused at once, the call puts the user's view
+                    // back (it made the image it names the active one), unless the user has
+                    // moved on.
+                    if result.is_err()
+                        && let Some(view) =
+                            r.call.and_then(|c| c.view).filter(|_| target.is_some() && self.active_doc == target)
+                    {
+                        self.restore_view(view);
+                    }
+                    self.answered.push((n, result));
+                }
                 // Said, if it went wrong: what was read for has said whatever else needs saying.
                 (None, Err(why)) => self.message(crate::state::MessageKind::Error, "Could not open", why),
                 (None, Ok(_)) => {}
@@ -175,24 +211,6 @@ impl AppState {
             let old = std::mem::replace(&mut r.notice, text.clone());
             self.take_down(&old);
             self.notify(text);
-        }
-    }
-
-    /// What the first file reading, read, waits for, if it must wait.
-    fn file_waits(&self) -> Option<&'static str> {
-        let r = self.file_readings.first()?;
-        if self.dialog_open() {
-            return Some("the dialog closes");
-        }
-        let d = r.target.and_then(|t| self.doc(t))?;
-        if d.busy.is_some() {
-            Some("the edit under way on the image finishes")
-        } else if d.transform.as_ref().is_some_and(|s| Some(s.serial) != r.box_then) {
-            Some("the transform box closes")
-        } else if d.crop.is_some() && d.crop != r.crop_then {
-            Some("you crop or leave the Crop tool")
-        } else {
-            None
         }
     }
 
@@ -318,5 +336,110 @@ mod tests {
         let said = st.messages.back().map(|m| m.body.clone()).unwrap_or_default();
         assert!(said.contains("closed before"), "{said}");
         std::fs::remove_file(&path).ok();
+    }
+
+    /// An Opal Studio file of its own (one whose image keeps its path), called `name`.
+    fn opal_file(name: &str) -> PathBuf {
+        use opal_core::document::{Document, IdGen, Layer, Position};
+        let path = std::env::temp_dir().join(format!("opal-opening-{}-{name}", std::process::id()));
+        let (mut doc, mut ids) = (Document::new(8, 8), IdGen::default());
+        let layer = Layer::new_raster(ids.layer(), ids.object(), "l", Default::default());
+        doc.insert(Position { parent: None, index: 0 }, layer).unwrap();
+        opal_io::native::save(&doc, &ids, &path, &Default::default()).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_file_opened_again_while_it_is_read_opens_once() {
+        let mut st = AppState::new();
+        let ctx = egui::Context::default();
+        let path = opal_file("twice.opal");
+        // Both wait for the dialog: neither is opened before the other is asked for.
+        st.rotate_by = Some(crate::image_ops::RotateBy { degrees: 30.0, grow: true });
+        st.open_later(vec![path.clone()], None, &ctx);
+        st.open_later(vec![path.clone()], None, &ctx);
+        read(&mut st);
+        st.rotate_by = None;
+        st.poll_files(false);
+        std::fs::remove_file(&path).ok();
+        assert_eq!(st.docs.len(), 1, "opened twice");
+        assert_eq!(st.active_doc, Some(st.docs[0].id));
+    }
+
+    #[test]
+    fn layers_opened_with_no_image_open_go_into_a_new_one_whatever_is_active_then() {
+        let mut st = AppState::new();
+        let ctx = egui::Context::default();
+        let path = png("layers-new.png");
+        st.open_as_layers_later(vec![path.clone()], None, &ctx);
+        // An image made meanwhile: the user's work, which the layers stay out of.
+        st.create_image(&NewImage { width: 40, height: 30, background: Background::White, resolution: 72.0 });
+        let made = st.active_doc.unwrap();
+        read(&mut st);
+        st.poll_files(false);
+        std::fs::remove_file(&path).ok();
+        assert_eq!(st.doc(made).unwrap().doc().layers.len(), 1, "put into the image made meanwhile");
+        assert_eq!(st.docs.len(), 2, "not opened in a new image");
+        let new = st.docs.iter().find(|d| d.id != made).unwrap();
+        assert_eq!((new.doc().canvas.width, new.doc().layers.len()), (6, 1));
+    }
+
+    #[test]
+    fn files_being_read_are_work_under_way() {
+        let mut st = image();
+        let ctx = egui::Context::default();
+        let path = png("work.png");
+        assert!(!st.work_under_way());
+        // Held by a dialog, so that it is still being read when asked.
+        st.rotate_by = Some(crate::image_ops::RotateBy { degrees: 30.0, grow: true });
+        st.open_later(vec![path.clone()], Some((7, Vec::new())), &ctx);
+        assert!(st.work_under_way(), "a file being read is not work under way");
+        st.rotate_by = None;
+        read(&mut st);
+        st.poll_files(false);
+        std::fs::remove_file(&path).ok();
+        assert!(matches!(st.answered.last(), Some((7, Ok(_)))), "{:?}", st.answered);
+    }
+
+    #[test]
+    fn a_reader_that_fails_unexpectedly_says_so_of_its_file_and_reads_the_others() {
+        let (a, b) = (PathBuf::from("a.png"), PathBuf::from("b.png"));
+        let read = read_files_with(&[a.clone(), b.clone()], |p| {
+            if p == Path::new("a.png") { panic!("a decoder's bug") } else { Err("b's own".to_owned()) }
+        });
+        assert!(
+            matches!(&read[0], (p, Err(why)) if *p == a && why.contains("a decoder's bug")),
+            "{:?}",
+            read[0].1.as_ref().err()
+        );
+        assert!(matches!(&read[1], (p, Err(why)) if *p == b && why == "b's own"));
+    }
+
+    #[test]
+    fn what_was_read_is_used_between_frames_not_inside_another_asking() {
+        let mut st = image();
+        let ctx = egui::Context::default();
+        let (first, second) = (png("first.png"), png("second.png"));
+        st.open_later(vec![first.clone()], None, &ctx);
+        read(&mut st);
+        // A script's call asking for another file now: the first, read already, waits for the
+        // frame's own turn, so that what opening it tells the user is not taken as the call's.
+        st.open_later(vec![second.clone()], Some((5, Vec::new())), &ctx);
+        assert_eq!(st.docs.len(), 1, "used inside the call");
+        read(&mut st);
+        st.poll_files(false);
+        std::fs::remove_file(&first).ok();
+        std::fs::remove_file(&second).ok();
+        assert_eq!(st.docs.len(), 3);
+    }
+
+    #[test]
+    fn a_place_asked_for_with_no_image_open_is_answered() {
+        let mut st = AppState::new();
+        let ctx = egui::Context::default();
+        let apply = Some((3, Vec::new(), crate::api::BoxArgs::default(), false));
+        st.place_later(png("nowhere.png"), None, false, apply, &ctx);
+        assert!(matches!(st.answered.last(), Some((3, Err(_)))), "{:?}", st.answered);
+        assert!(!st.reading_files());
     }
 }

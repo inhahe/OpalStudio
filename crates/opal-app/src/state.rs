@@ -301,17 +301,55 @@ pub struct Reading {
     /// the paste waits to be placed.
     pub result: Option<crate::clipboard::ReadResult>,
     pub in_place: bool,
-    /// The document it goes to: the one active when it was asked for.
-    pub target: Option<DocId>,
-    /// The transform box `target` had open when the paste was asked for (its session's
-    /// serial), and its crop box. A box opened (or a crop box changed) after that is the
-    /// user's newer work, which the paste waits for rather than ending it.
-    pub box_then: Option<u64>,
-    pub crop_then: Option<crate::edit_box::EditBox>,
+    /// The document it goes to: the one active when it was asked for, as it was then.
+    pub target: Target,
     /// The status-bar notice this paste put up, taken down when it is placed.
     pub notice: String,
     /// The API call the paste answers once it is placed, if it was one's.
     pub answer: Option<PasteAnswer>,
+}
+
+/// The image what is asked for now goes into later (a paste, files read), as the user had it
+/// then: its transform box (its session's serial), and its crop box. A box opened (or a crop
+/// box changed) since is the user's newer work, which what goes in waits for rather than
+/// ending it (see [`AppState::waits_for`]).
+#[derive(Clone, Copy, Debug)]
+pub struct Target {
+    /// The image; none, a new one.
+    pub id: Option<DocId>,
+    box_then: Option<u64>,
+    crop_then: Option<crate::edit_box::EditBox>,
+}
+
+impl AppState {
+    /// Image `id` (none: a new one) as the user has it now (see [`Target`]).
+    pub(crate) fn target_now(&self, id: Option<DocId>) -> Target {
+        let d = id.and_then(|t| self.doc(t));
+        Target {
+            id,
+            box_then: d.and_then(|d| d.transform.as_ref()).map(|s| s.serial),
+            crop_then: d.and_then(|d| d.crop),
+        }
+    }
+
+    /// What something going into `target` must wait for, if anything: a dialog closing, the
+    /// edit under way on the image finishing, a box the user opened (or a crop box changed)
+    /// since it was asked for.
+    pub(crate) fn waits_for(&self, target: &Target) -> Option<&'static str> {
+        if self.dialog_open() {
+            return Some("the dialog closes");
+        }
+        let d = target.id.and_then(|t| self.doc(t))?;
+        if d.busy.is_some() {
+            Some("the edit under way on the image finishes")
+        } else if d.transform.as_ref().is_some_and(|s| Some(s.serial) != target.box_then) {
+            Some("the transform box closes")
+        } else if d.crop.is_some() && d.crop != target.crop_then {
+            Some("you crop or leave the Crop tool")
+        } else {
+            None
+        }
+    }
 }
 
 /// An API call a paste answers: its number, where it puts the box, whether it goes into
@@ -453,12 +491,13 @@ impl AppState {
     }
 
     /// Whether work that a call will be answered with once it is done is under way: a
-    /// write, a copy, a paste being read, an answer being made off this thread, a change
-    /// made ready waiting to be made, or an answer made and not yet passed on.
+    /// write, a copy, a paste or files being read, an answer being made off this thread, a
+    /// change made ready waiting to be made, or an answer made and not yet passed on.
     pub fn work_under_way(&self) -> bool {
         !self.answered.is_empty()
             || self.writer.busy()
             || self.reading.is_some()
+            || self.reading_files()
             || !self.copying.is_empty()
             || !self.made.is_empty()
             || !self.finishing.is_empty()
@@ -961,7 +1000,8 @@ impl AppState {
             }
             return;
         }
-        let scripted = answer.is_some();
+        // A notification's answer nobody reads: what opening says goes to the user.
+        let scripted = answer.is_some() && self.calling.as_ref().is_none_or(|c| c.heard);
         let then: crate::opening::Then = Box::new(move |st: &mut AppState, read| {
             let (mut last, mut notes, mut failed) = (shown, Vec::new(), Vec::new());
             for (path, file) in read {
@@ -1014,12 +1054,18 @@ impl AppState {
     }
 
     /// Opens the file at `path` as `file` (what reading it gave) holds it, as an image of its
-    /// own: the image, and what should be said of it; or why it could not be read.
+    /// own (or shows the image it is open as already): the image, and what should be said of
+    /// it; or why it could not be read.
     pub(crate) fn open_read(
         &mut self,
         path: &Path,
         file: Result<crate::opening::ReadFile, String>,
     ) -> Result<(DocId, Vec<String>), String> {
+        // Asked for again while it was being read, it is the image it is open as now.
+        if let Some(id) = self.open_already(path) {
+            self.show_doc(id);
+            return Ok((id, Vec::new()));
+        }
         let title = file_title(path);
         match file? {
             crate::opening::ReadFile::Native(loaded) => {

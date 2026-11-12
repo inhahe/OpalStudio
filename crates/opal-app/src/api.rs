@@ -1071,7 +1071,10 @@ const CHANGES: &[(&str, &str, &[Param])] = &[
                 help: "What to change, as the metadata query tells it: description (the fields given; those not given \
                        kept), exif ({ifd: {tag: value}}), iptc ({\"record:number\": text or texts}) and xmp \
                        ({key: value}); null removes what it names. The description is written to XMP, IPTC \
-                       and EXIF alike, as File Info writes it; the rest as given.",
+                       and EXIF alike, as File Info writes it; the rest as given, and where another part \
+                       holds the same (an IPTC dataset XMP holds too, as the city or the date created; \
+                       EXIF's ImageDescription, Artist and Copyright), changed there too, unless the \
+                       changes change that as well.",
                 otherwise: Otherwise::Required,
             },
         ],
@@ -1080,7 +1083,9 @@ const CHANGES: &[(&str, &str, &[Param])] = &[
         "set_file_metadata",
         "Rewrites a JPEG's or PNG's metadata in place, its image data untouched (not decoded, nor encoded \
          again: no quality lost), and answers with all of it as file_metadata does. How a folder of \
-         photographs has its capture times shifted, or its captions filled in, without opening them.",
+         photographs has its capture times shifted, or its captions filled in, without opening them. A \
+         part the file has that Opal Studio could not read (XMP no XML reader takes, say) is not written \
+         over: a change to it is refused, the file left as it is.",
         &[
             Param {
                 name: "path",
@@ -2723,9 +2728,8 @@ impl AppState {
         let d = self.doc_mut(id).expect("found");
         let meta =
             opal_io::metadata::json::changed(&d.doc().metadata, &changes).map_err(|e| format!("set_metadata: {e}."))?;
-        // Compared as read, not as bytes: XMP written anew differs from the file's in its form.
-        let read = opal_io::metadata::json::to_json;
-        if read(&meta) != read(&d.doc().metadata) {
+        // (A part left as it was keeps its bytes.)
+        if meta != d.doc().metadata {
             let new = meta.clone();
             d.apply("Set metadata", |doc, _| {
                 doc.metadata = new;
@@ -4322,6 +4326,19 @@ mod tests {
             Reply::Now(r) => r,
             Reply::Later(n) => panic!("{name} answers later ({n})"),
         }
+    }
+
+    #[test]
+    fn a_place_that_fails_once_its_file_is_read_puts_the_user_s_image_back() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 40, "height": 20 })).unwrap();
+        now(&mut st, "new", json!({ "width": 30, "height": 20 })).unwrap();
+        let (a, b) = (st.docs[0].id, st.docs[1].id);
+        st.show_doc(a);
+        let missing = file_in("place-back", "missing.png");
+        let placed = call(&mut st, "place", json!({ "document": b.0, "path": missing }));
+        assert!(placed.is_err(), "{placed:?}");
+        assert_eq!(st.active_doc, Some(a), "left on the image the call named");
     }
 
     #[test]

@@ -157,18 +157,9 @@ impl AppState {
             }
         };
         let ready = result.is_some();
-        let d = target.and_then(|t| self.doc(t));
         let notice = if ready { String::new() } else { self.reading_notice().to_string() };
-        self.reading = Some(Reading {
-            rx,
-            result,
-            in_place,
-            target,
-            box_then: d.and_then(|d| d.transform.as_ref()).map(|s| s.serial),
-            crop_then: d.and_then(|d| d.crop),
-            notice: notice.clone(),
-            answer,
-        });
+        self.reading =
+            Some(Reading { rx, result, in_place, target: self.target_now(target), notice: notice.clone(), answer });
         if ready {
             self.poll_paste(false);
         } else {
@@ -201,7 +192,7 @@ impl AppState {
         if pointer_held {
             return;
         }
-        if let Some(until) = self.paste_waits() {
+        if let Some(until) = self.reading.as_ref().and_then(|r| self.waits_for(&r.target)) {
             // What it waits for takes Esc; once placed, its own box does, and cancels it.
             let text = format!("The paste will be placed when {until}.");
             let r = self.reading.as_mut().expect("checked above");
@@ -213,7 +204,7 @@ impl AppState {
         }
         let r = self.reading.take().expect("checked above");
         self.take_down(&r.notice);
-        self.paste_read(r.result.expect("received above"), r.in_place, r.target, r.answer);
+        self.paste_read(r.result.expect("received above"), r.in_place, r.target.id, r.answer);
     }
 
     /// What the status bar says while the clipboard is read: that Esc cancels the paste,
@@ -248,24 +239,6 @@ impl AppState {
     pub(crate) fn take_down(&mut self, notice: &str) {
         if self.notice.as_ref().is_some_and(|(text, _)| text == notice) {
             self.notice = None;
-        }
-    }
-
-    /// What a paste that has been read waits for, if it must wait.
-    fn paste_waits(&self) -> Option<&'static str> {
-        let r = self.reading.as_ref()?;
-        if self.dialog_open() {
-            return Some("the dialog closes");
-        }
-        let d = r.target.and_then(|t| self.doc(t))?;
-        if d.busy.is_some() {
-            Some("the edit under way on the image finishes")
-        } else if d.transform.as_ref().is_some_and(|s| Some(s.serial) != r.box_then) {
-            Some("the transform box closes")
-        } else if d.crop.is_some() && d.crop != r.crop_then {
-            Some("you crop or leave the Crop tool")
-        } else {
-            None
         }
     }
 
@@ -442,17 +415,22 @@ impl AppState {
         &mut self,
         paths: &[std::path::PathBuf],
     ) -> Result<(Vec<LayerId>, Vec<String>), String> {
-        self.layers_read(crate::opening::read_files(paths))
+        self.layers_read(crate::opening::read_files(paths), self.active_doc)
     }
 
     /// Open as Layers: each of the image files read already (`files`, each by its path, read
     /// as Open reads them) a layer of its own named after its file, pixel for pixel, centered
-    /// on the canvas: in the active image, above the active layer, the first lowest, as one
-    /// history state; with none open, in a new image the size and resolution of the first.
+    /// on the canvas: in image `into` (if it is open), above its active layer, the first lowest,
+    /// as one history state; with none given, in a new image the size and resolution of the
+    /// first.
     /// The new layers are selected, the topmost active. A file that could not be read (or an
     /// Opal Studio file) is left out. The new layers, and what should be said: those left
     /// out, and what reading the others said; or why none could be read.
-    pub(crate) fn layers_read(&mut self, files: crate::opening::Read) -> Result<(Vec<LayerId>, Vec<String>), String> {
+    pub(crate) fn layers_read(
+        &mut self,
+        files: crate::opening::Read,
+        into: Option<DocId>,
+    ) -> Result<(Vec<LayerId>, Vec<String>), String> {
         let mut said = Vec::new();
         let mut read = Vec::new();
         for (path, file) in files {
@@ -491,7 +469,7 @@ impl AppState {
                     .collect::<Vec<Layer>>()
             };
         let label = "Open as layers";
-        let made: Vec<LayerId> = match self.active_mut() {
+        let made: Vec<LayerId> = match into.and_then(|id| self.doc_mut(id)) {
             None => {
                 let first = &read[0].1;
                 let mut ids = IdGen::default();
@@ -524,7 +502,9 @@ impl AppState {
                 made
             }
         };
-        let d = self.active_mut().expect("one now");
+        // The image they went into: `into`, or the new one, active now.
+        let id = into.or(self.active_doc).expect("one now");
+        let d = self.doc_mut(id).expect("open");
         d.select_layers(&made, *made.last().expect("one read at least"));
         Ok((made, said))
     }
@@ -544,7 +524,7 @@ impl AppState {
 
     /// [`layers_read`](Self::layers_read), the files read on a worker thread (see
     /// [`read_then`](Self::read_then)), into the image active now (or a new one, if none is
-    /// open). For call `answer`, answers with the image, the layers and what reading said;
+    /// open now, whatever is active once they are read). For call `answer`, answers with the image, the layers and what reading said;
     /// else tells the user what should be said.
     pub(crate) fn open_as_layers_later(
         &mut self,
@@ -558,7 +538,7 @@ impl AppState {
             if let Some(t) = target {
                 st.show_doc(t);
             }
-            match st.layers_read(read) {
+            match st.layers_read(read, target) {
                 Ok((made, said)) => {
                     let ids: Vec<u64> = made.iter().map(|l| l.0).collect();
                     let document = st.active_doc.expect("one now").0;
@@ -605,8 +585,14 @@ impl AppState {
         apply: Option<(u64, Vec<u64>, crate::api::BoxArgs, bool)>,
         ctx: &egui::Context,
     ) {
-        let Some(target) = self.active_doc else { return };
         let answer = apply.as_ref().map(|(n, groups, ..)| (*n, groups.clone()));
+        // (Place needs an image, which its availability sees to; a call is answered still.)
+        let Some(target) = self.active_doc else {
+            if let Some((n, _)) = answer {
+                self.answered.push((n, Err("place: no image is open to place it in.".into())));
+            }
+            return;
+        };
         let then: crate::opening::Then = Box::new(move |st: &mut AppState, read| {
             st.show_doc(target);
             let placed = match read.into_iter().next() {

@@ -197,26 +197,27 @@ fn is_metadata(marker: u8, data: &[u8], parts: Parts) -> bool {
 }
 
 /// `jpeg` (a whole file, or its start: SOI and the segments after it) with its metadata
-/// segments of `parts` replaced by `segments` (see [`jpeg_segments_of`]), put after JFIF's
-/// APP0 if it comes first, else right after SOI. None if `jpeg` is not a JPEG.
+/// segments of `parts` replaced by `segments` (see [`jpeg_segments_of`]): put after its EXIF
+/// if that is kept (which readers look for first), else after JFIF's APP0 if it comes first,
+/// else right after SOI. None if `jpeg` is not a JPEG.
 pub fn replace_jpeg(jpeg: &[u8], segments: &[u8], parts: Parts) -> Option<Vec<u8>> {
     if !jpeg.starts_with(&[0xFF, 0xD8]) {
         return None;
     }
     let mut out = vec![0xFF, 0xD8];
     let (walked, rest) = jpeg_walk(jpeg);
-    let mut placed = false;
+    let kept_exif = walked.iter().position(|s| !parts.exif && s.marker == 0xE1 && s.data.starts_with(EXIF_HEADER));
+    let jfif = walked.first().is_some_and(|s| s.marker == 0xE0 && s.data.starts_with(b"JFIF\0"));
+    let after = kept_exif.map_or(usize::from(jfif), |i| i + 1);
     for (i, s) in walked.iter().enumerate() {
-        let is_jfif = s.marker == 0xE0 && s.data.starts_with(b"JFIF\0");
-        if !(placed || i == 0 && is_jfif) {
+        if i == after {
             out.extend_from_slice(segments);
-            placed = true;
         }
         if !is_metadata(s.marker, s.data, parts) {
             out.extend_from_slice(&jpeg[s.at..s.end]);
         }
     }
-    if !placed {
+    if after >= walked.len() {
         out.extend_from_slice(segments);
     }
     out.extend_from_slice(&jpeg[rest..]);
@@ -448,18 +449,34 @@ pub fn png_chunks_of(
         out.push((*b"iTXt", data));
     }
     if let Some(iim) = iptc {
-        let mut text = format!("\niptc\n{:8}\n", iim.len());
-        for line in iim.chunks(36) {
-            for b in line {
-                text.push_str(&format!("{b:02x}"));
-            }
-            text.push('\n');
-        }
-        let mut data = b"Raw profile type iptc\0".to_vec();
-        data.extend_from_slice(text.as_bytes());
-        out.push((*b"tEXt", data));
+        out.push((*b"tEXt", raw_profile_data("iptc", iim)));
     }
     out
+}
+
+/// The data of a tEXt chunk holding `bytes` as ImageMagick's "Raw profile type" `kind` (see
+/// [`raw_profile`]).
+fn raw_profile_data(kind: &str, bytes: &[u8]) -> Vec<u8> {
+    let mut text = format!("\n{kind}\n{:8}\n", bytes.len());
+    for line in bytes.chunks(36) {
+        for b in line {
+            text.push_str(&format!("{b:02x}"));
+        }
+        text.push('\n');
+    }
+    let mut data = format!("Raw profile type {kind}").into_bytes();
+    data.push(0);
+    data.extend_from_slice(text.as_bytes());
+    data
+}
+
+/// Photoshop's resources in a "Raw profile type 8bim" chunk (`kind`, `data`), if they hold an
+/// IIM: the others, the IIM and its digest taken out (none, if that was all).
+fn photoshop_without_iim(kind: &[u8; 4], data: &[u8]) -> Option<Vec<u8>> {
+    let (keyword, text) = png_text(kind, data)?;
+    let block = raw_profile(&text).filter(|_| keyword == "Raw profile type 8bim")?;
+    iptc::from_resources(&block)?;
+    Some(iptc::with_iim(&block, None)[iptc::PHOTOSHOP.len()..].to_vec())
 }
 
 /// `chunks` as a file holds them, each with its length and CRC.
@@ -496,7 +513,13 @@ pub fn replace_png(png: &[u8], chunks: &[u8], parts: Parts) -> Option<Vec<u8>> {
     for (i, (kind, data, at)) in all.iter().enumerate() {
         let whole = &png[*at..at + 12 + data.len()];
         if !png_is_metadata(kind, data, parts) {
-            out.extend_from_slice(whole);
+            match photoshop_without_iim(kind, data).filter(|_| parts.iptc) {
+                // Photoshop's resources that held the IIM, written in a chunk of its own: the
+                // others kept.
+                Some(others) if others.is_empty() => {}
+                Some(others) => out.extend(png_chunk(b"tEXt", &raw_profile_data("8bim", &others))),
+                None => out.extend_from_slice(whole),
+            }
         }
         if i == 0 {
             out.extend_from_slice(chunks);
@@ -618,5 +641,57 @@ mod tests {
         let cut = &with[..at + 12 + exif.len() - 2];
         assert_eq!(read_png(cut).exif, None);
         assert!(replace_png(cut, &[], Parts::ALL).is_some());
+    }
+
+    /// What a PNG's "Raw profile type 8bim" chunk holds (Photoshop's resources), if it has one.
+    fn eight_bim(png: &[u8]) -> Option<Vec<u8>> {
+        png_chunks(png).into_iter().find_map(|(kind, data, _)| {
+            let (keyword, text) = png_text(&kind, data)?;
+            (keyword == "Raw profile type 8bim").then(|| raw_profile(&text)).flatten()
+        })
+    }
+
+    #[test]
+    fn the_iim_among_photoshops_resources_in_a_png_is_replaced_and_the_others_kept() {
+        // Photoshop's resources as ImageMagick keeps them in a PNG: a path, and the IIM.
+        let mut path = b"8BIM".to_vec();
+        path.extend_from_slice(&2000u16.to_be_bytes());
+        path.extend_from_slice(&[0, 0, 0, 0, 0, 4, 1, 2, 3, 4]);
+        let mut old = iptc::Iim::default();
+        old.set_texts(2, 5, &["Old".into()]);
+        let block = iptc::with_iim(&path, Some(&old.bytes()))[iptc::PHOTOSHOP.len()..].to_vec();
+        let chunk = png_bytes(&[(*b"tEXt", raw_profile_data("8bim", &block))]);
+        let none = Parts { exif: false, xmp: false, iptc: false };
+        let with = replace_png(&png(), &chunk, none).unwrap();
+        assert_eq!(read_png(&with).iptc, Some(old.bytes()));
+        let only_iim = Parts { iptc: true, ..none };
+        // A new IIM is read back, not the old; and none, none.
+        let mut new = iptc::Iim::default();
+        new.set_texts(2, 5, &["New".into()]);
+        let edited = replace_png(&with, &png_bytes(&png_chunks_of(None, None, Some(&new.bytes()))), only_iim).unwrap();
+        let removed = replace_png(&with, &[], only_iim).unwrap();
+        assert_eq!(read_png(&edited).iptc, Some(new.bytes()));
+        assert_eq!(read_png(&removed).iptc, None);
+        // The path kept in both; the IIM no longer among the resources.
+        for (file, what) in [(&edited, "edited"), (&removed, "removed")] {
+            let kept = eight_bim(file).unwrap_or_else(|| panic!("the resources {what} with the IIM"));
+            assert_eq!(kept, path, "{what}");
+        }
+        // Resources holding only the IIM go with it.
+        let alone = iptc::to_resources(&old.bytes())[iptc::PHOTOSHOP.len()..].to_vec();
+        let lone = replace_png(&png(), &png_bytes(&[(*b"tEXt", raw_profile_data("8bim", &alone))]), none).unwrap();
+        assert_eq!(eight_bim(&replace_png(&lone, &[], only_iim).unwrap()), None);
+    }
+
+    #[test]
+    fn xmp_written_alone_goes_after_the_exif_kept_which_readers_look_for_first() {
+        let (exif, xmp, _) = sample();
+        let with_exif = replace_jpeg(&jpeg(), &jpeg_segments_of(Some(&exif), None, None).unwrap(), Parts::ALL).unwrap();
+        let only_xmp = Parts { exif: false, xmp: true, iptc: false };
+        let with_both = replace_jpeg(&with_exif, &jpeg_segments_of(None, Some(&xmp), None).unwrap(), only_xmp).unwrap();
+        let app1: Vec<&[u8]> =
+            jpeg_walk(&with_both).0.iter().filter(|s| s.marker == 0xE1).map(|s| &s.data[..4]).collect();
+        assert_eq!(app1, [&b"Exif"[..], b"http"], "the XMP put before the EXIF");
+        assert_eq!(read_jpeg(&with_both).exif.as_deref(), Some(&exif[..]));
     }
 }

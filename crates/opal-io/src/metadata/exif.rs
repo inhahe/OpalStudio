@@ -278,6 +278,11 @@ pub struct Exif {
 const MOST_ENTRIES: usize = 4096;
 
 impl Exif {
+    /// Whether its numbers are big-endian.
+    pub fn big_endian(&self) -> bool {
+        self.big
+    }
+
     /// Reads `bytes` as an EXIF structure: None if it is not one (its header wrong, or IFD0
     /// past its end).
     pub fn read(bytes: &[u8]) -> Option<Exif> {
