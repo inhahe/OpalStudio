@@ -349,7 +349,7 @@ mod tests {
         let (mut doc, mut ids) = (Document::new(8, 8), IdGen::default());
         let layer = Layer::new_raster(ids.layer(), ids.object(), "l", Default::default());
         doc.insert(Position { parent: None, index: 0 }, layer).unwrap();
-        opal_io::native::save(&doc, &ids, &path, &Default::default()).unwrap();
+        opal_io::native::save(&doc, &ids, &[], &path, &Default::default()).unwrap();
         path
     }
 

@@ -153,6 +153,20 @@ const LAYER: Param = Param {
     help: "The layer, by id.",
     otherwise: Otherwise::Now("the active layer"),
 };
+/// How a color sampler shows its colour.
+const SHOWN_AS: Param = Param {
+    name: "shown_as",
+    kind: Kind::Choice(crate::color_sampler::SHOWN_IDS),
+    help: "How it shows its colour: in a colour model, or as sRGB's hex code.",
+    otherwise: Otherwise::Now("the Color Sampler tool's New samplers show"),
+};
+/// Which of an image's color samplers.
+const SAMPLER: Param = Param {
+    name: "number",
+    kind: Kind::Int { min: 1, max: crate::color_sampler::MOST as i64 },
+    help: "Which sampler, numbered from 1, as the color_samplers query and the Info panel number them.",
+    otherwise: Otherwise::Required,
+};
 
 const OVERWRITE: Param = Param {
     name: "overwrite",
@@ -415,7 +429,7 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             },
         ],
         StraightenLayers => &[DOCUMENT, LAYERS],
-        ClearMeasurement => &[DOCUMENT],
+        ClearMeasurement | ClearColorSamplers => &[DOCUMENT],
         Trim => &[
             DOCUMENT,
             Param {
@@ -751,6 +765,15 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
     })
 }
 
+/// Where sampler `number` (from 1) is among `d`'s, or why there is none.
+fn sampler_index(d: &crate::doc::DocState, number: i64) -> Result<usize, String> {
+    let n = d.samplers.len();
+    usize::try_from(number - 1)
+        .ok()
+        .filter(|&i| i < n)
+        .ok_or_else(|| format!("The image has no color sampler {number} (it has {n})."))
+}
+
 /// The user's view, as a call that changes it found it: the active image, and each image's
 /// active and selected layers.
 pub type View = (Option<DocId>, Vec<(DocId, (Option<LayerId>, std::collections::HashSet<LayerId>))>);
@@ -803,6 +826,43 @@ const QUERIES: &[(&str, &str, &[Param])] = &[
          start and segments, lines and curves, from select_outline or the outline tool). \
          select_all, deselect, reselect, invert_selection and select_layer_pixels answer with it too.",
         &[DOCUMENT],
+    ),
+    (
+        "color_samplers",
+        "What an image's color samplers read, in order (numbered from 1, as the Info panel numbers them): \
+         each one's pixel, from the canvas's corner, and its colour (as color_at tells one), averaged over \
+         the Color Sampler tool's sample size, as the image shows (with an edit in progress, as it would \
+         leave it) and, while that differs, before (as the image is without it).",
+        &[DOCUMENT],
+    ),
+    (
+        "color_at",
+        "The colour an image shows at a pixel, from the canvas's corner: linear (the image's own linear \
+         sRGB, not premultiplied: values past 0 to 1 for colours outside sRGB), alpha (0 to 1), srgb (0 \
+         to 255, rounded and clamped), hex, and values in the model asked for (as its channels count: \
+         sRGB 0 to 255, Lab's L* 0 to 100, a hue in degrees), with that model's id.",
+        &[
+            DOCUMENT,
+            Param {
+                name: "x",
+                kind: Kind::Pixels { min: -10_000_000, max: 10_000_000 },
+                help: "The pixel's column, from the canvas's left edge.",
+                otherwise: Otherwise::Required,
+            },
+            Param {
+                name: "y",
+                kind: Kind::Pixels { min: -10_000_000, max: 10_000_000 },
+                help: "The pixel's row, from the canvas's top edge.",
+                otherwise: Otherwise::Required,
+            },
+            Param {
+                name: "size",
+                kind: Kind::Choice(&["1", "3", "5", "11", "31", "51", "101"]),
+                help: "How many pixels a side the square averaged about it is.",
+                otherwise: Otherwise::Value("\"1\""),
+            },
+            Param { otherwise: Otherwise::Value("\"srgb\""), ..SHOWN_AS },
+        ],
     ),
     (
         "measurement",
@@ -1176,6 +1236,56 @@ const CHANGES: &[(&str, &str, &[Param])] = &[
                 otherwise: Otherwise::Required,
             },
         ],
+    ),
+    (
+        "add_color_sampler",
+        "Pins a color sampler on an image, as the Color Sampler tool does (ten at most): the pixel it \
+         samples, from the canvas's corner, which must be on the canvas. Answers as the color_samplers \
+         query does.",
+        &[
+            DOCUMENT,
+            Param {
+                name: "x",
+                kind: Kind::Pixels { min: -10_000_000, max: 10_000_000 },
+                help: "The pixel's column, from the canvas's left edge.",
+                otherwise: Otherwise::Required,
+            },
+            Param {
+                name: "y",
+                kind: Kind::Pixels { min: -10_000_000, max: 10_000_000 },
+                help: "The pixel's row, from the canvas's top edge.",
+                otherwise: Otherwise::Required,
+            },
+            SHOWN_AS,
+        ],
+    ),
+    (
+        "move_color_sampler",
+        "Moves an image's color sampler to another pixel, or changes how it shows its colour. Answers as \
+         the color_samplers query does.",
+        &[
+            DOCUMENT,
+            SAMPLER,
+            Param {
+                name: "x",
+                kind: Kind::Pixels { min: -10_000_000, max: 10_000_000 },
+                help: "The pixel's column, from the canvas's left edge.",
+                otherwise: Otherwise::Now("where it is"),
+            },
+            Param {
+                name: "y",
+                kind: Kind::Pixels { min: -10_000_000, max: 10_000_000 },
+                help: "The pixel's row, from the canvas's top edge.",
+                otherwise: Otherwise::Now("where it is"),
+            },
+            Param { otherwise: Otherwise::Now("as it shows it"), ..SHOWN_AS },
+        ],
+    ),
+    (
+        "delete_color_sampler",
+        "Removes one of an image's color samplers; those after it are numbered one less. Answers as the \
+         color_samplers query does.",
+        &[DOCUMENT, SAMPLER],
     ),
     (
         "select_outline",
@@ -2272,6 +2382,11 @@ impl AppState {
             }
             None if method.name == "select_outline" => Reply::Now(self.select_outline_by_args(&args)),
             None if method.name == "measure" => Reply::Now(self.measure_by_args(&args)),
+            None if method.name == "add_color_sampler" => Reply::Now(self.sampler_by_args(None, &args)),
+            None if method.name == "move_color_sampler" => {
+                Reply::Now(self.sampler_by_args(Some(args.int("number")), &args))
+            }
+            None if method.name == "delete_color_sampler" => Reply::Now(self.delete_sampler_by_args(&args)),
             None if method.name == "remove_selection_step" => self.selection_step_by_args(true, &args),
             None if method.name == "edit_selection_step" => self.selection_step_by_args(false, &args),
             None if method.name == "delete_saved_selection" => Reply::Now(self.delete_saved_by_args(&args)),
@@ -2432,6 +2547,21 @@ impl AppState {
             "measurement" => {
                 let d = self.doc(self.which(args)?).expect("found");
                 Ok(crate::measure_tool::to_json(d))
+            }
+            "color_samplers" => {
+                let id = self.which(args)?;
+                Ok(self.samplers_json(id))
+            }
+            "color_at" => {
+                let id = self.which(args)?;
+                let d = self.doc_mut(id).expect("found");
+                let c = d.doc().canvas;
+                let p = [c.x + args.int("x"), c.y + args.int("y")];
+                let size = args.text("size").and_then(|s| s.parse().ok()).unwrap_or(1);
+                let shown = args.text("shown_as").and_then(crate::color_sampler::Shown::from_id).unwrap_or_default();
+                let layers = d.doc().layers.clone();
+                let read = d.readings[0].get(&layers, p, size);
+                Ok(crate::color_sampler::color_json(&read, shown))
             }
             "saved_selections" => {
                 let d = self.doc(self.which(args)?).expect("found");
@@ -3127,6 +3257,79 @@ impl AppState {
         d.measure = Some(m);
         d.revision += 1;
         Ok(crate::measure_tool::to_json(d))
+    }
+
+    /// Pins a color sampler (`number` none) on the image `args` names, or moves sampler
+    /// `number` (from 1) of its, as `args` says. Answers as the `color_samplers` query does.
+    fn sampler_by_args(&mut self, number: Option<i64>, args: &Args) -> Result<Value, String> {
+        use crate::color_sampler::{MOST, Sampler, Shown};
+        let id = self.which(args)?;
+        let new =
+            crate::color_sampler::shown_by(self.tool_settings(crate::tools::ToolId::ColorSampler), "sampler.model");
+        let d = self.doc_mut(id).expect("found");
+        let c = d.doc().canvas;
+        let carried = d.doc().carried;
+        let name = if number.is_some() { "move_color_sampler" } else { "add_color_sampler" };
+        let index = match number {
+            Some(n) => Some(sampler_index(d, n).map_err(|why| format!("{name}: {why}"))?),
+            None if d.samplers.len() >= MOST => return Err(format!("{name}: {}", crate::color_sampler::FULL)),
+            None => None,
+        };
+        let was = index.map(|i| (d.samplers[i].pixel(carried), d.samplers[i].shown));
+        let at = |k: usize, name: &str| args.opt_int(name).map(|v| [c.x, c.y][k] + v);
+        let p = [
+            at(0, "x").or(was.map(|w| w.0[0])).expect("given, or there"),
+            at(1, "y").or(was.map(|w| w.0[1])).expect("given, or there"),
+        ];
+        if !c.rect().contains(p[0], p[1]) {
+            return Err(format!("{name}: The pixel ({}, {}) is off the canvas.", p[0] - c.x, p[1] - c.y));
+        }
+        let shown = args.text("shown_as").and_then(Shown::from_id).or(was.map(|w| w.1)).unwrap_or(new);
+        let s = Sampler::of(p, carried, shown);
+        match index {
+            Some(i) => d.samplers[i] = s,
+            None => d.samplers.push(s),
+        }
+        d.samplers_changed();
+        Ok(self.samplers_json(id))
+    }
+
+    /// Removes the color sampler of the image `args` names that its `number` says. Answers as
+    /// the `color_samplers` query does.
+    fn delete_sampler_by_args(&mut self, args: &Args) -> Result<Value, String> {
+        let id = self.which(args)?;
+        let d = self.doc_mut(id).expect("found");
+        let i = sampler_index(d, args.int("number")).map_err(|why| format!("delete_color_sampler: {why}"))?;
+        d.samplers.remove(i);
+        d.samplers_changed();
+        Ok(self.samplers_json(id))
+    }
+
+    /// What image `id`'s color samplers read (the `color_samplers` query).
+    fn samplers_json(&mut self, id: DocId) -> Value {
+        let size = crate::color_sampler::sample_size(self.tool_settings(crate::tools::ToolId::ColorSampler));
+        let d = self.doc_mut(id).expect("found");
+        let c = d.doc().canvas;
+        let readings = d.sampler_readings(size);
+        let pixels = d.sampler_pixels();
+        let list: Vec<Value> = readings
+            .iter()
+            .zip(pixels)
+            .zip(&d.samplers)
+            .enumerate()
+            .map(|(i, (((now, before), p), s))| {
+                let mut v = json!({
+                    "number": i + 1,
+                    "at": [p[0] - c.x, p[1] - c.y],
+                    "color": crate::color_sampler::color_json(now, s.shown),
+                });
+                if let Some(b) = before {
+                    v["before"] = crate::color_sampler::color_json(b, s.shown);
+                }
+                v
+            })
+            .collect();
+        json!(list)
     }
 
     fn select_outline_by_args(&mut self, args: &Args) -> Result<Value, String> {
@@ -6322,5 +6525,60 @@ mod tests {
         assert!(now(&mut st, "measurement", json!({})).unwrap()["angle"].as_f64().unwrap().abs() < 1e-9);
         call(&mut st, "clear_measurement", json!({})).unwrap();
         assert_eq!(now(&mut st, "measurement", json!({})).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn scripts_pin_move_and_remove_color_samplers_and_read_colours() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 40, "height": 30 })).unwrap();
+        assert_eq!(now(&mut st, "color_samplers", json!({})).unwrap(), json!([]));
+        let one = now(&mut st, "add_color_sampler", json!({ "x": 3, "y": 4, "shown_as": "hsb" })).unwrap();
+        assert_eq!((one[0]["number"].clone(), one[0]["at"].clone()), (json!(1), json!([3, 4])));
+        let c = &one[0]["color"];
+        assert_eq!(
+            (c["srgb"].clone(), c["hex"].clone(), c["shown_as"].clone()),
+            (json!([255, 255, 255]), json!("#FFFFFF"), json!("hsb"))
+        );
+        assert_eq!(c["values"][2].as_f64().map(f64::round), Some(100.0));
+        // Moved, shown otherwise; another added the tool's way.
+        let moved = now(&mut st, "move_color_sampler", json!({ "number": 1, "x": "10 + 5" })).unwrap();
+        assert_eq!((moved[0]["at"].clone(), moved[0]["color"]["shown_as"].clone()), (json!([15, 4]), json!("hsb")));
+        now(&mut st, "add_color_sampler", json!({ "x": 0, "y": 0 })).unwrap();
+        let two = now(&mut st, "move_color_sampler", json!({ "number": 2, "shown_as": "hex" })).unwrap();
+        assert_eq!((two[1]["at"].clone(), two[1]["color"]["values"].clone()), (json!([0, 0]), json!("#FFFFFF")));
+        // Off the canvas, or a sampler not there: refused.
+        assert!(now(&mut st, "add_color_sampler", json!({ "x": 40, "y": 0 })).unwrap_err().contains("off the canvas"));
+        assert!(
+            now(&mut st, "delete_color_sampler", json!({ "number": 3 })).unwrap_err().contains("no color sampler 3")
+        );
+        let left = now(&mut st, "delete_color_sampler", json!({ "number": 1 })).unwrap();
+        assert_eq!((left.as_array().unwrap().len(), left[0]["at"].clone()), (1, json!([0, 0])));
+        // A colour anywhere: at the corner, four of a 3 × 3 square's pixels on the canvas.
+        let corner = now(&mut st, "color_at", json!({ "x": 0, "y": 0, "size": "3", "shown_as": "lab" })).unwrap();
+        assert!((corner["alpha"].as_f64().unwrap() - 4.0 / 9.0).abs() < 1e-3, "{corner}");
+        assert_eq!(corner["shown_as"], json!("lab"));
+        call(&mut st, "clear_color_samplers", json!({})).unwrap();
+        assert_eq!(now(&mut st, "color_samplers", json!({})).unwrap(), json!([]));
+        for _ in 0..crate::color_sampler::MOST {
+            now(&mut st, "add_color_sampler", json!({ "x": 1, "y": 1 })).unwrap();
+        }
+        assert!(
+            now(&mut st, "add_color_sampler", json!({ "x": 1, "y": 1 })).unwrap_err().contains("ten color samplers")
+        );
+        // Kept in the file: saved, the image has nothing more to save; a change to them is
+        // one; opened again, they are there.
+        call(&mut st, "clear_color_samplers", json!({})).unwrap();
+        now(&mut st, "add_color_sampler", json!({ "x": 7, "y": 8, "shown_as": "oklch" })).unwrap();
+        let path = file_in("samplers", "pinned.opal");
+        call(&mut st, "save_as", json!({ "path": path.display().to_string() })).unwrap();
+        assert!(!st.active().unwrap().is_dirty(), "unsaved after saving");
+        now(&mut st, "move_color_sampler", json!({ "number": 1, "x": 9 })).unwrap();
+        assert!(st.active().unwrap().is_dirty(), "a sampler moved is nothing to save");
+        call(&mut st, "close", json!({ "discard": true })).unwrap();
+        call(&mut st, "open", json!({ "path": path.display().to_string() })).unwrap();
+        let read = now(&mut st, "color_samplers", json!({})).unwrap();
+        assert_eq!((read[0]["at"].clone(), read[0]["color"]["shown_as"].clone()), (json!([7, 8]), json!("oklch")));
+        assert!(!st.active().unwrap().is_dirty(), "unsaved as opened");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }

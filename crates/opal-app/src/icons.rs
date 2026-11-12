@@ -64,6 +64,10 @@ pub const STRAIGHTEN: char = '\u{f05e9}';
 pub const STRAIGHTEN_LAYERS: char = '\u{f01b6}';
 /// dismiss_circle: Clear Measurement.
 pub const CLEAR_MEASUREMENT: char = '\u{f36d}';
+/// A target (target): the Color Sampler tool.
+pub const COLOR_SAMPLER: char = '\u{f781}';
+/// A target struck out (target_dismiss): Clear Color Samplers.
+pub const CLEAR_SAMPLERS: char = '\u{f036c}';
 pub const HELP: char = '\u{f63d}';
 pub const SEARCH: char = '\u{f68f}';
 pub const INFO: char = '\u{f4a3}';

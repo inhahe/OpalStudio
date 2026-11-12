@@ -94,6 +94,7 @@ pub enum Cmd {
     Straighten,
     StraightenLayers,
     ClearMeasurement,
+    ClearColorSamplers,
     FlipHorizontal,
     FlipVertical,
     FileInfo,
@@ -161,7 +162,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 116] = [
+    pub const ALL: [Cmd; 117] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -246,6 +247,7 @@ impl Cmd {
         Cmd::Straighten,
         Cmd::StraightenLayers,
         Cmd::ClearMeasurement,
+        Cmd::ClearColorSamplers,
         Cmd::FlipHorizontal,
         Cmd::FlipVertical,
         Cmd::FileInfo,
@@ -969,6 +971,14 @@ impl Cmd {
                 "Measure a line along what should be level or upright in them with the Measure tool \
                  (N): the selected layers turn about its middle by the least that makes it so, the \
                  canvas as it is, as one history state. The line turns with them.",
+                &[],
+            ),
+            Cmd::ClearColorSamplers => i(
+                "Clear Color Samplers",
+                icons::CLEAR_SAMPLERS,
+                "Remove every color sampler from the image.",
+                "Alt+click one with the Color Sampler tool (I) to remove it alone, or its button in \
+                 the Info panel.",
                 &[],
             ),
             Cmd::ClearMeasurement => i(
@@ -1827,6 +1837,13 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         // refused while one is locked, by `resize_image`, through `locked_layer`.)
         ResizeImage => needs_doc(),
         FileInfo => needs_doc(),
+        ClearColorSamplers => {
+            let d = st.active().ok_or("Open or create an image first.")?;
+            if d.samplers.is_empty() {
+                return Err("The image has no color samplers.".into());
+            }
+            Ok(())
+        }
         Straighten | StraightenLayers | ClearMeasurement => {
             let d = st.active().ok_or("Open or create an image first.")?;
             let m = d.measured().ok_or(crate::measure_tool::NOTHING_MEASURED)?;

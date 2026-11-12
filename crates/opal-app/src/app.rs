@@ -33,6 +33,8 @@ pub enum Pane {
     ToolSettings,
     /// What scripts run from the editor print.
     Console,
+    /// The colours under the pointer and at the color samplers (`color_sampler`).
+    Info,
 }
 
 pub struct OpalApp {
@@ -775,6 +777,10 @@ impl OpalApp {
         // the next, which is asked for.
         if std::mem::take(&mut self.st.show_console) {
             show_pane(&mut self.tree.tiles, Pane::Console);
+            ctx.request_repaint();
+        }
+        if std::mem::take(&mut self.st.show_info) {
+            show_pane(&mut self.tree.tiles, Pane::Info);
             ctx.request_repaint();
         }
         let reveal = std::mem::take(&mut self.st.reveal);
@@ -1712,8 +1718,9 @@ fn default_tree(st: &AppState) -> egui_tiles::Tree<Pane> {
     let layers = tiles.insert_pane(Pane::Layers);
     let selection = tiles.insert_pane(Pane::Selection);
     let history = tiles.insert_pane(Pane::History);
+    let info = tiles.insert_pane(Pane::Info);
     let console = tiles.insert_pane(Pane::Console);
-    let lh = tiles.insert_tab_tile(vec![layers, selection, history, console]);
+    let lh = tiles.insert_tab_tile(vec![layers, selection, history, info, console]);
     // Halves: in a window maximized on a full-HD screen at 125%, so the tool settings show a box's
     // position and size without scrolling (the crop box's after the crop tool's own settings).
     let mut right = egui_tiles::Linear::new(egui_tiles::LinearDir::Vertical, vec![tool_tabs, lh]);
@@ -1754,6 +1761,7 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
             Pane::History => format!("{}  History", icons::HISTORY).into(),
             Pane::ToolSettings => format!("{}  Tool settings", icons::OPTIONS).into(),
             Pane::Console => format!("{}  Console", icons::CONSOLE).into(),
+            Pane::Info => format!("{}  Info", icons::INFO).into(),
         }
     }
 
@@ -1778,6 +1786,7 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
                 area.show(ui, |ui| panels::tool_settings_panel(ui, self.st));
             }),
             Pane::Console => inset(ui, &mut |ui| crate::console::console_panel(ui, self.st)),
+            Pane::Info => inset(ui, &mut |ui| crate::color_sampler::info_panel(ui, self.st)),
         }
         UiResponse::None
     }

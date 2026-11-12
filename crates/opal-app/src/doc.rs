@@ -247,6 +247,8 @@ pub enum Drag {
     TurnView(TurnDrag),
     /// The Measure tool's.
     Measure(crate::measure_tool::MeasureDrag),
+    /// A color sampler's.
+    Sampler(crate::color_sampler::SamplerDrag),
 }
 
 /// Where a drag turning the view began: the pointer's bearing from the view's middle
@@ -310,6 +312,15 @@ pub struct DocState {
     /// What the Measure tool measured last (see `measure_tool`), kept until the next
     /// measure; not part of the image's history, nor kept in its file.
     pub measure: Option<crate::measure_tool::Measure>,
+    /// The points pinned on it whose colour is shown (see `color_sampler`); kept in its file,
+    /// not part of its history.
+    pub samplers: Vec<crate::color_sampler::Sampler>,
+    /// What has been read for them (and under the pointer): off the image as it shows, and as
+    /// its history has it, while an edit in progress differs.
+    pub readings: [crate::color_sampler::Readings; 2],
+    /// The samplers its file holds (as it was last saved or opened), which `is_dirty`
+    /// compares its own with.
+    pub samplers_saved: Vec<opal_io::native::Pinned>,
     /// The rectangle the transform box's fields fit it into (its top-left corner from the
     /// canvas's, and its size), once one has been typed; the canvas, whatever it is then,
     /// until then.
@@ -422,6 +433,9 @@ impl DocState {
             symmetry_center: None,
             symmetry_angle: 0.0,
             measure: None,
+            samplers: Vec::new(),
+            readings: Default::default(),
+            samplers_saved: Vec::new(),
             told_dropped: false,
             groups: Vec::new(),
             made_by: HashMap::new(),
@@ -587,6 +601,10 @@ impl DocState {
     /// pending edit included) would be saved otherwise than the state with nothing to save
     /// was. What is selected is no such change: files do not keep it.
     pub fn is_dirty(&self) -> bool {
+        // Its samplers are in its file too.
+        if self.pinned() != self.samplers_saved {
+            return true;
+        }
         match self.saved_at {
             Some(s) if self.history.contains(s) => !self.doc().saves_as(self.history.node(s).doc()),
             _ => true,
@@ -711,6 +729,10 @@ impl DocState {
             }
             Some(Drag::Measure(m)) => {
                 self.measure = m.was;
+                None
+            }
+            Some(Drag::Sampler(s)) => {
+                self.sampler_back(s);
                 None
             }
             Some(Drag::Crop(_) | Drag::Select(_) | Drag::Reshape(_)) => None,

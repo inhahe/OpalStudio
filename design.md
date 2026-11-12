@@ -979,6 +979,38 @@ own), as a drawing is turned on a desk; painting needs it most.
   `measurement` query (null if nothing is measured), `straighten(crop)`,
   `straighten_layers(layers)` and `clear_measurement()`.
 
+### Color samplers
+
+- **The Color Sampler tool** (I; `color_sampler`): a click on the canvas pins a sampler on
+  the pixel clicked (ten at most: the eleventh is refused, saying so); a press on one drags it
+  (kept on the canvas; Esc gives the drag up, as the tool changing does), Alt+click removes it,
+  and Clear Color Samplers (the tool settings, scripts) removes them all. Each is drawn,
+  whatever the tool, as a ring about its pixel with its number beside it, light over dark.
+- **The Info panel** (a tab beside Layers, brought to the front as the tool is chosen): the
+  colour under the pointer, then each sampler: its number, the pixel from the canvas's corner
+  (said if off the canvas, a crop having left it there), a swatch, its colour in a way chosen
+  for it (a menu: any of `opal_color`'s models, sRGB by default, or sRGB's hex code; values in
+  the model's units, rounded as its range wants), and its opacity where there is transparency.
+  While an edit in progress changes what a sampler reads (a box dragged, an adjustment
+  previewed: whatever `DocState::pending` holds), each value shows as it was, then as it is
+  (`before → now`). The tool's *Sample size* averages a square about each pixel (3 × 3 to
+  101 × 101), of premultiplied colour, made straight after; *New samplers show* is how one
+  placed shows its colour.
+- **Read** as the canvas composites the image (`composite::flatten` of the square), off the
+  image as it shows and, while it differs, off its history's state: each kept (`Readings`)
+  until those layers change, so a colour is composited once, not each frame.
+- **Kept** with the image (`DocState::samplers`), not in its history: their placing is not
+  an edit, and undoing an edit does not move them. They go with the image turned, flipped or
+  resized, as the measure does (each kept with the `Document::carried` it was placed in). The
+  image's file keeps them (`samplers` in `document.json`, version 5; see `native`), so a change
+  to them is a change to save (`DocState::samplers_saved`, which `is_dirty` compares).
+- Scripts: `add_color_sampler(x, y, shown_as)`, `move_color_sampler(number, x, y, shown_as)`,
+  `delete_color_sampler(number)`, `clear_color_samplers()`, and the `color_samplers` query
+  (each sampler's pixel and colour, and before, while an edit in progress changes it); the
+  `color_at` query reads any pixel's colour (a square averaged, in any model) without a
+  sampler. A colour is told as its linear sRGB (the image's own, unclamped), alpha, 8-bit
+  sRGB, hex code, and values in the model asked for.
+
 ### Tool settings panel
 
 A docked panel: the active tool's variant picker at the top, then its basic settings, then
@@ -2850,7 +2882,9 @@ server. Both rest on one language-neutral API.
 
 ## Native file format
 
-`.opal`, version 3: a zip archive holding `mimetype` (stored first, uncompressed:
+`.opal`, version 5 (each file written as the lowest version what it holds needs, which the
+versions before read: 2 without saved selections, 3 with them, 4 with metadata, 5 with color
+samplers): a zip archive holding `mimetype` (stored first, uncompressed:
 `application/x-opal-studio`), `document.json` (the canvas rectangle, the resolution, the
 layer tree and the next free identifier; a file without a resolution, as files before it
 are, has 72 ppi, and versions before it ignore it, so it needed no new version; a layer's
@@ -2858,7 +2892,11 @@ are, has 72 ppi, and versions before it ignore it, so it needed no new version; 
 a point past the nine, a number given twice, or an expression that does not read; and,
 version 3, `selections`, the selections saved in the image: each one's name, its steps as the
 API's `selection` query tells them, a mask step naming its mask's number, the number of the
-mask its steps come to, and how the image has changed since, if it has, `[a, b, c, d, e, f]`),
+mask its steps come to, and how the image has changed since, if it has, `[a, b, c, d, e, f]`;
+and, version 5, `samplers`, the color samplers pinned on the image, each the pixel it samples
+and how it shows its colour, the editor's identifier for it (a colour model's, or `hex`: one
+not known is read as sRGB), at most a thousand read, each within the coordinates a canvas
+may have, the editor keeping the first ten),
 `tiles/<n>.bin` or `tiles/<n>.srgb8`, one tile each, and `masks/<n>.bin`, the saved
 selections' masks, each once (`Mask::write_to`, written as made: a magic, the level outside
 its rows, and its rows of runs, each tile one level, a level a column or a row, or a level a

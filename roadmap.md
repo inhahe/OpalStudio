@@ -4,7 +4,7 @@ What each milestone delivers is specified in `design.md`: for milestone 5's adju
 F's filters, down to each one's settings (*The adjustments and their settings*, *Filters*);
 the rest added from the tool and command lists (N, T, P and L, and the items marked *(new)*)
 get their sections there as each begins (P's decisions so far: *Photographs*). Status:
-milestones 0, 1, S and E are done; everything after them is planned.
+milestones 0, 1, S, E and N are done; everything after them is planned.
 
 **Order:** 0, 1, S, E, 2, N, A, 3, 4, 5, F, 6, T, P, 7, L, 8, 9, 10, 11, then *Later*. Within a
 milestone, items are in the order to build them. Photo editing comes first, with vector

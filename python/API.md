@@ -834,6 +834,14 @@ Remove the line the Measure tool measured.
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 
+### `clear_color_samplers`
+
+Remove every color sampler from the image.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+
 ### `flip_horizontal`
 
 Mirror the whole image left to right.
@@ -906,6 +914,38 @@ Measures on an image as the Measure tool does, between points from the canvas's 
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
 | `points` (required) | points | The line's start and end, and a protractor's second arm's end if it has one, each [x, y] in pixels from the canvas's top-left corner. |
+
+### `add_color_sampler`
+
+Pins a color sampler on an image, as the Color Sampler tool does (ten at most): the pixel it samples, from the canvas's corner, which must be on the canvas. Answers as the color_samplers query does.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `x` (required) | pixels | The pixel's column, from the canvas's left edge. From -10000000 to 10000000 pixels. |
+| `y` (required) | pixels | The pixel's row, from the canvas's top edge. From -10000000 to 10000000 pixels. |
+| `shown_as` | `srgb`, `linear-srgb`, `adobergb`, `hsb`, `hsl`, `cmy`, `lab`, `lch`, `oklab`, `oklch`, `xyz`, `lms`, `opponent`, `hex` | How it shows its colour: in a colour model, or as sRGB's hex code. Default: the Color Sampler tool's New samplers show. |
+
+### `move_color_sampler`
+
+Moves an image's color sampler to another pixel, or changes how it shows its colour. Answers as the color_samplers query does.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `number` (required) | int | Which sampler, numbered from 1, as the color_samplers query and the Info panel number them. From 1 to 10. |
+| `x` | pixels | The pixel's column, from the canvas's left edge. From -10000000 to 10000000 pixels. Default: where it is. |
+| `y` | pixels | The pixel's row, from the canvas's top edge. From -10000000 to 10000000 pixels. Default: where it is. |
+| `shown_as` | `srgb`, `linear-srgb`, `adobergb`, `hsb`, `hsl`, `cmy`, `lab`, `lch`, `oklab`, `oklch`, `xyz`, `lms`, `opponent`, `hex` | How it shows its colour: in a colour model, or as sRGB's hex code. Default: as it shows it. |
+
+### `delete_color_sampler`
+
+Removes one of an image's color samplers; those after it are numbered one less. Answers as the color_samplers query does.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `number` (required) | int | Which sampler, numbered from 1, as the color_samplers query and the Info panel number them. From 1 to 10. |
 
 ### `select_outline`
 
@@ -1062,6 +1102,26 @@ What is selected in an image: the rectangle round it, as [x, y, width, height] f
 | Parameter | Kind | |
 |---|---|---|
 | `document` | document | The image, by id. Default: the active image. |
+
+### `color_samplers`
+
+What an image's color samplers read, in order (numbered from 1, as the Info panel numbers them): each one's pixel, from the canvas's corner, and its colour (as color_at tells one), averaged over the Color Sampler tool's sample size, as the image shows (with an edit in progress, as it would leave it) and, while that differs, before (as the image is without it).
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+
+### `color_at`
+
+The colour an image shows at a pixel, from the canvas's corner: linear (the image's own linear sRGB, not premultiplied: values past 0 to 1 for colours outside sRGB), alpha (0 to 1), srgb (0 to 255, rounded and clamped), hex, and values in the model asked for (as its channels count: sRGB 0 to 255, Lab's L* 0 to 100, a hue in degrees), with that model's id.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `x` (required) | pixels | The pixel's column, from the canvas's left edge. From -10000000 to 10000000 pixels. |
+| `y` (required) | pixels | The pixel's row, from the canvas's top edge. From -10000000 to 10000000 pixels. |
+| `size` | `1`, `3`, `5`, `11`, `31`, `51`, `101` | How many pixels a side the square averaged about it is. Default: "1". |
+| `shown_as` | `srgb`, `linear-srgb`, `adobergb`, `hsb`, `hsl`, `cmy`, `lab`, `lch`, `oklab`, `oklch`, `xyz`, `lms`, `opponent`, `hex` | How it shows its colour: in a colour model, or as sRGB's hex code. Default: "srgb". |
 
 ### `measurement`
 

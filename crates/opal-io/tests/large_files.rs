@@ -131,7 +131,7 @@ fn export_resized() {
 fn save_native() {
     let (d, ids) = large();
     let path = temp("doc.opal");
-    measure("Save", || opal_io::native::save(&d, &ids, &path, &opal_io::Progress::default()).unwrap());
+    measure("Save", || opal_io::native::save(&d, &ids, &[], &path, &opal_io::Progress::default()).unwrap());
     std::fs::remove_file(path).unwrap();
 }
 
@@ -202,7 +202,7 @@ fn huge_white_canvas() {
         composite_until(&d.layers, None, &mut |_, _| true);
     });
     let path = temp("huge.opal");
-    measure("Saved", || opal_io::native::save(&d, &ids2, &path, &opal_io::Progress::default()).unwrap());
+    measure("Saved", || opal_io::native::save(&d, &ids2, &[], &path, &opal_io::Progress::default()).unwrap());
     eprintln!("  file: {} MB", std::fs::metadata(&path).unwrap().len() >> 20);
     let mut loaded = None;
     measure("Opened", || loaded = Some(opal_io::native::load(&path, None).unwrap()));
@@ -342,7 +342,7 @@ fn export_spilled() {
     std::fs::remove_file(path).unwrap();
     // Saved, let go of, and opened again: its tiles go to disk as they are read.
     let saved = temp("spilled.opal");
-    opal_io::native::save(&d, &ids, &saved, &opal_io::Progress::default()).unwrap();
+    opal_io::native::save(&d, &ids, &[], &saved, &opal_io::Progress::default()).unwrap();
     drop((d, one));
     opal_core::store::settle();
     let mut opened = None;

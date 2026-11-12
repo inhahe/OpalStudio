@@ -121,6 +121,11 @@ cargo test --workspace                     # all tests, interface tests included
   resized. Image › Straighten turns the image so the line is level, or plumb, and crops it
   so no corner is left empty (or grows the canvas instead); Straighten Layers turns the
   selected layers instead.
+- **Color samplers.** The Color Sampler tool (I) pins up to ten points on the image; the
+  Info panel shows their colours (and the colour under the pointer) in sRGB or any other
+  model you choose for each (HSB, HSL, Lab, LCh, OKLab, linear, a hex code…), averaged over
+  as large a square as you like, and while an edit is shown before being applied, each value
+  as it was beside it. They are kept in the image's file.
   Cropping and resizing the canvas never delete anything unless asked to. Canvases go up
   to 300,000 pixels a side; anything that would need more memory than the computer has
   free (counting room on disk for the parts that can go there) is refused, with how much

@@ -2179,7 +2179,8 @@ fn saving_then_closing_closes_once_written_and_asks_again_if_edited_meanwhile() 
         let at = st.active().unwrap().history.current();
         let path = std::env::temp_dir().join("never-saved.opal");
         st.active_mut().unwrap().path = Some(path.clone());
-        let written = crate::writer::Written::Save { doc: id, at, path, before: (None, "Untitled".into()) };
+        let written =
+            crate::writer::Written::Save { doc: id, at, path, before: (None, "Untitled".into()), pinned: Vec::new() };
         st.writer.write(written, crate::writer::Then::Close, job, &ctx);
         if edit {
             st.queue.push(Cmd::NewLayer);
@@ -2218,7 +2219,8 @@ fn saving_all_then_quitting(fails: bool) {
     let at = st.active().unwrap().history.current();
     for job in [first, second] {
         let path = std::env::temp_dir().join("never-saved.opal");
-        let written = crate::writer::Written::Save { doc: id, at, path, before: (None, "Untitled".into()) };
+        let written =
+            crate::writer::Written::Save { doc: id, at, path, before: (None, "Untitled".into()), pinned: Vec::new() };
         st.writer.write(written, crate::writer::Then::Nothing, job, &ctx);
     }
     // As "Save all" in the quit question leaves it.
@@ -2329,8 +2331,13 @@ fn a_write_under_way_shows_how_far_it_has_got_and_can_be_cancelled() {
             let (at, path) = (d.history.current(), dir.join("never-saved.opal"));
             d.path = Some(path.clone());
             d.title = "never-saved".into();
-            let written =
-                crate::writer::Written::Save { doc: id, at, path, before: (Some(before.clone()), title.clone()) };
+            let written = crate::writer::Written::Save {
+                doc: id,
+                at,
+                path,
+                before: (Some(before.clone()), title.clone()),
+                pinned: Vec::new(),
+            };
             st.writer.write(written, crate::writer::Then::Close, job, &ctx);
             st.queue.push(Cmd::Exit);
         } else {
@@ -2485,7 +2492,8 @@ fn a_failure_reported_with_the_last_save_stops_saving_all_then_quitting() {
     for fails in [true, false] {
         let (job, release) = held_result(fails);
         let path = std::env::temp_dir().join("never-saved.opal");
-        let written = crate::writer::Written::Save { doc: id, at, path, before: (None, "Untitled".into()) };
+        let written =
+            crate::writer::Written::Save { doc: id, at, path, before: (None, "Untitled".into()), pinned: Vec::new() };
         st.writer.write(written, crate::writer::Then::Nothing, job, &ctx);
         releases.push(release);
     }
@@ -2553,7 +2561,7 @@ fn closing_waits_its_turn_and_takes_its_question_with_it() {
     let at = st.doc(a).unwrap().history.current();
     let path = std::env::temp_dir().join("never-saved.opal");
     st.doc_mut(a).unwrap().path = Some(path.clone());
-    let written = crate::writer::Written::Save { doc: a, at, path, before: (None, "a".into()) };
+    let written = crate::writer::Written::Save { doc: a, at, path, before: (None, "a".into()), pinned: Vec::new() };
     st.writer.write(written, crate::writer::Then::Close, job, &ctx);
     st.request_close(a);
     assert!(st.confirm.is_none(), "asked again about an image closing once saved");
@@ -2589,7 +2597,8 @@ fn a_close_after_saving_waits_for_the_button_to_be_let_go() {
     let at = st.active().unwrap().history.current();
     let path = std::env::temp_dir().join("never-saved.opal");
     st.active_mut().unwrap().path = Some(path.clone());
-    let written = crate::writer::Written::Save { doc: id, at, path, before: (None, "Untitled".into()) };
+    let written =
+        crate::writer::Written::Save { doc: id, at, path, before: (None, "Untitled".into()), pinned: Vec::new() };
     st.writer.write(written, crate::writer::Then::Close, job, &ctx);
     // Changed while it is written, so closing asks again; meanwhile a drag goes on.
     st.queue.push(Cmd::NewLayer);
@@ -2666,7 +2675,8 @@ fn a_save_as_failing_while_a_later_one_is_written_passes_its_file_on() {
     let (job, release) = held_result(true);
     let at = st.active().unwrap().history.current();
     st.active_mut().unwrap().path = Some(c.clone());
-    let written = crate::writer::Written::Save { doc: id, at, path: c, before: (Some(b), "b".into()) };
+    let written =
+        crate::writer::Written::Save { doc: id, at, path: c, before: (Some(b), "b".into()), pinned: Vec::new() };
     st.writer.write(written, crate::writer::Then::Nothing, job, &ctx);
     for _ in 0..20 {
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -5727,4 +5737,85 @@ fn the_measure_tool_measures_moves_what_it_measured_and_draws_a_protractor_s_arm
     h.key_press(egui::Key::Escape);
     h.run();
     assert_eq!(measured(&h), None);
+}
+
+#[test]
+fn the_color_sampler_tool_pins_points_whose_colour_the_info_panel_shows() {
+    use crate::tools::ToolId;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    h.state_mut().state_mut().set_tool(ToolId::ColorSampler);
+    h.run();
+    h.run();
+    let none = egui::Modifiers::NONE;
+    let pixels = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().sampler_pixels();
+    // A click pins one, which the Info panel (brought to the front) shows.
+    click_image(&mut h, [50.5, 60.5], none);
+    assert_eq!(pixels(&h), vec![[50, 60]]);
+    h.run();
+    assert!(h.query_by_label("#1").is_some(), "not in the Info panel");
+    assert!(h.query_all_by_label_contains("Red 255").next().is_some(), "its colour not shown");
+    // Dragged, it moves; Esc part-way gives the drag up.
+    drag_image(&mut h, &[[50.5, 60.5], [90.0, 70.0], [120.5, 80.5]], none);
+    assert_eq!(pixels(&h), vec![[120, 80]]);
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let at = |x: f32, y: f32| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    h.hover_at(at(120.5, 80.5));
+    h.run();
+    h.drag_at(at(120.5, 80.5));
+    h.run();
+    h.hover_at(at(200.0, 100.0));
+    h.run();
+    assert_eq!(pixels(&h), vec![[200, 100]]);
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.drop_at(at(200.0, 100.0));
+    h.run();
+    assert_eq!(pixels(&h), vec![[120, 80]], "not given up");
+    // Off the canvas: a click places none, and a drag keeps one on it.
+    click_image(&mut h, [-20.5, 50.5], none);
+    assert_eq!(pixels(&h), vec![[120, 80]], "placed off the canvas");
+    drag_image(&mut h, &[[120.5, 80.5], [20.0, 80.0], [-40.0, 80.5]], none);
+    assert_eq!(pixels(&h), vec![[0, 80]], "dragged off the canvas");
+    drag_image(&mut h, &[[0.5, 80.5], [60.0, 80.0], [120.5, 80.5]], none);
+    assert_eq!(pixels(&h), vec![[120, 80]]);
+    // An edit in progress changing it: shown as it was, then as it is.
+    {
+        let d = h.state_mut().state_mut().active_mut().unwrap();
+        let bg = d.doc().layers[0].id;
+        d.edit_pending("Hide", |doc| doc.layer_mut(bg).unwrap().visible = false);
+    }
+    h.run();
+    assert!(h.query_all_by_label_contains("Red 255 → 0").next().is_some(), "before and after not shown");
+    render(&mut h, "color-samplers");
+    h.state_mut().state_mut().active_mut().unwrap().discard_pending("Hide");
+    h.run();
+    // Ten at most: the eleventh is refused, saying so.
+    for k in 1..10 {
+        click_image(&mut h, [20.5 + 30.0 * k as f32, 200.5], none);
+    }
+    assert_eq!(pixels(&h).len(), 10);
+    click_image(&mut h, [20.5, 250.5], none);
+    assert_eq!(pixels(&h).len(), 10);
+    let said = h.state().state().notice.as_ref().map(|n| n.0.clone());
+    assert_eq!(said.as_deref(), Some(crate::color_sampler::FULL));
+    // Alt+click removes one; Clear Color Samplers, all.
+    click_image(&mut h, [120.5, 80.5], egui::Modifiers::ALT);
+    assert_eq!(pixels(&h).len(), 9);
+    assert!(!pixels(&h).contains(&[120, 80]));
+    // The Info panel's button removes one too.
+    h.run();
+    let first = pixels(&h)[0];
+    h.query_all_by_label(&crate::icons::CLOSE.to_string())
+        .filter(|n| n.rect().left() > 1000.0 && n.rect().top() > 400.0)
+        .min_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .expect("the first sampler's remove button")
+        .click();
+    h.run();
+    assert_eq!(pixels(&h).len(), 8);
+    assert!(!pixels(&h).contains(&first), "not the first removed");
+    command(&mut h, Cmd::ClearColorSamplers);
+    assert!(pixels(&h).is_empty());
 }

@@ -106,6 +106,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let texture_budget = (st.gpu.memory.map_or(1 << 30, |(_, budget)| budget / 2) / crate::gpu::TEXTURE_BYTES) as usize;
     let zs = st.tool_settings(ToolId::Zoom).clone();
     let turn_step = st.tool_settings(ToolId::RotateView).f64("rotate_view.step") as f32;
+    let new_sampler = crate::color_sampler::shown_by(st.tool_settings(ToolId::ColorSampler), "sampler.model");
     let ms = st.tool_settings(ToolId::Move).clone();
     let select = crate::select_tool::Options::of(st.tool_settings(ToolId::Select));
     let outlining = crate::outline_tool::Options::of(st.tool_settings(ToolId::Outline));
@@ -366,6 +367,14 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         // The tool changed (or Space made it the hand) mid-drag: the drag is given up.
         d.give_up_drag();
     }
+    // The Color Sampler tool: samplers placed, moved and removed.
+    if tool == ToolId::ColorSampler && !boxed {
+        let v = d.view;
+        let to_screen = |p: [f64; 2]| rect.min + v.to_screen(Vec2::new(p[0] as f32, p[1] as f32)) / ppp;
+        crate::color_sampler::canvas(&ctx, d, &response, &|p| to_doc(p, &v), &to_screen, new_sampler, &mut notice);
+    } else if matches!(d.drag, Some(Drag::Sampler(_))) {
+        d.give_up_drag();
+    }
     let cursor = match tool {
         _ if response.dragged_by(PointerButton::Middle) => CursorIcon::Grabbing,
         ToolId::Hand | ToolId::RotateView if response.dragged() => CursorIcon::Grabbing,
@@ -373,7 +382,9 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         ToolId::Zoom if ctx.input(|i| i.modifiers.alt) => CursorIcon::ZoomOut,
         ToolId::Zoom => CursorIcon::ZoomIn,
         ToolId::Move => CursorIcon::Move,
-        ToolId::Select | ToolId::Outline | ToolId::Crop | ToolId::Measure => CursorIcon::Crosshair,
+        ToolId::Select | ToolId::Outline | ToolId::Crop | ToolId::Measure | ToolId::ColorSampler => {
+            CursorIcon::Crosshair
+        }
     };
     // The boxes set their own cursors, by the handle under the pointer.
     // The crop box belongs to the chosen tool, so it stays while Space scrolls the view.
@@ -575,6 +586,10 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     }
     if let Some(Drag::Move(m)) = &d.drag {
         draw_guides(ui, &m.guides, rect, &to_screen);
+    }
+    // The color samplers, whatever the tool.
+    if !d.samplers.is_empty() {
+        crate::color_sampler::draw(ui, d, palette.accent, rect, &to_screen);
     }
     if tool == ToolId::Measure
         && !boxed

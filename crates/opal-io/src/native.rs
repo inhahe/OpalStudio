@@ -20,6 +20,9 @@
 //!   IIM), as bytes, kept as they were read (see `metadata`); `metadata` in `document.json`
 //!   says which there are, and whether the IIM's digest said it had changed since the XMP was
 //!   written. A file holding any is version 4.
+//! - `samplers` in `document.json`: the color samplers pinned on the image, each the pixel
+//!   it samples (document coordinates) and how it shows its colour (the application's
+//!   identifier). A file holding any is version 5.
 //!
 //! Version 0 had only pixel objects, called `raster`, without offsets, and a canvas
 //! without a position; it is still read.
@@ -53,8 +56,20 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 pub const MIME_TYPE: &str = "application/x-opal-studio";
 /// Version 2 adds tiles kept at 8 bits (`tiles/<n>.srgb8`); version 3, selections saved in
-/// the image (`selections`, `masks/<n>.bin`); version 4, metadata (`metadata/…`).
-pub const FORMAT_VERSION: u32 = 4;
+/// the image (`selections`, `masks/<n>.bin`); version 4, metadata (`metadata/…`); version 5,
+/// color samplers (`samplers`).
+pub const FORMAT_VERSION: u32 = 5;
+/// The most color samplers a file is read with (more are a damaged or hostile file's).
+const MOST_PINNED: usize = 1000;
+
+/// A color sampler pinned on an image, as its file keeps it: the pixel it samples, in
+/// document coordinates, and how it shows its colour (an identifier the application gives,
+/// as a colour model's).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pinned {
+    pub at: [i64; 2],
+    pub shown: String,
+}
 const TILE_BYTES: usize = TILE_PIXELS * 4 * 2;
 /// The bytes of a tile kept at 8 bits.
 const SRGB8_BYTES: usize = TILE_PIXELS * 4;
@@ -94,6 +109,9 @@ struct FileDoc {
     /// Which metadata it holds. Older files have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     metadata: Option<FileMetadata>,
+    /// The color samplers pinned on it. Older files have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    samplers: Vec<Pinned>,
 }
 
 /// Which of the metadata entries a file holds, and whether the IIM's digest said it had
@@ -274,7 +292,7 @@ use opal_core::document::MAX_COORD;
 
 /// Saves `doc` with the identifier generator's state to `path` (atomically), telling
 /// `progress` how far it has got in tiles written, and stopping if it is cancelled.
-pub fn save(doc: &Document, ids: &IdGen, path: &Path, progress: &Progress) -> Result<(), IoError> {
+pub fn save(doc: &Document, ids: &IdGen, pinned: &[Pinned], path: &Path, progress: &Progress) -> Result<(), IoError> {
     // Number the distinct tiles, keeping their order of first appearance.
     let mut numbers: HashMap<*const Tile, usize> = HashMap::new();
     let mut tiles: Vec<Arc<Tile>> = Vec::new();
@@ -293,8 +311,10 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path, progress: &Progress) -> Re
     });
     // A file holds nothing a version before it did not, and is written as that version: the
     // versions before what it holds open it.
-    let version = if metadata.is_some() {
+    let version = if !pinned.is_empty() {
         FORMAT_VERSION
+    } else if metadata.is_some() {
+        4
     } else if !selections.is_empty() {
         3
     } else {
@@ -309,6 +329,7 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path, progress: &Progress) -> Re
         layers,
         selections,
         metadata,
+        samplers: pinned.to_vec(),
     };
     // Compact: pretty, each number of a million tile places would take a line of its own.
     let json = serde_json::to_vec(&file).expect("the document serializes");
@@ -556,6 +577,8 @@ fn file_layer(layer: &Layer, numbers: &mut HashMap<*const Tile, usize>, tiles: &
 pub struct Loaded {
     pub doc: Document,
     pub ids: IdGen,
+    /// The color samplers pinned on it.
+    pub samplers: Vec<Pinned>,
 }
 
 /// Loads an `.opal` file; refused before its tiles are read if they would need more memory
@@ -597,6 +620,11 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
     }
     if !opal_core::units::valid_ppi(file.resolution) {
         return Err(bad(format!("the resolution {} is out of range", file.resolution)));
+    }
+    if file.samplers.len() > MOST_PINNED
+        || file.samplers.iter().any(|p| p.at.iter().any(|v| v.abs() > MAX_COORD) || p.shown.len() > 64)
+    {
+        return Err(bad("its color samplers are out of range".into()));
     }
     if file.next_id >= MAX_ID {
         return Err(bad(format!("next identifier {} is out of range", file.next_id)));
@@ -674,7 +702,7 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
     };
     let mut ids = IdGen::starting_at(file.next_id);
     ids.reserve_above(&doc);
-    Ok(Loaded { doc, ids })
+    Ok(Loaded { doc, ids, samplers: file.samplers })
 }
 
 /// The metadata a file keeps, as `which` (its `document.json`'s) says it has.
@@ -925,7 +953,7 @@ mod tests {
             },
         ];
         let path = std::env::temp_dir().join(format!("opal-native-saved-{}.opal", std::process::id()));
-        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        save(&doc, &ids, &[], &path, &Progress::default()).unwrap();
         let loaded = load(&path, None).unwrap().doc;
         assert_eq!(loaded.saved.len(), 2);
         let [a, b] = [&loaded.saved[0], &loaded.saved[1]];
@@ -998,7 +1026,7 @@ mod tests {
         // None saved: version 2, which the versions before saved selections open.
         let (mut doc, ids) = sample();
         let path = std::env::temp_dir().join(format!("opal-native-v2-{}.opal", std::process::id()));
-        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        save(&doc, &ids, &[], &path, &Progress::default()).unwrap();
         let version = |path: &Path| {
             let mut zip = ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
             let mut json = String::new();
@@ -1021,7 +1049,7 @@ mod tests {
                 of: opal_core::selection::MaskOf::LayerPixels,
             }))),
         }];
-        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        save(&doc, &ids, &[], &path, &Progress::default()).unwrap();
         assert_eq!(version(&path), serde_json::json!(3));
         // A selection of one step keeps no mask before it: one mask in the file, not two.
         let zip = ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
@@ -1043,7 +1071,7 @@ mod tests {
         )
         .unwrap();
         let path = std::env::temp_dir().join(format!("opal-native-8-{}.opal", std::process::id()));
-        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        save(&doc, &ids, &[], &path, &Progress::default()).unwrap();
         let loaded = load(&path, None).unwrap();
         std::fs::remove_file(&path).unwrap();
         let back = loaded.doc.layers[2].objects()[0].image().clone();
@@ -1062,12 +1090,12 @@ mod tests {
         let (doc, ids) = sample();
         let path = std::env::temp_dir().join(format!("opal-native-progress-{}.opal", std::process::id()));
         let p = Progress::default();
-        save(&doc, &ids, &path, &p).unwrap();
+        save(&doc, &ids, &[], &path, &p).unwrap();
         let (done, total) = (p.done.load(Relaxed), p.total.load(Relaxed));
         let saved = std::fs::read(&path).unwrap();
         let cancelled = Progress::default();
         cancelled.cancel();
-        let r = save(&doc, &ids, &path, &cancelled);
+        let r = save(&doc, &ids, &[], &path, &cancelled);
         let back = std::fs::read(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
         assert!(total > 0 && done == total, "{done} of {total}");
@@ -1079,7 +1107,7 @@ mod tests {
     fn a_document_needing_more_memory_than_is_free_is_refused_before_its_tiles_are_read() {
         let (doc, ids) = sample();
         let path = std::env::temp_dir().join(format!("opal-native-free-{}.opal", std::process::id()));
-        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        save(&doc, &ids, &[], &path, &Progress::default()).unwrap();
         let refused = load(&path, Some(Free::memory(1_000_000)));
         let opened = load(&path, Some(Free::memory(1 << 30)));
         std::fs::remove_file(&path).unwrap();
@@ -1104,7 +1132,7 @@ mod tests {
         let layer = Layer::new_raster(ids.layer(), ids.object(), "l", img);
         doc.insert(Position { parent: None, index: 0 }, layer).unwrap();
         let path = std::env::temp_dir().join(format!("opal-native-batches-{}.opal", std::process::id()));
-        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        save(&doc, &ids, &[], &path, &Progress::default()).unwrap();
         // Memory for a batch, and the tiles on disk.
         let (batch, tiles) = ((BATCH * TILE_BYTES) as u64, (100 * TILE_BYTES) as u64);
         let opened = load(&path, Some(Free { memory: batch + 100_000, reclaimable: 0, disk: tiles, resident: 0 }));
@@ -1127,7 +1155,7 @@ mod tests {
         let layer = Layer::new_raster(ids.layer(), ids.object(), "white", white);
         doc.insert(Position { parent: None, index: 0 }, layer).unwrap();
         let path = std::env::temp_dir().join(format!("opal-native-compact-{}.opal", std::process::id()));
-        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        save(&doc, &ids, &[], &path, &Progress::default()).unwrap();
         let mut zip = ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
         let size = zip.by_name("document.json").unwrap().size();
         drop(zip);
@@ -1143,7 +1171,7 @@ mod tests {
     fn save_and_load_round_trip() {
         let (doc, ids) = sample();
         let path = std::env::temp_dir().join(format!("opal-native-{}.opal", std::process::id()));
-        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        save(&doc, &ids, &[], &path, &Progress::default()).unwrap();
         let loaded = load(&path, None).unwrap();
         std::fs::remove_file(&path).unwrap();
 
@@ -1193,7 +1221,7 @@ mod tests {
         doc.insert(Position { parent: None, index: 2 }, layer).unwrap();
 
         let path = std::env::temp_dir().join(format!("opal-native-v1-{}.opal", std::process::id()));
-        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        save(&doc, &ids, &[], &path, &Progress::default()).unwrap();
         let loaded = load(&path, None).unwrap();
         std::fs::remove_file(&path).unwrap();
         let d = loaded.doc;
@@ -1231,7 +1259,7 @@ mod tests {
         let (mut doc, ids) = sample();
         doc.resolution = 299.5;
         let path = std::env::temp_dir().join(format!("opal-native-ppi-{}.opal", std::process::id()));
-        save(&doc, &ids, &path, &Progress::default()).unwrap();
+        save(&doc, &ids, &[], &path, &Progress::default()).unwrap();
         let loaded = load(&path, None).unwrap();
         std::fs::remove_file(&path).unwrap();
         assert_eq!(loaded.doc.resolution, 299.5);
@@ -1363,5 +1391,33 @@ mod tests {
                 assert!(unshuffle(&bytes) == **t, "tile {i}, batches of {at_once}");
             }
         }
+    }
+
+    #[test]
+    fn color_samplers_are_kept_in_a_version_5_file_and_read_back() {
+        let dir = std::env::temp_dir().join(format!("opal-samplers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pinned.opal");
+        let doc = Document::new(30, 20);
+        let ids = IdGen::default();
+        let pinned = vec![Pinned { at: [3, 4], shown: "lab".into() }, Pinned { at: [-5, 99], shown: "hex".into() }];
+        save(&doc, &ids, &pinned, &path, &Progress::default()).unwrap();
+        let file = read_entry(
+            &mut ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap(),
+            "document.json",
+            MAX_JSON,
+            &path,
+        )
+        .unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&file).unwrap()["version"], serde_json::json!(5));
+        assert_eq!(load(&path, None).unwrap().samplers, pinned);
+        // None: not written, and an older version.
+        save(&doc, &ids, &[], &path, &Progress::default()).unwrap();
+        assert!(load(&path, None).unwrap().samplers.is_empty());
+        // Out of range: refused.
+        let far = vec![Pinned { at: [i64::MAX, 0], shown: "srgb".into() }];
+        save(&doc, &ids, &far, &path, &Progress::default()).unwrap();
+        assert!(load(&path, None).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

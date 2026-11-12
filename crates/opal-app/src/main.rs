@@ -11,6 +11,7 @@ mod box_fields;
 mod canvas;
 mod clipboard;
 mod clock;
+mod color_sampler;
 mod commands;
 mod compare;
 mod config;

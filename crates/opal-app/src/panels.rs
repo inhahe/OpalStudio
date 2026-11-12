@@ -685,6 +685,10 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
     if tool == crate::tools::ToolId::Measure {
         crate::measure_tool::panel(ui, st);
     }
+    if tool == crate::tools::ToolId::ColorSampler {
+        ui.separator();
+        command_buttons(ui, st, &[Cmd::ClearColorSamplers]);
+    }
 }
 
 /// The active image's view's angle, typed in as any field takes it, and the View tab's

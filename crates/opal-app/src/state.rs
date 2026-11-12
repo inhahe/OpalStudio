@@ -183,6 +183,8 @@ pub struct AppState {
     pub scripts_unserved: Option<String>,
     /// Whether the Console panel should come to the front (a script was started).
     pub show_console: bool,
+    /// Whether the Info panel should come to the front (the Color Sampler tool chosen).
+    pub show_info: bool,
     /// Whether scripts shut out should be let in again (the user started one).
     pub let_scripts_in: bool,
     /// Whether Connect an Assistant is open.
@@ -378,6 +380,8 @@ impl AppState {
     pub fn set_tool(&mut self, tool: ToolId) {
         if tool != self.tool {
             self.preset_name = None;
+            // What it places shows there.
+            self.show_info |= tool == ToolId::ColorSampler;
         }
         self.tool = tool;
     }
@@ -413,6 +417,7 @@ impl AppState {
             field_entries: std::collections::BTreeMap::new(),
             scripts_file: None,
             show_console: false,
+            show_info: false,
             scripts_unserved: None,
             let_scripts_in: false,
             assistant_open: false,
@@ -784,6 +789,11 @@ impl AppState {
                 d.measure = None;
                 d.revision += 1;
             }
+            Cmd::ClearColorSamplers => {
+                let d = self.active_mut().expect("available");
+                d.samplers.clear();
+                d.samplers_changed();
+            }
             Cmd::Trim => self.trim = Some(self.last_trim.clone()),
             Cmd::RevealAll => self.reveal_all(),
             Cmd::Defringe => self.defringe = Some(self.last_defringe),
@@ -1111,7 +1121,10 @@ impl AppState {
             crate::opening::ReadFile::Native(loaded) => {
                 let loaded = *loaded;
                 let id = self.add_doc(title, loaded.doc, loaded.ids, "Open");
-                self.doc_mut(id).expect("just added").path = Some(path.to_owned());
+                let d = self.doc_mut(id).expect("just added");
+                d.path = Some(path.to_owned());
+                d.set_pinned(&loaded.samplers);
+                d.samplers_saved = d.pinned();
                 Ok((id, Vec::new()))
             }
             crate::opening::ReadFile::Image(imported) => {
@@ -1186,8 +1199,9 @@ impl AppState {
         let before = (d.path.replace(path.clone()), std::mem::replace(&mut d.title, file_title(&path)));
         // The document as it is now: it can be edited while this is written.
         let (doc, ids, at) = (d.history.doc().clone(), d.ids.clone(), d.history.current());
-        let written = Written::Save { doc: id, at, path: path.clone(), before };
-        let job = Box::new(move |p: &_| native::save(&doc, &ids, &path, p).map_err(|e| e.to_string()));
+        let pinned = d.pinned();
+        let written = Written::Save { doc: id, at, path: path.clone(), before, pinned: pinned.clone() };
+        let job = Box::new(move |p: &_| native::save(&doc, &ids, &pinned, &path, p).map_err(|e| e.to_string()));
         self.writer.write(written, then, job, ctx);
     }
 
@@ -1204,7 +1218,7 @@ impl AppState {
         let mut finished = VecDeque::from(finished);
         while let Some(f) = finished.pop_front() {
             match (f.written, f.result) {
-                (Written::Save { doc, at, path, .. }, Ok(())) => {
+                (Written::Save { doc, at, path, pinned, .. }, Ok(())) => {
                     // The image may have been closed meanwhile; what was to follow still is.
                     // It is saved if it still goes to this file (not if saved as another since).
                     let title = file_title(&path);
@@ -1212,6 +1226,7 @@ impl AppState {
                         && d.path.as_ref() == Some(&path)
                     {
                         d.saved_at = Some(at);
+                        d.samplers_saved = pinned;
                     }
                     match f.then {
                         // Changed while it was written: asked about again.

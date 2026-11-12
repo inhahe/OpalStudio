@@ -14,6 +14,7 @@ pub enum ToolId {
     Zoom,
     RotateView,
     Measure,
+    ColorSampler,
 }
 
 /// What the user needs to know about a tool.
@@ -76,12 +77,13 @@ impl ToolId {
     }
 
     /// Every tool, in toolbar order.
-    pub const ALL: [ToolId; 8] = [
+    pub const ALL: [ToolId; 9] = [
         ToolId::Move,
         ToolId::Select,
         ToolId::Outline,
         ToolId::Crop,
         ToolId::Measure,
+        ToolId::ColorSampler,
         ToolId::Hand,
         ToolId::Zoom,
         ToolId::RotateView,
@@ -97,6 +99,7 @@ impl ToolId {
             ToolId::Zoom => &ZOOM,
             ToolId::RotateView => &ROTATE_VIEW,
             ToolId::Measure => &MEASURE,
+            ToolId::ColorSampler => &COLOR_SAMPLER,
         }
     }
 }
@@ -530,6 +533,54 @@ static MEASURE: ToolInfo = ToolInfo {
            the image so the line is level, or plumb, whichever is nearer; Straighten Layers \
            turns the selected layers instead.",
     settings: MEASURE_SETTINGS,
+    variants: None,
+};
+
+pub static COLOR_SAMPLER_SETTINGS: &[Def] = &[
+    Def {
+        key: "sampler.size",
+        label: "Sample size",
+        help: "How much of the image each sampler reads: the one pixel, or the average of a square \
+               about it, which evens out noise and grain.",
+        section: "Color Sampler",
+        kind: Kind::Choice(crate::color_sampler::SIZES),
+        default: Init::Choice("1"),
+        advanced: false,
+    },
+    Def {
+        key: "sampler.model",
+        label: "New samplers show",
+        help: "How a sampler placed now shows its colour in the Info panel; each one's menu there \
+               changes it.",
+        section: "Color Sampler",
+        kind: Kind::Choice(crate::color_sampler::SHOWN),
+        default: Init::Choice("srgb"),
+        advanced: false,
+    },
+    Def {
+        key: "sampler.pointer",
+        label: "The pointer's colour",
+        help: "How the Info panel shows the colour under the pointer.",
+        section: "Color Sampler",
+        kind: Kind::Choice(crate::color_sampler::SHOWN),
+        default: Init::Choice("srgb"),
+        advanced: true,
+    },
+];
+
+static COLOR_SAMPLER: ToolInfo = ToolInfo {
+    id: "color_sampler",
+    name: "Color Sampler",
+    icon: icons::COLOR_SAMPLER,
+    key: Key::I,
+    description: "Click to pin a point whose colour the Info panel shows; drag one to move it, Alt+click to remove it.",
+    help: "Click on the image to pin a sampler there (ten at most): the Info panel shows its \
+           colour, in sRGB or any other model you choose for it, and while an edit is shown \
+           before it is applied (a box dragged, an adjustment previewed), the colour as it was \
+           beside it. Drag a sampler to move it; Alt+click it to remove it. Samplers are kept \
+           in the image's file, and go with the image turned or resized; they are not part \
+           of its history. The Info panel also shows the colour under the pointer.",
+    settings: COLOR_SAMPLER_SETTINGS,
     variants: None,
 };
 

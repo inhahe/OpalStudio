@@ -589,6 +589,11 @@ class Editor:
 
         document: The image, by id. Default: the active image.
         """
+    def clear_color_samplers(self, *, document: int | None = None) -> Any:
+        """Remove every color sampler from the image.
+
+        document: The image, by id. Default: the active image.
+        """
     def flip_horizontal(self, *, document: int | None = None) -> Any:
         """Mirror the whole image left to right.
 
@@ -634,6 +639,20 @@ class Editor:
         """What is selected in an image: the rectangle round it, as [x, y, width, height] from the canvas's corner (null if nothing is; "unbounded" where it reaches past every edge, inverted), and the steps that made it, in order: shapes (rectangles and ellipses, by their middle, size and angle, and how each combines), inversions, grow steps (by, corners), feather steps (width, side, falloff), smooth steps (radius) and border steps (width, side), as grow_selection, feather_selection, smooth_selection and border_selection take them, and masks (a "mask" step is, as its of says, a layer's pixels, from select_layer_pixels; what the steps before it came to, carried pixel by pixel by Rotate, Flip or Resize Image, which could not carry them exactly; or a saved selection, combined by load_selection; it gives no numbers, only how it combines), and outlines (their start and segments, lines and curves, from select_outline or the outline tool). select_all, deselect, reselect, invert_selection and select_layer_pixels answer with it too.
 
         document: The image, by id. Default: the active image.
+        """
+    def color_samplers(self, *, document: int | None = None) -> Any:
+        """What an image's color samplers read, in order (numbered from 1, as the Info panel numbers them): each one's pixel, from the canvas's corner, and its colour (as color_at tells one), averaged over the Color Sampler tool's sample size, as the image shows (with an edit in progress, as it would leave it) and, while that differs, before (as the image is without it).
+
+        document: The image, by id. Default: the active image.
+        """
+    def color_at(self, *, document: int | None = None, x: int | str | Expr, y: int | str | Expr, size: Literal["1", "3", "5", "11", "31", "51", "101"] = "1", shown_as: Literal["srgb", "linear-srgb", "adobergb", "hsb", "hsl", "cmy", "lab", "lch", "oklab", "oklch", "xyz", "lms", "opponent", "hex"] = "srgb") -> Any:
+        """The colour an image shows at a pixel, from the canvas's corner: linear (the image's own linear sRGB, not premultiplied: values past 0 to 1 for colours outside sRGB), alpha (0 to 1), srgb (0 to 255, rounded and clamped), hex, and values in the model asked for (as its channels count: sRGB 0 to 255, Lab's L* 0 to 100, a hue in degrees), with that model's id.
+
+        document: The image, by id. Default: the active image.
+        x: The pixel's column, from the canvas's left edge. From -10000000 to 10000000 pixels.
+        y: The pixel's row, from the canvas's top edge. From -10000000 to 10000000 pixels.
+        size: How many pixels a side the square averaged about it is. Default: "1".
+        shown_as: How it shows its colour: in a colour model, or as sRGB's hex code. Default: "srgb".
         """
     def measurement(self, *, document: int | None = None) -> Any:
         """What is measured on an image (the Measure tool, or measure): start and end, from the canvas's corner, in pixels, as it is now (turned, flipped or resized with the image since); width and height (how far the end is from the start, across and down); length; angle (degrees counterclockwise from the right, as a protractor reads it); straightening (the turn, in degrees clockwise, that straighten makes: the least that makes the line level or plumb); and for a protractor, arm (its second arm's end), arm_length and between (the angle between the arms, 0 to 180). Null if nothing is measured.
@@ -683,6 +702,29 @@ class Editor:
 
         document: The image, by id. Default: the active image.
         points: The line's start and end, and a protractor's second arm's end if it has one, each [x, y] in pixels from the canvas's top-left corner.
+        """
+    def add_color_sampler(self, *, document: int | None = None, x: int | str | Expr, y: int | str | Expr, shown_as: Literal["srgb", "linear-srgb", "adobergb", "hsb", "hsl", "cmy", "lab", "lch", "oklab", "oklch", "xyz", "lms", "opponent", "hex"] | None = None) -> Any:
+        """Pins a color sampler on an image, as the Color Sampler tool does (ten at most): the pixel it samples, from the canvas's corner, which must be on the canvas. Answers as the color_samplers query does.
+
+        document: The image, by id. Default: the active image.
+        x: The pixel's column, from the canvas's left edge. From -10000000 to 10000000 pixels.
+        y: The pixel's row, from the canvas's top edge. From -10000000 to 10000000 pixels.
+        shown_as: How it shows its colour: in a colour model, or as sRGB's hex code. Default: the Color Sampler tool's New samplers show.
+        """
+    def move_color_sampler(self, *, document: int | None = None, number: int | str | Expr, x: int | str | Expr | None = None, y: int | str | Expr | None = None, shown_as: Literal["srgb", "linear-srgb", "adobergb", "hsb", "hsl", "cmy", "lab", "lch", "oklab", "oklch", "xyz", "lms", "opponent", "hex"] | None = None) -> Any:
+        """Moves an image's color sampler to another pixel, or changes how it shows its colour. Answers as the color_samplers query does.
+
+        document: The image, by id. Default: the active image.
+        number: Which sampler, numbered from 1, as the color_samplers query and the Info panel number them. From 1 to 10.
+        x: The pixel's column, from the canvas's left edge. From -10000000 to 10000000 pixels. Default: where it is.
+        y: The pixel's row, from the canvas's top edge. From -10000000 to 10000000 pixels. Default: where it is.
+        shown_as: How it shows its colour: in a colour model, or as sRGB's hex code. Default: as it shows it.
+        """
+    def delete_color_sampler(self, *, document: int | None = None, number: int | str | Expr) -> Any:
+        """Removes one of an image's color samplers; those after it are numbered one less. Answers as the color_samplers query does.
+
+        document: The image, by id. Default: the active image.
+        number: Which sampler, numbered from 1, as the color_samplers query and the Info panel number them. From 1 to 10.
         """
     def select_outline(self, *, document: int | None = None, points: list[tuple[float, float]] | None = None, outline: dict[str, Any] | None = None, combine: Literal["replace", "add", "subtract", "intersect"] = "replace", smooth: bool | None = None) -> Any:
         """Selects what an outline encloses, as the outline tool does: points joined by straight sides, or an outline with curves, as the selection query tells one; the last point back to the first (a loop crossing itself selects each of its lobes). Give points or outline, one of them. Answers with what is selected then, as the selection query does.
