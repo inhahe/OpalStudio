@@ -1,15 +1,16 @@
 //! The local date and time, as metadata writes it.
 
-/// Now, local: as EXIF writes a date ("2024:05:06 14:03:22", local time, no zone) and as
-/// XMP does ("2024-05-06T14:03:22+02:00").
-pub fn now() -> (String, String) {
+/// Now, local: as EXIF writes a date ("2024:05:06 14:03:22", local time) and its zone
+/// ("+02:00"), and as XMP does ("2024-05-06T14:03:22+02:00").
+pub fn now() -> (String, String, String) {
     let (local, offset_minutes) = local_now();
     let [y, mo, d, h, mi, s] = local;
     let exif = format!("{y:04}:{mo:02}:{d:02} {h:02}:{mi:02}:{s:02}");
     let sign = if offset_minutes < 0 { '-' } else { '+' };
     let off = offset_minutes.unsigned_abs();
-    let xmp = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}{sign}{:02}:{:02}", off / 60, off % 60);
-    (exif, xmp)
+    let zone = format!("{sign}{:02}:{:02}", off / 60, off % 60);
+    let xmp = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}{zone}");
+    (exif, zone, xmp)
 }
 
 /// The local time (year, month, day, hour, minute, second) and its offset from UTC in
@@ -77,7 +78,8 @@ mod tests {
         assert_eq!(civil(1_715_004_202), [2024, 5, 6, 14, 3, 22]);
         // Leap day.
         assert_eq!(civil(951_782_400), [2000, 2, 29, 0, 0, 0]);
-        let (exif, xmp) = now();
+        let (exif, zone, xmp) = now();
+        assert_eq!((zone.len(), &zone[3..4]), (6, ":"));
         assert_eq!((exif.len(), &exif[4..5], &exif[10..11]), (19, ":", " "));
         assert!(xmp.len() == 25 && &xmp[10..11] == "T", "{xmp}");
     }

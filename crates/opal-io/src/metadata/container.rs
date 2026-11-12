@@ -14,6 +14,16 @@ const SEGMENT: usize = 65533;
 /// whole length and the offset).
 const EXTENDED_CHUNK: usize = SEGMENT - 35 - 32 - 8;
 
+/// Whether `bytes` begin as a JPEG's do.
+pub fn is_jpeg(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xFF, 0xD8])
+}
+
+/// Whether `bytes` begin as a PNG's do.
+pub fn is_png(bytes: &[u8]) -> bool {
+    bytes.starts_with(PNG_SIGNATURE)
+}
+
 /// The metadata of a JPEG's segments (`bytes`, the whole file, or its header at least).
 pub fn read_jpeg(bytes: &[u8]) -> Raw {
     let mut raw = Raw::default();
@@ -25,7 +35,7 @@ pub fn read_jpeg(bytes: &[u8]) -> Raw {
                 raw.exif = Some(data[EXIF_HEADER.len()..].to_vec());
             }
             // Some writers put a different byte after "Exif\0".
-            0xE1 if data.starts_with(b"Exif\0") && raw.exif.is_none() => raw.exif = Some(data[6..].to_vec()),
+            0xE1 if data.starts_with(b"Exif\0") && raw.exif.is_none() => raw.exif = data.get(6..).map(<[u8]>::to_vec),
             0xE1 if data.starts_with(XMP_HEADER) && raw.xmp.is_none() => {
                 raw.xmp = Some(data[XMP_HEADER.len()..].to_vec());
             }
@@ -73,9 +83,24 @@ fn extended_guid(xmp: &[u8]) -> Option<Vec<u8>> {
 /// A JPEG's segments before its image data (the scan): each marker's second byte and its
 /// data. Stops at what it cannot read.
 fn jpeg_segments(bytes: &[u8]) -> Vec<(u8, &[u8])> {
+    jpeg_walk(bytes).0.into_iter().map(|s| (s.marker, s.data)).collect()
+}
+
+/// A JPEG segment: its marker's second byte, its data, and where it lies whole (its marker
+/// and length included).
+struct Segment<'a> {
+    marker: u8,
+    data: &'a [u8],
+    at: usize,
+    end: usize,
+}
+
+/// A JPEG's segments before its image data, and where the walk stopped (the scan, or what
+/// could not be read): what follows, copied as it is by whatever rewrites the segments.
+fn jpeg_walk(bytes: &[u8]) -> (Vec<Segment<'_>>, usize) {
     let mut out = Vec::new();
     if !bytes.starts_with(&[0xFF, 0xD8]) {
-        return out;
+        return (out, 0);
     }
     let mut at = 2;
     while at + 4 <= bytes.len() && bytes[at] == 0xFF {
@@ -94,10 +119,10 @@ fn jpeg_segments(bytes: &[u8]) -> Vec<(u8, &[u8])> {
         if len < 2 {
             break;
         }
-        out.push((marker, data));
+        out.push(Segment { marker, data, at, end: at + 2 + len });
         at += 2 + len;
     }
-    out
+    (out, at)
 }
 
 /// The segments (each its marker and length included) that write `exif`, `xmp` (split into
@@ -128,10 +153,7 @@ pub fn jpeg_segments_of(
     if let Some(xmp) = xmp {
         let (standard, extended) = xmp.split(SEGMENT - XMP_HEADER.len());
         segment(0xE1, &[XMP_HEADER, standard.as_bytes()])?;
-        if let Some(extended) = extended {
-            let guid = super::xmp::Xmp::read(standard.as_bytes())
-                .and_then(|x| x.text(super::xmp::XMP_NOTE, "HasExtendedXMP"))
-                .expect("the split names it");
+        if let Some((guid, extended)) = extended {
             let whole = (extended.len() as u32).to_be_bytes();
             for (i, chunk) in extended.as_bytes().chunks(EXTENDED_CHUNK).enumerate() {
                 let offset = ((i * EXTENDED_CHUNK) as u32).to_be_bytes();
@@ -163,51 +185,41 @@ pub fn photoshop_block(jpeg: &[u8]) -> Vec<u8> {
 
 /// Whether a JPEG segment (its marker and data) carries metadata this module writes, which
 /// writing it anew replaces.
-fn is_metadata(marker: u8, data: &[u8]) -> bool {
+fn is_metadata(marker: u8, data: &[u8], parts: Parts) -> bool {
     match marker {
-        0xE1 => data.starts_with(b"Exif\0") || data.starts_with(XMP_HEADER) || data.starts_with(EXTENDED_HEADER),
-        0xED => data.starts_with(iptc::PHOTOSHOP),
+        0xE1 => {
+            (parts.exif && data.starts_with(b"Exif\0"))
+                || (parts.xmp && (data.starts_with(XMP_HEADER) || data.starts_with(EXTENDED_HEADER)))
+        }
+        0xED => parts.iptc && data.starts_with(iptc::PHOTOSHOP),
         _ => false,
     }
 }
 
 /// `jpeg` (a whole file, or its start: SOI and the segments after it) with its metadata
-/// segments replaced by `segments` (see [`jpeg_segments_of`]), put after JFIF's APP0 if it
-/// comes first, else right after SOI. None if `jpeg` is not a JPEG.
-pub fn replace_jpeg(jpeg: &[u8], segments: &[u8]) -> Option<Vec<u8>> {
+/// segments of `parts` replaced by `segments` (see [`jpeg_segments_of`]), put after JFIF's
+/// APP0 if it comes first, else right after SOI. None if `jpeg` is not a JPEG.
+pub fn replace_jpeg(jpeg: &[u8], segments: &[u8], parts: Parts) -> Option<Vec<u8>> {
     if !jpeg.starts_with(&[0xFF, 0xD8]) {
         return None;
     }
     let mut out = vec![0xFF, 0xD8];
-    let mut at = 2;
+    let (walked, rest) = jpeg_walk(jpeg);
     let mut placed = false;
-    let mut first = true;
-    while at + 4 <= jpeg.len() && jpeg[at] == 0xFF {
-        let marker = jpeg[at + 1];
-        if marker == 0xFF {
-            at += 1;
-            continue;
-        }
-        if marker == 0xDA || marker == 0xD9 {
-            break;
-        }
-        let len = usize::from(u16::from_be_bytes([jpeg[at + 2], jpeg[at + 3]]));
-        let Some(data) = jpeg.get(at + 4..at + 2 + len) else { break };
-        let is_jfif = marker == 0xE0 && data.starts_with(b"JFIF\0");
-        if !(placed || first && is_jfif) {
+    for (i, s) in walked.iter().enumerate() {
+        let is_jfif = s.marker == 0xE0 && s.data.starts_with(b"JFIF\0");
+        if !(placed || i == 0 && is_jfif) {
             out.extend_from_slice(segments);
             placed = true;
         }
-        if !is_metadata(marker, data) {
-            out.extend_from_slice(&jpeg[at..at + 2 + len]);
+        if !is_metadata(s.marker, s.data, parts) {
+            out.extend_from_slice(&jpeg[s.at..s.end]);
         }
-        first = false;
-        at += 2 + len;
     }
     if !placed {
         out.extend_from_slice(segments);
     }
-    out.extend_from_slice(&jpeg[at..]);
+    out.extend_from_slice(&jpeg[rest..]);
     Some(out)
 }
 
@@ -261,7 +273,7 @@ impl<W: std::io::Write> std::io::Write for JpegWithMetadata<W> {
         held.extend_from_slice(buf);
         if let Some(end) = Self::header_end(held) {
             let held = self.held.take().expect("held");
-            let header = replace_jpeg(&held[..end], &self.segments)
+            let header = replace_jpeg(&held[..end], &self.segments, Parts::ALL)
                 .ok_or_else(|| std::io::Error::other("the encoder wrote no JPEG"))?;
             self.out.write_all(&header)?;
             self.out.write_all(&held[end..])?;
@@ -276,6 +288,28 @@ impl<W: std::io::Write> std::io::Write for JpegWithMetadata<W> {
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 const XMP_KEYWORD: &str = "XML:com.adobe.xmp";
+/// The text chunks' keywords whose text is metadata read.
+const READ_KEYWORDS: [&str; 6] = [
+    XMP_KEYWORD,
+    "Raw profile type exif",
+    "Raw profile type APP1",
+    "Raw profile type xmp",
+    "Raw profile type iptc",
+    "Raw profile type 8bim",
+];
+
+/// Which parts of a file's metadata writing replaces; those it does not are kept as the file
+/// has them (what Opal Studio could not read among them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Parts {
+    pub exif: bool,
+    pub xmp: bool,
+    pub iptc: bool,
+}
+
+impl Parts {
+    pub const ALL: Parts = Parts { exif: true, xmp: true, iptc: true };
+}
 
 /// A PNG's chunks: each one's type, data, and where it starts (its length field).
 fn png_chunks(bytes: &[u8]) -> Vec<([u8; 4], &[u8], usize)> {
@@ -287,7 +321,11 @@ fn png_chunks(bytes: &[u8]) -> Vec<([u8; 4], &[u8], usize)> {
     while at + 12 <= bytes.len() {
         let len = u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]) as usize;
         let kind = [bytes[at + 4], bytes[at + 5], bytes[at + 6], bytes[at + 7]];
-        let Some(data) = bytes.get(at + 8..(at + 8).saturating_add(len)) else { break };
+        // Its data and its CRC both within the file.
+        if (at + 12).saturating_add(len) > bytes.len() {
+            break;
+        }
+        let data = &bytes[at + 8..at + 8 + len];
         out.push((kind, data, at));
         at += 12 + len;
         if &kind == b"IEND" {
@@ -301,6 +339,10 @@ fn png_chunks(bytes: &[u8]) -> Vec<([u8; 4], &[u8], usize)> {
 fn png_text(kind: &[u8; 4], data: &[u8]) -> Option<(String, Vec<u8>)> {
     let nul = data.iter().position(|&b| b == 0)?;
     let keyword: String = data[..nul].iter().map(|&c| char::from(c)).collect();
+    // Other text is not metadata Opal Studio reads: not inflated for nothing.
+    if !READ_KEYWORDS.contains(&keyword.as_str()) {
+        return None;
+    }
     let rest = &data[nul + 1..];
     let inflate = |b: &[u8]| {
         let mut out = Vec::new();
@@ -426,13 +468,17 @@ pub fn png_bytes(chunks: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
 }
 
 /// Whether a PNG chunk carries metadata this module writes, which writing it anew replaces.
-fn png_is_metadata(kind: &[u8; 4], data: &[u8]) -> bool {
+fn png_is_metadata(kind: &[u8; 4], data: &[u8], parts: Parts) -> bool {
     match kind {
-        b"eXIf" => true,
-        b"tEXt" | b"zTXt" | b"iTXt" => {
-            let keyword = data.split(|&b| b == 0).next().unwrap_or_default();
-            keyword == XMP_KEYWORD.as_bytes() || keyword.starts_with(b"Raw profile type ")
-        }
+        b"eXIf" => parts.exif,
+        b"tEXt" | b"zTXt" | b"iTXt" => match data.split(|&b| b == 0).next().unwrap_or_default() {
+            b"Raw profile type exif" | b"Raw profile type APP1" => parts.exif,
+            b"Raw profile type xmp" => parts.xmp,
+            k if k == XMP_KEYWORD.as_bytes() => parts.xmp,
+            b"Raw profile type iptc" => parts.iptc,
+            // Photoshop's resources (paths), a color profile: not the parts written.
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -440,7 +486,7 @@ fn png_is_metadata(kind: &[u8; 4], data: &[u8]) -> bool {
 /// `png` (a whole file) with its metadata chunks replaced by `chunks` (see
 /// [`png_chunks_of`]), put right after the header chunk (IHDR), before the image data as
 /// eXIf must be. None if `png` is not a PNG.
-pub fn replace_png(png: &[u8], chunks: &[u8]) -> Option<Vec<u8>> {
+pub fn replace_png(png: &[u8], chunks: &[u8], parts: Parts) -> Option<Vec<u8>> {
     let all = png_chunks(png);
     if all.first().is_none_or(|(k, ..)| k != b"IHDR") {
         return None;
@@ -449,7 +495,7 @@ pub fn replace_png(png: &[u8], chunks: &[u8]) -> Option<Vec<u8>> {
     let mut end = PNG_SIGNATURE.len();
     for (i, (kind, data, at)) in all.iter().enumerate() {
         let whole = &png[*at..at + 12 + data.len()];
-        if !png_is_metadata(kind, data) {
+        if !png_is_metadata(kind, data, parts) {
             out.extend_from_slice(whole);
         }
         if i == 0 {
@@ -496,7 +542,7 @@ mod tests {
         let (exif, xmp, iim) = sample();
         let segments = jpeg_segments_of(Some(&exif), Some(&xmp), Some(&iptc::to_resources(&iim))).unwrap();
         let plain = jpeg();
-        let with = replace_jpeg(&plain, &segments).unwrap();
+        let with = replace_jpeg(&plain, &segments, Parts::ALL).unwrap();
         let raw = read_jpeg(&with);
         assert_eq!(raw.exif.as_deref(), Some(&exif[..]));
         assert_eq!(Xmp::read(raw.xmp.as_deref().unwrap()).unwrap().text(DC, "title").as_deref(), Some("Harbour"));
@@ -506,9 +552,9 @@ mod tests {
         let decoded = |b: &[u8]| image::load_from_memory(b).unwrap().to_rgb8();
         assert_eq!(decoded(&with), decoded(&plain));
         // Written again, replaced, not doubled; and none: gone.
-        let again = replace_jpeg(&with, &segments).unwrap();
+        let again = replace_jpeg(&with, &segments, Parts::ALL).unwrap();
         assert_eq!(again, with);
-        assert_eq!(replace_jpeg(&with, &[]).unwrap(), plain);
+        assert_eq!(replace_jpeg(&with, &[], Parts::ALL).unwrap(), plain);
         // Streamed through the writer, a few bytes at a time: the same.
         let mut w = JpegWithMetadata::new(Vec::new(), segments);
         for chunk in plain.chunks(7) {
@@ -522,7 +568,7 @@ mod tests {
         let mut xmp = Xmp::default();
         let many: Vec<String> = (0..12_000).map(|i| format!("keyword {i}")).collect();
         xmp.set_texts(DC, "subject", crate::metadata::xmp::ArrayKind::Bag, &many);
-        let with = replace_jpeg(&jpeg(), &jpeg_segments_of(None, Some(&xmp), None).unwrap()).unwrap();
+        let with = replace_jpeg(&jpeg(), &jpeg_segments_of(None, Some(&xmp), None).unwrap(), Parts::ALL).unwrap();
         let raw = read_jpeg(&with);
         let mut read = Xmp::read(raw.xmp.as_deref().unwrap()).unwrap();
         read.join(Xmp::read(raw.extended_xmp.as_deref().unwrap()).unwrap());
@@ -533,14 +579,15 @@ mod tests {
     fn a_png_takes_its_metadata_after_its_header_and_reads_imagemagicks_too() {
         let (exif, xmp, iim) = sample();
         let plain = png();
-        let with = replace_png(&plain, &png_bytes(&png_chunks_of(Some(&exif), Some(&xmp), Some(&iim)))).unwrap();
+        let with =
+            replace_png(&plain, &png_bytes(&png_chunks_of(Some(&exif), Some(&xmp), Some(&iim))), Parts::ALL).unwrap();
         let raw = read_png(&with);
         assert_eq!(raw.exif.as_deref(), Some(&exif[..]));
         assert!(Xmp::read(raw.xmp.as_deref().unwrap()).is_some());
         assert_eq!(raw.iptc.as_deref(), Some(&iim[..]));
         let decoded = |b: &[u8]| image::load_from_memory(b).unwrap().to_rgba8();
         assert_eq!(decoded(&with), decoded(&plain));
-        assert_eq!(replace_png(&with, &[]).unwrap(), plain);
+        assert_eq!(replace_png(&with, &[], Parts::ALL).unwrap(), plain);
         // ImageMagick's EXIF, compressed, with its header.
         let mut text = b"\nexif\n      14\n".to_vec();
         let mut payload = EXIF_HEADER.to_vec();
@@ -552,7 +599,24 @@ mod tests {
         std::io::Write::write_all(&mut z, &text).unwrap();
         let mut data = b"Raw profile type exif\0\0".to_vec();
         data.extend(z.finish().unwrap());
-        let magick = replace_png(&plain, &png_chunk(b"zTXt", &data)).unwrap();
+        let magick = replace_png(&plain, &png_chunk(b"zTXt", &data), Parts::ALL).unwrap();
         assert_eq!(read_png(&magick).exif.as_deref(), Some(&exif[..8]));
+    }
+
+    #[test]
+    fn a_damaged_file_is_read_as_far_as_it_can_be_and_nothing_panics() {
+        // An APP1 of "Exif" and its NUL alone.
+        let plain = jpeg();
+        let mut short = vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x07];
+        short.extend_from_slice(b"Exif\0");
+        short.extend_from_slice(&plain[2..]);
+        assert_eq!(read_jpeg(&short).exif, None);
+        // A PNG cut off within a chunk's CRC: that chunk is none.
+        let (exif, ..) = sample();
+        let with = replace_png(&png(), &png_bytes(&png_chunks_of(Some(&exif), None, None)), Parts::ALL).unwrap();
+        let at = with.windows(4).position(|w| w == b"eXIf").unwrap() - 4;
+        let cut = &with[..at + 12 + exif.len() - 2];
+        assert_eq!(read_png(cut).exif, None);
+        assert!(replace_png(cut, &[], Parts::ALL).is_some());
     }
 }

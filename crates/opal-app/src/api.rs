@@ -1972,8 +1972,7 @@ fn set_file_metadata_by_args(args: &Args) -> Result<Value, String> {
     use opal_io::metadata::{file, json};
     let path = args.path("path");
     let changes = args.get("changes").expect("required").clone();
-    file::rewrite(&path, |m| json::changed(m, &changes)).map_err(|e| format!("set_file_metadata: {e}"))?;
-    let meta = file::of_file(&path).map_err(|e| format!("set_file_metadata: {e}"))?;
+    let meta = file::rewrite(&path, |m| json::changed(m, &changes)).map_err(|e| format!("set_file_metadata: {e}"))?;
     Ok(json::to_json(&meta))
 }
 
@@ -2718,7 +2717,9 @@ impl AppState {
         let d = self.doc_mut(id).expect("found");
         let meta =
             opal_io::metadata::json::changed(&d.doc().metadata, &changes).map_err(|e| format!("set_metadata: {e}."))?;
-        if meta != d.doc().metadata {
+        // Compared as read, not as bytes: XMP written anew differs from the file's in its form.
+        let read = opal_io::metadata::json::to_json;
+        if read(&meta) != read(&d.doc().metadata) {
             let new = meta.clone();
             d.apply("Set metadata", |doc, _| {
                 doc.metadata = new;
@@ -4380,6 +4381,51 @@ mod tests {
         drop(held);
         st.finish_edits();
         std::fs::remove_dir_all(missing.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn what_export_keeps_of_metadata_is_named_alike_in_the_preference_and_for_scripts() {
+        let names: Vec<&str> = opal_io::metadata::Keep::ALL.map(|k| k.name()).to_vec();
+        let def = crate::prefs::PREFS.iter().find(|d| d.key == "export.metadata").expect("the preference");
+        let crate::settings::Kind::Choice(choices) = def.kind else { panic!("not a choice") };
+        assert_eq!(choices.iter().map(|(n, _)| *n).collect::<Vec<_>>(), names);
+        let param = params(Cmd::Export).unwrap().iter().find(|p| p.name == "metadata").expect("the parameter");
+        let Kind::Choice(words) = param.kind else { panic!("not a choice") };
+        assert_eq!(words.to_vec(), names);
+    }
+
+    #[test]
+    fn a_script_hears_what_export_left_out_and_a_change_to_nothing_makes_nothing() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 8, "height": 8 })).unwrap();
+        // EXIF past what a JPEG's segment holds (a maker note of 70 KB).
+        let mut e = opal_io::metadata::exif::Exif::new();
+        e.set(opal_io::metadata::exif::Ifd::Exif, 0x927C, &opal_io::metadata::exif::Value::Undefined(vec![1; 70_000]));
+        let d = st.active_mut().unwrap();
+        let meta =
+            opal_core::document::Metadata { exif: Some(std::sync::Arc::from(e.into_bytes())), ..Default::default() };
+        d.apply("EXIF", |doc, _| {
+            doc.metadata = meta;
+            Ok::<(), String>(())
+        })
+        .unwrap();
+        let out = file_in("metadata-notes", "big.jpg");
+        let answer = call(&mut st, "export", json!({ "path": out.display().to_string(), "metadata": "all" })).unwrap();
+        assert!(answer["notes"].to_string().contains("EXIF was left out"), "{answer}");
+        // A description given as it is, of XMP another program wrote in its own form: no state.
+        let packet = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title><rdf:Alt><rdf:li xml:lang="x-default">Harbour</rdf:li></rdf:Alt></dc:title></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+        let d = st.active_mut().unwrap();
+        let meta =
+            opal_core::document::Metadata { xmp: Some(std::sync::Arc::from(packet.as_bytes())), ..Default::default() };
+        d.apply("XMP", |doc, _| {
+            doc.metadata = meta;
+            Ok::<(), String>(())
+        })
+        .unwrap();
+        let before = st.active().unwrap().history.current();
+        now(&mut st, "set_metadata", json!({ "changes": { "description": { "title": "Harbour" } } })).unwrap();
+        assert_eq!(st.active().unwrap().history.current(), before, "a change to nothing made a state");
+        std::fs::remove_dir_all(out.parent().unwrap()).ok();
     }
 
     #[test]

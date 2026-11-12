@@ -1416,13 +1416,16 @@ export leave out what gives away more than the user means to.
   whole, as bytes (`opal_core::document::Metadata`, the document's `metadata`), and the
   native file keeps them (`metadata/exif.bin`, `metadata/xmp.xml`, `metadata/iptc.bin`;
   format version 4, written only by a file that has some). A new image has none. Open as
-  Layers and Place take a file's pixels, not its metadata, as Photoshop does. Nothing is
-  parsed until it is shown, edited or exported, and what Opal Studio does not understand
+  Layers and Place take a file's pixels, not its metadata, as Photoshop does. Each part is
+  parsed once as it is read, to keep only what reads as what it should be (`Raw::into_metadata`),
+  and then kept as bytes, parsed again only when it is shown, edited or exported; what Opal
+  Studio does not understand
   goes out as it came in.
 - **Read and written by code of our own** (`opal_io::metadata`): the JPEG segments and PNG
   chunks (`container`); EXIF's IFDs (`exif`, with the standard tags' names in `tags`);
   IIM's datasets and Photoshop's block (`iptc`); and XMP (`xmp`): RDF/XML read (with
-  roxmltree, which refuses DTDs) into XMP's data model, every shorthand RDF allows, and
+  roxmltree, which refuses DTDs and is held to a million nodes, and read 64 levels deep at
+  most, past which a crafted packet would overflow the stack) into XMP's data model, every shorthand RDF allows, and
   written back from it, so that a property edited is written alone and every other kept,
   Lightroom's develop settings and a file's history included. No crate kept maker notes
   intact through an edit, which is the crux.
@@ -1433,21 +1436,29 @@ export leave out what gives away more than the user means to.
   points at. Offsets counting from the start of the structure (a Canon's or a Sony's maker
   note's) therefore stay right. Zeros left at the end (a thumbnail removed usually lies
   last) are trimmed. A JPEG's APP1 holds at most 64 KB; EXIF past that after trimming is
-  left out of the JPEG, and export says so.
+  left out of the JPEG, and export says so (with a script's answer, or once the file is
+  written). A fraction is written as near as a RATIONAL can hold it (1/8000 stays 1/8000:
+  continued fractions, `Value::rational`). EXIF with no tag left is not written at all.
 - **What export makes true.** The pixels are exported upright, so the orientation is
   written as 1; the size is the exported one (EXIF's ImageWidth and ImageLength,
   PixelXDimension and PixelYDimension, and their XMP copies, where present); the resolution
-  the image's; the modification date now (EXIF DateTime, `xmp:ModifyDate`,
-  `xmp:MetadataDate`), and EXIF's Software Opal Studio. The embedded thumbnails (EXIF's IFD1,
+  the image's; the modification date now (EXIF DateTime, with OffsetTime its zone and the
+  camera's SubSecTime gone, as they qualify it; `xmp:ModifyDate`, `xmp:MetadataDate`), and
+  EXIF's Software Opal Studio. A thumbnail's offset is taken at its word only where an image
+  can lie (past the header, clear of every IFD), so a damaged one zeroes nothing else. The embedded thumbnails (EXIF's IFD1,
   XMP's `xmp:Thumbnails`) are dropped, as they show the image as it was, cropped-away parts
   included. Of Photoshop's APP13 block only the IIM goes out, with its digest worked out
-  again. XMP too large for a JPEG's segment is split into Extended XMP, its largest
+  again; an IIM whose digest said it was newer than the XMP is first carried to the XMP (and
+  EXIF), as the guidelines would have it, so that the new digest's saying they agree is true.
+  XMP too large for a JPEG's segment is split into Extended XMP, its largest
   properties moved, as XMP's part 3 says.
 - **Export chooses what goes out** (the `export.metadata` preference, shown in the Export
   dialog; scripts `export(metadata=…)`):
   - *All* of it.
-  - *All but the place and serial numbers* (the default): no GPS (EXIF's GPS IFD, XMP's
-    `exif:GPS…`), no named place (IIM's sublocation, city, state and country; their XMP), no
+  - *All but the place and serial numbers* (the default): no GPS (EXIF's GPS IFD, and any
+    XMP property whose name speaks of GPS, latitude, longitude or altitude, in any schema: a
+    drone's own as well as EXIF's), no named place (IIM's location shown, sublocation, city,
+    state and country; their XMP), no
     serial numbers or owner (EXIF's BodySerialNumber, LensSerialNumber and CameraOwnerName;
     XMP's `aux:` and `exifEX:` ones), and no maker note, which holds serial numbers in most
     cameras' and cannot be told apart from the rest of it without a decoder per maker. What
@@ -1485,8 +1496,13 @@ export leave out what gives away more than the user means to.
   `set_file_metadata(path, changes)` rewrites a JPEG's or PNG's in place
   (`metadata::file::rewrite`): its image data untouched, neither decoded nor encoded again,
   written as given (the image is the file's own, so nothing is made true of it as export
-  does), and in a JPEG, Photoshop's other resources kept (a clipping path, say), replaced
-  atomically. That is how a folder of photographs has its capture times shifted, or is
+  does). Only the parts the changes changed are written; the others stay as the file has
+  them, what Opal Studio could not read among them, and an IIM's digest saying it is newer;
+  in a JPEG, Photoshop's other resources stay too (a clipping path, say). Replaced
+  atomically. Reading a file's metadata reads only what comes before and between its image
+  data. A tag set keeps the type it has (or EXIF gives it), so what the query gave goes
+  back as it was; an IIM changed alone is carried to XMP, as File Info would; a key that is
+  no XML name is refused. That is how a folder of photographs has its capture times shifted, or is
   renamed by them.
 
 ## Thumbnails

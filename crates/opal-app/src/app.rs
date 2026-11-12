@@ -971,7 +971,7 @@ impl OpalApp {
                 let Some((w, progress)) = self.st.writer.pending().next() else { return };
                 let (doing, path) = match w {
                     crate::writer::Written::Save { path, .. } => ("Saving", path),
-                    crate::writer::Written::Export { path } => ("Exporting", path),
+                    crate::writer::Written::Export { path, .. } => ("Exporting", path),
                 };
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 if progress.is_cancelled() {

@@ -2154,7 +2154,12 @@ fn quitting_waits_for_the_files_being_written() {
     let (job, release) = held_result(false);
     let st = h.state_mut().state_mut();
     let path = std::env::temp_dir().join("never-written.png");
-    st.writer.write(crate::writer::Written::Export { path }, crate::writer::Then::Nothing, job, &ctx);
+    st.writer.write(
+        crate::writer::Written::Export { path, notes: Vec::new() },
+        crate::writer::Then::Nothing,
+        job,
+        &ctx,
+    );
     st.queue.push(Cmd::Exit);
     h.run();
     let st = h.state().state();
@@ -2334,7 +2339,7 @@ fn a_write_under_way_shows_how_far_it_has_got_and_can_be_cancelled() {
             st.writer.write(written, crate::writer::Then::Close, job, &ctx);
             st.queue.push(Cmd::Exit);
         } else {
-            let written = crate::writer::Written::Export { path: dir.join("never-exported.png") };
+            let written = crate::writer::Written::Export { path: dir.join("never-exported.png"), notes: Vec::new() };
             st.writer.write(written, crate::writer::Then::Nothing, job, &ctx);
         }
         let mut shown = false;
@@ -2456,7 +2461,12 @@ fn a_failed_write_stops_a_quit_waiting_for_it() {
     let (job, release) = held_result(true);
     let st = h.state_mut().state_mut();
     let path = std::env::temp_dir().join("never-written.png");
-    st.writer.write(crate::writer::Written::Export { path }, crate::writer::Then::Nothing, job, &ctx);
+    st.writer.write(
+        crate::writer::Written::Export { path, notes: Vec::new() },
+        crate::writer::Then::Nothing,
+        job,
+        &ctx,
+    );
     st.queue.push(Cmd::Exit);
     h.run();
     drop(release);
@@ -4484,4 +4494,43 @@ fn a_file_dropped_on_the_window_is_read_in_the_background_and_opened() {
     let c = st.active().unwrap().doc().canvas;
     assert_eq!((st.docs.len(), c.width, c.height), (2, 7, 5), "not opened");
     std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn file_infos_caption_takes_enter_and_ok_with_nothing_changed_changes_nothing() {
+    use egui_kittest::kittest::by;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 40, 30);
+    // Keywords as another program may write them, spaces round one.
+    let d = h.state_mut().state_mut().active_mut().unwrap();
+    let described =
+        opal_io::metadata::Description { keywords: vec![" sea ".into(), "boat".into()], ..Default::default() };
+    let meta = opal_io::metadata::with_description(&d.doc().metadata, &described);
+    d.apply("Described", |doc, _| {
+        doc.metadata = meta;
+        Ok::<(), String>(())
+    })
+    .unwrap();
+    let before = h.state().state().active().unwrap().history.current();
+    let ctx = h.ctx.clone();
+    h.state_mut().state_mut().run(crate::commands::Cmd::FileInfo, &ctx);
+    h.run();
+    h.get_by_label("OK").click();
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().history.current(), before, "OK with nothing changed changed it");
+    // Enter in the caption begins a line rather than closing the dialog.
+    h.state_mut().state_mut().run(crate::commands::Cmd::FileInfo, &ctx);
+    h.run();
+    type_into(&mut h, by().label("Caption"), "Boats");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert!(h.state().state().file_info.is_some(), "Enter in the caption closed File Info");
+    assert!(h.state().state().dialog_open(), "File Info not counted a dialog");
+    h.get(focused()).type_text("at dusk");
+    h.run();
+    h.get_by_label("OK").click();
+    h.run();
+    let caption = opal_io::metadata::description(&h.state().state().active().unwrap().doc().metadata).caption;
+    assert_eq!(caption, "Boats\nat dusk");
 }

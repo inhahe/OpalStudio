@@ -57,9 +57,9 @@ impl Raw {
 
 /// The metadata of a file's bytes (a JPEG or PNG; anything else has none).
 pub fn read(bytes: &[u8]) -> Metadata {
-    let raw = if bytes.starts_with(&[0xFF, 0xD8]) {
+    let raw = if container::is_jpeg(bytes) {
         container::read_jpeg(bytes)
-    } else if bytes.starts_with(b"\x89PNG") {
+    } else if container::is_png(bytes) {
         container::read_png(bytes)
     } else {
         Raw::default()
@@ -98,16 +98,6 @@ impl Keep {
     pub fn named(name: &str) -> Option<Keep> {
         Keep::ALL.into_iter().find(|k| k.name() == name)
     }
-
-    /// What it is, as the export dialog lists it.
-    pub fn label(self) -> &'static str {
-        match self {
-            Keep::All => "All",
-            Keep::NotPlace => "All but the place and serial numbers",
-            Keep::Copyright => "Copyright and contact only",
-            Keep::Nothing => "None",
-        }
-    }
 }
 
 /// What is true of an image exported: its size, its resolution, and when.
@@ -117,8 +107,10 @@ pub struct Exported {
     pub height: u32,
     /// Pixels per inch.
     pub ppi: f64,
-    /// Now, as EXIF writes a date ("YYYY:MM:DD HH:MM:SS") and XMP does (ISO 8601).
+    /// Now, as EXIF writes a date ("YYYY:MM:DD HH:MM:SS", local) and its time zone
+    /// ("+01:00"), and as XMP does (ISO 8601).
     pub exif_now: String,
+    pub exif_zone: String,
     pub xmp_now: String,
     /// What wrote it ("Opal Studio 0.14.1").
     pub software: String,
@@ -151,6 +143,7 @@ impl Prepared {
         container::png_chunks_of(self.exif.as_deref(), self.xmp.as_ref(), self.iptc.as_deref())
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.exif.is_none() && self.xmp.is_none() && self.iptc.is_none()
     }
@@ -171,13 +164,19 @@ const COPYRIGHT: u16 = 0x8298;
 const PIXEL_X: u16 = 0xA002;
 const PIXEL_Y: u16 = 0xA003;
 const MAKER_NOTE: u16 = 0x927C;
+/// The Exif IFD's time zone and fraction of a second of DateTime (IFD0's).
+const OFFSET_TIME: u16 = 0x9010;
+const SUB_SEC_TIME: u16 = 0x9290;
 /// What identifies the camera, the lens, or their owner.
 const IDENTIFYING: [u16; 4] = [0xA430, 0xA431, 0xA435, MAKER_NOTE];
 
 /// XMP's properties that place the image: in IPTC Core and Photoshop's schemas, and the
 /// IPTC extension's locations.
 fn places(name: &Name) -> bool {
-    (name.ns == xmp::EXIF && name.local.starts_with("GPS"))
+    // A position in any schema: a camera's or a drone's own (DJI's GpsLatitude,
+    // AbsoluteAltitude) as well as EXIF's.
+    let local = name.local.to_ascii_lowercase();
+    ["gps", "latitude", "longitude", "longtitude", "altitude"].iter().any(|w| local.contains(w))
         || (name.ns == xmp::PHOTOSHOP && ["City", "State", "Country"].contains(&name.local.as_str()))
         || (name.ns == xmp::IPTC_CORE && ["Location", "CountryCode"].contains(&name.local.as_str()))
         || (name.ns == xmp::IPTC_EXT && ["LocationCreated", "LocationShown"].contains(&name.local.as_str()))
@@ -200,8 +199,9 @@ fn copyright_and_contact(name: &Name) -> bool {
         || (name.ns == xmp::PHOTOSHOP && ["Credit", "Source"].contains(&name.local.as_str()))
 }
 
-/// IIM's datasets that place the image: sublocation, city, state, country and its code.
-const IIM_PLACES: [u8; 5] = [90, 92, 95, 100, 101];
+/// IIM's datasets that place the image: the content's location (its code and name),
+/// sublocation, city, state, country and its code.
+const IIM_PLACES: [u8; 7] = [26, 27, 90, 92, 95, 100, 101];
 /// IIM's that say who made it and holds its copyright: by-line, its title, credit, source,
 /// copyright notice, contact.
 const IIM_COPYRIGHT: [u8; 6] = [80, 85, 110, 115, 116, 118];
@@ -213,6 +213,16 @@ pub fn for_export(meta: &Metadata, keep: Keep, out: &Exported) -> Prepared {
     if keep == Keep::Nothing {
         return Prepared::default();
     }
+    // An IIM a program unaware of XMP changed since the XMP was written is the newer: XMP (and
+    // EXIF) are made to say what it says, as the guidelines would have it, before the IIM's
+    // digest is worked out again on writing (which says they agree).
+    let synced;
+    let meta = if meta.iptc_changed {
+        synced = with_description(meta, &description(meta));
+        &synced
+    } else {
+        meta
+    };
     let mut prepared = Prepared::default();
     // EXIF.
     let exif = meta.exif.as_deref().and_then(Exif::read);
@@ -235,6 +245,9 @@ pub fn for_export(meta: &Metadata, keep: Keep, out: &Exported) -> Prepared {
                 e.remove(Ifd::Exif, tag);
             }
         }
+        // What was removed lies last as often as not (the thumbnail's image): dropped before
+        // what is added goes after it.
+        e.trim();
         if keep != Keep::Copyright {
             let upright = Value::Shorts(vec![1]);
             if e.get(Ifd::Image, ORIENTATION).is_some() {
@@ -255,15 +268,24 @@ pub fn for_export(meta: &Metadata, keep: Keep, out: &Exported) -> Prepared {
                 }
             }
             e.set(Ifd::Image, DATE_TIME, &Value::Ascii(out.exif_now.clone()));
+            // The modification time's zone and fraction of a second, which qualify it: its own
+            // zone, and no fraction, rather than the camera's.
+            if e.get(Ifd::Exif, OFFSET_TIME).is_some() || e.get(Ifd::Exif, 0x9003).is_some() {
+                e.set(Ifd::Exif, OFFSET_TIME, &Value::Ascii(out.exif_zone.clone()));
+            }
+            e.remove(Ifd::Exif, SUB_SEC_TIME);
             e.set(Ifd::Image, SOFTWARE, &Value::Ascii(out.software.clone()));
         }
         e.trim();
-        prepared.exif = Some(e.into_bytes());
+        // Nothing left (copyright and contact only, of a photograph with neither): none.
+        if !e.is_empty() {
+            prepared.exif = Some(e.into_bytes());
+        }
     }
     // XMP.
     if let Some(mut x) = meta.xmp.as_deref().and_then(Xmp::read) {
-        // Thumbnails, and the history of what was done in another program, are left behind
-        // with the image they were of.
+        // Thumbnails are left behind with the image they were of, and the note that there
+        // was Extended XMP with what it named.
         x.remove(xmp::XMP, "Thumbnails");
         x.remove(xmp::XMP_NOTE, "HasExtendedXMP");
         match keep {
@@ -289,7 +311,8 @@ pub fn for_export(meta: &Metadata, keep: Keep, out: &Exported) -> Prepared {
             }
             for (ns, local) in [(xmp::TIFF, "XResolution"), (xmp::TIFF, "YResolution")] {
                 if x.get(ns, local).is_some() {
-                    x.set_text(ns, local, &format!("{}/10000", (out.ppi * 10000.0).round() as u64));
+                    let [n, d] = Value::rational(out.ppi);
+                    x.set_text(ns, local, &format!("{n}/{d}"));
                 }
             }
             if x.get(xmp::TIFF, "ResolutionUnit").is_some() {
@@ -316,14 +339,9 @@ pub fn for_export(meta: &Metadata, keep: Keep, out: &Exported) -> Prepared {
     prepared
 }
 
-/// `ppi` as an EXIF rational, exact to a ten-thousandth.
+/// `ppi` as an EXIF rational (see `Value::rational`).
 fn rational(ppi: f64) -> Value {
-    let (n, d) = if ppi.fract() == 0.0 && ppi < f64::from(u32::MAX) {
-        (ppi as u32, 1)
-    } else {
-        ((ppi * 10000.0).round().min(f64::from(u32::MAX)) as u32, 10000)
-    };
-    Value::Rationals(vec![[n, d]])
+    Value::Rationals(vec![Value::rational(ppi)])
 }
 
 /// What describes the image, as File Info edits it: read as the Metadata Working Group's
@@ -484,6 +502,7 @@ mod tests {
             height: 800,
             ppi: 300.0,
             exif_now: "2026:11:12 10:00:00".into(),
+            exif_zone: "+01:00".into(),
             xmp_now: "2026-11-12T10:00:00+01:00".into(),
             software: "Opal Studio 1.0".into(),
         }
@@ -577,5 +596,58 @@ mod tests {
         let fresh = with_description(&Metadata::default(), &new);
         assert!(fresh.xmp.is_some() && fresh.exif.is_none() && fresh.iptc.is_none());
         assert_eq!(description(&fresh), new);
+    }
+
+    #[test]
+    fn a_place_in_any_schema_is_left_behind_and_a_newer_iim_is_carried_to_xmp() {
+        let mut meta = photograph();
+        let mut x = Xmp::read(meta.xmp.as_deref().unwrap()).unwrap();
+        let dji = "http://www.dji.com/drone-dji/1.0/";
+        for local in ["GpsLatitude", "GpsLongitude", "AbsoluteAltitude", "FlightYawDegree"] {
+            x.set_text(dji, local, "1");
+        }
+        meta.xmp = Some(Arc::from(x.packet().into_bytes()));
+        let mut iim = iptc::Iim::read(meta.iptc.as_deref().unwrap()).unwrap();
+        iim.set_texts(2, 27, &["Paris".into()]);
+        iim.set_texts(2, 5, &["Quay".into()]);
+        meta.iptc = Some(Arc::from(iim.bytes()));
+        let p = for_export(&meta, Keep::NotPlace, &exported());
+        let x = p.xmp.as_ref().unwrap();
+        for local in ["GpsLatitude", "GpsLongitude", "AbsoluteAltitude"] {
+            assert!(x.get(dji, local).is_none(), "{local} left");
+        }
+        assert!(x.get(dji, "FlightYawDegree").is_some(), "more than the place left behind");
+        assert!(iptc::Iim::read(p.iptc.as_deref().unwrap()).unwrap().texts(2, 27).is_empty());
+        // The IIM changed since the XMP (its title now Quay): exported, the XMP says so too.
+        meta.iptc_changed = true;
+        let p = for_export(&meta, Keep::All, &exported());
+        assert_eq!(p.xmp.unwrap().text(xmp::DC, "title").as_deref(), Some("Quay"));
+    }
+
+    #[test]
+    fn the_thumbnail_removed_is_trimmed_off_before_what_export_adds() {
+        let mut e = Exif::read(photograph().exif.as_deref().unwrap()).unwrap();
+        let before = e.bytes().len();
+        e.add_thumbnail(4096);
+        let meta = Metadata { exif: Some(Arc::from(e.into_bytes())), ..Metadata::default() };
+        let out = for_export(&meta, Keep::All, &exported()).exif.unwrap().len();
+        assert!(out < before + 1024, "the thumbnail's 4096 bytes kept: {out} from {before}");
+    }
+
+    #[test]
+    fn export_writes_no_empty_exif_and_dates_its_change_in_its_own_zone() {
+        // Copyright and contact only, of a photograph with neither: no EXIF at all.
+        let mut e = Exif::new();
+        e.set(Ifd::Image, 0x010F, &Value::Ascii("Canon".into()));
+        let bare = Metadata { exif: Some(Arc::from(e.into_bytes())), ..Metadata::default() };
+        assert!(for_export(&bare, Keep::Copyright, &exported()).exif.is_none());
+        // The camera's zone and fraction of a second do not qualify the export's time.
+        let mut e = Exif::read(photograph().exif.as_deref().unwrap()).unwrap();
+        e.set(Ifd::Exif, OFFSET_TIME, &Value::Ascii("+09:00".into()));
+        e.set(Ifd::Exif, SUB_SEC_TIME, &Value::Ascii("123".into()));
+        let tokyo = Metadata { exif: Some(Arc::from(e.into_bytes())), ..Metadata::default() };
+        let out = Exif::read(for_export(&tokyo, Keep::All, &exported()).exif.as_deref().unwrap()).unwrap();
+        assert_eq!(out.get(Ifd::Exif, OFFSET_TIME), Some(Value::Ascii("+01:00".into())));
+        assert_eq!(out.get(Ifd::Exif, SUB_SEC_TIME), None);
     }
 }

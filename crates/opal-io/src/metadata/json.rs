@@ -107,13 +107,18 @@ fn xmp_key(name: &Name) -> String {
 
 /// The name a key gives (see [`xmp_key`]).
 fn xmp_name(key: &str) -> Option<Name> {
-    if let Some(rest) = key.strip_prefix('{') {
-        let (ns, local) = rest.split_once('}')?;
-        return (!local.is_empty()).then(|| Name::new(ns, local));
-    }
-    let (prefix, local) = key.split_once(':')?;
-    let ns = xmp::namespace_of(prefix)?;
-    (!local.is_empty()).then(|| Name::new(ns, local))
+    let (ns, local) = match key.strip_prefix('{') {
+        Some(rest) => rest.split_once('}')?,
+        None => {
+            let (prefix, local) = key.split_once(':')?;
+            (xmp::namespace_of(prefix)?, local)
+        }
+    };
+    // Written as an element's name, it must be one XML takes, or the packet would not read.
+    let mut chars = local.chars();
+    let first = chars.next()?;
+    let name = (first.is_alphabetic() || first == '_') && chars.all(|c| c.is_alphanumeric() || "-._".contains(c));
+    (name && !ns.is_empty()).then(|| Name::new(ns, local))
 }
 
 /// An XMP value as JSON: text as a string; an alternative as {language: text}; another array
@@ -189,10 +194,13 @@ fn looks_like_language(k: &str) -> bool {
                 .all(|part| (1..=8).contains(&part.len()) && part.chars().all(|c| c.is_ascii_alphanumeric())))
 }
 
-/// An EXIF value from JSON given for `tag` of `ifd`: text as ASCII; a whole number as a SHORT
-/// (or a LONG past 65535); another number as a RATIONAL; a list of numbers likewise each.
-/// Tags whose type EXIF fixes otherwise are written as their type is ([`tag_type`]).
-fn exif_value(ifd: Ifd, tag: u16, v: &Json) -> Result<Value, String> {
+/// An EXIF value from JSON given for `tag` of `ifd`, of the TIFF type the tag has
+/// (`existing`, if it is there), else the type EXIF gives it ([`tag_type`]), else as the JSON
+/// reads: text as ASCII; a whole number as a SHORT (or a LONG past 65535); another number as
+/// a RATIONAL; a list of numbers likewise each. So what the metadata query gives comes back as
+/// it was: bytes (UNDEFINED, BYTE: a maker note, a version) given as a list of numbers, or as
+/// text, stay bytes.
+fn exif_value(ifd: Ifd, tag: u16, existing: Option<u16>, v: &Json) -> Result<Value, String> {
     let numbers = |v: &Json| -> Result<Vec<f64>, String> {
         match v {
             Json::Number(n) => Ok(vec![n.as_f64().unwrap_or(0.0)]),
@@ -203,25 +211,31 @@ fn exif_value(ifd: Ifd, tag: u16, v: &Json) -> Result<Value, String> {
             _ => Err(format!("{} takes a number or a list of them", tags::name(ifd, tag))),
         }
     };
-    let rational = |x: f64| -> [u32; 2] {
-        if x.fract() == 0.0 && (0.0..f64::from(u32::MAX)).contains(&x) {
-            [x as u32, 1]
-        } else {
-            let d = 10_000u32;
-            [(x * f64::from(d)).round().clamp(0.0, f64::from(u32::MAX)) as u32, d]
+    let bytes = |v: &Json| -> Result<Vec<u8>, String> {
+        match v {
+            Json::String(s) => Ok(s.as_bytes().to_vec()),
+            _ => numbers(v)?
+                .into_iter()
+                .map(|x| {
+                    (x.fract() == 0.0 && (0.0..=255.0).contains(&x))
+                        .then_some(x as u8)
+                        .ok_or_else(|| format!("{} takes bytes (0 to 255) or text", tags::name(ifd, tag)))
+                })
+                .collect(),
         }
     };
-    let srational = |x: f64| -> [i32; 2] {
-        if x.fract() == 0.0 && x.abs() < f64::from(i32::MAX) {
-            [x as i32, 1]
-        } else {
-            [(x * 10_000.0).round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32, 10_000]
-        }
-    };
-    Ok(match (tag_type(ifd, tag), v) {
+    Ok(match (existing.or_else(|| tag_type(ifd, tag)), v) {
+        (Some(7), v) => Value::Undefined(bytes(v)?),
+        (Some(1), v) => Value::Bytes(bytes(v)?),
+        (Some(129), Json::String(s)) => Value::Utf8(s.clone()),
         (_, Json::String(s)) => Value::Ascii(s.clone()),
-        (Some(5), v) => Value::Rationals(numbers(v)?.into_iter().map(rational).collect()),
-        (Some(10), v) => Value::SRationals(numbers(v)?.into_iter().map(srational).collect()),
+        (Some(6), v) => Value::SBytes(numbers(v)?.into_iter().map(|x| x.clamp(-128.0, 127.0) as i8).collect()),
+        (Some(8), v) => Value::SShorts(numbers(v)?.into_iter().map(|x| x.clamp(-32768.0, 32767.0) as i16).collect()),
+        (Some(9), v) => Value::SLongs(numbers(v)?.into_iter().map(|x| x as i32).collect()),
+        (Some(11), v) => Value::Floats(numbers(v)?.into_iter().map(|x| x as f32).collect()),
+        (Some(12), v) => Value::Doubles(numbers(v)?),
+        (Some(5), v) => Value::Rationals(numbers(v)?.into_iter().map(Value::rational).collect()),
+        (Some(10), v) => Value::SRationals(numbers(v)?.into_iter().map(Value::srational).collect()),
         (Some(4), v) => Value::Longs(numbers(v)?.into_iter().map(|x| x.max(0.0) as u32).collect()),
         (Some(3), v) => Value::Shorts(numbers(v)?.into_iter().map(|x| x.clamp(0.0, 65535.0) as u16).collect()),
         (_, v) => {
@@ -231,7 +245,7 @@ fn exif_value(ifd: Ifd, tag: u16, v: &Json) -> Result<Value, String> {
             } else if n.iter().all(|x| x.fract() == 0.0 && *x >= 0.0) {
                 Value::Longs(n.into_iter().map(|x| x as u32).collect())
             } else {
-                Value::Rationals(n.into_iter().map(rational).collect())
+                Value::Rationals(n.into_iter().map(Value::rational).collect())
             }
         }
     })
@@ -239,9 +253,16 @@ fn exif_value(ifd: Ifd, tag: u16, v: &Json) -> Result<Value, String> {
 
 /// The TIFF type EXIF gives a tag that is not text, where it fixes one: those of time,
 /// aperture, distance and place that are fractions (RATIONAL, 5; SRATIONAL, 10, for those that
-/// may be negative), and counts that are LONG (4).
+/// may be negative), counts that are LONG (4), and bytes (UNDEFINED, 7; BYTE, 1): versions, a
+/// maker note, a comment, what a scene and its source were.
 fn tag_type(ifd: Ifd, tag: u16) -> Option<u16> {
     match (ifd, tag) {
+        (
+            Ifd::Exif,
+            0x9000 | 0xA000 | 0x9101 | 0x927C | 0x9286 | 0xA300 | 0xA301 | 0xA302 | 0x8828 | 0xA20C | 0xA40B,
+        ) => Some(7),
+        (Ifd::Gps, 0x001B | 0x001C) | (Ifd::Interop, 0x0002) => Some(7),
+        (Ifd::Gps, 0x0000 | 0x0005) => Some(1),
         (Ifd::Image | Ifd::Thumbnail, 0x011A | 0x011B) => Some(5),
         (
             Ifd::Exif,
@@ -293,12 +314,13 @@ pub fn changed(meta: &Metadata, changes: &Json) -> Result<Metadata, String> {
                 if v.is_null() {
                     exif.remove(ifd, tag);
                 } else {
-                    exif.set(ifd, tag, &exif_value(ifd, tag, v)?);
+                    let existing = exif.kind_of(ifd, tag);
+                    exif.set(ifd, tag, &exif_value(ifd, tag, existing, v)?);
                 }
             }
         }
         exif.trim();
-        meta.exif = Some(Arc::from(exif.into_bytes()));
+        meta.exif = (!exif.is_empty()).then(|| Arc::from(exif.into_bytes()));
     }
     if let Some(i) = changes.get("iptc") {
         let sets = i.as_object().ok_or("iptc must be an object of datasets")?;
@@ -320,7 +342,10 @@ pub fn changed(meta: &Metadata, changes: &Json) -> Result<Metadata, String> {
             iim.set_texts(r, n, &texts);
         }
         meta.iptc = (!iim.is_empty()).then(|| Arc::from(iim.bytes()));
-        meta.iptc_changed = false;
+        // Changed alone, the IIM is the newer: what describes the image is carried to XMP and
+        // EXIF, so that the digest written with it, which says they agree, is true.
+        meta.iptc_changed = true;
+        meta = super::with_description(&meta, &description(&meta));
     }
     if let Some(x) = changes.get("xmp") {
         let props = x.as_object().ok_or("xmp must be an object of properties")?;
@@ -427,5 +452,38 @@ mod tests {
         ] {
             assert!(changed(&meta, &bad).is_err(), "{bad} taken");
         }
+    }
+
+    #[test]
+    fn what_the_query_gives_goes_back_as_it_was_and_names_xml_cannot_hold_are_refused() {
+        let mut e = Exif::new();
+        e.set(Ifd::Exif, 0x9000, &Value::Undefined(b"0232".to_vec()));
+        e.set(Ifd::Exif, 0x927C, &Value::Undefined(vec![1, 2, 250]));
+        e.set(Ifd::Gps, 0x0000, &Value::Bytes(vec![2, 3, 0, 0]));
+        let meta = Metadata { exif: Some(Arc::from(e.into_bytes())), ..Metadata::default() };
+        let all = to_json(&meta);
+        let copied = changed(&Metadata::default(), &json!({ "exif": all["exif"] })).unwrap();
+        let back = Exif::read(copied.exif.as_deref().unwrap()).unwrap();
+        assert_eq!(back.get(Ifd::Exif, 0x9000), Some(Value::Undefined(b"0232".to_vec())));
+        assert_eq!(back.get(Ifd::Exif, 0x927C), Some(Value::Undefined(vec![1, 2, 250])));
+        assert_eq!(back.get(Ifd::Gps, 0x0000), Some(Value::Bytes(vec![2, 3, 0, 0])));
+        // A tag no table knows keeps the type it has.
+        let mut e = Exif::read(meta.exif.as_deref().unwrap()).unwrap();
+        e.set(Ifd::Exif, 0xC000, &Value::Undefined(vec![7, 8, 9]));
+        let odd = Metadata { exif: Some(Arc::from(e.into_bytes())), ..Metadata::default() };
+        let again = changed(&odd, &json!({ "exif": to_json(&odd)["exif"] })).unwrap();
+        assert_eq!(
+            Exif::read(again.exif.as_deref().unwrap()).unwrap().get(Ifd::Exif, 0xC000),
+            Some(Value::Undefined(vec![7, 8, 9]))
+        );
+        for bad in ["dc:my title", "dc:1st", "{}x", "dc:"] {
+            assert!(changed(&meta, &json!({ "xmp": { bad: "x" } })).is_err(), "{bad} taken");
+        }
+        // An IIM title set alone reaches XMP, which a reader takes first.
+        let titled = changed(&meta, &json!({ "xmp": { "dc:title": "Harbour" } })).unwrap();
+        let retitled = changed(&titled, &json!({ "iptc": { "2:5": "Quay" } })).unwrap();
+        let x = Xmp::read(retitled.xmp.as_deref().unwrap()).unwrap();
+        assert_eq!(x.text(xmp::DC, "title").as_deref(), Some("Quay"));
+        assert_eq!(to_json(&retitled)["description"]["title"], "Quay");
     }
 }

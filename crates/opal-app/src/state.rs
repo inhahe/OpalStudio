@@ -462,7 +462,8 @@ impl AppState {
                 || self.rotate_by.is_some()
                 || self.save_selection.is_some()
                 || self.load_selection.is_some()
-                || self.modifying.is_some())
+                || self.modifying.is_some()
+                || self.file_info.is_some())
     }
 
     /// The color scheme in use: the chosen one, or the system's when following it.
@@ -1128,13 +1129,21 @@ impl AppState {
                         (Failure::Error(e), _) => self.message(MessageKind::Error, "Could not save", e),
                     }
                 }
-                (Written::Export { path }, Ok(())) => {
+                (Written::Export { path, notes }, Ok(())) => {
                     self.notify(format!("Exported \"{}\".", file_title(&path)));
-                    if let Then::Answer(n) = f.then {
-                        self.answered.push((n, Ok(serde_json::json!({ "path": path.display().to_string() }))));
+                    match f.then {
+                        Then::Answer(n) => {
+                            let answer = json!({ "path": path.display().to_string() });
+                            self.answered.push((n, Ok(crate::api::with_notes(answer, notes))));
+                        }
+                        _ => {
+                            for note in notes {
+                                self.message(MessageKind::Warning, format!("Exported {}", file_title(&path)), note);
+                            }
+                        }
                     }
                 }
-                (Written::Export { path }, Err(failure)) => match (failure, f.then) {
+                (Written::Export { path, .. }, Err(failure)) => match (failure, f.then) {
                     (Failure::Cancelled, Then::Answer(n)) => {
                         self.answered.push((n, Err("The export was cancelled; the file was left as it was.".into())))
                     }
@@ -1200,7 +1209,8 @@ impl AppState {
 
     /// What of an image's metadata export writes, as the preference says.
     pub(crate) fn export_metadata(&self) -> opal_io::metadata::Keep {
-        opal_io::metadata::Keep::named(&self.prefs.choice("export.metadata")).unwrap_or(opal_io::metadata::Keep::All)
+        opal_io::metadata::Keep::named(&self.prefs.choice("export.metadata"))
+            .unwrap_or(opal_io::metadata::Keep::NotPlace)
     }
 
     /// What export writes into a file of `format` of `doc`'s metadata, as `keep` says, made true
@@ -1213,9 +1223,9 @@ impl AppState {
     ) -> (image_files::Embed, Vec<String>) {
         use opal_io::metadata;
         let (width, height) = size.map_or((doc.canvas.width, doc.canvas.height), |s| (s.width, s.height));
-        let (exif_now, xmp_now) = crate::clock::now();
+        let (exif_now, exif_zone, xmp_now) = crate::clock::now();
         let software = format!("Opal Studio {}", env!("CARGO_PKG_VERSION"));
-        let out = metadata::Exported { width, height, ppi: doc.resolution, exif_now, xmp_now, software };
+        let out = metadata::Exported { width, height, ppi: doc.resolution, exif_now, exif_zone, xmp_now, software };
         let prepared = metadata::for_export(&doc.metadata, keep, &out);
         let mut notes = Vec::new();
         let embed = match format {
@@ -1266,10 +1276,7 @@ impl AppState {
         ctx: &egui::Context,
     ) {
         let (embed, notes) = Self::embedded(&doc, &format, size.as_ref(), keep);
-        for note in notes {
-            self.message(MessageKind::Warning, "Export", note);
-        }
-        let written = Written::Export { path: path.clone() };
+        let written = Written::Export { path: path.clone(), notes };
         let job = Box::new(move |p: &_| {
             // Measured now, not when asked for: the write may have waited behind others.
             let mut memory = memory.unwrap_or_else(crate::memory::Allowance::now);

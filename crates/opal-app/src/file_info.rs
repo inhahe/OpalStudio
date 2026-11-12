@@ -73,6 +73,9 @@ pub struct FileInfo {
     pub capture: Vec<(&'static str, String)>,
     /// The name a template is saved by, as typed.
     pub template_name: String,
+    /// What describes the image as the dialog first showed it, lists as typed: OK with
+    /// nothing changed from it changes nothing.
+    pub was: Description,
 }
 
 /// The texts `typed` lists, separated by semicolons, each trimmed, none empty.
@@ -83,14 +86,17 @@ pub fn listed(typed: &str) -> Vec<String> {
 impl FileInfo {
     fn of(doc: DocId, meta: &opal_core::document::Metadata) -> FileInfo {
         let description = metadata::description(meta);
-        FileInfo {
+        let mut info = FileInfo {
             doc,
             creators: description.creators.join("; "),
             keywords: description.keywords.join("; "),
             description,
             capture: metadata::capture::capture(meta),
             template_name: String::new(),
-        }
+            was: Description::default(),
+        };
+        info.was = info.edited();
+        info
     }
 
     /// What describes the image, as edited (the lists as typed).
@@ -130,6 +136,7 @@ pub fn dialog(ctx: &egui::Context, st: &mut AppState) {
     let palette = st.palette;
     let names: Vec<String> = st.metadata_templates.keys().cloned().collect();
     let mut done = None;
+    let mut caption_typing = false;
     let mut save_template = false;
     let mut apply: Option<String> = None;
     let mut forget: Option<String> = None;
@@ -153,7 +160,10 @@ pub fn dialog(ctx: &egui::Context, st: &mut AppState) {
             };
             line(ui, "Title", &mut d.title);
             let l = ui.label("Caption");
-            ui.add(egui::TextEdit::multiline(&mut d.caption).desired_width(320.0).desired_rows(3)).labelled_by(l.id);
+            let caption = ui
+                .add(egui::TextEdit::multiline(&mut d.caption).desired_width(320.0).desired_rows(3))
+                .labelled_by(l.id);
+            caption_typing = caption.has_focus();
             ui.end_row();
             line(ui, "Creators", &mut info.creators);
             line(ui, "Creator's email", &mut d.email);
@@ -227,7 +237,8 @@ pub fn dialog(ctx: &egui::Context, st: &mut AppState) {
                 });
             });
         }
-        done = crate::dialogs::ok_cancel(ui, "OK");
+        // Enter in the caption begins a line; elsewhere, it is OK.
+        done = crate::dialogs::ok_cancel_unless(ui, "OK", caption_typing);
     });
     if let Some(name) = apply
         && let Some(t) = st.metadata_templates.get(&name)
@@ -249,7 +260,10 @@ pub fn dialog(ctx: &egui::Context, st: &mut AppState) {
     match done {
         Some(true) => {
             st.file_info = None;
-            if let Err(why) = st.describe(info.doc, &info.edited()) {
+            let edited = info.edited();
+            if edited == info.was {
+                // Nothing changed (lists split as typed, which may not be as the file had them).
+            } else if let Err(why) = st.describe(info.doc, &edited) {
                 st.message(crate::state::MessageKind::Error, "File Info", why);
             }
         }

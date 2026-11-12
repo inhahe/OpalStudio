@@ -454,10 +454,16 @@ fn size_fields(
 
 /// OK and Cancel (also Enter and Esc): `Some(true)` for OK.
 pub(crate) fn ok_cancel(ui: &mut egui::Ui, ok: &str) -> Option<bool> {
+    ok_cancel_unless(ui, ok, false)
+}
+
+/// [`ok_cancel`], Enter not OK while `typing_lines` (a field of several lines has the
+/// keyboard, where Enter begins a line).
+pub(crate) fn ok_cancel_unless(ui: &mut egui::Ui, ok: &str, typing_lines: bool) -> Option<bool> {
     let mut done = None;
     ui.add_space(8.0);
     ui.horizontal(|ui| {
-        if ui.button(ok).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        if ui.button(ok).clicked() || (!typing_lines && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
             done = Some(true);
         }
         if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {

@@ -161,7 +161,9 @@ impl Xmp {
         // Leading padding or a byte order mark before the first tag.
         let text = text.trim_start_matches(['\u{feff}', ' ', '\t', '\r', '\n', '\0']);
         let text = text.trim_end_matches(['\0', ' ', '\t', '\r', '\n']);
-        let doc = roxmltree::Document::parse(text).ok()?;
+        // At most a million nodes: a packet is never near that, and a crafted one is not read.
+        let options = roxmltree::ParsingOptions { nodes_limit: 1 << 20, ..Default::default() };
+        let doc = roxmltree::Document::parse_with_options(text, options).ok()?;
         let rdf = doc.descendants().find(|n| n.is_element() && is(n, RDF, "RDF"))?;
         let mut xmp = Xmp::default();
         for n in doc.descendants().filter(roxmltree::Node::is_element) {
@@ -174,7 +176,7 @@ impl Xmp {
             }
         }
         for description in rdf.children().filter(|n| n.is_element() && is(n, RDF, "Description")) {
-            for (name, value) in fields_of(description, text) {
+            for (name, value) in fields_of(description, text, 0) {
                 xmp.set(name, value);
             }
         }
@@ -318,8 +320,9 @@ impl Xmp {
     /// Splits it for a JPEG, whose segments hold `limit` bytes of a packet: as it is, if it
     /// fits; else the standard packet with the largest properties moved to an extended one
     /// until it fits, the standard naming the extended by its digest (GUID, the MD5 of it in
-    /// capitals, as XMP's part 3 says). The packet, and the extended `x:xmpmeta` if any.
-    pub fn split(&self, limit: usize) -> (String, Option<String>) {
+    /// capitals, as XMP's part 3 says). The packet, and the GUID and extended `x:xmpmeta` if
+    /// any.
+    pub fn split(&self, limit: usize) -> (String, Option<(String, String)>) {
         let whole = self.packet();
         if whole.len() <= limit {
             return (whole, None);
@@ -338,8 +341,9 @@ impl Xmp {
         sizes.sort_by_key(|&(_, len)| std::cmp::Reverse(len));
         let mut standard = self.clone();
         let mut extended = Xmp { properties: Vec::new(), prefixes: self.prefixes.clone() };
-        // Room for the note naming the extended packet.
-        let note = 120;
+        // The note naming the extended packet, as it will be (a GUID is always 32 characters),
+        // counted in: it may bring a namespace declaration of its own.
+        let note = (Name::new(XMP_NOTE, "HasExtendedXMP"), Value::text("0".repeat(32)));
         let mut moved = Vec::new();
         for (i, _) in sizes {
             moved.push(i);
@@ -350,7 +354,9 @@ impl Xmp {
                 .filter(|(j, _)| !moved.contains(j))
                 .map(|(_, p)| p.clone())
                 .collect();
-            if standard.packet().len() + note <= limit {
+            let mut with_note = standard.clone();
+            with_note.set(note.0.clone(), note.1.clone());
+            if with_note.packet().len() <= limit {
                 break;
             }
         }
@@ -358,8 +364,8 @@ impl Xmp {
             self.properties.iter().enumerate().filter(|(j, _)| moved.contains(j)).map(|(_, p)| p.clone()).collect();
         let extended = extended.xmpmeta();
         let guid: String = md5::compute_hex(extended.as_bytes());
-        standard.set(Name::new(XMP_NOTE, "HasExtendedXMP"), Value::text(guid));
-        (standard.packet(), Some(extended))
+        standard.set(Name::new(XMP_NOTE, "HasExtendedXMP"), Value::text(guid.clone()));
+        (standard.packet(), Some((guid, extended)))
     }
 }
 
@@ -381,9 +387,14 @@ fn name_of(n: &roxmltree::Node) -> Option<Name> {
     Some(Name::new(n.tag_name().namespace()?, n.tag_name().name()))
 }
 
+/// How deep values are read into one another (structures in arrays in structures...): far
+/// past any packet's, and short of what would overflow the stack, which a crafted one nested
+/// a hundred thousand deep would. Deeper fields are left out.
+const DEEPEST: usize = 64;
+
 /// The fields an `rdf:Description` (or a property element standing for a structure) gives:
-/// its attributes not RDF's or XML's, and its child elements.
-fn fields_of(n: roxmltree::Node, input: &str) -> Vec<(Name, Value)> {
+/// its attributes not RDF's or XML's, and its child elements (`depth` levels in).
+fn fields_of(n: roxmltree::Node, input: &str, depth: usize) -> Vec<(Name, Value)> {
     let mut out = Vec::new();
     for a in n.attributes() {
         match a.namespace() {
@@ -391,22 +402,25 @@ fn fields_of(n: roxmltree::Node, input: &str) -> Vec<(Name, Value)> {
             Some(ns) => out.push((Name::new(ns, a.name()), Value::text(a.value()))),
         }
     }
+    if depth >= DEEPEST {
+        return out;
+    }
     for c in n.children().filter(roxmltree::Node::is_element) {
         if let Some(name) = name_of(&c) {
-            out.push((name, value_of(c, input)));
+            out.push((name, value_of(c, input, depth + 1)));
         }
     }
     out
 }
 
 /// The value a property element (or an array's item) holds, in whichever of RDF's forms.
-fn value_of(n: roxmltree::Node, input: &str) -> Value {
+fn value_of(n: roxmltree::Node, input: &str, depth: usize) -> Value {
     let lang = n.attribute((XML, "lang")).map(str::to_owned);
     if let Some(uri) = n.attribute((RDF, "resource")) {
         return Value::Uri(uri.to_owned());
     }
     match n.attribute((RDF, "parseType")) {
-        Some("Resource") => return structure(fields_of(n, input)),
+        Some("Resource") => return structure(fields_of(n, input, depth)),
         Some("Literal") => {
             let inner: String = n.children().map(|c| &input[c.range()]).collect();
             return Value::Literal(inner);
@@ -420,21 +434,25 @@ fn value_of(n: roxmltree::Node, input: &str) -> Value {
                 .into_iter()
                 .find(|k| is(&one, RDF, k.element()))
                 .expect("one of them");
-            let items =
-                one.children().filter(|c| c.is_element() && is(c, RDF, "li")).map(|li| value_of(li, input)).collect();
+            let items = one
+                .children()
+                .filter(|c| c.is_element() && is(c, RDF, "li"))
+                .take(if depth < DEEPEST { usize::MAX } else { 0 })
+                .map(|li| value_of(li, input, depth + 1))
+                .collect();
             Value::Array { kind, items }
         }
-        [one] if is(&one, RDF, "Description") => structure(fields_of(one, input)),
+        [one] if is(&one, RDF, "Description") => structure(fields_of(one, input, depth)),
         [] => {
             // Attributes besides RDF's and XML's make it a structure in shorthand.
-            let shorthand = fields_of(n, input);
+            let shorthand = fields_of(n, input, depth);
             if shorthand.is_empty() {
                 Value::Text { text: n.text().unwrap_or_default().to_owned(), lang }
             } else {
                 structure(shorthand)
             }
         }
-        _ => structure(fields_of(n, input)),
+        _ => structure(fields_of(n, input, depth)),
     }
 }
 
@@ -639,7 +657,7 @@ mod tests {
         x.set_texts(DC, "subject", ArrayKind::Bag, &long);
         let (standard, extended) = x.split(65_000);
         assert!(standard.len() <= 65_000, "{}", standard.len());
-        let extended = extended.expect("split");
+        let (_, extended) = extended.expect("split");
         let mut read = Xmp::read(standard.as_bytes()).unwrap();
         assert_eq!(read.text(XMP_NOTE, "HasExtendedXMP").map(|g| g.len()), Some(32));
         assert!(read.get(DC, "subject").is_none() && read.text(DC, "title").is_some());
@@ -649,5 +667,41 @@ mod tests {
         // Small enough: whole.
         assert!(Xmp::default().split(65_000).1.is_none());
         assert!(Xmp::read(b"not xml").is_none() && Xmp::read(b"<a/>").is_none());
+    }
+
+    #[test]
+    fn a_standard_packet_split_off_fits_with_its_note_whatever_its_size() {
+        let mut x = Xmp::default();
+        x.set_default_text(DC, "title", "Harbour");
+        let rest = x.packet().len();
+        let many: Vec<String> = (0..2_000).map(|i| format!("keyword {i}")).collect();
+        x.set_texts(DC, "subject", ArrayKind::Bag, &many);
+        // Limits from a little under to a little past what the rest and the note take.
+        for extra in 100..170 {
+            let limit = rest + extra;
+            let (standard, extended) = x.split(limit);
+            assert!(standard.len() <= limit, "{} past {limit}", standard.len());
+            assert!(extended.is_some());
+        }
+    }
+
+    #[test]
+    fn a_packet_nested_past_all_reason_is_read_without_overflowing_the_stack() {
+        let depth = 20_000;
+        let mut p = String::from(
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+             <rdf:Description rdf:about=\"\" xmlns:a=\"http://a/\">",
+        );
+        p.push_str(&"<a:b rdf:parseType=\"Resource\">".repeat(depth));
+        p.push_str(&"</a:b>".repeat(depth));
+        p.push_str("</rdf:Description></rdf:RDF></x:xmpmeta>");
+        // Read on a thread with the interface thread's stack (a megabyte).
+        let read = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || Xmp::read(p.as_bytes()).map(|x| x.properties.len()))
+            .unwrap()
+            .join()
+            .expect("the stack overflowed");
+        assert_eq!(read, Some(1));
     }
 }

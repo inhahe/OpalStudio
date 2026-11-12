@@ -159,6 +159,19 @@ impl Value {
         }
     }
 
+    /// `x` as a RATIONAL, as near as one can be: a fraction of whole numbers whose denominator
+    /// is at most a million (1/8000 stays 1/8000, 2.8 is 14/5), by continued fractions.
+    pub fn rational(x: f64) -> [u32; 2] {
+        let [n, d] = fraction(x.max(0.0), f64::from(u32::MAX));
+        [n as u32, d as u32]
+    }
+
+    /// `x` as an SRATIONAL (see [`rational`](Self::rational)).
+    pub fn srational(x: f64) -> [i32; 2] {
+        let [n, d] = fraction(x.abs(), f64::from(i32::MAX));
+        [if x < 0.0 { -(n as i32) } else { n as i32 }, d as i32]
+    }
+
     /// The first of its numbers, as a float, if it is numbers.
     pub fn number(&self) -> Option<f64> {
         self.numbers().into_iter().next()
@@ -192,6 +205,31 @@ impl Value {
             _ => None,
         }
     }
+}
+
+/// The fraction nearest `x` (not negative) whose denominator is at most a million and whose
+/// numerator at most `most`, as numerator and denominator.
+fn fraction(x: f64, most: f64) -> [u64; 2] {
+    if !x.is_finite() || x >= most {
+        return [most.min(f64::from(u32::MAX)) as u64, 1];
+    }
+    // The convergents of x's continued fraction, until the next would pass the bounds.
+    let (mut h, mut h1, mut k, mut k1) = (1u64, 0u64, 0u64, 1u64);
+    let mut rest = x;
+    for _ in 0..40 {
+        let a = rest.floor();
+        let (h2, k2) = (a as u64 * h + h1, a as u64 * k + k1);
+        if k2 > 1_000_000 || h2 as f64 > most {
+            break;
+        }
+        (h1, h, k1, k) = (h, h2, k, k2);
+        let frac = rest - a;
+        if frac < 1e-12 {
+            break;
+        }
+        rest = 1.0 / frac;
+    }
+    if k == 0 { [x.round() as u64, 1] } else { [h, k] }
 }
 
 /// The bytes a value of TIFF type `kind` takes, if the type is known.
@@ -317,6 +355,10 @@ impl Exif {
 
     /// The entry whose 12 bytes are at `at`.
     fn entry_at(&self, at: usize) -> Option<Entry> {
+        // All 12 of its bytes there, or editing it would write past the end.
+        if at.checked_add(12)? > self.bytes.len() {
+            return None;
+        }
         let (tag, kind, count) = (self.u16_at(at)?, self.u16_at(at + 2)?, self.u32_at(at + 4)?);
         let size = type_size(kind).and_then(|s| s.checked_mul(count as usize));
         let value_at = size.and_then(|size| {
@@ -333,6 +375,11 @@ impl Exif {
     /// The value of tag `tag` in `ifd`, if it is there and of a type known.
     pub fn get(&self, ifd: Ifd, tag: u16) -> Option<Value> {
         self.value(&self.entry(ifd, tag)?)
+    }
+
+    /// The TIFF type of tag `tag` in `ifd`, if it is there.
+    pub fn kind_of(&self, ifd: Ifd, tag: u16) -> Option<u16> {
+        self.entry(ifd, tag).map(|e| e.kind)
     }
 
     /// Every tag of `ifd` with its value (those of a type unknown, or lying past the end,
@@ -496,9 +543,12 @@ impl Exif {
         match ifd {
             Ifd::Image => self.put_u32(4, at),
             Ifd::Thumbnail => {
-                let image = self.ifd_at(Ifd::Image).expect("IFD0");
+                // (IFD0 gone, there is nothing to point from.)
+                let Some(image) = self.ifd_at(Ifd::Image) else { return };
                 let n = usize::from(self.u16_at(image).unwrap_or(0));
-                self.put_u32(image + 2 + n * 12, at);
+                if image + 2 + n * 12 + 4 <= self.bytes.len() {
+                    self.put_u32(image + 2 + n * 12, at);
+                }
             }
             _ => {
                 let (parent, tag) = ifd.pointer().expect("a pointed-to IFD");
@@ -555,6 +605,28 @@ impl Exif {
         self.put_u16(at, (n - 1) as u16);
     }
 
+    /// Where IFD1's thumbnail image lies, if it says, and that is a place an image can be: past
+    /// the header, within the bytes, and clear of every IFD's entries (a damaged or stale
+    /// offset is not taken at its word, or zeroing the image would zero the structure).
+    fn thumbnail_range(&self) -> Option<(usize, usize)> {
+        let at = self.get(Ifd::Thumbnail, THUMBNAIL_AT)?.number()? as usize;
+        let len = self.get(Ifd::Thumbnail, THUMBNAIL_LENGTH)?.number()? as usize;
+        let end = at.checked_add(len)?;
+        if at < 8 || end > self.bytes.len() {
+            return None;
+        }
+        let clear = Ifd::ALL.into_iter().filter_map(|i| self.ifd_at(i).map(|a| (i, a))).all(|(i, a)| {
+            let table_end = a + 2 + self.entries(i).len() * 12 + 4;
+            end <= a || at >= table_end
+        });
+        clear.then_some((at, len))
+    }
+
+    /// Whether it holds no tag at all (an empty IFD0, and no other IFD with any).
+    pub fn is_empty(&self) -> bool {
+        Ifd::ALL.into_iter().all(|i| self.tags(i).is_empty())
+    }
+
     /// Removes IFD `ifd`: its entries' values (and IFDs it points to, and the thumbnail's
     /// image) zeroed, the IFD itself zeroed, and the pointer to it removed (IFD0's next set
     /// to none, for the thumbnail's). IFD0 cannot be removed: it is emptied instead.
@@ -564,12 +636,10 @@ impl Exif {
             self.remove_ifd(child);
         }
         let entries = self.entries(ifd);
-        if ifd == Ifd::Thumbnail {
-            let at = self.get(ifd, THUMBNAIL_AT).and_then(|v| v.number());
-            let len = self.get(ifd, THUMBNAIL_LENGTH).and_then(|v| v.number());
-            if let (Some(at), Some(len)) = (at, len) {
-                self.zero(at as usize, len as usize);
-            }
+        if ifd == Ifd::Thumbnail
+            && let Some((from, len)) = self.thumbnail_range()
+        {
+            self.zero(from, len);
         }
         for e in &entries {
             if let (Some(v), true) = (e.value_at, e.out_of_line()) {
@@ -763,5 +833,54 @@ mod tests {
         assert_eq!(e.get(Ifd::Image, 0x0112), Some(Value::Shorts(vec![3])));
         assert!(Exif::read(b"II\x2a\x00\xff\xff\x00\x00").is_none(), "IFD0 past the end");
         assert!(Exif::read(b"XX").is_none());
+    }
+
+    impl Exif {
+        /// Gives it IFD1 and a thumbnail's `len` bytes, after everything, as cameras put them.
+        pub(crate) fn add_thumbnail(&mut self, len: usize) {
+            let ifd = self.append(&[0; 6]);
+            self.point_to(Ifd::Thumbnail, ifd as u32);
+            let at = self.append(&vec![0xAB; len]);
+            self.set(Ifd::Thumbnail, THUMBNAIL_AT, &Value::Longs(vec![at as u32]));
+            self.set(Ifd::Thumbnail, THUMBNAIL_LENGTH, &Value::Longs(vec![len as u32]));
+        }
+    }
+
+    #[test]
+    fn an_ifd_the_bytes_cut_off_is_read_as_far_as_it_goes_and_edited_without_panicking() {
+        let mut e = Exif::new();
+        e.set(Ifd::Image, 0x010F, &ascii("Canon"));
+        e.set(Ifd::Image, 0x0110, &ascii("EOS"));
+        // Cut 4 bytes into IFD0's last entry.
+        let at = e.ifd_at(Ifd::Image).unwrap();
+        let cut = Exif::read(&e.bytes()[..at + 2 + 12 + 8]).unwrap();
+        assert_eq!(cut.tags(Ifd::Image).len(), 1);
+        let mut cut = cut;
+        cut.set(Ifd::Image, 0x0131, &ascii("Opal Studio"));
+        cut.set(Ifd::Image, 0x010F, &ascii("Canon Inc."));
+        assert_eq!(cut.get(Ifd::Image, 0x0131), Some(ascii("Opal Studio")));
+    }
+
+    #[test]
+    fn a_thumbnail_said_to_lie_over_the_structure_is_not_zeroed_there() {
+        let mut e = Exif::new();
+        e.set(Ifd::Image, 0x010F, &ascii("Canon"));
+        e.add_thumbnail(16);
+        // Its offset made 0: the header.
+        e.set(Ifd::Thumbnail, THUMBNAIL_AT, &Value::Longs(vec![0]));
+        e.set(Ifd::Thumbnail, THUMBNAIL_LENGTH, &Value::Longs(vec![8]));
+        e.remove_ifd(Ifd::Thumbnail);
+        assert_eq!(&e.bytes()[..4], b"II*\0", "the header zeroed");
+        assert_eq!(e.get(Ifd::Image, 0x010F), Some(ascii("Canon")));
+    }
+
+    #[test]
+    fn rationals_are_as_near_as_a_fraction_can_be() {
+        assert_eq!(Value::rational(1.0 / 8000.0), [1, 8000]);
+        assert_eq!(Value::rational(1.0 / 4000.0), [1, 4000]);
+        assert_eq!(Value::rational(2.8), [14, 5]);
+        assert_eq!(Value::rational(300.0), [300, 1]);
+        assert_eq!(Value::srational(-1.0 / 3.0), [-1, 3]);
+        assert_eq!(Value::srational(0.7), [7, 10]);
     }
 }

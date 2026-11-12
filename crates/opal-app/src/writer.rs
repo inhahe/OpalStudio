@@ -13,14 +13,12 @@ use std::sync::{Arc, mpsc};
 pub enum Written {
     /// Document `doc`, as it was at history state `at`, saved to `path`; `before` is the file
     /// it had before, and its title then (put back if the save fails).
-    Save {
-        doc: DocId,
-        at: NodeId,
-        path: PathBuf,
-        before: (Option<PathBuf>, String),
-    },
+    Save { doc: DocId, at: NodeId, path: PathBuf, before: (Option<PathBuf>, String) },
     Export {
         path: PathBuf,
+        /// What should be said once it is written (what of the metadata was left out),
+        /// with the call's answer, or to the user.
+        notes: Vec<String>,
     },
 }
 

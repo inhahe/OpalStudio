@@ -24,6 +24,12 @@ const UTF8: &[u8] = b"\x1b%G";
 /// 2:00, the record version, which comes first in record 2.
 const RECORD_VERSION: (u8, u8) = (2, 0);
 
+/// Whether record 2's dataset `number` holds text: all but its version (2:00) and the
+/// rasterized caption and preview's (2:125, 2:200 to 2:202), which are binary.
+fn is_text(number: u8) -> bool {
+    !matches!(number, 0 | 125 | 200..=202)
+}
+
 impl Iim {
     /// Reads `bytes` as IIM datasets: None if they are not (a dataset not starting with its
     /// tag marker, or running past the end).
@@ -103,6 +109,13 @@ impl Iim {
     /// the block say it is UTF-8 (1:90), if it did not.
     pub fn set_texts(&mut self, record: u8, number: u8, texts: &[String]) {
         if texts.iter().any(|t| !t.is_ascii()) && !self.utf8() {
+            // The texts there already, Latin-1 until now, are made UTF-8 too, or they would read
+            // wrong once the block says it is UTF-8.
+            for s in &mut self.sets {
+                if s.record == 2 && is_text(s.number) && std::str::from_utf8(&s.data).is_err() {
+                    s.data = s.data.iter().map(|&c| char::from(c)).collect::<String>().into_bytes();
+                }
+            }
             self.sets.retain(|s| (s.record, s.number) != CHARSET);
             self.insert(DataSet { record: CHARSET.0, number: CHARSET.1, data: UTF8.to_vec() });
         }
@@ -159,22 +172,12 @@ const DIGEST_RESOURCE: u16 = 0x0425;
 /// XMP was written (true if there is a digest and it is not the IIM's).
 pub fn from_resources(block: &[u8]) -> Option<(Vec<u8>, bool)> {
     let (mut iim, mut digest) = (None, None);
-    let mut at = 0;
-    while at + 12 <= block.len() && &block[at..at + 4] == b"8BIM" {
-        let id = u16::from_be_bytes([block[at + 4], block[at + 5]]);
-        // A Pascal string padded to an even length, its length byte included.
-        let name = usize::from(block[at + 6]);
-        let name_end = at + 6 + ((name + 1 + 1) & !1);
-        let Some(size) = block.get(name_end..name_end + 4) else { break };
-        let size = u32::from_be_bytes([size[0], size[1], size[2], size[3]]) as usize;
-        let start = name_end + 4;
-        let Some(data) = block.get(start..start.saturating_add(size)) else { break };
-        match id {
-            IIM_RESOURCE => iim = Some(data.to_vec()),
-            DIGEST_RESOURCE => digest = Some(data.to_vec()),
+    for r in resources(block) {
+        match r.id {
+            IIM_RESOURCE if r.signature == *b"8BIM" => iim = Some(r.data.to_vec()),
+            DIGEST_RESOURCE if r.signature == *b"8BIM" => digest = Some(r.data.to_vec()),
             _ => {}
         }
-        at = start + ((size + 1) & !1);
     }
     let iim = iim?;
     let changed = digest.is_some_and(|d| d[..] != Md5::digest(&iim)[..]);
@@ -186,26 +189,52 @@ pub fn from_resources(block: &[u8]) -> Option<(Vec<u8>, bool)> {
 /// the header included, what a JPEG's APP13 carries.
 pub fn with_iim(block: &[u8], iim: Option<&[u8]>) -> Vec<u8> {
     let mut out = PHOTOSHOP.to_vec();
+    for r in resources(block) {
+        if r.signature != *b"8BIM" || (r.id != IIM_RESOURCE && r.id != DIGEST_RESOURCE) {
+            out.extend_from_slice(r.whole);
+            // A last resource whose padding the file left off.
+            if r.whole.len() % 2 == 1 {
+                out.push(0);
+            }
+        }
+    }
+    if let Some(iim) = iim {
+        out.extend_from_slice(&to_resources(iim)[PHOTOSHOP.len()..]);
+    }
+    out
+}
+
+/// One of Photoshop's image resources: its signature ("8BIM", or another program's own), its
+/// identifier, its data, and the whole of it as it lies (its padding included).
+struct Resource<'a> {
+    signature: [u8; 4],
+    id: u16,
+    data: &'a [u8],
+    whole: &'a [u8],
+}
+
+/// The resources of Photoshop's image resource block `block` (its header taken off), in
+/// order, as far as they can be read.
+fn resources(block: &[u8]) -> Vec<Resource<'_>> {
+    let mut out = Vec::new();
     let mut at = 0;
-    while at + 12 <= block.len() && &block[at..at + 4] == b"8BIM" {
+    while at + 12 <= block.len() {
+        let signature = [block[at], block[at + 1], block[at + 2], block[at + 3]];
+        // A signature is four printable characters ("8BIM", "MeSa", "PHUT"...).
+        if !signature.iter().all(|c| c.is_ascii_graphic()) {
+            break;
+        }
         let id = u16::from_be_bytes([block[at + 4], block[at + 5]]);
+        // A Pascal string padded to an even length, its length byte included.
         let name = usize::from(block[at + 6]);
         let name_end = at + 6 + ((name + 1 + 1) & !1);
         let Some(size) = block.get(name_end..name_end + 4) else { break };
         let size = u32::from_be_bytes([size[0], size[1], size[2], size[3]]) as usize;
-        let end = name_end + 4 + ((size + 1) & !1);
-        let Some(whole) = block.get(at..end.min(block.len())) else { break };
-        if id != IIM_RESOURCE && id != DIGEST_RESOURCE {
-            out.extend_from_slice(whole);
-            // A last resource whose padding the file left off.
-            if whole.len() % 2 == 1 {
-                out.push(0);
-            }
-        }
+        let start = name_end + 4;
+        let Some(data) = block.get(start..start.saturating_add(size)) else { break };
+        let end = (start + ((size + 1) & !1)).min(block.len());
+        out.push(Resource { signature, id, data, whole: &block[at..end] });
         at = end;
-    }
-    if let Some(iim) = iim {
-        out.extend_from_slice(&to_resources(iim)[PHOTOSHOP.len()..]);
     }
     out
 }
@@ -290,5 +319,33 @@ mod tests {
         assert_eq!(from_resources(&replaced[PHOTOSHOP.len()..]).unwrap(), (other.bytes(), false));
         let gone = with_iim(&with_path[PHOTOSHOP.len()..], None);
         assert!(gone.windows(3).any(|w| w == b"abc") && from_resources(&gone[PHOTOSHOP.len()..]).is_none());
+    }
+
+    #[test]
+    fn latin_1_texts_are_made_utf_8_when_the_block_comes_to_say_it_is() {
+        // Written by an older program: Latin-1, no 1:90.
+        let mut iim = Iim {
+            sets: vec![
+                DataSet { record: 2, number: 0, data: vec![0, 4] },
+                DataSet { record: 2, number: 90, data: vec![b'M', 0xFC, b'n', b'c', b'h', b'e', b'n'] },
+            ],
+        };
+        iim.set_texts(2, 116, &["© Hans".into()]);
+        let read = Iim::read(&iim.bytes()).unwrap();
+        assert_eq!(read.texts(2, 90), ["München"]);
+        assert_eq!(read.texts(2, 116), ["© Hans"]);
+        assert_eq!(read.sets.iter().find(|s| s.number == 0).map(|s| s.data.clone()), Some(vec![0, 4]));
+    }
+
+    #[test]
+    fn another_programs_resources_are_read_past_and_kept() {
+        let mut iim = Iim::default();
+        iim.set_texts(2, 5, &["Title".into()]);
+        // A resource of another signature first, then Photoshop's.
+        let mut block = b"MeSa\x03\xe8\x00\x00\x00\x00\x00\x02ok".to_vec();
+        block.extend_from_slice(&to_resources(&iim.bytes())[PHOTOSHOP.len()..]);
+        assert_eq!(from_resources(&block).map(|(b, _)| b), Some(iim.bytes()));
+        let kept = with_iim(&block, None);
+        assert!(kept.windows(4).any(|w| w == b"MeSa"), "the other program's resource lost");
     }
 }
