@@ -4401,3 +4401,55 @@ fn the_select_tool_s_variant_is_chosen_atop_its_settings_and_an_ellipse_drawn() 
     h.run();
     assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 100, 200, 160))), "Esc did not give the drag up");
 }
+
+#[test]
+fn file_info_edits_what_describes_the_image_and_a_template_fills_it_in() {
+    use egui_kittest::kittest::by;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 40, 30);
+    let ctx = h.ctx.clone();
+    h.state_mut().state_mut().run(crate::commands::Cmd::FileInfo, &ctx);
+    h.run();
+    type_into(&mut h, by().label("Title"), "Harbour");
+    type_into(&mut h, by().label("Creators"), "Ann; Bob");
+    type_into(&mut h, by().label("Copyright notice"), "© Ann");
+    type_into(&mut h, by().label("Keywords"), "sea; boat");
+    // Kept as a template, by name.
+    type_into(&mut h, by().label("Name"), "Mine");
+    h.get_by_label("Save as template").click();
+    h.run();
+    h.get_by_label("OK").click();
+    h.run();
+    let st = h.state().state();
+    let d = st.active().unwrap();
+    let desc = opal_io::metadata::description(&d.doc().metadata);
+    assert_eq!((desc.title.as_str(), desc.copyright.as_str()), ("Harbour", "© Ann"));
+    assert_eq!(
+        (desc.creators.clone(), desc.keywords.clone()),
+        (vec!["Ann".to_owned(), "Bob".to_owned()], vec!["sea".to_owned(), "boat".to_owned()])
+    );
+    assert_eq!(d.history.undo_label(), Some("File info"));
+    let t = st.metadata_templates.get("Mine").expect("the template not kept");
+    assert_eq!((t.creators.len(), t.copyright.as_str()), (2, "© Ann"));
+    // Another image: the template fills its creators and copyright, its title left as typed.
+    image_of(&mut h, 20, 20);
+    h.state_mut().state_mut().run(crate::commands::Cmd::FileInfo, &ctx);
+    h.run();
+    type_into(&mut h, by().label("Title"), "Quay");
+    h.get_by_label("Template").click();
+    h.run();
+    h.get_by_label("Mine").click();
+    h.run();
+    h.get_by_label("OK").click();
+    h.run();
+    let desc = opal_io::metadata::description(&h.state().state().active().unwrap().doc().metadata);
+    assert_eq!((desc.title.as_str(), desc.copyright.as_str(), desc.creators.len()), ("Quay", "© Ann", 2));
+    // Nothing changed, nothing made.
+    let before = h.state().state().active().unwrap().history.current();
+    h.state_mut().state_mut().run(crate::commands::Cmd::FileInfo, &ctx);
+    h.run();
+    h.get_by_label("OK").click();
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().history.current(), before);
+}

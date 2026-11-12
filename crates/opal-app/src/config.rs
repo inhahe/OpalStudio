@@ -32,6 +32,9 @@ struct Saved {
     /// What was entered lately in each field remembered by name, the latest first.
     #[serde(default)]
     field_entries: BTreeMap<String, Vec<String>>,
+    /// File Info's templates, by name.
+    #[serde(default)]
+    metadata_templates: BTreeMap<String, crate::file_info::Template>,
 }
 
 /// Notes where this program is, in `program.json` beside the settings, for the `opal`
@@ -145,6 +148,14 @@ fn apply_json(st: &mut AppState, text: &str) -> Result<(), String> {
             st.field_entries.insert(name.clone(), kept);
         }
     }
+    // Each template on its own: one that cannot be read is skipped.
+    for (name, t) in obj.get("metadata_templates").and_then(serde_json::Value::as_object).into_iter().flatten() {
+        if let Ok(t) = serde_json::from_value::<crate::file_info::Template>(t.clone())
+            && !name.trim().is_empty()
+        {
+            st.metadata_templates.insert(name.clone(), t);
+        }
+    }
     Ok(())
 }
 
@@ -175,6 +186,7 @@ fn saved(st: &AppState) -> Saved {
         // Those JSON can hold (a path that is not Unicode would fail the whole file).
         recent_scripts: st.console.recent.iter().filter(|p| p.to_str().is_some()).cloned().collect(),
         field_entries: st.field_entries.clone(),
+        metadata_templates: st.metadata_templates.clone(),
     }
 }
 
@@ -206,6 +218,10 @@ mod tests {
             last_new_ppi: None,
             recent_scripts: vec![PathBuf::from("C:/scripts/sky.py")],
             field_entries: BTreeMap::from([("box.x".to_owned(), vec!["Logo.right + 5mm".to_owned(), "10".to_owned()])]),
+            metadata_templates: BTreeMap::from([(
+                "Mine".to_owned(),
+                crate::file_info::Template { copyright: "© Ann".into(), ..Default::default() },
+            )]),
         };
         let json = serde_json::to_string(&saved).unwrap();
         let back: Saved = serde_json::from_str(&json).unwrap();
@@ -216,6 +232,18 @@ mod tests {
         apply_json(&mut fresh, &json).unwrap();
         assert_eq!(fresh.console.recent, [PathBuf::from("C:/scripts/sky.py")], "the recent scripts were lost");
         assert_eq!(fresh.field_entries["box.x"], ["Logo.right + 5mm", "10"], "the fields' entries were lost");
+        assert_eq!(fresh.metadata_templates["Mine"].copyright, "© Ann", "File Info's templates were lost");
+        // Saved from the settings as they are.
+        let mut st = AppState::new();
+        st.metadata_templates
+            .insert("Ours".into(), crate::file_info::Template { email: "a@b.c".into(), ..Default::default() });
+        let mut back = AppState::new();
+        apply_json(&mut back, &serde_json::to_string(&super::saved(&st)).unwrap()).unwrap();
+        assert_eq!(back.metadata_templates["Ours"].email, "a@b.c", "File Info's templates not saved");
+        // A template that cannot be read is skipped, the others kept.
+        let mut odd = AppState::new();
+        apply_json(&mut odd, r#"{"metadata_templates": {"a": {"copyright": "x"}, "b": 7}}"#).unwrap();
+        assert_eq!(odd.metadata_templates.keys().collect::<Vec<_>>(), ["a"]);
         // Of entries that cannot be, those that can are kept, each once.
         let mut entries = AppState::new();
         let json = r#"{"field_entries": {"box.y": ["1in", 2, "", "1in", " 3mm "], "box.x": "no"}}"#;

@@ -15,6 +15,11 @@
 //!   come to, if kept; and how the image has been turned, flipped, resized or cropped since, if
 //!   it has), each as `Mask::to_bytes` makes it. A file holding none is written as version 2,
 //!   which versions before saved selections read.
+//! - `metadata/exif.bin`, `metadata/xmp.xml`, `metadata/iptc.bin`: what the file the image
+//!   came from said of it besides its pixels (EXIF's TIFF structure, the XMP packet, the IPTC
+//!   IIM), as bytes, kept as they were read (see `metadata`); `metadata` in `document.json`
+//!   says which there are, and whether the IIM's digest said it had changed since the XMP was
+//!   written. A file holding any is version 4.
 //!
 //! Version 0 had only pixel objects, called `raster`, without offsets, and a canvas
 //! without a position; it is still read.
@@ -27,8 +32,8 @@
 use crate::memory::{Free, Need};
 use crate::{IoError, Progress, write_all, write_atomically};
 use opal_core::document::{
-    Canvas, Document, IdGen, ImageObject, KeptSelection, Layer, LayerContent, LayerId, Object, ObjectId, ObjectKind,
-    PixelObject, Placement, SavedSelection,
+    Canvas, Document, IdGen, ImageObject, KeptSelection, Layer, LayerContent, LayerId, Metadata, Object, ObjectId,
+    ObjectKind, PixelObject, Placement, SavedSelection,
 };
 use opal_core::geom::{Affine, IRect};
 use opal_core::mask::Mask;
@@ -48,8 +53,8 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 pub const MIME_TYPE: &str = "application/x-opal-studio";
 /// Version 2 adds tiles kept at 8 bits (`tiles/<n>.srgb8`); version 3, selections saved in
-/// the image (`selections`, `masks/<n>.bin`).
-pub const FORMAT_VERSION: u32 = 3;
+/// the image (`selections`, `masks/<n>.bin`); version 4, metadata (`metadata/…`).
+pub const FORMAT_VERSION: u32 = 4;
 const TILE_BYTES: usize = TILE_PIXELS * 4 * 2;
 /// The bytes of a tile kept at 8 bits.
 const SRGB8_BYTES: usize = TILE_PIXELS * 4;
@@ -86,7 +91,32 @@ struct FileDoc {
     /// The selections saved in the image. Older files have none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     selections: Vec<FileSelection>,
+    /// Which metadata it holds. Older files have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metadata: Option<FileMetadata>,
 }
+
+/// Which of the metadata entries a file holds, and whether the IIM's digest said it had
+/// changed since the XMP was written.
+#[derive(Serialize, Deserialize, Default)]
+struct FileMetadata {
+    #[serde(default)]
+    exif: bool,
+    #[serde(default)]
+    xmp: bool,
+    #[serde(default)]
+    iptc: bool,
+    #[serde(default)]
+    iptc_changed: bool,
+}
+
+/// The entries metadata is kept in.
+const EXIF_ENTRY: &str = "metadata/exif.bin";
+const XMP_ENTRY: &str = "metadata/xmp.xml";
+const IPTC_ENTRY: &str = "metadata/iptc.bin";
+/// The most bytes a metadata entry is read to (an XMP packet with a long history runs to a
+/// megabyte or two).
+const METADATA_LIMIT: usize = 64 << 20;
 
 /// A selection saved in the image: its name; its steps, in the form the API's `selection`
 /// query tells them but in document coordinates (a mask step's mask by its number, `mask`);
@@ -254,16 +284,31 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path, progress: &Progress) -> Re
     let mut mask_numbers: HashMap<*const Mask, usize> = HashMap::new();
     let selections: Vec<FileSelection> =
         doc.saved.iter().map(|s| file_selection(s, &mut mask_numbers, &mut masks)).collect();
+    let m = &doc.metadata;
+    let metadata = (!m.is_empty()).then(|| FileMetadata {
+        exif: m.exif.is_some(),
+        xmp: m.xmp.is_some(),
+        iptc: m.iptc.is_some(),
+        iptc_changed: m.iptc_changed,
+    });
+    // A file holds nothing a version before it did not, and is written as that version: the
+    // versions before what it holds open it.
+    let version = if metadata.is_some() {
+        FORMAT_VERSION
+    } else if !selections.is_empty() {
+        3
+    } else {
+        2
+    };
     let file = FileDoc {
         format: "opal-studio".into(),
-        // A file without saved selections holds nothing version 2 did not, and is written so:
-        // the versions before them open it.
-        version: if selections.is_empty() { 2 } else { FORMAT_VERSION },
+        version,
         canvas: doc.canvas,
         resolution: doc.resolution,
         next_id: ids.peek(),
         layers,
         selections,
+        metadata,
     };
     // Compact: pretty, each number of a million tile places would take a line of its own.
     let json = serde_json::to_vec(&file).expect("the document serializes");
@@ -283,6 +328,13 @@ pub fn save(doc: &Document, ids: &IdGen, path: &Path, progress: &Progress) -> Re
         for (n, m) in masks.iter().enumerate() {
             zip.start_file(format!("masks/{n}.bin"), deflated).map_err(zip_err)?;
             m.write_to(&mut zip).map_err(|e| IoError::io(path, e))?;
+        }
+        let m = &doc.metadata;
+        for (name, bytes) in [(EXIF_ENTRY, &m.exif), (XMP_ENTRY, &m.xmp), (IPTC_ENTRY, &m.iptc)] {
+            if let Some(bytes) = bytes {
+                zip.start_file(name, deflated).map_err(zip_err)?;
+                write_all(&mut zip, bytes, path)?;
+            }
         }
         zip.finish().map_err(zip_err)?;
         Ok(())
@@ -609,6 +661,7 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
     }
     // The selections saved in it; what was selected is not kept.
     let saved = read_selections(&mut zip, file.selections, &mask_sizes, path)?;
+    let metadata = read_metadata(&mut zip, file.metadata.as_ref(), path)?;
     let doc = Document {
         canvas: file.canvas,
         resolution: file.resolution,
@@ -617,10 +670,44 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
         deselected: None,
         saved,
         carried: opal_core::geom::Affine::IDENTITY,
+        metadata,
     };
     let mut ids = IdGen::starting_at(file.next_id);
     ids.reserve_above(&doc);
     Ok(Loaded { doc, ids })
+}
+
+/// The metadata a file keeps, as `which` (its `document.json`'s) says it has.
+fn read_metadata<R: Read + Seek>(
+    zip: &mut ZipArchive<R>,
+    which: Option<&FileMetadata>,
+    path: &Path,
+) -> Result<Metadata, IoError> {
+    let mut metadata = Metadata::default();
+    if let Some(m) = which {
+        let mut entry = |name: &str, there: bool| -> Result<Option<Arc<[u8]>>, IoError> {
+            Ok(if there { Some(Arc::from(read_entry(zip, name, METADATA_LIMIT, path)?)) } else { None })
+        };
+        metadata.exif = entry(EXIF_ENTRY, m.exif)?;
+        metadata.xmp = entry(XMP_ENTRY, m.xmp)?;
+        metadata.iptc = entry(IPTC_ENTRY, m.iptc)?;
+        metadata.iptc_changed = m.iptc_changed;
+    }
+    Ok(metadata)
+}
+
+/// The metadata the Opal Studio file at `path` keeps, read without its layers.
+pub fn metadata_of(path: &Path) -> Result<Metadata, IoError> {
+    let bad = |message: String| IoError::Format { path: path.to_owned(), message };
+    let file = std::fs::File::open(path).map_err(|e| IoError::io(path, e))?;
+    let mut zip =
+        ZipArchive::new(std::io::BufReader::new(file)).map_err(|e| bad(format!("not a zip archive ({e})")))?;
+    let json = read_entry(&mut zip, "document.json", json_limit(None), path)?;
+    let doc: FileDoc = serde_json::from_slice(&json).map_err(|e| bad(format!("document.json: {e}")))?;
+    if doc.format != "opal-studio" {
+        return Err(bad(format!("unknown format {:?}", doc.format)));
+    }
+    read_metadata(&mut zip, doc.metadata.as_ref(), path)
 }
 
 /// Reads an entry of at most `limit` bytes. A larger one is refused after reading one byte

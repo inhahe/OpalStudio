@@ -1391,6 +1391,93 @@ filter reaches, which the bands are drawn from. A JPEG is at most
 65,535 pixels a side (the format's limit): the dialog says so and offers no export past
 it.
 
+## Metadata
+
+What a photograph's file says about it besides its pixels: the camera's EXIF, the IPTC
+fields news and stock agencies fill in, and XMP, which carries both and anything else.
+Opal Studio keeps all of it from opening to export, shows and edits what matters, and lets
+export leave out what gives away more than the user means to.
+
+- **Kept as it was read.** Opening a JPEG or PNG keeps its EXIF (the TIFF structure, maker
+  notes and all), its XMP packet (a JPEG's Extended XMP joined to it), and its IPTC IIM (in
+  a JPEG, from Photoshop's APP13 block, with whether the block's digest says a program
+  unaware of XMP changed it since; in a PNG, ImageMagick's "Raw profile type iptc" text)
+  whole, as bytes (`opal_core::document::Metadata`, the document's `metadata`), and the
+  native file keeps them (`metadata/exif.bin`, `metadata/xmp.xml`, `metadata/iptc.bin`;
+  format version 4, written only by a file that has some). A new image has none. Open as
+  Layers and Place take a file's pixels, not its metadata, as Photoshop does. Nothing is
+  parsed until it is shown, edited or exported, and what Opal Studio does not understand
+  goes out as it came in.
+- **Read and written by code of our own** (`opal_io::metadata`): the JPEG segments and PNG
+  chunks (`container`); EXIF's IFDs (`exif`, with the standard tags' names in `tags`);
+  IIM's datasets and Photoshop's block (`iptc`); and XMP (`xmp`): RDF/XML read (with
+  roxmltree, which refuses DTDs) into XMP's data model, every shorthand RDF allows, and
+  written back from it, so that a property edited is written alone and every other kept,
+  Lightroom's develop settings and a file's history included. No crate kept maker notes
+  intact through an edit, which is the crux.
+- **EXIF is edited in place.** The bytes are kept as they are and only grow: a value that
+  fits where it was is written there; one that does not goes at the end, its entry pointed
+  there; an IFD that gains an entry is written anew at the end and pointed to; what an edit
+  leaves unreferenced is zeroed, so nothing removed for privacy survives as bytes no one
+  points at. Offsets counting from the start of the structure (a Canon's or a Sony's maker
+  note's) therefore stay right. Zeros left at the end (a thumbnail removed usually lies
+  last) are trimmed. A JPEG's APP1 holds at most 64 KB; EXIF past that after trimming is
+  left out of the JPEG, and export says so.
+- **What export makes true.** The pixels are exported upright, so the orientation is
+  written as 1; the size is the exported one (EXIF's ImageWidth and ImageLength,
+  PixelXDimension and PixelYDimension, and their XMP copies, where present); the resolution
+  the image's; the modification date now (EXIF DateTime, `xmp:ModifyDate`,
+  `xmp:MetadataDate`), and EXIF's Software Opal Studio. The embedded thumbnails (EXIF's IFD1,
+  XMP's `xmp:Thumbnails`) are dropped, as they show the image as it was, cropped-away parts
+  included. Of Photoshop's APP13 block only the IIM goes out, with its digest worked out
+  again. XMP too large for a JPEG's segment is split into Extended XMP, its largest
+  properties moved, as XMP's part 3 says.
+- **Export chooses what goes out** (the `export.metadata` preference, shown in the Export
+  dialog; scripts `export(metadata=…)`):
+  - *All* of it.
+  - *All but the place and serial numbers* (the default): no GPS (EXIF's GPS IFD, XMP's
+    `exif:GPS…`), no named place (IIM's sublocation, city, state and country; their XMP), no
+    serial numbers or owner (EXIF's BodySerialNumber, LensSerialNumber and CameraOwnerName;
+    XMP's `aux:` and `exifEX:` ones), and no maker note, which holds serial numbers in most
+    cameras' and cannot be told apart from the rest of it without a decoder per maker. What
+    makes a photograph worth sharing (camera, lens, exposure, date, description) stays; where
+    someone lives does not leave by accident.
+  - *Copyright and contact only*: the creator, the copyright notice, its status and web page,
+    the creator's email and website, credit and source; EXIF's Artist and Copyright alone.
+  - *None*.
+- **File Info** (Image tab, Ctrl+Shift+Alt+I, as in Photoshop) shows the capture and edits
+  what describes the image:
+  - *Capture*, read only (`metadata::capture`): camera (make and model), lens, shutter,
+    aperture, ISO, exposure compensation, focal length and its 35 mm equivalent, flash,
+    program, metering, white balance, when it was taken (with its fraction of a second and
+    time zone, if known), where (latitude, longitude, altitude), and the software it went
+    through.
+  - *Description*, edited (`metadata::Description`): title, caption, creators, the
+    creator's email and website, copyright notice, copyright status (copyrighted, public
+    domain, not said), copyright web page, keywords. Each is read as the Metadata Working
+    Group's guidelines say: XMP first, then IIM (first, if its digest says a program unaware
+    of XMP changed it since), then EXIF. Written, it goes to XMP (made if there is none), to
+    the IIM if there is one, and to EXIF's ImageDescription, Artist and Copyright where it
+    has them, so that whichever a program reads, it reads the same.
+  - The edit is one history state ("File info"), undone like any other.
+- **Templates:** the creators, contact and copyright fields saved by name (Preferences keep
+  them), applied in File Info in one click, filling what they hold and leaving the rest.
+- **Scripts read and write all of it** (`metadata::json`): `metadata()` gives the
+  description as File Info edits it, the capture as it shows it, every EXIF tag (IFD by IFD,
+  by name, or `0xNNNN` if unknown; whole numbers as integers, fractions worked out), every
+  IIM dataset (by `record:number`, a list of texts) and every XMP property (by
+  `prefix:name`, or `{namespace}name`; an alternative as `{language: text}`, a structure
+  as an object). `set_metadata(changes)` changes any of them, in that same shape, as one
+  history state ("Set metadata"), `null` removing what it names, the description written
+  as File Info writes it. `file_metadata(path)` reads a JPEG's, PNG's or Opal Studio file's
+  without opening its image (`metadata::file::of_file`, `native::metadata_of`), and
+  `set_file_metadata(path, changes)` rewrites a JPEG's or PNG's in place
+  (`metadata::file::rewrite`): its image data untouched, neither decoded nor encoded again,
+  written as given (the image is the file's own, so nothing is made true of it as export
+  does), and in a JPEG, Photoshop's other resources kept (a clipping path, say), replaced
+  atomically. That is how a folder of photographs has its capture times shifted, or is
+  renamed by them.
+
 ## Thumbnails
 
 Each layer in the layers panel shows a thumbnail of its content within the canvas
@@ -1697,10 +1784,8 @@ versions, Upright, the Browse panel). Decided so far; the rest is settled when P
 - **Develop is one adjustment layer**, Lightroom's sections in one panel, each of which can be
   turned off; its presets keep all of them or the ones chosen. A look's amount moves each
   setting from its neutral value toward the look's, or past it.
-- **Metadata** is kept as it was read (EXIF, IPTC and XMP kept whole, and read for showing
-  and editing), and written on export as export's choice says. The orientation is written as
-  upright, since the pixels already are; the size is the exported one; an embedded thumbnail
-  is remade or dropped. The choice names what gives away the place and the camera.
+- **Metadata** is kept as it was read, shown and edited, and written on export as export's
+  choice says: see *Metadata*.
 - **Lens profiles:** lensfun's library is LGPL-3.0 and needs GLib, so its database (XML,
   CC-BY-SA 3.0) is read by code of our own. Its models are few and documented (distortion:
   poly3, poly5, PTLens; chromatic aberration: linear, poly3; vignetting: pa). The database

@@ -480,6 +480,45 @@ pub struct Document {
     /// Cropping and resizing the canvas move the canvas, not the coordinates. Not saved in the
     /// file (a file opened starts again from the identity).
     pub carried: Affine,
+    /// What the file it came from said of it besides its pixels: kept, and saved in the file.
+    pub metadata: Metadata,
+}
+
+/// What an image's file said about it besides its pixels: its EXIF (the TIFF structure), XMP
+/// packet and IPTC IIM, each as bytes, kept as they were read and edited only where asked
+/// (`opal_io::metadata` reads and writes them). Shared between history states until changed.
+#[derive(Clone, Debug, Default)]
+pub struct Metadata {
+    pub exif: Option<Arc<[u8]>>,
+    pub xmp: Option<Arc<[u8]>>,
+    pub iptc: Option<Arc<[u8]>>,
+    /// Whether the IIM's digest said a program unaware of XMP changed it after the XMP was
+    /// written (so that it is read first: see `opal_io::metadata::description`).
+    pub iptc_changed: bool,
+}
+
+impl Metadata {
+    /// Whether it holds anything.
+    pub fn is_empty(&self) -> bool {
+        self.exif.is_none() && self.xmp.is_none() && self.iptc.is_none()
+    }
+}
+
+impl PartialEq for Metadata {
+    /// Whether they hold the same bytes (told at once where they share them).
+    fn eq(&self, other: &Metadata) -> bool {
+        fn same(a: &Option<Arc<[u8]>>, b: &Option<Arc<[u8]>>) -> bool {
+            match (a, b) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
+                (None, None) => true,
+                _ => false,
+            }
+        }
+        same(&self.exif, &other.exif)
+            && same(&self.xmp, &other.xmp)
+            && same(&self.iptc, &other.iptc)
+            && self.iptc_changed == other.iptc_changed
+    }
 }
 
 /// A selection kept aside (what Deselect took away; one saved by name), with how the image
@@ -530,6 +569,7 @@ impl Document {
             deselected: None,
             saved: Vec::new(),
             carried: Affine::IDENTITY,
+            metadata: Metadata::default(),
         }
     }
 
@@ -538,9 +578,10 @@ impl Document {
     /// anew when saved), whatever either has selected, which files do not keep.
     pub fn saves_as(&self, other: &Document) -> bool {
         // Each field named, so that one added is weighed here too (the rest: see `same_as`).
-        let Document { canvas, resolution, layers, selection: _, deselected: _, saved, carried: _ } = self;
+        let Document { canvas, resolution, layers, selection: _, deselected: _, saved, carried: _, metadata } = self;
         *canvas == other.canvas
             && *resolution == other.resolution
+            && *metadata == other.metadata
             && layers.len() == other.layers.len()
             && layers.iter().zip(&other.layers).all(|(a, b)| Arc::ptr_eq(a, b) || a.same_as(b))
             && saved.len() == other.saved.len()

@@ -88,6 +88,7 @@ Save a flattened copy as PNG or JPEG.
 | `overwrite` | bool | Write over a file already there (otherwise that is refused). Default: false. |
 | `sixteen_bit` | bool | For a PNG: 16 bits a channel rather than 8. Default: the preference. |
 | `quality` | int | For a JPEG: its quality. From 1 to 100. Default: the preference. |
+| `metadata` | `all`, `no place`, `copyright`, `none` | What of the image's metadata (the EXIF, IPTC and XMP its file had) goes into the file: all; all but where it was taken and serial numbers; only who made it, its copyright and how to reach them; or none. Default: the preference. |
 
 ### `close`
 
@@ -803,6 +804,24 @@ Give the active layer a new name.
 | `layer` | layer | The layer, by id. Default: the active layer. |
 | `name` (required) | text | Its new name. |
 
+### `set_metadata`
+
+Changes an image's metadata (see the metadata query) as one step of history, as File Info does, and answers with all of it as the metadata query does. Export writes it as its metadata setting says.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `changes` (required) | any | What to change, as the metadata query tells it: description (the fields given; those not given kept), exif ({ifd: {tag: value}}), iptc ({"record:number": text or texts}) and xmp ({key: value}); null removes what it names. The description is written to XMP, IPTC and EXIF alike, as File Info writes it; the rest as given. |
+
+### `set_file_metadata`
+
+Rewrites a JPEG's or PNG's metadata in place, its image data untouched (not decoded, nor encoded again: no quality lost), and answers with all of it as file_metadata does. How a folder of photographs has its capture times shifted, or its captions filled in, without opening them.
+
+| Parameter | Kind | |
+|---|---|---|
+| `path` (required) | path | The file, by its absolute path. |
+| `changes` (required) | any | What to change, as set_metadata takes it. |
+
 ### `select_outline`
 
 Selects what an outline encloses, as the outline tool does: points joined by straight sides, or an outline with curves, as the selection query tells one; the last point back to the first (a loop crossing itself selects each of its lobes). Give points or outline, one of them. Answers with what is selected then, as the selection query does.
@@ -934,6 +953,22 @@ Puts pixels into an image, at a place on its canvas: as a new layer above the ac
 | `name` | text | The new layer's name. Default: a numbered one. |
 
 ## Queries
+
+### `metadata`
+
+What an image's file said of it besides its pixels (EXIF, IPTC, XMP), kept with it: description (as File Info edits it: title, caption, creators, email, website, copyright, copyright_status (copyrighted, public domain or unknown), copyright_url, keywords), capture (as File Info shows it, label by label), exif (IFD by IFD: image, exif, gps, interop, thumbnail; each tag by its name, or 0xNNNN if it has none: text as text, numbers as numbers, a fraction worked out), iptc (each dataset by record:number, as 2:120 for the caption, a list of texts) and xmp (each property by prefix:name, or {namespace}name for a namespace with no usual prefix: text, a list, {language: text} for an alternative, {field: value} for a structure).
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+
+### `file_metadata`
+
+An image file's metadata, as the metadata query tells it, read without opening its image: a JPEG's, a PNG's, or an Opal Studio file's.
+
+| Parameter | Kind | |
+|---|---|---|
+| `path` (required) | path | The file, by its absolute path. |
 
 ### `selection`
 

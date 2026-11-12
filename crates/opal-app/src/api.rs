@@ -21,6 +21,7 @@ use opal_core::raster::RasterImage;
 use opal_core::tile::Pixel;
 use opal_core::units::{DEFAULT_PPI, MAX_PPI, MIN_PPI, Unit, parse_length};
 use opal_io::image_files::ExportSize;
+use opal_io::metadata::Keep;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -373,6 +374,14 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
                 help: "For a JPEG: its quality.",
                 otherwise: Otherwise::Now("the preference"),
             },
+            Param {
+                name: "metadata",
+                kind: Kind::Choice(&["all", "no place", "copyright", "none"]),
+                help: "What of the image's metadata (the EXIF, IPTC and XMP its file had) goes into the file: \
+                       all; all but where it was taken and serial numbers; only who made it, its copyright and \
+                       how to reach them; or none.",
+                otherwise: Otherwise::Now("the preference"),
+            },
         ],
         Close => &[
             DOCUMENT,
@@ -683,6 +692,7 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
         | Help
         | Shortcuts
         | About
+        | FileInfo
         | WidgetGallery => return None,
     })
 }
@@ -702,6 +712,29 @@ pub struct Calling {
 
 /// The queries: what the API tells of the editor and its images.
 const QUERIES: &[(&str, &str, &[Param])] = &[
+    (
+        "metadata",
+        "What an image's file said of it besides its pixels (EXIF, IPTC, XMP), kept with it: description \
+         (as File Info edits it: title, caption, creators, email, website, copyright, copyright_status \
+         (copyrighted, public domain or unknown), copyright_url, keywords), capture (as File \
+         Info shows it, label by label), exif (IFD by IFD: image, exif, gps, interop, thumbnail; each tag by \
+         its name, or 0xNNNN if it has none: text as text, numbers as numbers, a fraction worked out), iptc \
+         (each dataset by record:number, as 2:120 for the caption, a list of texts) and xmp (each property by \
+         prefix:name, or {namespace}name for a namespace with no usual prefix: text, a list, {language: \
+         text} for an alternative, {field: value} for a structure).",
+        &[DOCUMENT],
+    ),
+    (
+        "file_metadata",
+        "An image file's metadata, as the metadata query tells it, read without opening its image: a JPEG's, a \
+         PNG's, or an Opal Studio file's.",
+        &[Param {
+            name: "path",
+            kind: Kind::Path,
+            help: "The file, by its absolute path.",
+            otherwise: Otherwise::Required,
+        }],
+    ),
     (
         "selection",
         "What is selected in an image: the rectangle round it, as [x, y, width, height] from the canvas's \
@@ -1020,6 +1053,43 @@ const STEP_SETTINGS: &[Param] = &[
 /// The changes the API alone makes (no command of the interface makes them): their names,
 /// what they do, and their parameters.
 const CHANGES: &[(&str, &str, &[Param])] = &[
+    (
+        "set_metadata",
+        "Changes an image's metadata (see the metadata query) as one step of history, as File Info does, and \
+         answers with all of it as the metadata query does. Export writes it as its metadata setting says.",
+        &[
+            DOCUMENT,
+            Param {
+                name: "changes",
+                kind: Kind::Any,
+                help: "What to change, as the metadata query tells it: description (the fields given; those not given \
+                       kept), exif ({ifd: {tag: value}}), iptc ({\"record:number\": text or texts}) and xmp \
+                       ({key: value}); null removes what it names. The description is written to XMP, IPTC \
+                       and EXIF alike, as File Info writes it; the rest as given.",
+                otherwise: Otherwise::Required,
+            },
+        ],
+    ),
+    (
+        "set_file_metadata",
+        "Rewrites a JPEG's or PNG's metadata in place, its image data untouched (not decoded, nor encoded \
+         again: no quality lost), and answers with all of it as file_metadata does. How a folder of \
+         photographs has its capture times shifted, or its captions filled in, without opening them.",
+        &[
+            Param {
+                name: "path",
+                kind: Kind::Path,
+                help: "The file, by its absolute path.",
+                otherwise: Otherwise::Required,
+            },
+            Param {
+                name: "changes",
+                kind: Kind::Any,
+                help: "What to change, as set_metadata takes it.",
+                otherwise: Otherwise::Required,
+            },
+        ],
+    ),
     (
         "select_outline",
         "Selects what an outline encloses, as the outline tool does: points joined by straight sides, or an \
@@ -1896,6 +1966,17 @@ fn located(origin: &crate::box_fields::Origin, doc: &opal_core::document::Docume
     })
 }
 
+/// Rewrites the metadata of the file `args` name as their `changes` say (see
+/// `metadata::file::rewrite`); answers with all of it.
+fn set_file_metadata_by_args(args: &Args) -> Result<Value, String> {
+    use opal_io::metadata::{file, json};
+    let path = args.path("path");
+    let changes = args.get("changes").expect("required").clone();
+    file::rewrite(&path, |m| json::changed(m, &changes)).map_err(|e| format!("set_file_metadata: {e}"))?;
+    let meta = file::of_file(&path).map_err(|e| format!("set_file_metadata: {e}"))?;
+    Ok(json::to_json(&meta))
+}
+
 /// `value` with `notes` added to its "notes", if there are any.
 pub(crate) fn with_notes(mut value: Value, notes: Vec<String>) -> Value {
     if !notes.is_empty()
@@ -2108,6 +2189,8 @@ impl AppState {
             None if method.name == "edit_selection_step" => self.selection_step_by_args(false, &args),
             None if method.name == "delete_saved_selection" => Reply::Now(self.delete_saved_by_args(&args)),
             None if method.name == "set_preference" => Reply::Now(self.set_preference(&args, ctx)),
+            None if method.name == "set_metadata" => Reply::Now(self.set_metadata_by_args(&args)),
+            None if method.name == "set_file_metadata" => Reply::Now(set_file_metadata_by_args(&args)),
             None => Reply::Now(self.answer(&method.name, &args)),
         };
         let view = self.calling.take().expect("set above").view;
@@ -2247,6 +2330,15 @@ impl AppState {
             "saved_selections" => {
                 let d = self.doc(self.which(args)?).expect("found");
                 Ok(saved_json(d.doc()))
+            }
+            "metadata" => {
+                let d = self.doc(self.which(args)?).expect("found");
+                Ok(opal_io::metadata::json::to_json(&d.doc().metadata))
+            }
+            "file_metadata" => {
+                let path = args.path("path");
+                let meta = opal_io::metadata::file::of_file(&path).map_err(|e| format!("file_metadata: {e}"))?;
+                Ok(opal_io::metadata::json::to_json(&meta))
             }
             "methods" => Ok(describe()),
             "preferences" => Ok(self.preferences_json()),
@@ -2624,6 +2716,25 @@ impl AppState {
         Ok(())
     }
 
+    /// Changes the metadata of the image `args` names as their `changes` say, as one history
+    /// state; answers with all of it.
+    fn set_metadata_by_args(&mut self, args: &Args) -> Result<Value, String> {
+        let id = self.which(args)?;
+        let changes = args.get("changes").expect("required").clone();
+        let d = self.doc_mut(id).expect("found");
+        let meta =
+            opal_io::metadata::json::changed(&d.doc().metadata, &changes).map_err(|e| format!("set_metadata: {e}."))?;
+        if meta != d.doc().metadata {
+            let new = meta.clone();
+            d.apply("Set metadata", |doc, _| {
+                doc.metadata = new;
+                Ok::<(), String>(())
+            })
+            .map_err(|e| format!("set_metadata: {e}"))?;
+        }
+        Ok(opal_io::metadata::json::to_json(&meta))
+    }
+
     /// Exports the active image as `args` say.
     fn export_by_args(&mut self, args: &Args, ctx: &egui::Context) -> Reply {
         let path = args.path("path");
@@ -2648,7 +2759,8 @@ impl AppState {
             height,
             sampling: crate::prefs::sampling(&self.prefs, "export"),
         });
-        self.reply_after_write(|st, then| st.export_to(doc, path, format, size, None, then, ctx))
+        let keep = args.text("metadata").map_or_else(|| self.export_metadata(), |k| Keep::named(k).expect("checked"));
+        self.reply_after_write(|st, then| st.export_to(doc, path, format, size, keep, None, then, ctx))
     }
 
     /// The resolution lengths given to `method` with `args` are converted at: the one they
@@ -4274,6 +4386,87 @@ mod tests {
         drop(held);
         st.finish_edits();
         std::fs::remove_dir_all(missing.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_photographs_metadata_is_kept_edited_saved_and_exported_as_chosen() {
+        let file = |name: &str| file_in("metadata", name);
+        // A photograph as a camera leaves it: taken at a place, by a camera with a serial
+        // number; turned a quarter by its orientation.
+        let photo = file("photo.jpg");
+        crate::paste::testing::white_jpeg(&photo, 8, 6, None);
+        let camera = json!({
+            "exif": {
+                "image": { "Make": "Canon", "Model": "Canon EOS R5", "Orientation": 6 },
+                "exif": { "ExposureTime": 0.004, "FNumber": 2.8, "BodySerialNumber": "SERIAL-1" },
+                "gps": { "GPSLatitudeRef": "N", "GPSLatitude": [48, 51, 29.6] }
+            },
+            "description": { "title": "Harbour", "creators": ["Ann"] }
+        });
+        let path = |p: &std::path::Path| p.display().to_string();
+        now(&mut AppState::new(), "set_file_metadata", json!({ "path": path(&photo), "changes": camera })).unwrap();
+        // Opened: kept, upright (6 by 8), and read as File Info reads it.
+        let mut st = AppState::new();
+        now(&mut st, "open", json!({ "path": path(&photo) })).unwrap();
+        let c = st.active().unwrap().doc().canvas;
+        assert_eq!((c.width, c.height), (6, 8));
+        let m = now(&mut st, "metadata", json!({})).unwrap();
+        assert_eq!(
+            (m["description"]["title"].as_str(), m["capture"]["Camera"].as_str()),
+            (Some("Harbour"), Some("Canon EOS R5"))
+        );
+        assert_eq!(m["capture"]["Aperture"], "f/2.8");
+        // Edited as one step, and undone.
+        let changed =
+            now(&mut st, "set_metadata", json!({ "changes": { "description": { "title": "Quay" } } })).unwrap();
+        assert_eq!(changed["description"]["title"], "Quay");
+        assert_eq!(st.active().unwrap().history.undo_label(), Some("Set metadata"));
+        assert!(st.active().unwrap().is_dirty(), "a change to what the file keeps not counted unsaved");
+        // Saved and opened again: kept.
+        let opal = file("photo.opal");
+        call(&mut st, "save_as", json!({ "path": path(&opal) })).unwrap();
+        let mut again = AppState::new();
+        now(&mut again, "open", json!({ "path": path(&opal) })).unwrap();
+        assert_eq!(now(&mut again, "metadata", json!({})).unwrap()["description"]["title"], "Quay");
+        assert_eq!(
+            now(&mut again, "file_metadata", json!({ "path": path(&opal) })).unwrap()["description"]["title"],
+            "Quay"
+        );
+        // Exported as each choice keeps it, upright and at the size exported.
+        let exported = |st: &mut AppState, name: &str, keep: Option<&str>| {
+            let out = file(name);
+            let mut args = json!({ "path": path(&out), "overwrite": true });
+            if let Some(k) = keep {
+                args["metadata"] = json!(k);
+            }
+            call(st, "export", args).unwrap();
+            now(st, "file_metadata", json!({ "path": path(&out) })).unwrap()
+        };
+        let all = exported(&mut again, "all.jpg", Some("all"));
+        assert_eq!(all["exif"]["image"]["Orientation"], 1, "not upright");
+        assert_eq!(all["exif"]["gps"]["GPSLatitudeRef"], "N");
+        assert_eq!(all["exif"]["exif"]["BodySerialNumber"], "SERIAL-1");
+        // The preference's default: no place, no serial number, the rest kept.
+        let default = exported(&mut again, "default.png", None);
+        assert!(default["exif"].get("gps").is_none() && default["exif"]["exif"].get("BodySerialNumber").is_none());
+        assert_eq!(
+            (default["description"]["title"].as_str(), default["exif"]["exif"]["FNumber"].as_f64()),
+            (Some("Quay"), Some(2.8))
+        );
+        let copyright = exported(&mut again, "copyright.jpg", Some("copyright"));
+        assert!(copyright["exif"].get("exif").is_none() && copyright["description"]["title"] == "");
+        assert_eq!(copyright["description"]["creators"], json!(["Ann"]));
+        let none = exported(&mut again, "none.jpg", Some("none"));
+        assert_eq!(
+            (none["exif"].as_object().map(|o| o.len()), none["xmp"].as_object().map(|o| o.len())),
+            (Some(0), Some(0))
+        );
+        let why = now(&mut again, "export", json!({ "path": path(&file("x.jpg")), "metadata": "most" })).unwrap_err();
+        assert!(why.contains("metadata"), "{why}");
+        // A file not an image's: refused.
+        let why = now(&mut again, "set_file_metadata", json!({ "path": path(&opal), "changes": {} })).unwrap_err();
+        assert!(why.contains("in place"), "{why}");
+        std::fs::remove_dir_all(photo.parent().unwrap()).ok();
     }
 
     #[test]

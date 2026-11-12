@@ -12,6 +12,7 @@
 mod density;
 pub mod image_files;
 pub mod memory;
+pub mod metadata;
 pub mod native;
 pub mod pixels;
 

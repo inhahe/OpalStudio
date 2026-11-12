@@ -563,6 +563,24 @@ pub static PREFS: &[Def] = &[
         advanced: false,
     },
     Def {
+        key: "export.metadata",
+        label: "Metadata",
+        help: "What the image's file said of it besides its pixels (the camera's EXIF, IPTC, XMP) goes \
+               into what is exported: all of it; all but where it was taken and the camera's and \
+               lens's serial numbers (the maker's notes too, which hold them); only who made it, its \
+               copyright and how to reach them; or none. Whatever goes says the image is upright and \
+               the size it is exported at.",
+        section: "Export",
+        kind: Kind::Choice(&[
+            ("all", "All"),
+            ("no place", "All but the place and serial numbers"),
+            ("copyright", "Copyright and contact only"),
+            ("none", "None"),
+        ]),
+        default: Init::Choice("no place"),
+        advanced: false,
+    },
+    Def {
         key: "export.png_16",
         label: "16-bit PNG",
         help: "Write 16 bits per channel instead of 8: smoother gradients for further editing, \

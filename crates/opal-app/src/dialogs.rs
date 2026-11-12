@@ -40,6 +40,8 @@ pub fn show_all(ctx: &egui::Context, st: &mut AppState) {
         load_selection(ctx, st);
     } else if st.modifying.is_some() {
         modifying(ctx, st);
+    } else if st.file_info.is_some() {
+        crate::file_info::dialog(ctx, st);
     }
     preferences(ctx, st);
     about(ctx, st);
@@ -451,7 +453,7 @@ fn size_fields(
 }
 
 /// OK and Cancel (also Enter and Esc): `Some(true)` for OK.
-fn ok_cancel(ui: &mut egui::Ui, ok: &str) -> Option<bool> {
+pub(crate) fn ok_cancel(ui: &mut egui::Ui, ok: &str) -> Option<bool> {
     let mut done = None;
     ui.add_space(8.0);
     ui.horizontal(|ui| {

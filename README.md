@@ -41,7 +41,7 @@ cargo test --workspace                     # all tests, interface tests included
 ## What works so far
 
 - **Files.** Open PNG and JPEG (8 and 16 bits; EXIF orientation honored) and Opal
-  Studio's own `.opal` files, which keep every layer and the selections saved. An 8-bit image takes half the
+  Studio's own `.opal` files, which keep every layer, the selections saved and the metadata. An 8-bit image takes half the
   memory until it is changed: its pixels are kept as they were read. Images larger than
   memory can be worked on, saved and opened again: past a share of it (a preference), or
   past what is free while something needing memory is done, the parts not looked at
@@ -70,6 +70,16 @@ cargo test --workspace                     # all tests, interface tests included
   Placed by) puts it where they say now, and Re-apply All Placements does so for every
   layer, each after those it is placed relative to (layers placed relative to each other in
   a loop are left as they are, and said).
+- **Metadata.** What a photograph's file says besides its pixels (the camera's EXIF, IPTC,
+  XMP) is kept: through the `.opal` file, to export. Image › File Info (Ctrl+Shift+Alt+I)
+  shows how it was taken (camera, lens, exposure, when, where) and edits its title,
+  caption, creators, contact, copyright and keywords, written to all three as other
+  programs read them; templates fill in the creator's and copyright fields at once. Export's
+  Metadata setting chooses what goes out: all of it, all but where it was taken and serial
+  numbers (the default), copyright and contact only, or none. Whatever goes says the image
+  is upright and the size it was exported at. Scripts read and change all of it
+  (`metadata`, `set_metadata`), and a JPEG's or PNG's without opening it
+  (`file_metadata`, `set_file_metadata`: rewritten in place, no quality lost).
 - **Paste and place.** Ctrl+V pastes an image (from Opal Studio, another program, or an
   image file copied in Explorer) into a box that moves, scales and rotates it, snapping to
   the canvas and other layers; Enter places it. A pasted image keeps its own pixels, so it

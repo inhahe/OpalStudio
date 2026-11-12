@@ -152,3 +152,5 @@ pub const LAYER_VIA_COPY: char = '\u{e424}';
 pub const LAYER_VIA_CUT: char = '\u{ea77}';
 /// A group packed into one (folder_zip): not New Group's.
 pub const MERGE_GROUP: char = '\u{f435}';
+/// A tag: what the file says of the image.
+pub const FILE_INFO: char = '\u{f77c}';

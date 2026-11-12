@@ -200,6 +200,10 @@ pub struct AppState {
     pub new_image: Option<NewImage>,
     pub last_new: NewImage,
     pub export: Option<ExportDialog>,
+    /// File Info, while it is open.
+    pub file_info: Option<crate::file_info::FileInfo>,
+    /// File Info's templates, by name.
+    pub metadata_templates: std::collections::BTreeMap<String, crate::file_info::Template>,
     /// The format last exported to, offered first next time.
     pub last_export: ExportKind,
     pub prefs_open: bool,
@@ -369,6 +373,8 @@ impl AppState {
                 resolution: opal_core::units::DEFAULT_PPI,
             },
             export: None,
+            file_info: None,
+            metadata_templates: std::collections::BTreeMap::new(),
             last_export: ExportKind::Png,
             prefs_open: false,
             prefs_section: 0,
@@ -706,6 +712,7 @@ impl AppState {
             Cmd::Rotate180 => self.turn(Turn::Half),
             Cmd::FlipHorizontal => self.turn(Turn::FlipHorizontal),
             Cmd::FlipVertical => self.turn(Turn::FlipVertical),
+            Cmd::FileInfo => self.open_file_info(),
             Cmd::Redo => {
                 self.active_mut().expect("available").redo();
             }
@@ -917,6 +924,7 @@ impl AppState {
                     warnings.extend(said);
                     let layer = Layer::new_raster(ids.layer(), ids.object(), "Background", imported.image);
                     doc.insert(Position { parent: None, index: 0 }, layer).expect("an empty document takes a layer");
+                    doc.metadata = imported.metadata;
                     self.add_doc(title, doc, ids, "Open");
                     for w in warnings {
                         self.message(MessageKind::Warning, format!("Opened {}", file_title(path)), w);
@@ -1112,7 +1120,37 @@ impl AppState {
             height: spec.height,
             sampling: crate::prefs::sampling(&self.prefs, "export"),
         });
-        self.export_to(doc, path, format, size, None, Then::Nothing, ctx);
+        let keep = self.export_metadata();
+        self.export_to(doc, path, format, size, keep, None, Then::Nothing, ctx);
+    }
+
+    /// What of an image's metadata export writes, as the preference says.
+    pub(crate) fn export_metadata(&self) -> opal_io::metadata::Keep {
+        opal_io::metadata::Keep::named(&self.prefs.choice("export.metadata")).unwrap_or(opal_io::metadata::Keep::All)
+    }
+
+    /// What export writes into a file of `format` of `doc`'s metadata, as `keep` says, made true
+    /// of the image exported (at `size`, or the canvas's); and what should be said of it.
+    fn embedded(
+        doc: &Document,
+        format: &ExportFormat,
+        size: Option<&image_files::ExportSize>,
+        keep: opal_io::metadata::Keep,
+    ) -> (image_files::Embed, Vec<String>) {
+        use opal_io::metadata;
+        let (width, height) = size.map_or((doc.canvas.width, doc.canvas.height), |s| (s.width, s.height));
+        let (exif_now, xmp_now) = crate::clock::now();
+        let software = format!("Opal Studio {}", env!("CARGO_PKG_VERSION"));
+        let out = metadata::Exported { width, height, ppi: doc.resolution, exif_now, xmp_now, software };
+        let prepared = metadata::for_export(&doc.metadata, keep, &out);
+        let mut notes = Vec::new();
+        let embed = match format {
+            ExportFormat::Jpeg { .. } => {
+                image_files::Embed { jpeg: prepared.jpeg_segments(&mut notes), png: Vec::new() }
+            }
+            ExportFormat::Png { .. } => image_files::Embed { jpeg: Vec::new(), png: prepared.png_chunks() },
+        };
+        (embed, notes)
     }
 
     /// How an export of `kind` is written: as the preferences say, but for `sixteen_bit` (a
@@ -1138,8 +1176,9 @@ impl AppState {
     }
 
     /// Writes `doc`'s canvas to `path` (off the interface thread; a failure inside the
-    /// encoders is reported like any other), or says why not if it would need more memory
-    /// than is free when its turn comes (or than `memory`, for tests); then does `then`.
+    /// encoders is reported like any other), with what of its metadata `keep` keeps, or says
+    /// why not if it would need more memory than is free when its turn comes (or than
+    /// `memory`, for tests); then does `then`.
     #[allow(clippy::too_many_arguments)]
     pub fn export_to(
         &mut self,
@@ -1147,10 +1186,15 @@ impl AppState {
         path: PathBuf,
         format: ExportFormat,
         size: Option<image_files::ExportSize>,
+        keep: opal_io::metadata::Keep,
         memory: Option<crate::memory::Allowance>,
         then: Then,
         ctx: &egui::Context,
     ) {
+        let (embed, notes) = Self::embedded(&doc, &format, size.as_ref(), keep);
+        for note in notes {
+            self.message(MessageKind::Warning, "Export", note);
+        }
         let written = Written::Export { path: path.clone() };
         let job = Box::new(move |p: &_| {
             // Measured now, not when asked for: the write may have waited behind others.
@@ -1158,7 +1202,7 @@ impl AppState {
             // Kept while exporting: it caps the tiles' memory.
             memory.take(image_files::export_memory(&doc, size.as_ref()))?;
             let pool = Some(crate::background::pool());
-            image_files::export_in(&doc, &path, &format, size.as_ref(), pool, p).map_err(|e| e.to_string())
+            image_files::export_in(&doc, &path, &format, size.as_ref(), &embed, pool, p).map_err(|e| e.to_string())
         });
         self.writer.write(written, then, job, ctx);
     }
@@ -1340,6 +1384,7 @@ mod tests {
             path.clone(),
             png,
             None,
+            opal_io::metadata::Keep::All,
             Some(crate::memory::Allowance::memory(Some(1000))),
             Then::Nothing,
             &ctx(),

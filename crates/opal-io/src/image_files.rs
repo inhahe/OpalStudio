@@ -28,6 +28,8 @@ pub struct Imported {
     pub resolution: Option<[f64; 2]>,
     /// Things the user should know about how the file was read.
     pub warnings: Vec<String>,
+    /// What the file says of the image besides its pixels (see `metadata`).
+    pub metadata: opal_core::document::Metadata,
 }
 
 /// Reads a PNG or JPEG (recognized by content, not extension), turned upright according to
@@ -83,7 +85,8 @@ pub fn import_bytes(bytes: &[u8], path: &Path, free: Option<Free>) -> Result<Imp
                 .to_owned(),
         );
     }
-    Ok(Imported { width, height, image, resolution, warnings })
+    let metadata = crate::metadata::read(bytes);
+    Ok(Imported { width, height, image, resolution, warnings, metadata })
 }
 
 /// How a decoded image's samples become tiles (by its colour type, which [`image_of`]'s
@@ -542,19 +545,29 @@ fn frame_edges(image: &mut RasterImage, rect: &IRect, border: i64) {
 /// while the encoder compresses this one, so a canvas exported at its own size is never
 /// held whole.
 pub fn export(doc: &Document, path: &Path, format: &ExportFormat, size: Option<&ExportSize>) -> Result<(), IoError> {
-    export_in(doc, path, format, size, None, &Progress::default())
+    export_in(doc, path, format, size, &Embed::default(), None, &Progress::default())
 }
 
-/// [`export`], compositing in `pool` (rayon's global pool if `None`), telling `progress`
-/// how far it has got (see [`Exported::new`]: the result's pixels count as the encoder
-/// takes them), and stopping if it is cancelled. The bands are made on a thread of their
-/// own, which gives its parallel work to `pool`; the encoder, which waits for them, runs
-/// on the calling thread (which may be one of `pool`'s, if it has another).
+/// Metadata written into an exported file, made ready (see `metadata::Prepared`): a JPEG's
+/// segments, and a PNG's chunks (each its type and data).
+#[derive(Clone, Debug, Default)]
+pub struct Embed {
+    pub jpeg: Vec<u8>,
+    pub png: Vec<([u8; 4], Vec<u8>)>,
+}
+
+/// [`export`], with `embed`'s metadata written in, compositing in `pool` (rayon's global
+/// pool if `None`), telling `progress` how far it has got (see [`Exported::new`]: the
+/// result's pixels count as the encoder takes them), and stopping if it is cancelled. The
+/// bands are made on a thread of their own, which gives its parallel work to `pool`; the
+/// encoder, which waits for them, runs on the calling thread (which may be one of `pool`'s,
+/// if it has another).
 pub fn export_in(
     doc: &Document,
     path: &Path,
     format: &ExportFormat,
     size: Option<&ExportSize>,
+    embed: &Embed,
     pool: Option<&rayon::ThreadPool>,
     progress: &Progress,
 ) -> Result<(), IoError> {
@@ -569,15 +582,19 @@ pub fn export_in(
     in_bands(doc, size, pool, progress, |width, height, bands| {
         write_atomically(path, Some(progress), |out| match format {
             ExportFormat::Png { sixteen_bit } => {
-                write_png(out, width, height, bands, *sixteen_bit, Some(doc.resolution))
+                write_png(out, width, height, bands, *sixteen_bit, Some(doc.resolution), &embed.png)
                     .map_err(|e| encode_err(e.to_string()))
             }
             ExportFormat::Jpeg { quality, background } => {
                 let bg = from_srgb8([background[0], background[1], background[2], 255]);
                 let rows = JpegRows::new(bands, width, height, bg);
-                let mut encoder = JpegEncoder::new_with_quality(out, (*quality).clamp(1, 100));
+                // The metadata's segments put in as the encoder writes its own.
+                let mut with = crate::metadata::container::JpegWithMetadata::new(out, embed.jpeg.clone());
+                let mut encoder = JpegEncoder::new_with_quality(&mut with, (*quality).clamp(1, 100));
                 encoder.set_pixel_density(crate::density::jpeg_density(doc.resolution));
-                encoder.encode_image(&rows).map_err(|e| encode_err(e.to_string()))
+                encoder.encode_image(&rows).map_err(|e| encode_err(e.to_string()))?;
+                drop(encoder);
+                with.finish().map(|_| ()).map_err(|e| IoError::io(path, e))
             }
         })
     })
@@ -593,7 +610,7 @@ pub fn png_in_memory(
 ) -> Result<Vec<u8>, String> {
     in_bands(doc, size, pool, &Progress::default(), |width, height, bands| {
         let mut out = Vec::new();
-        write_png(&mut out, width, height, bands, false, None).map(|()| out).map_err(|e| e.to_string())
+        write_png(&mut out, width, height, bands, false, None, &[]).map(|()| out).map_err(|e| e.to_string())
     })
     .unwrap_or_else(|| Err("cancelled".to_owned()))
 }
@@ -633,7 +650,8 @@ fn in_bands<R>(
 }
 
 /// Writes a `width × height` PNG with transparency, at 8 or (`sixteen`) 16 bits a channel,
-/// from `bands` of rows, top to bottom, recording `ppi` pixels per inch if given.
+/// from `bands` of rows, top to bottom, recording `ppi` pixels per inch if given, and
+/// `chunks` (metadata's, each its type and data) before the image data.
 fn write_png(
     out: impl Write,
     width: u32,
@@ -641,6 +659,7 @@ fn write_png(
     bands: impl Iterator<Item = Vec<Pixel>>,
     sixteen: bool,
     ppi: Option<f64>,
+    chunks: &[([u8; 4], Vec<u8>)],
 ) -> Result<(), png::EncodingError> {
     let mut encoder = png::Encoder::new(out, width, height);
     encoder.set_pixel_dims(ppi.map(crate::density::png_dims));
@@ -649,6 +668,9 @@ fn write_png(
     encoder.set_compression(png::Compression::Balanced);
     encoder.set_filter(png::Filter::Adaptive);
     let mut writer = encoder.write_header()?;
+    for (kind, data) in chunks {
+        writer.write_chunk(png::chunk::ChunkType(*kind), data)?;
+    }
     let mut stream = writer.stream_writer()?;
     for band in bands {
         let bytes: Vec<u8> = if sixteen {
@@ -1106,7 +1128,7 @@ mod tests {
         std::thread::spawn(move || {
             let d = tall_document();
             let png = ExportFormat::Png { sixteen_bit: false };
-            let r = p.install(|| export_in(&d, &at, &png, None, Some(&p), &Progress::default()));
+            let r = p.install(|| export_in(&d, &at, &png, None, &Embed::default(), Some(&p), &Progress::default()));
             let _ = tx.send(r.is_ok());
         });
         let done = rx.recv_timeout(Duration::from_secs(10));
@@ -1205,13 +1227,13 @@ mod tests {
         let path = temp("too-wide.jpg");
         let jpeg = ExportFormat::Jpeg { quality: 90, background: [255; 3] };
         let p = Progress::default();
-        let r = export_in(&d, &path, &jpeg, None, None, &p);
+        let r = export_in(&d, &path, &jpeg, None, &Embed::default(), None, &p);
         assert!(matches!(&r, Err(IoError::Unsupported { message, .. }) if message.contains("65535")), "{r:?}");
         assert_eq!(p.fraction(), None, "begun all the same");
         assert!(!path.exists());
         // At a size within the limit, it is written.
         let size = ExportSize { width: 7000, height: 1, sampling: Sampling::default() };
-        export_in(&d, &path, &jpeg, Some(&size), None, &p).unwrap();
+        export_in(&d, &path, &jpeg, Some(&size), &Embed::default(), None, &p).unwrap();
         std::fs::remove_file(&path).unwrap();
     }
 
@@ -1286,7 +1308,7 @@ mod tests {
         let path = temp("counted.png");
         for (format, size) in kinds_of_export() {
             let p = Progress::default();
-            export_in(&d, &path, &format, size.as_ref(), None, &p).unwrap();
+            export_in(&d, &path, &format, size.as_ref(), &Embed::default(), None, &p).unwrap();
             let (done, total) = (p.done.load(Relaxed), p.total.load(Relaxed));
             assert!(total > 0 && done == total, "{format:?} at {size:?}: {done} of {total}");
             assert_eq!(p.fraction(), Some(1.0));
@@ -1302,7 +1324,7 @@ mod tests {
         for (format, size) in kinds_of_export() {
             let p = Progress::default();
             p.cancel();
-            let r = export_in(&d, &path, &format, size.as_ref(), None, &p);
+            let r = export_in(&d, &path, &format, size.as_ref(), &Embed::default(), None, &p);
             assert!(matches!(r, Err(IoError::Cancelled { .. })), "{format:?} at {size:?}: {r:?}");
             assert_eq!(std::fs::read(&path).unwrap(), b"before");
         }

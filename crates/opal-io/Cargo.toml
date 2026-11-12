@@ -18,3 +18,9 @@ thiserror = { workspace = true }
 image = { workspace = true }
 png = { workspace = true }
 zip = { workspace = true }
+# Metadata (see `metadata`): XMP's XML (no DTDs), IIM's and Extended XMP's digests, PNG's
+# compressed text and its chunks' checksums.
+roxmltree = "0.21"
+md-5 = "0.10"
+flate2 = "1"
+crc32fast = "1"

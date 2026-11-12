@@ -88,6 +88,7 @@ pub enum Cmd {
     RotateBy,
     FlipHorizontal,
     FlipVertical,
+    FileInfo,
     ToggleVisible,
     ToggleLock,
     Rename,
@@ -143,7 +144,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 98] = [
+    pub const ALL: [Cmd; 99] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -222,6 +223,7 @@ impl Cmd {
         Cmd::RotateBy,
         Cmd::FlipHorizontal,
         Cmd::FlipVertical,
+        Cmd::FileInfo,
         Cmd::ToggleVisible,
         Cmd::ToggleLock,
         Cmd::Rename,
@@ -875,6 +877,17 @@ impl Cmd {
                 "Pixel layers are mirrored exactly, without resampling.",
                 &[],
             ),
+            Cmd::FileInfo => i(
+                "File Info",
+                icons::FILE_INFO,
+                "See how the photograph was taken, and edit its title, caption, creators, copyright and keywords.",
+                "What the image's file said of it besides its pixels (the camera's EXIF, IPTC, XMP), kept in \
+                 the image and its file and written on export as Export's Metadata setting says. What \
+                 describes it is read from and written to all three alike, as the Metadata Working Group's \
+                 guidelines say, as one step of history. A template fills in the creators, contact and \
+                 copyright fields at once.",
+                const { &[ctrl_shift_alt(Key::I)] },
+            ),
             Cmd::FlipVertical => i(
                 "Flip Vertically",
                 icons::FLIP_V,
@@ -1175,6 +1188,14 @@ pub static RIBBON: &[Tab] = &[
                     Cmd::FlipHorizontal,
                     Cmd::FlipVertical,
                 ],
+            },
+            Group {
+                name: "Info",
+                description: "What the image's file says of it besides its pixels: how it was taken, and \
+                              what describes it.",
+                large: 1,
+                icons: false,
+                cmds: &[Cmd::FileInfo],
             },
         ],
     },
@@ -1551,6 +1572,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         // (Resize Image may give a new resolution alone, which changes no layer; a new size is
         // refused while one is locked, by `resize_image`, through `locked_layer`.)
         ResizeImage => needs_doc(),
+        FileInfo => needs_doc(),
         RotateCw | RotateCcw | Rotate180 | RotateBy | FlipHorizontal | FlipVertical => {
             let d = st.active().ok_or("Open or create an image first.")?;
             match d.doc().layers.iter().find_map(|l| first_locked(l)) {

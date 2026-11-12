@@ -57,7 +57,7 @@ class Editor:
         path: Where: an Opal Studio file (.opal is added unless it is there), by its absolute path.
         overwrite: Write over a file already there (otherwise that is refused). Default: false.
         """
-    def export(self, *, document: int | None = None, path: str | os.PathLike[str], width: float | str | Expr | None = None, height: float | str | Expr | None = None, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px", overwrite: bool = False, sixteen_bit: bool | None = None, quality: int | str | Expr | None = None) -> Any:
+    def export(self, *, document: int | None = None, path: str | os.PathLike[str], width: float | str | Expr | None = None, height: float | str | Expr | None = None, unit: Literal["px", "pt", "pc", "in", "ft", "yd", "mm", "cm", "m"] = "px", overwrite: bool = False, sixteen_bit: bool | None = None, quality: int | str | Expr | None = None, metadata: Literal["all", "no place", "copyright", "none"] | None = None) -> Any:
         """Save a flattened copy as PNG or JPEG.
 
         document: The image, by id. Default: the active image.
@@ -68,6 +68,7 @@ class Editor:
         overwrite: Write over a file already there (otherwise that is refused). Default: false.
         sixteen_bit: For a PNG: 16 bits a channel rather than 8. Default: the preference.
         quality: For a JPEG: its quality. From 1 to 100. Default: the preference.
+        metadata: What of the image's metadata (the EXIF, IPTC and XMP its file had) goes into the file: all; all but where it was taken and serial numbers; only who made it, its copyright and how to reach them; or none. Default: the preference.
         """
     def close(self, *, document: int | None = None, discard: bool = False) -> Any:
         """Close the image.
@@ -567,6 +568,16 @@ class Editor:
         layer: The layer, by id. Default: the active layer.
         name: Its new name.
         """
+    def metadata(self, *, document: int | None = None) -> Any:
+        """What an image's file said of it besides its pixels (EXIF, IPTC, XMP), kept with it: description (as File Info edits it: title, caption, creators, email, website, copyright, copyright_status (copyrighted, public domain or unknown), copyright_url, keywords), capture (as File Info shows it, label by label), exif (IFD by IFD: image, exif, gps, interop, thumbnail; each tag by its name, or 0xNNNN if it has none: text as text, numbers as numbers, a fraction worked out), iptc (each dataset by record:number, as 2:120 for the caption, a list of texts) and xmp (each property by prefix:name, or {namespace}name for a namespace with no usual prefix: text, a list, {language: text} for an alternative, {field: value} for a structure).
+
+        document: The image, by id. Default: the active image.
+        """
+    def file_metadata(self, *, path: str | os.PathLike[str]) -> Any:
+        """An image file's metadata, as the metadata query tells it, read without opening its image: a JPEG's, a PNG's, or an Opal Studio file's.
+
+        path: The file, by its absolute path.
+        """
     def selection(self, *, document: int | None = None) -> Any:
         """What is selected in an image: the rectangle round it, as [x, y, width, height] from the canvas's corner (null if nothing is; "unbounded" where it reaches past every edge, inverted), and the steps that made it, in order: shapes (rectangles and ellipses, by their middle, size and angle, and how each combines), inversions, grow steps (by, corners), feather steps (width, side, falloff), smooth steps (radius) and border steps (width, side), as grow_selection, feather_selection, smooth_selection and border_selection take them, and masks (a "mask" step is, as its of says, a layer's pixels, from select_layer_pixels; what the steps before it came to, carried pixel by pixel by Rotate, Flip or Resize Image, which could not carry them exactly; or a saved selection, combined by load_selection; it gives no numbers, only how it combines), and outlines (their start and segments, lines and curves, from select_outline or the outline tool). select_all, deselect, reselect, invert_selection and select_layer_pixels answer with it too.
 
@@ -598,6 +609,18 @@ class Editor:
         """
     def preferences(self) -> Any:
         """Every preference: for each, its key, label, section, help, value and default, and what it takes (its range or choices). set_preference changes them."""
+    def set_metadata(self, *, document: int | None = None, changes: Any) -> Any:
+        """Changes an image's metadata (see the metadata query) as one step of history, as File Info does, and answers with all of it as the metadata query does. Export writes it as its metadata setting says.
+
+        document: The image, by id. Default: the active image.
+        changes: What to change, as the metadata query tells it: description (the fields given; those not given kept), exif ({ifd: {tag: value}}), iptc ({"record:number": text or texts}) and xmp ({key: value}); null removes what it names. The description is written to XMP, IPTC and EXIF alike, as File Info writes it; the rest as given.
+        """
+    def set_file_metadata(self, *, path: str | os.PathLike[str], changes: Any) -> Any:
+        """Rewrites a JPEG's or PNG's metadata in place, its image data untouched (not decoded, nor encoded again: no quality lost), and answers with all of it as file_metadata does. How a folder of photographs has its capture times shifted, or its captions filled in, without opening them.
+
+        path: The file, by its absolute path.
+        changes: What to change, as set_metadata takes it.
+        """
     def select_outline(self, *, document: int | None = None, points: list[tuple[float, float]] | None = None, outline: dict[str, Any] | None = None, combine: Literal["replace", "add", "subtract", "intersect"] = "replace", smooth: bool | None = None) -> Any:
         """Selects what an outline encloses, as the outline tool does: points joined by straight sides, or an outline with curves, as the selection query tells one; the last point back to the first (a loop crossing itself selects each of its lobes). Give points or outline, one of them. Answers with what is selected then, as the selection query does.
 
