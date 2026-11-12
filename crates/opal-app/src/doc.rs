@@ -150,6 +150,10 @@ pub struct DocState {
     pub revision: u64,
     /// The transform box, while one is open. Its document is the pending edit.
     pub transform: Option<crate::transform::Session>,
+    /// What the last transform box applied to layers did (Transform, or a script's transform),
+    /// as a map of the image: what Transform Again does again. Not part of its history, as in
+    /// Photoshop: an undo leaves it.
+    pub last_transform: Option<opal_core::geom::Affine>,
     /// The Crop tool's box, while the tool is in use.
     pub crop: Option<crate::edit_box::EditBox>,
     /// The drag under way on its canvas, if one is (one at most), given up as one
@@ -235,6 +239,7 @@ impl DocState {
             revision: 0,
             transform: None,
             drag: None,
+            last_transform: None,
             crop: None,
             fit_rect: None,
             origin: crate::box_fields::Origin::default(),

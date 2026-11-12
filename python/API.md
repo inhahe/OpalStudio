@@ -218,6 +218,24 @@ Move, scale and rotate the selected layers with a box.
 | `from_anchor` | `top-left`, `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom`, `bottom-right` | Which point of the canvas (or of from_layer) x and y count from. Default: "top-left". |
 | `unit` | `px`, `pt`, `pc`, `in`, `ft`, `yd`, `mm`, `cm`, `m` | What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px". |
 
+### `transform_again`
+
+Do to the selected layers what the last Transform did.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `layers` | layers | The layers, by id. Default: the selected layers. |
+
+### `transform_again_copy`
+
+Copy the selected layers and do to the copies what the last Transform did.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `layers` | layers | The layers, by id. Default: the selected layers. |
+
 ### `reapply_placement`
 
 Place the active layer again as the expressions it was placed by say, now.

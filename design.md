@@ -1204,6 +1204,17 @@ Pasting opens the **transform box** instead of placing the pixels. The same box 
 existing layers: Transform (Ctrl+T) opens it on the selected layers; Transform Selection, on
 the selection itself (see *Transform Selection*).
 
+- **Transform Again** (Ctrl+Shift+T) does to the selected layers what the last box applied to
+  layers did. That is the same map of the image (`DocState::last_transform`, the box's
+  `Session::delta`), so a turn about a point turns as far again about the same point. It is
+  applied through a box as Transform's is, its pixels kept as pixels where they end on the
+  grid. A paste's placing and Transform Selection do not count. An undo leaves it, as in
+  Photoshop.
+- **Transform Again as a Copy** (Ctrl+Shift+Alt+T) copies the selected layers first, each just
+  above its layer, and transforms the copies, which become the selected ones. Pressed again,
+  the next copies go on from them: a few presses make a row, or a ring. The copying and the
+  transform are one history state.
+
 - **Where a paste goes:** onto a new layer above the active one, as an image object. A
   button on the box puts it into the active layer instead, baked into that layer's pixels
   when committed. Pasting with no document open makes a new image of the clipboard.

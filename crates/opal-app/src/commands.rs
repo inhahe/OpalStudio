@@ -29,6 +29,8 @@ pub enum Cmd {
     PasteInPlace,
     Place,
     Transform,
+    TransformAgain,
+    TransformAgainCopy,
     ReapplyPlacement,
     ReapplyAllPlacements,
     NewLayer,
@@ -140,7 +142,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 95] = [
+    pub const ALL: [Cmd; 97] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -160,6 +162,8 @@ impl Cmd {
         Cmd::PasteInPlace,
         Cmd::Place,
         Cmd::Transform,
+        Cmd::TransformAgain,
+        Cmd::TransformAgainCopy,
         Cmd::ReapplyPlacement,
         Cmd::ReapplyAllPlacements,
         Cmd::NewLayer,
@@ -400,6 +404,25 @@ impl Cmd {
                  transformed this way keep their pixels, so they can be transformed again without \
                  losing quality.",
                 const { &[ctrl(Key::T)] },
+            ),
+            Cmd::TransformAgain => i(
+                "Transform Again",
+                icons::TRANSFORM_AGAIN,
+                "Do to the selected layers what the last Transform did.",
+                "The same move, scale and turn, about the same place on the image: a layer turned \
+                 by 30 degrees about a point turns 30 more about it. What the last transform box \
+                 applied to layers did (not a paste's placing, nor Transform Selection); an undo \
+                 leaves it to do again.",
+                const { &[ctrl_shift(Key::T)] },
+            ),
+            Cmd::TransformAgainCopy => i(
+                "Transform Again as a Copy",
+                icons::TRANSFORM_AGAIN_COPY,
+                "Copy the selected layers and do to the copies what the last Transform did.",
+                "Each copy goes just above its layer and becomes the selected one, so that pressed \
+                 again, the next copies go on from them: a few presses make a row, or a ring \
+                 about the point the transform turned round. One history state each time.",
+                const { &[ctrl_shift_alt(Key::T)] },
             ),
             Cmd::ReapplyPlacement => i(
                 "Re-apply Placement",
@@ -1083,7 +1106,13 @@ pub static RIBBON: &[Tab] = &[
                 description: "Moving, scaling and rotating layers. The Move tool (V) moves them too.",
                 large: 1,
                 icons: false,
-                cmds: &[Cmd::Transform, Cmd::ReapplyPlacement, Cmd::ReapplyAllPlacements],
+                cmds: &[
+                    Cmd::Transform,
+                    Cmd::TransformAgain,
+                    Cmd::TransformAgainCopy,
+                    Cmd::ReapplyPlacement,
+                    Cmd::ReapplyAllPlacements,
+                ],
             },
             Group {
                 name: "Layers",
@@ -1432,6 +1461,12 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
                 return Err("No layer in the image was placed by expressions naming the canvas or other layers.".into());
             }
             Ok(())
+        }
+        TransformAgain | TransformAgainCopy => {
+            if st.active().is_some_and(|d| d.last_transform.is_none()) {
+                return Err("Transform layers first (Ctrl+T): this does the same again.".into());
+            }
+            availability(st, Transform)
         }
         Transform | Rasterize => {
             let (d, sel) = selected_layers(st)?;

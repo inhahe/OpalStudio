@@ -1058,12 +1058,17 @@ impl DocState {
         if unchanged && !placed_anew {
             return self.cancel_transform();
         }
+        // What a box on layers did, for Transform Again.
+        let again = (s.kind == Kind::Transform && s.current != s.start).then(|| s.delta());
         // Placed by the box (moved, or new), its layers keep what it was given, or nothing;
         // only drawn another way where they are, they keep what they had. A paste drawn
         // into the active layer has no layer of its own to keep it.
         let into_active = s.paste.as_ref().is_some_and(|p| p.into_active && p.active.is_some());
         let replaces = !into_active && (s.current != s.start || s.kind != Kind::Transform || placement.is_some());
         let Some(s) = self.transform.take() else { return };
+        if let Some(again) = again {
+            self.last_transform = Some(again);
+        }
         let Some(p) = self.pending.as_mut() else { return };
         // Pixel objects ending exactly on the grid are pixels again (see `image_ops::on_grid`):
         // moved, the same pixels; turned or flipped, copied exactly if there is memory for

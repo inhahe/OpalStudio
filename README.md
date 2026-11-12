@@ -87,7 +87,9 @@ cargo test --workspace                     # all tests, interface tests included
   box) is finished first.
 - **Moving and transforming.** The Move tool drags the selected layers (clicking picks the
   layer under the pointer; right-click lists every layer there); the arrow keys nudge;
-  Transform (Ctrl+T) scales and rotates layers, losslessly. Layer › Align (and the Move
+  Transform (Ctrl+T) scales and rotates layers, losslessly; Transform Again (Ctrl+Shift+T)
+  does the same again, to the layers selected now, and Transform Again as a Copy
+  (Ctrl+Shift+Alt+T) to copies, a press at a time, a row or a ring of them. Layer › Align (and the Move
   tool's settings) lines the selected layers up by their edges or centers, and spaces their
   centers or the gaps between them evenly: to each other, the canvas, the selection, or the
   active layer (Align to); with the transform box open, it aligns the box (a paste, centered

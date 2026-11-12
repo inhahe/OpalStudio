@@ -89,10 +89,13 @@ impl AppState {
     }
 
     /// Copies each selected layer, just above itself.
-    pub(crate) fn duplicate_layers(&mut self) {
+    /// Duplicates the selected layers of the active image, each copy just above its layer, as
+    /// one history state; the copies, in the order made (none, if it was refused).
+    pub(crate) fn duplicate_layers(&mut self) -> Vec<LayerId> {
         let d = self.active_mut().expect("available");
         let sel = d.selected_layers();
         let label = if sel.len() > 1 { "Duplicate layers" } else { "Duplicate layer" };
+        let mut made = Vec::new();
         let result = d.apply(label, |doc, ids| {
             // Copies put above the same locked group go each above the one before, keeping
             // their order.
@@ -101,6 +104,7 @@ impl AppState {
                 let layer = doc.layer(src).ok_or(TreeError::NoSuchLayer(src))?;
                 let mut copy = copy_with_new_ids(layer, ids);
                 copy.name = format!("{} copy", layer.name);
+                made.push(copy.id);
                 let pos = above(doc, src).ok_or(TreeError::NoSuchLayer(src))?;
                 let before = above_same.entry((pos.parent, pos.index)).or_default();
                 doc.insert(Position { index: pos.index + *before, ..pos }, copy)?;
@@ -108,7 +112,9 @@ impl AppState {
             }
             Ok::<(), TreeError>(())
         });
+        let done = result.is_ok();
         self.report(result);
+        if done { made } else { Vec::new() }
     }
 
     pub(crate) fn delete_layers(&mut self) {
@@ -784,6 +790,87 @@ mod tests {
         assert_eq!((d.selected_layers(), d.active_layer()), (vec![c, b, background, a, g, top], Some(top)));
         d.deselect_layers();
         assert_eq!((d.selected_layers(), d.active_layer()), (vec![], None));
+    }
+
+    #[test]
+    fn transform_again_does_the_last_transform_to_the_layers_selected_now_or_to_copies() {
+        use crate::commands::{Cmd, availability};
+        use opal_core::geom::{Affine, FRect, IRect};
+        let mut st = app(400, 300);
+        let rect = |st: &mut AppState, r: IRect| {
+            let d = st.active_mut().unwrap();
+            let mut id = None;
+            d.apply::<TreeError>("Add", |doc, ids| {
+                let l = ids.layer();
+                let red = pixel_from_f32([1.0, 0.0, 0.0, 1.0]);
+                let n = doc.layers.len();
+                doc.insert(
+                    Position { parent: None, index: n },
+                    Layer::new_raster(l, ids.object(), "r", RasterImage::filled(&r, red)),
+                )?;
+                id = Some(l);
+                Ok(())
+            })
+            .unwrap();
+            id.unwrap()
+        };
+        let (a, b) = (rect(&mut st, IRect::new(10, 10, 30, 20)), rect(&mut st, IRect::new(100, 100, 120, 110)));
+        let bounds = |st: &AppState, id| st.active().unwrap().doc().layer(id).unwrap().bounds().unwrap();
+        // Nothing transformed yet: refused, saying so.
+        let why = availability(&st, Cmd::TransformAgain).unwrap_err();
+        assert!(why.contains("Transform layers first"), "{why}");
+        // a moved by (50, 20) with the box: b moved the same by Transform Again.
+        let sampling = opal_core::resample::Sampling::default();
+        let d = st.active_mut().unwrap();
+        d.select_only(a);
+        assert!(d.begin_transform(sampling));
+        let m = d.transform.as_ref().unwrap().start.then(Affine::translate(50.0, 20.0));
+        d.set_box(m, None);
+        d.commit_pending();
+        assert_eq!(bounds(&st, a), FRect::new(60.0, 30.0, 80.0, 40.0));
+        st.active_mut().unwrap().select_only(b);
+        st.transform_again(false);
+        assert_eq!(bounds(&st, b), FRect::new(150.0, 120.0, 170.0, 130.0));
+        assert_eq!(st.active().unwrap().history.undo_label(), Some("Transform again"));
+        // As a copy: b stays, its copy moved on and selected, one history state; again, the
+        // next copy from that one.
+        let count = |st: &AppState| st.active().unwrap().doc().layers.len();
+        let n = count(&st);
+        st.transform_again(true);
+        let first = st.active().unwrap().active_layer().unwrap();
+        assert_ne!(first, b);
+        assert_eq!(
+            (bounds(&st, b), bounds(&st, first)),
+            (FRect::new(150.0, 120.0, 170.0, 130.0), FRect::new(200.0, 140.0, 220.0, 150.0))
+        );
+        assert_eq!(st.active().unwrap().history.undo_label(), Some("Transform again as a copy"));
+        st.transform_again(true);
+        let second = st.active().unwrap().active_layer().unwrap();
+        assert_eq!((count(&st), bounds(&st, second)), (n + 2, FRect::new(250.0, 160.0, 270.0, 170.0)));
+        assert!(st.active_mut().unwrap().undo());
+        assert_eq!(count(&st), n + 1, "undone in more than one step");
+        // Two at once: both copied, both copies moved on and selected.
+        let d = st.active_mut().unwrap();
+        d.select_only(a);
+        d.toggle_selected(b);
+        st.transform_again(true);
+        let copies = st.active().unwrap().selected_layers();
+        assert!(copies.len() == 2 && !copies.contains(&a) && !copies.contains(&b), "{copies:?}");
+        let moved: Vec<FRect> = copies.iter().map(|&l| bounds(&st, l)).collect();
+        assert_eq!(moved, vec![FRect::new(110.0, 50.0, 130.0, 60.0), FRect::new(200.0, 140.0, 220.0, 150.0)]);
+        // A turn about a point: done again, as far again about the same point.
+        let c = rect(&mut st, IRect::new(190, 100, 210, 110));
+        let d = st.active_mut().unwrap();
+        d.select_only(c);
+        assert!(d.begin_transform(sampling));
+        let quarter = Affine::rotate(std::f64::consts::FRAC_PI_2).about(200.0, 150.0);
+        let m = d.transform.as_ref().unwrap().start.then(quarter);
+        d.set_box(m, None);
+        d.commit_pending();
+        st.transform_again(false);
+        let r = bounds(&st, c);
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        assert!(near(r.x0, 190.0) && near(r.y0, 190.0) && near(r.x1, 210.0) && near(r.y1, 200.0), "{r:?}");
     }
 
     #[test]

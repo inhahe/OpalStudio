@@ -745,7 +745,8 @@ impl AppState {
     pub(crate) fn layer_via(&mut self, cut: bool) {
         let d = self.active().expect("available");
         let Some(selection) = d.pixel_selection() else {
-            return self.duplicate_layers();
+            self.duplicate_layers();
+            return;
         };
         let mask = selection.mask().clone();
         let title = if cut { "Layer via Cut" } else { "Layer via Copy" };

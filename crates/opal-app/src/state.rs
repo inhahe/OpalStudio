@@ -604,6 +604,8 @@ impl AppState {
             Cmd::PasteInPlace => self.paste(true, ctx),
             Cmd::Place => self.place_dialog(),
             Cmd::Transform => self.transform(),
+            Cmd::TransformAgain => self.transform_again(false),
+            Cmd::TransformAgainCopy => self.transform_again(true),
             Cmd::ReapplyPlacement => {
                 let sampling = crate::prefs::sampling(&self.prefs, "transform");
                 let d = self.active_mut().expect("available");
@@ -693,7 +695,9 @@ impl AppState {
             }
             Cmd::NewLayer => self.new_layer(false),
             Cmd::NewGroup => self.new_layer(true),
-            Cmd::Duplicate => self.duplicate_layers(),
+            Cmd::Duplicate => {
+                self.duplicate_layers();
+            }
             Cmd::LayerViaCopy => self.layer_via(false),
             Cmd::LayerViaCut => self.layer_via(true),
             Cmd::GroupLayers => self.group_layers(),

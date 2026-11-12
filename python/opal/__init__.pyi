@@ -167,6 +167,18 @@ class Editor:
         from_anchor: Which point of the canvas (or of from_layer) x and y count from. Default: "top-left".
         unit: What the lengths given as plain numbers are in: pixels, points, picas, inches, feet, yards, millimeters, centimeters or meters, converted at the image's resolution. A length can also be given as text with a unit of its own: "8.5in", "21 cm". Default: "px".
         """
+    def transform_again(self, *, document: int | None = None, layers: list[int] | None = None) -> Any:
+        """Do to the selected layers what the last Transform did.
+
+        document: The image, by id. Default: the active image.
+        layers: The layers, by id. Default: the selected layers.
+        """
+    def transform_again_copy(self, *, document: int | None = None, layers: list[int] | None = None) -> Any:
+        """Copy the selected layers and do to the copies what the last Transform did.
+
+        document: The image, by id. Default: the active image.
+        layers: The layers, by id. Default: the selected layers.
+        """
     def reapply_placement(self, *, document: int | None = None, layer: int | None = None) -> Any:
         """Place the active layer again as the expressions it was placed by say, now.
 
