@@ -91,6 +91,9 @@ pub enum Cmd {
     RotateCcw,
     Rotate180,
     RotateBy,
+    Straighten,
+    StraightenLayers,
+    ClearMeasurement,
     FlipHorizontal,
     FlipVertical,
     FileInfo,
@@ -158,7 +161,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 113] = [
+    pub const ALL: [Cmd; 116] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -240,6 +243,9 @@ impl Cmd {
         Cmd::RotateCcw,
         Cmd::Rotate180,
         Cmd::RotateBy,
+        Cmd::Straighten,
+        Cmd::StraightenLayers,
+        Cmd::ClearMeasurement,
         Cmd::FlipHorizontal,
         Cmd::FlipVertical,
         Cmd::FileInfo,
@@ -944,6 +950,35 @@ impl Cmd {
                  while cropping it, use the Crop tool.",
                 &[],
             ),
+            Cmd::Straighten => i(
+                "Straighten",
+                icons::STRAIGHTEN,
+                "Turn the image so the line measured is level, or plumb.",
+                "Measure a line along what should be level or upright (a horizon, a wall) with the \
+                 Measure tool (N): Straighten turns the whole image by the least that makes it so, \
+                 and crops it to the largest rectangle of its shape within what was there, so no \
+                 corner is left empty (or, without the tool's Crop when straightening, grows the \
+                 canvas to hold all of it). Layers keep their pixels: cropping only moves the \
+                 canvas.",
+                &[],
+            ),
+            Cmd::StraightenLayers => i(
+                "Straighten Layers",
+                icons::STRAIGHTEN_LAYERS,
+                "Turn the selected layers so the line measured is level, or plumb.",
+                "Measure a line along what should be level or upright in them with the Measure tool \
+                 (N): the selected layers turn about its middle by the least that makes it so, the \
+                 canvas as it is, as one history state. The line turns with them.",
+                &[],
+            ),
+            Cmd::ClearMeasurement => i(
+                "Clear Measurement",
+                icons::CLEAR_MEASUREMENT,
+                "Remove the line the Measure tool measured.",
+                "Esc removes it too, with the Measure tool chosen. It is not part of the image's \
+                 history: nothing to undo.",
+                &[],
+            ),
             Cmd::FlipHorizontal => i(
                 "Flip Horizontally",
                 icons::FLIP_H,
@@ -1333,6 +1368,7 @@ pub static RIBBON: &[Tab] = &[
                     Cmd::RotateCcw,
                     Cmd::Rotate180,
                     Cmd::RotateBy,
+                    Cmd::Straighten,
                     Cmd::FlipHorizontal,
                     Cmd::FlipVertical,
                 ],
@@ -1791,6 +1827,24 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         // refused while one is locked, by `resize_image`, through `locked_layer`.)
         ResizeImage => needs_doc(),
         FileInfo => needs_doc(),
+        Straighten | StraightenLayers | ClearMeasurement => {
+            let d = st.active().ok_or("Open or create an image first.")?;
+            let m = d.measured().ok_or(crate::measure_tool::NOTHING_MEASURED)?;
+            if cmd == ClearMeasurement {
+                return Ok(());
+            }
+            if m.straightening() == 0.0 {
+                return Err(crate::measure_tool::STRAIGHT_ALREADY.into());
+            }
+            if cmd == Straighten {
+                return availability(st, RotateBy);
+            }
+            // The box applied at once would end one open, which is the user's to apply or not.
+            if d.transform.is_some() {
+                return Err("Apply or cancel the box first.".into());
+            }
+            availability(st, Transform)
+        }
         RotateCw | RotateCcw | Rotate180 | RotateBy | FlipHorizontal | FlipVertical => {
             let d = st.active().ok_or("Open or create an image first.")?;
             match d.doc().layers.iter().find_map(|l| first_locked(l)) {

@@ -113,6 +113,14 @@ cargo test --workspace                     # all tests, interface tests included
   margin), from the sides you choose; Reveal All, which grows the canvas to show everything
   the layers hold; Resize Image and Resize Canvas; quarter turns, flips and rotation by any
   angle.
+- **Measuring.** The Measure tool (N) measures between two points: the length, the angle
+  (as a protractor reads it), the width and height, in any unit, shown on the image and in
+  the tool settings, where numbers can be typed in too. Drag an end to move it, Shift for
+  multiples of 45°, Alt+drag from an end for a protractor's second arm and the angle
+  between. What is measured stays until the next measure, and goes with the image turned or
+  resized. Image › Straighten turns the image so the line is level, or plumb, and crops it
+  so no corner is left empty (or grows the canvas instead); Straighten Layers turns the
+  selected layers instead.
   Cropping and resizing the canvas never delete anything unless asked to. Canvases go up
   to 300,000 pixels a side; anything that would need more memory than the computer has
   free (counting room on disk for the parts that can go there) is refused, with how much

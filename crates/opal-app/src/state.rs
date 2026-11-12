@@ -768,6 +768,22 @@ impl AppState {
                 });
             }
             Cmd::RotateBy => self.rotate_by = Some(RotateBy { degrees: 0.0, grow: true }),
+            Cmd::Straighten => {
+                let crop = self.tool_settings(crate::tools::ToolId::Measure).bool("measure.crop");
+                if let Err(why) = self.straighten(crop) {
+                    self.message(MessageKind::Info, "Straighten", why);
+                }
+            }
+            Cmd::StraightenLayers => {
+                if let Err(why) = self.straighten_layers() {
+                    self.message(MessageKind::Info, "Straighten Layers", why);
+                }
+            }
+            Cmd::ClearMeasurement => {
+                let d = self.active_mut().expect("available");
+                d.measure = None;
+                d.revision += 1;
+            }
             Cmd::Trim => self.trim = Some(self.last_trim.clone()),
             Cmd::RevealAll => self.reveal_all(),
             Cmd::Defringe => self.defringe = Some(self.last_defringe),

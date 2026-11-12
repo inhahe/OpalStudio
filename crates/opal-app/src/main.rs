@@ -34,6 +34,7 @@ mod lengths;
 mod mask_view;
 mod mcp;
 mod mcp_http;
+mod measure_tool;
 mod memory;
 mod move_tool;
 mod number_field;

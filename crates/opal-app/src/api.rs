@@ -404,6 +404,18 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             },
         ],
         RemoveBlackMatte | RemoveWhiteMatte => &[DOCUMENT, LAYERS],
+        Straighten => &[
+            DOCUMENT,
+            Param {
+                name: "crop",
+                kind: Kind::Bool,
+                help: "Crop the turned image to the largest rectangle of its shape within what was there; false \
+                       grows the canvas to hold all of it.",
+                otherwise: Otherwise::Now("the Measure tool's Crop when straightening"),
+            },
+        ],
+        StraightenLayers => &[DOCUMENT, LAYERS],
+        ClearMeasurement => &[DOCUMENT],
         Trim => &[
             DOCUMENT,
             Param {
@@ -793,6 +805,17 @@ const QUERIES: &[(&str, &str, &[Param])] = &[
         &[DOCUMENT],
     ),
     (
+        "measurement",
+        "What is measured on an image (the Measure tool, or measure): start and end, from the canvas's \
+         corner, in pixels, as it is now (turned, flipped or resized with the image since); width and height \
+         (how far the end is from the start, across and down); length; angle (degrees counterclockwise from \
+         the right, as a protractor reads it); straightening (the turn, in degrees clockwise, that \
+         straighten makes: the least that makes the line level or plumb); and for a protractor, arm (its \
+         second arm's end), arm_length and between (the angle between the arms, 0 to 180). Null if nothing \
+         is measured.",
+        &[DOCUMENT],
+    ),
+    (
         "saved_selections",
         "The selections saved in an image (save_selection), in the order they were first saved: each one's \
          name, the rectangle round what it selects (as the selection query tells it; if the image has been \
@@ -1133,6 +1156,23 @@ const CHANGES: &[(&str, &str, &[Param])] = &[
                 name: "changes",
                 kind: Kind::Any,
                 help: "What to change, as set_metadata takes it.",
+                otherwise: Otherwise::Required,
+            },
+        ],
+    ),
+    (
+        "measure",
+        "Measures on an image as the Measure tool does, between points from the canvas's corner: two, a \
+         line from the first to the second; three, a protractor's second arm too, from the first to the \
+         third. What is measured stays until the next measure, and goes with the image turned or resized; \
+         straighten and straighten_layers use it. Answers as the measurement query does.",
+        &[
+            DOCUMENT,
+            Param {
+                name: "points",
+                kind: Kind::Points { min: 2 },
+                help: "The line's start and end, and a protractor's second arm's end if it has one, each [x, y] in \
+                       pixels from the canvas's top-left corner.",
                 otherwise: Otherwise::Required,
             },
         ],
@@ -2231,6 +2271,7 @@ impl AppState {
                 Reply::Now(self.select_by_args(opal_core::mask::ShapeKind::Ellipse, &args))
             }
             None if method.name == "select_outline" => Reply::Now(self.select_outline_by_args(&args)),
+            None if method.name == "measure" => Reply::Now(self.measure_by_args(&args)),
             None if method.name == "remove_selection_step" => self.selection_step_by_args(true, &args),
             None if method.name == "edit_selection_step" => self.selection_step_by_args(false, &args),
             None if method.name == "delete_saved_selection" => Reply::Now(self.delete_saved_by_args(&args)),
@@ -2387,6 +2428,10 @@ impl AppState {
             "selection" => {
                 let d = self.doc(self.which(args)?).expect("found");
                 Ok(selection_json(d))
+            }
+            "measurement" => {
+                let d = self.doc(self.which(args)?).expect("found");
+                Ok(crate::measure_tool::to_json(d))
             }
             "saved_selections" => {
                 let d = self.doc(self.which(args)?).expect("found");
@@ -2593,6 +2638,19 @@ impl AppState {
                 self.trim(&spec);
                 self.reply_when_done(|st, id| st.canvas_json_of(id))
             }
+            Cmd::Straighten => {
+                let crop = args
+                    .flag("crop")
+                    .unwrap_or_else(|| self.tool_settings(crate::tools::ToolId::Measure).bool("measure.crop"));
+                match self.straighten(crop) {
+                    Ok(()) => self.reply_when_done(|st, id| st.canvas_json_of(id)),
+                    Err(why) => now(Err(why)),
+                }
+            }
+            Cmd::StraightenLayers => match self.straighten_layers() {
+                Ok(()) => self.reply_when_done(|st, id| st.selected_layers_json_of(id)),
+                Err(why) => now(Err(why)),
+            },
             Cmd::RotateBy => {
                 let degrees = args.number("degrees");
                 if degrees != 0.0 {
@@ -3042,6 +3100,35 @@ impl AppState {
 
     /// Selects what the outline `args` give encloses (`select_outline`); what is selected then,
     /// as the `selection` query tells it.
+    /// Measures on the image `args` names between the points it gives, as the Measure tool
+    /// does: two, a line from the first to the second; three, a protractor's second arm too,
+    /// from the first to the third. Answers as the `measurement` query does.
+    fn measure_by_args(&mut self, args: &Args) -> Result<Value, String> {
+        let id = self.which(args)?;
+        let d = self.doc_mut(id).expect("found");
+        let c = d.doc().canvas;
+        // From the canvas's corner, as everywhere in the API.
+        let points: Vec<[f64; 2]> = args
+            .get("points")
+            .and_then(Value::as_array)
+            .expect("required")
+            .iter()
+            .map(|p| [p[0].as_f64().expect("checked") + c.x as f64, p[1].as_f64().expect("checked") + c.y as f64])
+            .collect();
+        let [start, end] = *points.first_chunk::<2>().expect("two at least, checked");
+        let arm = points.get(2).copied();
+        if points.len() > 3 {
+            return Err("measure: Give two points, or three for a protractor.".into());
+        }
+        let m = crate::measure_tool::Measure { start, end, arm, carried: d.doc().carried };
+        if !m.measures() {
+            return Err("measure: The line, and a protractor's second arm, need some length.".into());
+        }
+        d.measure = Some(m);
+        d.revision += 1;
+        Ok(crate::measure_tool::to_json(d))
+    }
+
     fn select_outline_by_args(&mut self, args: &Args) -> Result<Value, String> {
         use opal_core::outline::{Outline, Segment};
         let id = self.which(args)?;
@@ -6187,5 +6274,47 @@ mod tests {
         assert_eq!(d.history.nodes().count(), before + 3);
         assert_eq!(d.history.undo_label(), Some("Remove white matte"));
         assert!(call(&mut st, "defringe", json!({ "width": 0 })).is_err(), "a width of nought taken");
+    }
+
+    #[test]
+    fn scripts_measure_read_what_is_measured_and_straighten_by_it() {
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 400, "height": 300 })).unwrap();
+        assert_eq!(now(&mut st, "measurement", json!({})).unwrap(), Value::Null);
+        let why = call(&mut st, "straighten", json!({})).unwrap_err();
+        assert!(why.contains("Measure a line first"), "{why}");
+        // A line rising a tenth of its run, from the canvas's corner.
+        let m = now(&mut st, "measure", json!({ "points": [[0, 120], [200, 100]] })).unwrap();
+        let t = (0.1_f64).atan().to_degrees();
+        assert_eq!(
+            (m["start"].clone(), m["end"].clone(), m["width"].clone()),
+            (json!([0.0, 120.0]), json!([200.0, 100.0]), json!(200.0))
+        );
+        assert!(
+            (m["angle"].as_f64().unwrap() - t).abs() < 1e-9 && (m["straightening"].as_f64().unwrap() - t).abs() < 1e-9
+        );
+        assert!(m.get("between").is_none());
+        // Straightened, the canvas grown to hold it all: the line level, measured as it is now.
+        let canvas = call(&mut st, "straighten", json!({ "crop": false })).unwrap();
+        let (s, c) = t.to_radians().sin_cos();
+        assert_eq!(canvas["width"].as_f64(), Some((400.0 * c + 300.0 * s).ceil()));
+        let level = now(&mut st, "measurement", json!({})).unwrap();
+        assert!(level["angle"].as_f64().unwrap().abs() < 1e-9, "{level}");
+        assert!(call(&mut st, "straighten", json!({})).unwrap_err().contains("level (or plumb) already"));
+        // A protractor: the angle between its arms.
+        let p = now(&mut st, "measure", json!({ "points": [[100, 100], [200, 100], [100, 0]] })).unwrap();
+        assert_eq!((p["arm"].clone(), p["between"].clone()), (json!([100.0, 0.0]), json!(90.0)));
+        // Four points, or a line of no length: refused, the measure as it was.
+        assert!(now(&mut st, "measure", json!({ "points": [[0, 0], [1, 1], [2, 2], [3, 3]] })).is_err());
+        assert!(now(&mut st, "measure", json!({ "points": [[5, 5], [5, 5]] })).is_err());
+        assert_eq!(now(&mut st, "measurement", json!({})).unwrap()["arm"], json!([100.0, 0.0]));
+        // The selected layers straightened about the line's middle, the line with them.
+        now(&mut st, "measure", json!({ "points": [[50, 60], [150, 50]] })).unwrap();
+        call(&mut st, "straighten_layers", json!({})).unwrap();
+        let d = st.active().unwrap();
+        assert_eq!(d.history.undo_label(), Some(crate::measure_tool::STRAIGHTEN_LAYERS));
+        assert!(now(&mut st, "measurement", json!({})).unwrap()["angle"].as_f64().unwrap().abs() < 1e-9);
+        call(&mut st, "clear_measurement", json!({})).unwrap();
+        assert_eq!(now(&mut st, "measurement", json!({})).unwrap(), Value::Null);
     }
 }

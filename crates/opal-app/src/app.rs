@@ -432,6 +432,7 @@ impl OpalApp {
         let outline_smooth = self.st.tool_settings(ToolId::Outline).bool("outline.smooth");
         let outline_tool = self.st.tool() == ToolId::Outline;
         let rotate_tool = self.st.tool() == ToolId::RotateView;
+        let measure_tool = self.st.tool() == ToolId::Measure;
         let Some(d) = self.st.active_mut() else { return };
         // While an edit is under way on the image, they change nothing (see `edits`).
         if d.busy.is_some() {
@@ -498,6 +499,17 @@ impl OpalApp {
             && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
         {
             d.view.turn_to(0.0);
+            return;
+        }
+        // The Measure tool's Esc removes what it measured, when no box takes it.
+        if measure_tool
+            && d.measure.is_some()
+            && d.transform.is_none()
+            && !d.dragging()
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            d.measure = None;
+            d.revision += 1;
             return;
         }
         // Before and After ends with Esc, when no box takes it, nor a drag (which gives itself up).

@@ -357,6 +357,15 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
             d.drag = None;
         }
     }
+    // The Measure tool: a line measured, an end of it or all of it moved, a protractor's arm.
+    if tool == ToolId::Measure && !boxed {
+        let v = d.view;
+        let to_screen = |p: [f64; 2]| rect.min + v.to_screen(Vec2::new(p[0] as f32, p[1] as f32)) / ppp;
+        crate::measure_tool::canvas(&ctx, d, &response, &|p| to_doc(p, &v), &to_screen);
+    } else if matches!(d.drag, Some(Drag::Measure(_))) {
+        // The tool changed (or Space made it the hand) mid-drag: the drag is given up.
+        d.give_up_drag();
+    }
     let cursor = match tool {
         _ if response.dragged_by(PointerButton::Middle) => CursorIcon::Grabbing,
         ToolId::Hand | ToolId::RotateView if response.dragged() => CursorIcon::Grabbing,
@@ -364,7 +373,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         ToolId::Zoom if ctx.input(|i| i.modifiers.alt) => CursorIcon::ZoomOut,
         ToolId::Zoom => CursorIcon::ZoomIn,
         ToolId::Move => CursorIcon::Move,
-        ToolId::Select | ToolId::Outline | ToolId::Crop => CursorIcon::Crosshair,
+        ToolId::Select | ToolId::Outline | ToolId::Crop | ToolId::Measure => CursorIcon::Crosshair,
     };
     // The boxes set their own cursors, by the handle under the pointer.
     // The crop box belongs to the chosen tool, so it stays while Space scrolls the view.
@@ -566,6 +575,13 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     }
     if let Some(Drag::Move(m)) = &d.drag {
         draw_guides(ui, &m.guides, rect, &to_screen);
+    }
+    if tool == ToolId::Measure
+        && !boxed
+        && let Some(m) = d.measured()
+    {
+        let labels = crate::measure_tool::labels(&m, unit, d.doc().resolution);
+        crate::measure_tool::draw(ui, &m, &labels, palette.accent, rect, &to_screen);
     }
     // Where the context menu was opened, for listing the layers there.
     let menu_at_id = response.id.with("menu-at");

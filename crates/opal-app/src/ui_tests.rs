@@ -5542,3 +5542,99 @@ fn match_views_asked_for_with_an_image_behind_a_tab_waits_until_it_is_shown() {
     let (a, b) = (middle_of(&h, active), middle_of(&h, other));
     assert!(a.1 == b.1 && (a.0 - b.0).length() <= 1.0, "not matched: {a:?} {b:?}");
 }
+
+#[test]
+fn the_measure_tool_measures_moves_what_it_measured_and_draws_a_protractor_s_arm() {
+    use crate::tools::ToolId;
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    h.state_mut().state_mut().set_tool(ToolId::Measure);
+    h.run();
+    let (none, shift, alt) = (egui::Modifiers::NONE, egui::Modifiers::SHIFT, egui::Modifiers::ALT);
+    let measured = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().measured();
+    let ends = |h: &Harness<'static, OpalApp>| measured(h).map(|m| (m.start, m.end));
+    // Measured between whole pixels' corners.
+    drag_image(&mut h, &[[100.2, 199.7], [200.0, 150.0], [299.8, 100.3]], none);
+    assert_eq!(ends(&h), Some(([100.0, 200.0], [300.0, 100.0])));
+    let m = measured(&h).unwrap();
+    assert!((m.angle() - (0.5_f64).atan().to_degrees()).abs() < 1e-9 && m.arm.is_none());
+    render(&mut h, "measure");
+    // Its end dragged; then the line, all of it.
+    drag_image(&mut h, &[[300.0, 100.0], [300.0, 130.0], [300.0, 150.0]], none);
+    assert_eq!(ends(&h), Some(([100.0, 200.0], [300.0, 150.0])));
+    drag_image(&mut h, &[[200.0, 175.0], [205.0, 175.0], [210.0, 170.0]], none);
+    assert_eq!(ends(&h), Some(([110.0, 195.0], [310.0, 145.0])));
+    // Measured anew with Shift: along a multiple of 45°.
+    drag_image(&mut h, &[[50.0, 50.0], [100.0, 55.0], [150.0, 58.0]], shift);
+    assert_eq!(ends(&h), Some(([50.0, 50.0], [150.0, 50.0])));
+    // Alt+drag from its start: a protractor's second arm, a quarter turn from the line.
+    drag_image(&mut h, &[[50.0, 50.0], [50.0, 100.0], [50.0, 150.0]], alt);
+    let m = measured(&h).unwrap();
+    assert_eq!((m.arm, m.between()), (Some([50.0, 150.0]), Some(90.0)));
+    render(&mut h, "measure-protractor");
+    // A click measures nothing: what was measured stays; so too an end dragged onto the other.
+    // Esc part-way gives a drag up.
+    click_image(&mut h, [300.0, 250.0], none);
+    assert_eq!(measured(&h), Some(m));
+    drag_image(&mut h, &[[150.0, 50.0], [100.0, 50.0], [50.0, 50.0]], none);
+    assert_eq!(measured(&h), Some(m));
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let at = |x: f32, y: f32| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    h.hover_at(at(150.0, 50.0));
+    h.run();
+    h.drag_at(at(150.0, 50.0));
+    h.run();
+    h.hover_at(at(250.0, 90.0));
+    h.run();
+    assert_ne!(measured(&h), Some(m), "the end did not follow");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.drop_at(at(250.0, 90.0));
+    h.run();
+    assert_eq!(measured(&h), Some(m), "not given up");
+    // Space pressed part-way makes the tool the hand: likewise.
+    h.hover_at(at(150.0, 50.0));
+    h.run();
+    h.drag_at(at(150.0, 50.0));
+    h.run();
+    h.hover_at(at(250.0, 90.0));
+    h.run();
+    let space = |pressed| egui::Event::Key {
+        key: egui::Key::Space,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers: none,
+    };
+    h.event(space(true));
+    h.run();
+    assert!(h.state().state().active().unwrap().drag.is_none() && measured(&h) == Some(m), "not given up for Space");
+    h.drop_at(at(250.0, 90.0));
+    h.run();
+    h.event(space(false));
+    h.run();
+    assert_eq!(measured(&h), Some(m));
+    // A length and an angle typed: the end moves, along the line, then round its start.
+    type_into(&mut h, egui_kittest::kittest::by().label("Length"), "40");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert_eq!(ends(&h), Some(([50.0, 50.0], [90.0, 50.0])));
+    type_into(&mut h, egui_kittest::kittest::by().label("Angle"), "90");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let m = measured(&h).unwrap();
+    assert!((m.end[0] - 50.0).abs() < 1e-9 && (m.end[1] - 10.0).abs() < 1e-9, "{m:?}");
+    // Another tool: not drawn, but kept. Esc with the tool: gone.
+    h.state_mut().state_mut().set_tool(ToolId::Select);
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(measured(&h).is_some(), "another tool's Esc removed it");
+    h.state_mut().state_mut().set_tool(ToolId::Measure);
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(measured(&h), None);
+}

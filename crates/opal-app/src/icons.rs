@@ -58,6 +58,12 @@ pub const ROTATE_VIEW_LEFT: char = '\u{f13f}';
 pub const ROTATE_VIEW_RIGHT: char = '\u{f13d}';
 /// North up (compass_true_north): the view put straight.
 pub const STRAIGHT_VIEW: char = '\u{f0a24}';
+/// A crop turned (crop_arrow_rotate): Straighten, which turns the image and crops it.
+pub const STRAIGHTEN: char = '\u{f05e9}';
+/// A turned rectangle put level (align_straighten): Straighten Layers.
+pub const STRAIGHTEN_LAYERS: char = '\u{f01b6}';
+/// dismiss_circle: Clear Measurement.
+pub const CLEAR_MEASUREMENT: char = '\u{f36d}';
 pub const HELP: char = '\u{f63d}';
 pub const SEARCH: char = '\u{f68f}';
 pub const INFO: char = '\u{f4a3}';

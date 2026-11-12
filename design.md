@@ -384,8 +384,8 @@ On the Select tab (and for scripts, by the same names):
   layers, as Ctrl+J does in Photoshop (Duplicate Layer keeps its button, without a key).
 - **Crop to Selection** makes the canvas the rectangle round the selection (refused for one
   that reaches past every edge).
-- **Rotate**, **Flip**, **Resize Image** and the Crop tool's straightening carry what is
-  selected with the layers (`Selection::transformed`). Its shapes are carried exactly, so a
+- **Rotate**, **Flip**, **Resize Image** and the Crop tool's straightening (Straighten's too,
+  see *Measuring*) carry what is selected with the layers (`Selection::transformed`). Its shapes are carried exactly, so a
   rectangle on the grid turned a quarter is one on the grid again; a turned rectangle
   stretched along another way, no longer a rectangle, cannot be, so the selection up to it
   becomes a *mask* step: its mask, carried pixel by pixel (exactly through quarter turns and
@@ -929,6 +929,47 @@ own), as a drawing is turned on a desk; painting needs it most.
   active one's angle too. Asked for before the active image is shown (a script naming one
   behind a tab), matching waits until it is.
 - Not kept in the file, nor between sessions: it is how the image is looked at.
+
+### Measuring
+
+- **The Measure tool** (N; `measure_tool`): a drag across the image measures between two
+  points, at the corners between pixels (where the edges measured between lie), Shift
+  keeping the line to a multiple of 45° in the image's own axes. A press on an end moves it,
+  on the line all of it (an end first, where they meet); Alt+drag from an end draws a
+  protractor's second arm from it (from the end, the line is turned round, so that end is
+  its start, the vertex). A drag that measures nothing (a click) leaves what was measured;
+  Esc gives a drag up, as the tool changing does (Space making it the hand). Drawn only while
+  the tool is chosen: the line and the arm, light over dark so as to show on any image, a
+  handle at each point, the arc between the arms, and labels beyond each end (its length,
+  and the line's angle) and outside the arc (the angle between), clear of the handles.
+- **What it measures** (`Measure`): the length; the angle, in degrees counterclockwise from
+  the right, as a protractor reads it (-180 to 180); the width and height (how far the end is
+  from the start, across and down); and a protractor's second arm's length and the angle
+  between the arms (0 to 180). The tool settings show them in the unit sizes are shown in
+  (its menu there changes it everywhere), the ends' positions from the canvas's corner in
+  fields that take what is typed (a length typed moves the end along the line; an angle,
+  round the start), and Straighten, Straighten Layers and Clear Measurement.
+- **Kept** on the image (`DocState::measure`) until the next measure, Esc with the tool, or
+  Clear Measurement; not part of its history, nor kept in its file. Its points are kept with
+  the `Document::carried` they were measured in, so it goes with the image turned, flipped or
+  resized since, and back with that undone (`Measure::now`).
+- **Straighten** (Image › Rotate): the image turned about its canvas's middle by the least
+  that makes the line level or plumb (`Measure::straightening`: -45° to 45°), as the Crop
+  tool's straightening does it (one history state, "Crop and straighten", off the interface
+  thread, the layers keeping their pixels), the canvas then the largest rectangle of its shape
+  within what was there (`inscribed`: its sides differing from the canvas's by even numbers
+  of pixels, so it lies on the grid about the same middle), so no corner is empty. Without
+  the tool's *Crop when straightening*, Rotate by Angle's turn instead, the canvas grown to
+  hold all of it. The line, carried, is level (or plumb) after it, and Straighten then
+  unavailable, saying so. Refused while a layer is locked.
+- **Straighten Layers**: the selected layers turned about the line's middle by the same
+  least turn, through a box applied at once (one history state, "Straighten layers"), the
+  canvas as it is; the measure turned with them, as it lies on what they hold (so a second
+  press does not turn them again; undone, the line stays as turned). Refused for a locked
+  layer, or with the transform box open (its to apply or cancel).
+- Scripts: `measure(points)` (two, or three for a protractor, from the canvas's corner), the
+  `measurement` query (null if nothing is measured), `straighten(crop)`,
+  `straighten_layers(layers)` and `clear_measurement()`.
 
 ### Tool settings panel
 

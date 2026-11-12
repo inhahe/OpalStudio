@@ -808,6 +808,32 @@ Turn the whole image by any angle.
 | `degrees` (required) | angle | The angle, clockwise. From -360.0 to 360.0 degrees. |
 | `grow` | bool | Grow the canvas so that nothing is cut off. Default: true. |
 
+### `straighten`
+
+Turn the image so the line measured is level, or plumb.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `crop` | bool | Crop the turned image to the largest rectangle of its shape within what was there; false grows the canvas to hold all of it. Default: the Measure tool's Crop when straightening. |
+
+### `straighten_layers`
+
+Turn the selected layers so the line measured is level, or plumb.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `layers` | layers | The layers, by id. Default: the selected layers. |
+
+### `clear_measurement`
+
+Remove the line the Measure tool measured.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+
 ### `flip_horizontal`
 
 Mirror the whole image left to right.
@@ -871,6 +897,15 @@ Rewrites a JPEG's or PNG's metadata in place, its image data untouched (not deco
 |---|---|---|
 | `path` (required) | path | The file, by its absolute path. |
 | `changes` (required) | any | What to change, as set_metadata takes it. |
+
+### `measure`
+
+Measures on an image as the Measure tool does, between points from the canvas's corner: two, a line from the first to the second; three, a protractor's second arm too, from the first to the third. What is measured stays until the next measure, and goes with the image turned or resized; straighten and straighten_layers use it. Answers as the measurement query does.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `points` (required) | points | The line's start and end, and a protractor's second arm's end if it has one, each [x, y] in pixels from the canvas's top-left corner. |
 
 ### `select_outline`
 
@@ -1023,6 +1058,14 @@ An image file's metadata, as the metadata query tells it, read without opening i
 ### `selection`
 
 What is selected in an image: the rectangle round it, as [x, y, width, height] from the canvas's corner (null if nothing is; "unbounded" where it reaches past every edge, inverted), and the steps that made it, in order: shapes (rectangles and ellipses, by their middle, size and angle, and how each combines), inversions, grow steps (by, corners), feather steps (width, side, falloff), smooth steps (radius) and border steps (width, side), as grow_selection, feather_selection, smooth_selection and border_selection take them, and masks (a "mask" step is, as its of says, a layer's pixels, from select_layer_pixels; what the steps before it came to, carried pixel by pixel by Rotate, Flip or Resize Image, which could not carry them exactly; or a saved selection, combined by load_selection; it gives no numbers, only how it combines), and outlines (their start and segments, lines and curves, from select_outline or the outline tool). select_all, deselect, reselect, invert_selection and select_layer_pixels answer with it too.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+
+### `measurement`
+
+What is measured on an image (the Measure tool, or measure): start and end, from the canvas's corner, in pixels, as it is now (turned, flipped or resized with the image since); width and height (how far the end is from the start, across and down); length; angle (degrees counterclockwise from the right, as a protractor reads it); straightening (the turn, in degrees clockwise, that straighten makes: the least that makes the line level or plumb); and for a protractor, arm (its second arm's end), arm_length and between (the angle between the arms, 0 to 180). Null if nothing is measured.
 
 | Parameter | Kind | |
 |---|---|---|

@@ -196,6 +196,8 @@ pub enum Drag {
     Symmetry(crate::outline_tool::SymmetryDrag),
     /// Turning the view (the Rotate View tool's, or with R held): where it began.
     TurnView(TurnDrag),
+    /// The Measure tool's.
+    Measure(crate::measure_tool::MeasureDrag),
 }
 
 /// Where a drag turning the view began: the pointer's bearing from the view's middle
@@ -253,6 +255,9 @@ pub struct DocState {
     /// image's history, nor kept in its file.
     pub symmetry_center: Option<[f64; 2]>,
     pub symmetry_angle: f64,
+    /// What the Measure tool measured last (see `measure_tool`), kept until the next
+    /// measure; not part of the image's history, nor kept in its file.
+    pub measure: Option<crate::measure_tool::Measure>,
     /// The rectangle the transform box's fields fit it into (its top-left corner from the
     /// canvas's, and its size), once one has been typed; the canvas, whatever it is then,
     /// until then.
@@ -364,6 +369,7 @@ impl DocState {
             picked: None,
             symmetry_center: None,
             symmetry_angle: 0.0,
+            measure: None,
             told_dropped: false,
             groups: Vec::new(),
             made_by: HashMap::new(),
@@ -649,6 +655,10 @@ impl DocState {
             }
             Some(Drag::TurnView(t)) => {
                 self.view.turn_to(t.angle);
+                None
+            }
+            Some(Drag::Measure(m)) => {
+                self.measure = m.was;
                 None
             }
             Some(Drag::Crop(_) | Drag::Select(_) | Drag::Reshape(_)) => None,

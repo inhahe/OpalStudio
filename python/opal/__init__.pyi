@@ -572,6 +572,23 @@ class Editor:
         degrees: The angle, clockwise. From -360.0 to 360.0 degrees.
         grow: Grow the canvas so that nothing is cut off. Default: true.
         """
+    def straighten(self, *, document: int | None = None, crop: bool | None = None) -> Any:
+        """Turn the image so the line measured is level, or plumb.
+
+        document: The image, by id. Default: the active image.
+        crop: Crop the turned image to the largest rectangle of its shape within what was there; false grows the canvas to hold all of it. Default: the Measure tool's Crop when straightening.
+        """
+    def straighten_layers(self, *, document: int | None = None, layers: list[int] | None = None) -> Any:
+        """Turn the selected layers so the line measured is level, or plumb.
+
+        document: The image, by id. Default: the active image.
+        layers: The layers, by id. Default: the selected layers.
+        """
+    def clear_measurement(self, *, document: int | None = None) -> Any:
+        """Remove the line the Measure tool measured.
+
+        document: The image, by id. Default: the active image.
+        """
     def flip_horizontal(self, *, document: int | None = None) -> Any:
         """Mirror the whole image left to right.
 
@@ -618,6 +635,11 @@ class Editor:
 
         document: The image, by id. Default: the active image.
         """
+    def measurement(self, *, document: int | None = None) -> Any:
+        """What is measured on an image (the Measure tool, or measure): start and end, from the canvas's corner, in pixels, as it is now (turned, flipped or resized with the image since); width and height (how far the end is from the start, across and down); length; angle (degrees counterclockwise from the right, as a protractor reads it); straightening (the turn, in degrees clockwise, that straighten makes: the least that makes the line level or plumb); and for a protractor, arm (its second arm's end), arm_length and between (the angle between the arms, 0 to 180). Null if nothing is measured.
+
+        document: The image, by id. Default: the active image.
+        """
     def saved_selections(self, *, document: int | None = None) -> Any:
         """The selections saved in an image (save_selection), in the order they were first saved: each one's name, the rectangle round what it selects (as the selection query tells it; if the image has been turned, flipped, resized or cropped since it was saved, the rectangle round that rectangle carried so, which may be larger than what load_selection then selects), its steps as they were when it was saved, and whether the image has changed since (load_selection carries it so).
 
@@ -655,6 +677,12 @@ class Editor:
 
         path: The file, by its absolute path.
         changes: What to change, as set_metadata takes it.
+        """
+    def measure(self, *, document: int | None = None, points: list[tuple[float, float]]) -> Any:
+        """Measures on an image as the Measure tool does, between points from the canvas's corner: two, a line from the first to the second; three, a protractor's second arm too, from the first to the third. What is measured stays until the next measure, and goes with the image turned or resized; straighten and straighten_layers use it. Answers as the measurement query does.
+
+        document: The image, by id. Default: the active image.
+        points: The line's start and end, and a protractor's second arm's end if it has one, each [x, y] in pixels from the canvas's top-left corner.
         """
     def select_outline(self, *, document: int | None = None, points: list[tuple[float, float]] | None = None, outline: dict[str, Any] | None = None, combine: Literal["replace", "add", "subtract", "intersect"] = "replace", smooth: bool | None = None) -> Any:
         """Selects what an outline encloses, as the outline tool does: points joined by straight sides, or an outline with curves, as the selection query tells one; the last point back to the first (a loop crossing itself selects each of its lobes). Give points or outline, one of them. Answers with what is selected then, as the selection query does.

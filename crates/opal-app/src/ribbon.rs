@@ -107,6 +107,7 @@ pub static KEYTIPS: &[TabKeytips] = &[
             (Cmd::RotateCcw, 'L'),
             (Cmd::Rotate180, '1'),
             (Cmd::RotateBy, 'B'),
+            (Cmd::Straighten, 'S'),
             (Cmd::FlipHorizontal, 'F'),
             (Cmd::FlipVertical, 'V'),
             (Cmd::FileInfo, 'I'),

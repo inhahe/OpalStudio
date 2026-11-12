@@ -13,6 +13,7 @@ pub enum ToolId {
     Hand,
     Zoom,
     RotateView,
+    Measure,
 }
 
 /// What the user needs to know about a tool.
@@ -75,8 +76,16 @@ impl ToolId {
     }
 
     /// Every tool, in toolbar order.
-    pub const ALL: [ToolId; 7] =
-        [ToolId::Move, ToolId::Select, ToolId::Outline, ToolId::Crop, ToolId::Hand, ToolId::Zoom, ToolId::RotateView];
+    pub const ALL: [ToolId; 8] = [
+        ToolId::Move,
+        ToolId::Select,
+        ToolId::Outline,
+        ToolId::Crop,
+        ToolId::Measure,
+        ToolId::Hand,
+        ToolId::Zoom,
+        ToolId::RotateView,
+    ];
 
     pub fn info(self) -> &'static ToolInfo {
         match self {
@@ -87,6 +96,7 @@ impl ToolId {
             ToolId::Hand => &HAND,
             ToolId::Zoom => &ZOOM,
             ToolId::RotateView => &ROTATE_VIEW,
+            ToolId::Measure => &MEASURE,
         }
     }
 }
@@ -490,6 +500,36 @@ static ROTATE_VIEW: ToolInfo = ToolInfo {
            hold R and drag to turn the view for as long as R is held (with the outline tool, \
            R+drag redraws the outline instead); tap R to choose this tool.",
     settings: ROTATE_VIEW_SETTINGS,
+    variants: None,
+};
+
+pub static MEASURE_SETTINGS: &[Def] = &[Def {
+    key: "measure.crop",
+    label: "Crop when straightening",
+    help: "Straighten crops the turned image to the largest rectangle of its shape within what was \
+           there, so no corner is left empty. Off: the canvas grows to hold all of it.",
+    section: "Measure",
+    kind: Kind::Bool,
+    default: Init::Bool(true),
+    advanced: false,
+}];
+
+static MEASURE: ToolInfo = ToolInfo {
+    id: "measure",
+    name: "Measure",
+    icon: icons::RULER,
+    key: Key::N,
+    description: "Drag to measure a distance and an angle; Alt+drag from an end for a protractor.",
+    help: "Drag across the image to measure between two points: the tool settings show the \
+           length, the angle (counterclockwise from the right, as a protractor reads it), the \
+           width and height, in the unit you choose there, and take numbers typed in. Drag an \
+           end to move it, or the line to move it all; Shift keeps to multiples of 45°. Alt+drag \
+           from an end draws a protractor's second arm, and the angle between the two shows. \
+           What is measured stays on the image until the next measure (Esc or Clear \
+           Measurement removes it), and goes with the image turned or resized. Straighten turns \
+           the image so the line is level, or plumb, whichever is nearer; Straighten Layers \
+           turns the selected layers instead.",
+    settings: MEASURE_SETTINGS,
     variants: None,
 };
 

@@ -682,6 +682,9 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
     if tool == crate::tools::ToolId::RotateView && st.active().is_some() {
         view_angle(ui, st);
     }
+    if tool == crate::tools::ToolId::Measure {
+        crate::measure_tool::panel(ui, st);
+    }
 }
 
 /// The active image's view's angle, typed in as any field takes it, and the View tab's
@@ -726,7 +729,7 @@ fn align_buttons(ui: &mut egui::Ui, st: &mut AppState, distribute: bool) {
 
 /// A row of buttons running `cmds`, each by its icon, saying what it does, or why it is not
 /// available when it is not.
-fn command_buttons(ui: &mut egui::Ui, st: &mut AppState, cmds: &[Cmd]) {
+pub(crate) fn command_buttons(ui: &mut egui::Ui, st: &mut AppState, cmds: &[Cmd]) {
     ui.horizontal(|ui| {
         for &cmd in cmds {
             let info = cmd.info();
