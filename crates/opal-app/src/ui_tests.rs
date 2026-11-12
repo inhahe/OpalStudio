@@ -4453,3 +4453,35 @@ fn file_info_edits_what_describes_the_image_and_a_template_fills_it_in() {
     h.run();
     assert_eq!(h.state().state().active().unwrap().history.current(), before);
 }
+
+#[test]
+fn a_file_dropped_on_the_window_is_read_in_the_background_and_opened() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 40, 30);
+    let path = std::env::temp_dir().join(format!("opal-ui-dropped-{}.png", std::process::id()));
+    image::RgbaImage::from_pixel(7, 5, image::Rgba([1, 2, 3, 255])).save(&path).unwrap();
+    /// A file dropped, as the window's integration hands one over.
+    #[derive(Debug)]
+    struct Dropped(std::path::PathBuf);
+    impl egui::DroppedFile for Dropped {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+    h.input_mut().dropped_files.push(std::sync::Arc::new(Dropped(path.clone())));
+    for _ in 0..400 {
+        h.run();
+        if h.state().state().docs.len() == 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let st = h.state().state();
+    let c = st.active().unwrap().doc().canvas;
+    assert_eq!((st.docs.len(), c.width, c.height), (2, 7, 5), "not opened");
+    std::fs::remove_file(&path).ok();
+}

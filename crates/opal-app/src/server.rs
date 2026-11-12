@@ -1399,6 +1399,8 @@ mod tests {
         let ctx = egui::Context::default();
         for _ in 0..500 {
             server.serve(&mut st, &ctx, false);
+            // As the window's frames do: the file is read in the background (`opening`).
+            st.poll_files(false);
             if !st.docs.is_empty() {
                 break;
             }

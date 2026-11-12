@@ -1309,12 +1309,23 @@ the selection itself (see *Transform Selection*).
   (the default resolution if not), as Open and a paste make one (`AppState::image_for`,
   which says too when the file's pixels are not square). A file that cannot be read is left
   out and said, with what reading the others warned of, refused or not; if none can be read
-  nothing is opened. Files are read as Open and Place read them, on the interface thread
-  (`known-issues.md`). Place remains the way to bring in one file to position and size.
+  nothing is opened. Files are read as Open and Place read them, in the background (below).
+  Place remains the way to bring in one file to position and size.
   Scripts: `open_as_layers(paths)`, a parameter of the kind `paths` (a list of absolute
   paths, at least one; the Python package takes any sequence, or one path alone, and makes
   each absolute against its own folder, as it does a `path`; MCP's schema is an array of
   strings), returning `{document, layers}` and `notes` if there is anything to say.
+- **Reading files in the background** (`opening`): Open (from its dialog, or files dropped on
+  the window), Place and Open as Layers, and scripts' calls of them, read and decode their
+  files on a worker thread, so the window keeps answering while a large one is read; the
+  status bar says what is being read and that Esc gives it up. What was read is used as a
+  paste is (`read_then`, `poll_files`): in the order asked for, into the image that was
+  active then (dropped, and said, if it was closed meanwhile), once nothing the user is in
+  the middle of would be ended by it (a dialog, a drag, an edit under way on that image, a
+  box opened there since); meanwhile the status bar says what it waits for. A script's call
+  is answered once it has been used (a notification's failure, which no one hears, goes to
+  the user). Files named on the command line are read before the window opens, there being
+  nothing to keep answering yet.
 - **One history state:** the whole session in the box, from paste to commit, is one entry
   ("Paste" or "Transform"). Cancel leaves the document as it was.
 - **The clipboard:** PNG first (keeping 16-bit color and transparency), then the other

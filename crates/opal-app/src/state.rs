@@ -16,6 +16,7 @@ use opal_core::raster::RasterImage;
 use opal_core::tile::pixel_from_f32;
 use opal_io::image_files::{self, ExportFormat};
 use opal_io::native;
+use serde_json::json;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -268,6 +269,9 @@ pub struct AppState {
     pub thumbs: crate::thumbs::Thumbnails,
     /// A paste waiting for the clipboard to be read.
     pub reading: Option<Reading>,
+    /// Files being read for Open, Place or Open as Layers, or waiting to be used, in the order
+    /// asked for (see `opening`).
+    pub file_readings: Vec<crate::opening::FileReading>,
     /// The memory images' tiles may take before going to disk, as last given to the store.
     tile_budget: Option<u64>,
     /// The memory this computer has, if known.
@@ -415,6 +419,7 @@ impl AppState {
             edit_wait: crate::edits::WAITED_FOR,
             thumbs: Default::default(),
             reading: None,
+            file_readings: Vec::new(),
             tile_budget: None,
             memory_total: crate::memory::total(),
             told_store_trouble: false,
@@ -486,8 +491,8 @@ impl AppState {
     }
 
     /// What is done between frames, with or without a window: the edits that have finished
-    /// applied (`edits`), the copies and writes that have finished reported, and a paste whose
-    /// clipboard has been read placed
+    /// applied (`edits`), the copies and writes that have finished reported, files read used
+    /// (`opening`), and a paste whose clipboard has been read placed
     /// (`pointer_held` as for [`poll_writes`](Self::poll_writes) and
     /// [`poll_paste`](Self::poll_paste)), each image's history kept within the memory the preferences give it, and the tiles'
     /// share of memory kept to (and trouble writing them to disk told of).
@@ -496,6 +501,7 @@ impl AppState {
         self.poll_copies();
         self.poll_writes(pointer_held);
         self.poll_paste(pointer_held);
+        self.poll_files(pointer_held);
         let budget = crate::prefs::bytes(&self.prefs, "history.memory");
         for d in &mut self.docs {
             d.set_history_budget(budget);
@@ -594,7 +600,7 @@ impl AppState {
                 }
             }
             Cmd::New => self.new_image = Some(self.last_new.clone()),
-            Cmd::Open => self.open_dialog(),
+            Cmd::Open => self.open_dialog(ctx),
             Cmd::Save => self.save_active(false, ctx),
             Cmd::SaveAs => self.save_active(true, ctx),
             Cmd::Export => {
@@ -623,8 +629,8 @@ impl AppState {
             Cmd::CopyMerged => self.copy(true, ctx),
             Cmd::Paste => self.paste(false, ctx),
             Cmd::PasteInPlace => self.paste(true, ctx),
-            Cmd::Place => self.place_dialog(),
-            Cmd::OpenAsLayers => self.open_as_layers_dialog(),
+            Cmd::Place => self.place_dialog(ctx),
+            Cmd::OpenAsLayers => self.open_as_layers_dialog(ctx),
             Cmd::Transform => self.transform(),
             Cmd::TransformAgain => self.transform_again(false),
             Cmd::TransformAgainCopy => self.transform_again(true),
@@ -876,61 +882,129 @@ impl AppState {
         self.add_doc(title, doc, ids, label);
     }
 
-    fn open_dialog(&mut self) {
+    fn open_dialog(&mut self, ctx: &egui::Context) {
         let files = rfd::FileDialog::new()
             .set_title("Open")
             .add_filter("Images and Opal Studio files", &["opal", "png", "jpg", "jpeg"])
             .add_filter("Opal Studio files", &["opal"])
             .add_filter("PNG and JPEG images", &["png", "jpg", "jpeg"])
             .pick_files();
-        for path in files.unwrap_or_default() {
-            self.open_path(&path);
-        }
+        self.open_later(files.unwrap_or_default(), None, ctx);
     }
 
     /// Opens the files dropped on the window, in the order dropped, while no dialog is open
-    /// (one opened behind a dialog would become the image it acts on).
-    pub fn open_dropped(&mut self) {
-        while !self.dialog_open()
-            && let Some(path) = self.dropped.pop_front()
-        {
-            self.open_path(&path);
+    /// (one opened behind a dialog would become the image it acts on): read in the
+    /// background (see [`open_later`](Self::open_later)).
+    pub fn open_dropped(&mut self, ctx: &egui::Context) {
+        if self.dialog_open() {
+            return;
+        }
+        let paths: Vec<PathBuf> = self.dropped.drain(..).collect();
+        if !paths.is_empty() {
+            self.open_later(paths, None, ctx);
         }
     }
 
-    /// Opens a file, telling the user if that fails or if anything about it needs saying.
+    /// Opens `paths` as Open does, each read on a worker thread (see
+    /// [`read_then`](Self::read_then)), so the window keeps answering; one open already just
+    /// shown. For call `answer` (its number and groups), answers with the image last opened
+    /// or shown (and what reading said), or why it could not be opened; else tells the user.
+    pub(crate) fn open_later(&mut self, paths: Vec<PathBuf>, answer: Option<(u64, Vec<u64>)>, ctx: &egui::Context) {
+        let mut shown = None;
+        let mut to_read = Vec::new();
+        for path in paths {
+            match self.open_already(&path) {
+                Some(id) => {
+                    self.show_doc(id);
+                    shown = Some(id);
+                }
+                None => to_read.push(path),
+            }
+        }
+        if to_read.is_empty() {
+            if let Some((n, _)) = answer {
+                self.answered.push((n, Ok(shown.map_or_else(|| json!({}), |id| json!({ "document": id.0 })))));
+            }
+            return;
+        }
+        let scripted = answer.is_some();
+        let then: crate::opening::Then = Box::new(move |st: &mut AppState, read| {
+            let (mut last, mut notes, mut failed) = (shown, Vec::new(), Vec::new());
+            for (path, file) in read {
+                match st.open_read(&path, file) {
+                    Ok((id, said)) => {
+                        last = Some(id);
+                        if scripted {
+                            notes.extend(said);
+                        } else {
+                            for w in said {
+                                st.message(MessageKind::Warning, format!("Opened {}", file_title(&path)), w);
+                            }
+                        }
+                    }
+                    Err(why) => failed.push(why),
+                }
+            }
+            if !failed.is_empty() && (scripted || last.is_none()) {
+                return Err(format!("Could not open the file: {}", failed.join("\n")));
+            }
+            for why in failed {
+                st.message(MessageKind::Error, "Could not open the file", why);
+            }
+            let value = last.map_or_else(|| json!({}), |id| json!({ "document": id.0 }));
+            Ok(crate::api::with_notes(value, notes))
+        });
+        self.read_then(to_read, None, answer, then, ctx);
+    }
+
+    /// The image whose file `path` is, if it is open.
+    fn open_already(&self, path: &Path) -> Option<DocId> {
+        self.docs.iter().find(|d| d.path.as_deref() == Some(path)).map(|d| d.id)
+    }
+
+    /// Opens a file, reading it here (see [`open_later`](Self::open_later) for reading it in
+    /// the background), telling the user if that fails or if anything about it needs saying.
     pub fn open_path(&mut self, path: &Path) {
-        // Already open: just show it.
-        if let Some(id) = self.docs.iter().find(|d| d.path.as_deref() == Some(path)).map(|d| d.id) {
+        if let Some(id) = self.open_already(path) {
             self.show_doc(id);
             return;
         }
-        let title = file_title(path);
-        let is_native = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("opal"));
-        if is_native {
-            match native::load(path, crate::memory::free()) {
-                Ok(loaded) => {
-                    let id = self.add_doc(title, loaded.doc, loaded.ids, "Open");
-                    self.doc_mut(id).expect("just added").path = Some(path.to_owned());
+        match self.open_read(path, crate::opening::read_file(path)) {
+            Ok((_, said)) => {
+                for w in said {
+                    self.message(MessageKind::Warning, format!("Opened {}", file_title(path)), w);
                 }
-                Err(e) => self.message(MessageKind::Error, "Could not open the file", e.to_string()),
             }
-        } else {
-            match image_files::import(path, crate::memory::free()) {
-                Ok(imported) => {
-                    let mut ids = IdGen::default();
-                    let (mut doc, said) = self.image_for(imported.width, imported.height, imported.resolution);
-                    let mut warnings = imported.warnings;
-                    warnings.extend(said);
-                    let layer = Layer::new_raster(ids.layer(), ids.object(), "Background", imported.image);
-                    doc.insert(Position { parent: None, index: 0 }, layer).expect("an empty document takes a layer");
-                    doc.metadata = imported.metadata;
-                    self.add_doc(title, doc, ids, "Open");
-                    for w in warnings {
-                        self.message(MessageKind::Warning, format!("Opened {}", file_title(path)), w);
-                    }
-                }
-                Err(e) => self.message(MessageKind::Error, "Could not open the image", e.to_string()),
+            Err(why) => self.message(MessageKind::Error, "Could not open the file", why),
+        }
+    }
+
+    /// Opens the file at `path` as `file` (what reading it gave) holds it, as an image of its
+    /// own: the image, and what should be said of it; or why it could not be read.
+    pub(crate) fn open_read(
+        &mut self,
+        path: &Path,
+        file: Result<crate::opening::ReadFile, String>,
+    ) -> Result<(DocId, Vec<String>), String> {
+        let title = file_title(path);
+        match file? {
+            crate::opening::ReadFile::Native(loaded) => {
+                let loaded = *loaded;
+                let id = self.add_doc(title, loaded.doc, loaded.ids, "Open");
+                self.doc_mut(id).expect("just added").path = Some(path.to_owned());
+                Ok((id, Vec::new()))
+            }
+            crate::opening::ReadFile::Image(imported) => {
+                let imported = *imported;
+                let mut ids = IdGen::default();
+                let (mut doc, said) = self.image_for(imported.width, imported.height, imported.resolution);
+                let mut warnings = imported.warnings;
+                warnings.extend(said);
+                let layer = Layer::new_raster(ids.layer(), ids.object(), "Background", imported.image);
+                doc.insert(Position { parent: None, index: 0 }, layer).expect("an empty document takes a layer");
+                doc.metadata = imported.metadata;
+                let id = self.add_doc(title, doc, ids, "Open");
+                Ok((id, warnings))
             }
         }
     }
@@ -1362,11 +1436,13 @@ mod tests {
         // Behind a dialog, it would become the image the dialog acts on: it waits.
         st.rotate_by = Some(RotateBy { degrees: 30.0, grow: true });
         st.dropped.push_back(path.clone());
-        st.open_dropped();
+        let ctx = egui::Context::default();
+        st.open_dropped(&ctx);
         assert_eq!(st.active_doc, first, "opened behind the dialog");
         assert_eq!(st.dropped.len(), 1);
         st.rotate_by = None;
-        st.open_dropped();
+        st.open_dropped(&ctx);
+        crate::opening::testing::wait(&mut st);
         let _ = std::fs::remove_file(&path);
         assert!(st.dropped.is_empty());
         assert_eq!(st.docs.len(), 2);

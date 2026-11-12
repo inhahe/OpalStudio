@@ -11,17 +11,6 @@ its colors are off; the user is warned when the image opens. Whether a profile i
 judged from its description text. **Fix:** color management with lcms2 in milestone 5:
 convert from the embedded profile into the working space on import.
 
-## Open, Place and Open as Layers read files on the interface thread
-
-`crates/opal-app/src/state.rs` (`open_path`) and `paste.rs` (`place_file`,
-`open_as_layers`): each reads and decodes its files before it returns, so the window stops
-answering meanwhile, with nothing on screen saying why and no way to stop it. A large 16-bit
-PNG takes seconds; Open as Layers with twenty camera JPEGs, longer. A paste is read in the
-background already (`paste_answering`, `poll_paste`). **Fix:** read files the same way: on a
-worker, the status bar saying which file is being read and that Esc cancels, the result
-placed when it is ready (waiting, as a paste does, for a dialog, a drag or a box to be done),
-on the image that was active; scripts answered when it is placed.
-
 ## GPU memory is only reported on Windows
 
 `crates/opal-app/src/gpu_memory.rs`. **Fix:** query `VK_EXT_memory_budget` through wgpu's

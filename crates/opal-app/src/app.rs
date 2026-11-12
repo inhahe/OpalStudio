@@ -352,14 +352,19 @@ impl OpalApp {
         }
     }
 
-    /// Esc cancels a paste still being read, or waiting to be placed, unless a box on the
-    /// image shown takes it first.
+    /// Esc cancels a paste still being read, or waiting to be placed, and files being read
+    /// (see `opening`), unless a box on the image shown takes it first.
     fn cancel_paste_key(&mut self, ctx: &egui::Context) {
-        if self.st.reading.is_none() {
+        if self.st.reading.is_none() && !self.st.reading_files() {
             return;
         }
         if !self.st.box_takes_escape() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-            self.st.cancel_paste();
+            if self.st.reading.is_some() {
+                self.st.cancel_paste();
+            }
+            if self.st.reading_files() {
+                self.st.cancel_files();
+            }
         }
     }
 
@@ -547,7 +552,7 @@ impl OpalApp {
         self.st.dropped.extend(dropped);
         // Those waiting open in the frame after the dialog closes, which closing it brings
         // (the dialogs are part of `signature`).
-        self.st.open_dropped();
+        self.st.open_dropped(ctx);
     }
 
     /// Closing the window, or Exit, asks about unsaved changes first.

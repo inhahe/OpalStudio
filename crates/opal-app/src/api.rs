@@ -2269,6 +2269,12 @@ impl AppState {
         (refusals, notes)
     }
 
+    /// The number a call answered later is answered by (see `answered`).
+    fn later_answer(&mut self) -> u64 {
+        self.next_answer += 1;
+        self.next_answer
+    }
+
     /// The reply to the call being carried out (`calling`), which may have begun an edit of the
     /// active image (see `edits`): once that is applied, what `answer` gives of that image then;
     /// at once, if it began none (nothing, with no image open).
@@ -2413,25 +2419,16 @@ impl AppState {
                     .filter_map(Value::as_str)
                     .map(PathBuf::from)
                     .collect();
-                match self.open_as_layers(&paths) {
-                    Ok((made, said)) => {
-                        let ids: Vec<u64> = made.iter().map(|l| l.0).collect();
-                        let document = self.active_doc.expect("one now").0;
-                        now(Ok(with_notes(json!({ "document": document, "layers": ids }), said)))
-                    }
-                    Err(why) => now(Err(format!("open_as_layers: {why}"))),
-                }
+                let n = self.later_answer();
+                let groups = self.active().map(|d| d.groups.clone()).unwrap_or_default();
+                self.open_as_layers_later(paths, Some((n, groups)), ctx);
+                Reply::Later(n)
             }
             Cmd::Open => {
-                let before = self.docs.len();
-                self.open_path(&args.path("path"));
-                // Opened, or shown if it already was.
-                match self.active_doc {
-                    Some(id) if self.docs.len() > before || self.doc(id).is_some_and(|d| d.path.is_some()) => {
-                        now(Ok(json!({ "document": id.0 })))
-                    }
-                    _ => now(Ok(json!({}))),
-                }
+                // Opened once read, or shown if it already was.
+                let n = self.later_answer();
+                self.open_later(vec![args.path("path")], Some((n, Vec::new())), ctx);
+                Reply::Later(n)
             }
             Cmd::Save => {
                 let id = doc.expect("available");
@@ -2594,17 +2591,14 @@ impl AppState {
                     Ok(place) => place,
                     Err(why) => return now(Err(format!("place: {why}"))),
                 };
-                let name = args.text("name");
+                let name = args.text("name").map(str::to_owned);
                 let print_size =
                     args.flag("print_size").unwrap_or_else(|| self.prefs.bool("transform.place_print_size"));
-                match self.place_file(&args.path("path"), name, print_size) {
-                    Ok(warnings) => {
-                        let notes = warnings.into_iter().map(|w| format!("Placed: {w}")).collect();
-                        let into = args.flag("into_active") == Some(true);
-                        now(self.apply_box(&place, into).map(|v| with_notes(v, notes)))
-                    }
-                    Err(why) => now(Err(format!("place: {why}"))),
-                }
+                let into = args.flag("into_active") == Some(true);
+                let n = self.later_answer();
+                let groups = self.active().map(|d| d.groups.clone()).unwrap_or_default();
+                self.place_later(args.path("path"), name, print_size, Some((n, groups, place, into)), ctx);
+                Reply::Later(n)
             }
             Cmd::Transform => {
                 let place = match BoxArgs::of(args, params, self.active().map(|d| d.history.doc())) {
@@ -4333,7 +4327,7 @@ mod tests {
         let ids = |r: &Value| r["layers"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect::<Vec<_>>();
         // None open: a new image the size of the first file, each a layer, centered; one that
         // cannot be read left out, and said.
-        let r = now(&mut st, "open_as_layers", json!({ "paths": [a, b, missing] })).unwrap();
+        let r = call(&mut st, "open_as_layers", json!({ "paths": [a, b, missing] })).unwrap();
         let made = ids(&r);
         let d = st.active().unwrap();
         assert_eq!((d.doc().canvas.width, d.doc().canvas.height, d.doc().layers.len()), (40, 20, 2));
@@ -4347,7 +4341,7 @@ mod tests {
         // Into the image open: above the active layer, the first lowest, as one history state.
         st.active_mut().unwrap().select_only(LayerId(made[0]));
         let (c, e) = (png_at(file("layers-c.png"), 6, 4), png_at(file("layers-e.png"), 2, 2));
-        let r = now(&mut st, "open_as_layers", json!({ "paths": [&c, &e] })).unwrap();
+        let r = call(&mut st, "open_as_layers", json!({ "paths": [&c, &e] })).unwrap();
         assert!(r.get("notes").is_none(), "notes with nothing to say: {r}");
         let more = ids(&r);
         let order = |st: &AppState| st.active().unwrap().doc().layers.iter().map(|l| l.id.0).collect::<Vec<u64>>();
@@ -4361,19 +4355,19 @@ mod tests {
         let mut fresh = AppState::new();
         let jpeg = file("layers-150.jpg");
         crate::paste::testing::white_jpeg(&jpeg, 8, 8, Some([150, 150]));
-        now(&mut fresh, "open_as_layers", json!({ "paths": [jpeg] })).unwrap();
+        call(&mut fresh, "open_as_layers", json!({ "paths": [jpeg] })).unwrap();
         assert_eq!(fresh.active().unwrap().doc().resolution, 150.0);
         // Its pixels not square: said, as Open says it.
         let mut fresh = AppState::new();
         let tall = file("layers-tall.jpg");
         crate::paste::testing::white_jpeg(&tall, 8, 8, Some([300, 150]));
-        let r = now(&mut fresh, "open_as_layers", json!({ "paths": [tall] })).unwrap();
+        let r = call(&mut fresh, "open_as_layers", json!({ "paths": [tall] })).unwrap();
         assert_eq!(fresh.active().unwrap().doc().resolution, 300.0);
         assert!(r["notes"].to_string().contains("not square"), "{r}");
         // A path not absolute, or none that can be read: refused.
-        let why = now(&mut st, "open_as_layers", json!({ "paths": ["relative.png"] })).unwrap_err();
+        let why = call(&mut st, "open_as_layers", json!({ "paths": ["relative.png"] })).unwrap_err();
         assert!(why.contains("absolute"), "{why}");
-        let why = now(&mut st, "open_as_layers", json!({ "paths": [missing] })).unwrap_err();
+        let why = call(&mut st, "open_as_layers", json!({ "paths": [missing] })).unwrap_err();
         assert!(why.contains("Left out "), "{why}");
         // Refused while an edit is under way on the image: what was left out is said too.
         st.edit_wait = std::time::Duration::ZERO;
@@ -4407,7 +4401,7 @@ mod tests {
         now(&mut AppState::new(), "set_file_metadata", json!({ "path": path(&photo), "changes": camera })).unwrap();
         // Opened: kept, upright (6 by 8), and read as File Info reads it.
         let mut st = AppState::new();
-        now(&mut st, "open", json!({ "path": path(&photo) })).unwrap();
+        call(&mut st, "open", json!({ "path": path(&photo) })).unwrap();
         let c = st.active().unwrap().doc().canvas;
         assert_eq!((c.width, c.height), (6, 8));
         let m = now(&mut st, "metadata", json!({})).unwrap();
@@ -4426,7 +4420,7 @@ mod tests {
         let opal = file("photo.opal");
         call(&mut st, "save_as", json!({ "path": path(&opal) })).unwrap();
         let mut again = AppState::new();
-        now(&mut again, "open", json!({ "path": path(&opal) })).unwrap();
+        call(&mut again, "open", json!({ "path": path(&opal) })).unwrap();
         assert_eq!(now(&mut again, "metadata", json!({})).unwrap()["description"]["title"], "Quay");
         assert_eq!(
             now(&mut again, "file_metadata", json!({ "path": path(&opal) })).unwrap()["description"]["title"],
@@ -4634,6 +4628,7 @@ mod tests {
         };
         for _ in 0..1000 {
             st.poll_writes(false);
+            st.poll_files(false);
             if let Some((_, r)) = st.answers().into_iter().find(|(m, _)| *m == n) {
                 return r;
             }
@@ -4868,6 +4863,7 @@ mod tests {
         let given = args(json!({ "path": missing.display().to_string() }));
         // A notification: no one hears its answer, so the user is told, as by a dialog.
         st.call_from(&[], false, "open", &given, &egui::Context::default());
+        crate::opening::testing::wait(&mut st);
         assert!(st.messages.iter().any(|m| m.kind == MessageKind::Error), "what opening it said was lost");
         assert!(st.raise_window);
     }
@@ -5044,7 +5040,7 @@ mod tests {
     fn what_a_dialog_would_have_said_comes_back_with_the_call() {
         let mut st = AppState::new();
         let missing = std::env::temp_dir().join("opal-no-such-file.png");
-        let err = now(&mut st, "open", json!({ "path": missing.display().to_string() })).unwrap_err();
+        let err = call(&mut st, "open", json!({ "path": missing.display().to_string() })).unwrap_err();
         assert!(err.contains("Could not open"), "{err}");
         assert!(st.messages.is_empty(), "the error was left to a dialog too");
     }
@@ -5136,7 +5132,7 @@ mod tests {
         // the others in their own.
         let given =
             json!({ "path": path, "x": "0.1in", "y": "10px", "width": 1, "height": 1, "unit": "in", "fit": "inside" });
-        let placed = now(&mut st, "place", given).unwrap();
+        let placed = call(&mut st, "place", given).unwrap();
         assert_eq!(placed["box"], json!({ "x": 10.0, "y": 35.0, "width": 100.0, "height": 50.0, "angle": 0.0 }));
         let layer = placed["layer"].as_u64().unwrap();
         let d = st.active().unwrap();
@@ -5169,10 +5165,10 @@ mod tests {
         assert!((x - 50.0).abs() < 1e-9 && (y - 50.0).abs() < 1e-9, "it did not turn about its center: {t}");
         // Into the active layer, if it can take it; else refused, and no box left open.
         now(&mut st, "new_group", json!({})).unwrap();
-        let refused = now(&mut st, "place", json!({ "path": path, "into_active": true })).unwrap_err();
+        let refused = call(&mut st, "place", json!({ "path": path, "into_active": true })).unwrap_err();
         assert!(refused.contains("no plain, unlocked active layer"), "{refused}");
         assert!(st.active().unwrap().transform.is_none(), "the refused box was left open");
-        let missing = now(&mut st, "place", json!({ "path": format!("{path}.gone") })).unwrap_err();
+        let missing = call(&mut st, "place", json!({ "path": format!("{path}.gone") })).unwrap_err();
         assert!(missing.starts_with("place:"), "{missing}");
         std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).ok();
     }
@@ -5221,7 +5217,7 @@ mod tests {
         now(&mut st, "set_preference", json!({ "key": "ui.default_resolution", "value": 96 })).unwrap();
         let plain = std::env::temp_dir().join(format!("opal-api-no-ppi-{}.png", std::process::id()));
         image::RgbaImage::new(4, 4).save(&plain).unwrap();
-        now(&mut st, "open", json!({ "path": plain.display().to_string() })).unwrap();
+        call(&mut st, "open", json!({ "path": plain.display().to_string() })).unwrap();
         std::fs::remove_file(&plain).ok();
         assert_eq!(st.active().unwrap().doc().resolution, 96.0);
         now(&mut st, "close", json!({ "discard": true })).unwrap();
@@ -5235,7 +5231,7 @@ mod tests {
             None,
         )
         .unwrap();
-        now(&mut st, "open", json!({ "path": path.display().to_string() })).unwrap();
+        call(&mut st, "open", json!({ "path": path.display().to_string() })).unwrap();
         std::fs::remove_file(&path).ok();
         let docs = now(&mut st, "documents", json!({})).unwrap();
         assert_eq!(docs[1]["resolution"], json!(240.0), "{docs}");
@@ -5247,7 +5243,7 @@ mod tests {
         encoder.set_pixel_density(PixelDensity { density: (100, 200), unit: PixelDensityUnit::Inches });
         image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8)).write_with_encoder(encoder).unwrap();
         std::fs::write(&tall, jpeg).unwrap();
-        let opened = now(&mut st, "open", json!({ "path": tall.display().to_string() })).unwrap();
+        let opened = call(&mut st, "open", json!({ "path": tall.display().to_string() })).unwrap();
         std::fs::remove_file(&tall).ok();
         assert!(opened["notes"][0].as_str().is_some_and(|n| n.contains("not square")), "{opened}");
         assert_eq!(now(&mut st, "documents", json!({})).unwrap()[2]["resolution"], json!(100.0));
@@ -5264,9 +5260,8 @@ mod tests {
         let states = st.active().unwrap().history.nodes().count();
         // Each call made in the run's group, as the server makes a script's.
         let call = |st: &mut AppState, name: &str, given: Value| st.call_from(&[7], true, name, &args(given), &ctx);
-        let Reply::Now(Ok(placed)) = call(&mut st, "place", json!({ "path": path, "x": 5 })) else {
-            panic!("not placed")
-        };
+        let reply = call(&mut st, "place", json!({ "path": path, "x": 5 }));
+        let placed = answered(&mut st, reply).expect("placed");
         let Reply::Now(Ok(_)) = call(&mut st, "transform", json!({ "layers": [placed["layer"]], "angle": 30 })) else {
             panic!("not transformed")
         };
@@ -5472,18 +5467,18 @@ mod tests {
         // 90 pixels at 300 ppi are 0.3 in: 30 pixels at 100 ppi.
         let logo = jpeg_at("logo.jpg", 90, 60, Some([300, 300]));
         let width = |v: Value| box_of(&v)[2];
-        assert_eq!(width(now(&mut st, "place", json!({ "path": logo })).unwrap()), 30.0);
-        assert_eq!(width(now(&mut st, "place", json!({ "path": logo, "print_size": false })).unwrap()), 90.0);
+        assert_eq!(width(call(&mut st, "place", json!({ "path": logo })).unwrap()), 30.0);
+        assert_eq!(width(call(&mut st, "place", json!({ "path": logo, "print_size": false })).unwrap()), 90.0);
         // So too from the preference.
         now(&mut st, "set_preference", json!({ "key": "transform.place_print_size", "value": false })).unwrap();
-        assert_eq!(width(now(&mut st, "place", json!({ "path": logo })).unwrap()), 90.0);
+        assert_eq!(width(call(&mut st, "place", json!({ "path": logo })).unwrap()), 90.0);
         // A file that does not say its resolution: pixel for pixel either way.
         let shot = jpeg_at("shot.jpg", 90, 60, None);
-        assert_eq!(width(now(&mut st, "place", json!({ "path": shot, "print_size": true })).unwrap()), 90.0);
+        assert_eq!(width(call(&mut st, "place", json!({ "path": shot, "print_size": true })).unwrap()), 90.0);
         // Pixels that are not square: 200 × 100 at 200 ppi across and 100 down is an inch
         // each way, so 100 pixels each way here.
         let fax = jpeg_at("fax.jpg", 200, 100, Some([200, 100]));
-        let b = box_of(&now(&mut st, "place", json!({ "path": fax, "print_size": true })).unwrap());
+        let b = box_of(&call(&mut st, "place", json!({ "path": fax, "print_size": true })).unwrap());
         assert_eq!(b, [150.0, 100.0, 100.0, 100.0]);
         // The box switches between the two, about its center, and back.
         st.place_file(std::path::Path::new(&logo), None, true).unwrap();
@@ -5514,7 +5509,7 @@ mod tests {
         let mut st = AppState::new();
         now(&mut st, "new", json!({ "width": 400, "height": 300, "resolution": 200 })).unwrap();
         let place = |st: &mut AppState, path: &str, on: bool| {
-            box_of(&now(st, "place", json!({ "path": path, "print_size": on })).unwrap())
+            box_of(&call(st, "place", json!({ "path": path, "print_size": on })).unwrap())
         };
         // The canvas's pixels at half its resolution print twice its size, and are fitted
         // back to exactly the canvas.
@@ -5554,7 +5549,7 @@ mod tests {
         // A resolution too far from the image's to scale by: pixel for pixel, and said.
         now(&mut st, "resize_image", json!({ "resolution": 0.01 })).unwrap();
         let fine = jpeg_at("fine.jpg", 10, 10, Some([65000, 65000]));
-        let v = now(&mut st, "place", json!({ "path": fine, "print_size": true })).unwrap();
+        let v = call(&mut st, "place", json!({ "path": fine, "print_size": true })).unwrap();
         assert_eq!(box_of(&v)[2], 10.0);
         assert!(v["notes"].to_string().contains("too far from the image's"), "{v}");
         open(&mut st, &fine, true);
@@ -5573,7 +5568,7 @@ mod tests {
         let c = st.active().unwrap().doc().canvas;
         assert_eq!((c.width, c.height, st.active().unwrap().doc().resolution), (288, 144, 144.0));
         let path = png_file("logo.png", 40, 20).display().to_string();
-        let logo = now(&mut st, "place", json!({ "path": path, "name": "Logo", "x": 10, "y": 20 })).unwrap();
+        let logo = call(&mut st, "place", json!({ "path": path, "name": "Logo", "x": 10, "y": 20 })).unwrap();
         let logo = logo["layer"].clone();
         let bounds = |st: &AppState, layer: &Value| {
             let id = LayerId(layer.as_u64().unwrap());
@@ -5583,7 +5578,7 @@ mod tests {
         // Another layer's edge, a length in a unit, and a bare number in the call's unit.
         let given =
             json!({ "path": path, "x": "Logo.right + 0.25in", "y": "layer(\"Logo\").bottom + 1", "unit": "in" });
-        let mark = now(&mut st, "place", given).unwrap()["layer"].clone();
+        let mark = call(&mut st, "place", given).unwrap()["layer"].clone();
         assert_eq!(bounds(&st, &mark), [86.0, 184.0, 126.0, 204.0]);
         // The box's own numbers, as it was: moved 1 in right, then half as wide (its
         // proportions kept), and turned.
@@ -5623,12 +5618,12 @@ mod tests {
         now(&mut st, "new", json!({ "width": 200, "height": 100, "resolution": 100 })).unwrap();
         let path = png_file("piece.png", 10, 10).display().to_string();
         let id = |v: &Value| LayerId(v["layer"].as_u64().unwrap());
-        let logo = id(&now(&mut st, "place", json!({ "path": path, "name": "Logo", "x": 20, "y": 30 })).unwrap());
+        let logo = id(&call(&mut st, "place", json!({ "path": path, "name": "Logo", "x": 20, "y": 30 })).unwrap());
         let placed = |st: &AppState, l: LayerId| st.active().unwrap().doc().layer(l).unwrap().placed.clone();
         let left = |st: &AppState, l: LayerId| st.active().unwrap().doc().layer(l).unwrap().bounds().unwrap().x0;
         // x names another layer, so it is kept, the layer by id; y is a length alone, which
         // working out again would not change.
-        let mark = id(&now(&mut st, "place", json!({ "path": path, "x": "Logo.right + 5", "y": "0.1in" })).unwrap());
+        let mark = id(&call(&mut st, "place", json!({ "path": path, "x": "Logo.right + 5", "y": "0.1in" })).unwrap());
         let p = placed(&st, mark).expect("its placement was not kept");
         assert_eq!((p.layers.clone(), p.numbers.len()), (vec![mark], 1));
         assert_eq!(
@@ -5644,7 +5639,8 @@ mod tests {
         assert_eq!(placed(&st, mark), Some(p.clone()), "re-applied, it is kept as it was");
         // A side given with the other, not in proportion with it: re-applied, the other
         // stays as it is.
-        let wide = id(&now(&mut st, "place", json!({ "path": path, "width": "Logo.width * 2", "height": 7 })).unwrap());
+        let wide =
+            id(&call(&mut st, "place", json!({ "path": path, "width": "Logo.width * 2", "height": 7 })).unwrap());
         now(&mut st, "transform", json!({ "layers": [logo.0], "width": 20 })).unwrap();
         now(&mut st, "reapply_placement", json!({ "layer": wide.0 })).unwrap();
         let b = st.active().unwrap().doc().layer(wide).unwrap().bounds().unwrap();
@@ -5700,7 +5696,7 @@ mod tests {
         now(&mut st, "new", json!({ "width": 200, "height": 100, "resolution": 100 })).unwrap();
         let path = png_file("piece.png", 10, 10).display().to_string();
         let id = |v: &Value| LayerId(v["layer"].as_u64().unwrap());
-        let logo = id(&now(&mut st, "place", json!({ "path": path, "name": "Logo", "x": 20, "y": 30 })).unwrap());
+        let logo = id(&call(&mut st, "place", json!({ "path": path, "name": "Logo", "x": 20, "y": 30 })).unwrap());
         let placed = |st: &AppState, l: LayerId| st.active().unwrap().doc().layer(l).unwrap().placed.clone();
         // Naming the layer it moves, or counting from it, it would move again each time.
         now(&mut st, "transform", json!({ "layers": [logo.0], "x": "Logo.left + 10" })).unwrap();
@@ -5711,11 +5707,11 @@ mod tests {
         // Fitted inside a rectangle, its sides are the rectangle's, not the box's (though
         // its height comes out the rectangle's too).
         let given = json!({ "path": path, "width": "Logo.width * 3", "height": "Logo.height", "fit": "inside" });
-        let fitted = id(&now(&mut st, "place", given).unwrap());
+        let fitted = id(&call(&mut st, "place", given).unwrap());
         assert_eq!(placed(&st, fitted), None, "a rectangle's sides were kept as the box's");
         // An angle past half a turn is the same angle, and kept.
         let turned =
-            id(&now(&mut st, "place", json!({ "path": path, "angle": "180 + atan2(Logo.height, Logo.width)" }))
+            id(&call(&mut st, "place", json!({ "path": path, "angle": "180 + atan2(Logo.height, Logo.width)" }))
                 .unwrap());
         let p = placed(&st, turned).expect("the angle was not kept");
         assert_eq!(p.numbers.iter().map(|n| n.number).collect::<Vec<_>>(), vec![BoxNumber::Angle]);
@@ -5729,7 +5725,7 @@ mod tests {
         d.commit_pending();
         assert_eq!(placed(&st, turned), Some(p), "drawing it another way lost its placement");
         // Given what leaves it where it is, the box is kept as given all the same.
-        let mark = id(&now(&mut st, "place", json!({ "path": path, "x": 5 })).unwrap());
+        let mark = id(&call(&mut st, "place", json!({ "path": path, "x": 5 })).unwrap());
         let left = |st: &AppState, l: LayerId| st.active().unwrap().doc().layer(l).unwrap().bounds().unwrap().x0;
         let there = format!("Logo.left - {}", left(&st, logo) - left(&st, mark));
         now(&mut st, "transform", json!({ "layers": [mark.0], "x": there })).unwrap();
@@ -5737,7 +5733,7 @@ mod tests {
         assert!(placed(&st, mark).is_some(), "a placement that moved nothing was dropped");
         // Placed together, they are re-applied together, or not at all: not one of them
         // again by itself once the other has been placed otherwise, and none if one is locked.
-        let other = id(&now(&mut st, "place", json!({ "path": path, "x": 100 })).unwrap());
+        let other = id(&call(&mut st, "place", json!({ "path": path, "x": 100 })).unwrap());
         now(&mut st, "transform", json!({ "layers": [mark.0, other.0], "x": "Logo.right" })).unwrap();
         assert_eq!(placed(&st, mark).unwrap().layers.len(), 2);
         // Open on one of them, the box is not what they were placed as.
@@ -5776,7 +5772,7 @@ mod tests {
         let path = png_file("piece.png", 10, 10).display().to_string();
         let id = |v: &Value| LayerId(v["layer"].as_u64().unwrap());
         let place = |st: &mut AppState, name: &str, x: &str| {
-            id(&now(st, "place", json!({ "path": path, "name": name, "x": x })).unwrap())
+            id(&call(st, "place", json!({ "path": path, "name": name, "x": x })).unwrap())
         };
         let left = |st: &AppState, l: LayerId| st.active().unwrap().doc().layer(l).unwrap().bounds().unwrap().x0;
         // A chain: B is placed by A, and C by B; C lies below B, so found first.
@@ -5852,7 +5848,7 @@ mod tests {
         let mut st = AppState::new();
         now(&mut st, "new", json!({ "width": 200, "height": 100, "resolution": 100 })).unwrap();
         let path = png_file("mark.png", 10, 10).display().to_string();
-        let mark = now(&mut st, "place", json!({ "path": path, "x": 50, "y": 20 })).unwrap()["layer"].clone();
+        let mark = call(&mut st, "place", json!({ "path": path, "x": 50, "y": 20 })).unwrap()["layer"].clone();
         let bounds = |st: &AppState, layer: &Value| {
             let id = LayerId(layer.as_u64().unwrap());
             let b = st.active().unwrap().doc().layer(id).unwrap().bounds().unwrap();
@@ -5860,7 +5856,7 @@ mod tests {
         };
         // Its top-left corner 0.05 in (5 px) right of the mark's bottom-right corner.
         let given = json!({ "path": path, "x": "0.05in", "y": 0, "from_layer": mark, "from_anchor": "bottom-right" });
-        let next = now(&mut st, "place", given).unwrap();
+        let next = call(&mut st, "place", given).unwrap();
         assert_eq!((next["box"]["x"].clone(), next["box"]["y"].clone()), (json!(5.0), json!(0.0)), "{next}");
         let layer = next["layer"].clone();
         assert_eq!(bounds(&st, &layer), (65.0, 30.0, 75.0, 40.0));
@@ -5896,10 +5892,10 @@ mod tests {
         let canvas = st.active().unwrap().doc().canvas;
         assert_eq!((x0 - canvas.x as f64, y0 - canvas.y as f64), (1.0, 1.0), "not from where the mark was");
         // A layer that is not there, or holds nothing, is nothing to count from.
-        let none = now(&mut st, "place", json!({ "path": path, "from_layer": 999 })).unwrap_err();
+        let none = call(&mut st, "place", json!({ "path": path, "from_layer": 999 })).unwrap_err();
         assert!(none.contains("no layer 999"), "{none}");
         let empty = now(&mut st, "new_layer", json!({})).unwrap()["layer"].clone();
-        let nothing = now(&mut st, "place", json!({ "path": path, "from_layer": empty })).unwrap_err();
+        let nothing = call(&mut st, "place", json!({ "path": path, "from_layer": empty })).unwrap_err();
         assert!(nothing.contains("holds nothing"), "{nothing}");
         assert!(st.active().unwrap().transform.is_none(), "a refused box was left open");
         std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap()).ok();

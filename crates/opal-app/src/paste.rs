@@ -245,7 +245,7 @@ impl AppState {
     }
 
     /// Clears the status bar if it still shows `notice`.
-    fn take_down(&mut self, notice: &str) {
+    pub(crate) fn take_down(&mut self, notice: &str) {
         if self.notice.as_ref().is_some_and(|(text, _)| text == notice) {
             self.notice = None;
         }
@@ -370,13 +370,9 @@ impl AppState {
         d.begin_paste(pasted, place, sampling, position, into, how);
     }
 
-    /// Opens the transform box on the active document with the image file at `path` on a
-    /// new layer called `name` (or after the file), placed as a paste is: what Place does
-    /// once a file is chosen. At its print size if `print_size` (scaled by its resolution
-    /// against the image's, each way), else pixel for pixel; the box's button switches
-    /// between the two. A file that does not say its resolution, or says one the image's
-    /// is too far from to scale by, is placed pixel for pixel. What the file's reading said
-    /// comes back as warnings.
+    /// [`place_imported`](Self::place_imported), reading the file here (the interface and
+    /// scripts read it in the background: [`place_later`](Self::place_later)).
+    #[cfg(test)]
     pub(crate) fn place_file(
         &mut self,
         path: &std::path::Path,
@@ -384,6 +380,23 @@ impl AppState {
         print_size: bool,
     ) -> Result<Vec<String>, String> {
         let imported = opal_io::image_files::import(path, crate::memory::free()).map_err(|e| e.to_string())?;
+        self.place_imported(path, imported, name, print_size)
+    }
+
+    /// Opens the transform box on the active document with the image file at `path`, read
+    /// already (`imported`), on a new layer called `name` (or after the file), placed as a
+    /// paste is: what Place does once a file is chosen. At its print size if `print_size`
+    /// (scaled by its resolution against the image's, each way), else pixel for pixel; the
+    /// box's button switches between the two. A file that does not say its resolution, or
+    /// says one the image's is too far from to scale by, is placed pixel for pixel. What the
+    /// file's reading said comes back as warnings.
+    pub(crate) fn place_imported(
+        &mut self,
+        path: &std::path::Path,
+        imported: opal_io::image_files::Imported,
+        name: Option<&str>,
+        print_size: bool,
+    ) -> Result<Vec<String>, String> {
         let pasted = Pasted {
             width: imported.width,
             height: imported.height,
@@ -422,27 +435,37 @@ impl AppState {
         Ok(warnings)
     }
 
-    /// Open as Layers: each of the image files at `paths` (PNG or JPEG, read as Open reads
-    /// them) a layer of its own named after its file, pixel for pixel, centered on the canvas:
-    /// in the active image, above the active layer, the first lowest, as one history state;
-    /// with none open, in a new image the size and resolution of the first. The new layers are
-    /// selected, the topmost active. A file that cannot be read is left out. The new layers, and
-    /// what should be said: those left out, and what reading the others said; or why none
-    /// could be read.
+    /// [`layers_read`](Self::layers_read), reading the files here (the interface and scripts
+    /// read them in the background: [`open_as_layers_later`](Self::open_as_layers_later)).
+    #[cfg(test)]
     pub(crate) fn open_as_layers(
         &mut self,
         paths: &[std::path::PathBuf],
     ) -> Result<(Vec<LayerId>, Vec<String>), String> {
+        self.layers_read(crate::opening::read_files(paths))
+    }
+
+    /// Open as Layers: each of the image files read already (`files`, each by its path, read
+    /// as Open reads them) a layer of its own named after its file, pixel for pixel, centered
+    /// on the canvas: in the active image, above the active layer, the first lowest, as one
+    /// history state; with none open, in a new image the size and resolution of the first.
+    /// The new layers are selected, the topmost active. A file that could not be read (or an
+    /// Opal Studio file) is left out. The new layers, and what should be said: those left
+    /// out, and what reading the others said; or why none could be read.
+    pub(crate) fn layers_read(&mut self, files: crate::opening::Read) -> Result<(Vec<LayerId>, Vec<String>), String> {
         let mut said = Vec::new();
         let mut read = Vec::new();
-        for path in paths {
-            match opal_io::image_files::import(path, crate::memory::free()) {
-                Ok(imported) => {
-                    let named = crate::state::file_title(path);
+        for (path, file) in files {
+            let named = crate::state::file_title(&path);
+            match file {
+                Ok(crate::opening::ReadFile::Image(imported)) => {
                     said.extend(imported.warnings.iter().map(|w| format!("{named}: {w}")));
                     let name =
                         path.file_stem().map_or_else(|| "Layer".to_owned(), |s| s.to_string_lossy().into_owned());
-                    read.push((name, imported));
+                    read.push((name, *imported));
+                }
+                Ok(crate::opening::ReadFile::Native(_)) => {
+                    said.push(format!("Left out {named}: an Opal Studio file, not an image file."))
                 }
                 // (The error names the file.)
                 Err(e) => said.push(format!("Left out {e}")),
@@ -507,8 +530,8 @@ impl AppState {
     }
 
     /// Asks for image files and opens them as layers (see
-    /// [`open_as_layers`](Self::open_as_layers)).
-    pub(crate) fn open_as_layers_dialog(&mut self) {
+    /// [`open_as_layers_later`](Self::open_as_layers_later)).
+    pub(crate) fn open_as_layers_dialog(&mut self, ctx: &egui::Context) {
         let Some(paths) = rfd::FileDialog::new()
             .set_title("Open as Layers")
             .add_filter("PNG and JPEG images", &["png", "jpg", "jpeg"])
@@ -516,18 +539,49 @@ impl AppState {
         else {
             return;
         };
-        match self.open_as_layers(&paths) {
-            Ok((_, said)) => {
-                for s in said {
-                    self.message(MessageKind::Warning, "Open as Layers", s);
-                }
-            }
-            Err(why) => self.message(MessageKind::Error, "Nothing was opened", why),
-        }
+        self.open_as_layers_later(paths, None, ctx);
     }
 
-    /// Asks for an image file and places it (see [`place_file`](Self::place_file)).
-    pub(crate) fn place_dialog(&mut self) {
+    /// [`layers_read`](Self::layers_read), the files read on a worker thread (see
+    /// [`read_then`](Self::read_then)), into the image active now (or a new one, if none is
+    /// open). For call `answer`, answers with the image, the layers and what reading said;
+    /// else tells the user what should be said.
+    pub(crate) fn open_as_layers_later(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        answer: Option<(u64, Vec<u64>)>,
+        ctx: &egui::Context,
+    ) {
+        let target = self.active_doc;
+        let scripted = answer.is_some();
+        let then: crate::opening::Then = Box::new(move |st: &mut AppState, read| {
+            if let Some(t) = target {
+                st.show_doc(t);
+            }
+            match st.layers_read(read) {
+                Ok((made, said)) => {
+                    let ids: Vec<u64> = made.iter().map(|l| l.0).collect();
+                    let document = st.active_doc.expect("one now").0;
+                    if scripted {
+                        return Ok(crate::api::with_notes(json!({ "document": document, "layers": ids }), said));
+                    }
+                    for s in said {
+                        st.message(MessageKind::Warning, "Open as Layers", s);
+                    }
+                    Ok(json!({}))
+                }
+                Err(why) if scripted => Err(format!("open_as_layers: {why}")),
+                Err(why) => {
+                    st.message(MessageKind::Error, "Nothing was opened", why);
+                    Ok(json!({}))
+                }
+            }
+        });
+        self.read_then(paths, target, answer, then, ctx);
+    }
+
+    /// Asks for an image file and places it (see [`place_later`](Self::place_later)).
+    pub(crate) fn place_dialog(&mut self, ctx: &egui::Context) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Place")
             .add_filter("PNG and JPEG images", &["png", "jpg", "jpeg"])
@@ -535,14 +589,56 @@ impl AppState {
         else {
             return;
         };
-        match self.place_file(&path, None, self.prefs.bool("transform.place_print_size")) {
-            Ok(warnings) => {
-                for w in warnings {
-                    self.message(MessageKind::Warning, "Placed", w);
+        let print_size = self.prefs.bool("transform.place_print_size");
+        self.place_later(path, None, print_size, None, ctx);
+    }
+
+    /// [`place_imported`](Self::place_imported), the file read on a worker thread (see
+    /// [`read_then`](Self::read_then)), into the image active now; then `apply` (a script's
+    /// call: where its box goes, and whether into the active layer), answering call `answer`
+    /// with what applying gives, or telling the user what should be said.
+    pub(crate) fn place_later(
+        &mut self,
+        path: std::path::PathBuf,
+        name: Option<String>,
+        print_size: bool,
+        apply: Option<(u64, Vec<u64>, crate::api::BoxArgs, bool)>,
+        ctx: &egui::Context,
+    ) {
+        let Some(target) = self.active_doc else { return };
+        let answer = apply.as_ref().map(|(n, groups, ..)| (*n, groups.clone()));
+        let then: crate::opening::Then = Box::new(move |st: &mut AppState, read| {
+            st.show_doc(target);
+            let placed = match read.into_iter().next() {
+                Some((path, Ok(crate::opening::ReadFile::Image(imported)))) => {
+                    st.place_imported(&path, *imported, name.as_deref(), print_size)
+                }
+                Some((path, Ok(crate::opening::ReadFile::Native(_)))) => Err(format!(
+                    "{} is an Opal Studio file: Place takes PNG and JPEG images.",
+                    crate::state::file_title(&path)
+                )),
+                Some((_, Err(why))) => Err(why),
+                None => Err("Nothing was read.".to_owned()),
+            };
+            match (placed, apply) {
+                (Ok(warnings), Some((_, _, place, into))) => {
+                    let notes = warnings.into_iter().map(|w| format!("Placed: {w}")).collect();
+                    st.apply_box(&place, into).map(|v| crate::api::with_notes(v, notes))
+                }
+                (Err(why), Some(_)) => Err(format!("place: {why}")),
+                (Ok(warnings), None) => {
+                    for w in warnings {
+                        st.message(MessageKind::Warning, "Placed", w);
+                    }
+                    Ok(json!({}))
+                }
+                (Err(why), None) => {
+                    st.message(MessageKind::Error, "Could not place the image", why);
+                    Ok(json!({}))
                 }
             }
-            Err(e) => self.message(MessageKind::Error, "Could not place the image", e),
-        }
+        });
+        self.read_then(vec![path], Some(target), answer, then, ctx);
     }
 
     /// Opens the clipboard's image as a new image of its own size.
