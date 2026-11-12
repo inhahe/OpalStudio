@@ -859,7 +859,7 @@ impl AppState {
                 let step = self.tool_settings(ToolId::RotateView).f64("rotate_view.step") as f32;
                 let by = if cmd == Cmd::RotateViewLeft { -step } else { step };
                 let v = &mut self.active_mut().expect("available").view;
-                v.turn_to(v.angle + by);
+                v.turn_to(v.angle() + by);
             }
             Cmd::ResetRotation => self.active_mut().expect("available").view.turn_to(0.0),
             Cmd::ZoomFit => {

@@ -340,7 +340,8 @@ impl OpalApp {
             });
             let released = i.events.iter().any(|e| matches!(e, Event::Key { key: k, pressed: false, .. } if *k == key));
             let others = i.events.iter().any(|e| matches!(e, Event::Key { key: k, pressed: true, .. } if *k != key));
-            (pressed, released, i.pointer.any_down(), others)
+            // (A press counts though let go in the same frame: a tap on a touchpad.)
+            (pressed, released, i.pointer.any_down() || i.pointer.any_pressed(), others)
         });
         // (Not a keytip's R, nor one typed or pressed behind a dialog.)
         if pressed && !typing && !self.st.dialog_open() && self.st.ribbon.keytips == Keytips::Off {
@@ -434,6 +435,18 @@ impl OpalApp {
         let rotate_tool = self.st.tool() == ToolId::RotateView;
         let measure_tool = self.st.tool() == ToolId::Measure;
         let Some(d) = self.st.active_mut() else { return };
+        // Esc gives up a turn of the view before anything else it would end (a box the turn is
+        // over), its angle put back; the rest of the drag does nothing.
+        if let Some(crate::doc::Drag::TurnView(t)) = &mut d.drag
+            && !t.given_up
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            t.given_up = true;
+            let angle = t.angle;
+            d.view.turn_to(angle);
+            d.revision += 1;
+            return;
+        }
         // While an edit is under way on the image, they change nothing (see `edits`).
         if d.busy.is_some() {
             return;
@@ -492,7 +505,7 @@ impl OpalApp {
         }
         // The Rotate View tool's Esc puts the view straight, when no box takes it.
         if rotate_tool
-            && d.view.angle != 0.0
+            && d.view.angle() != 0.0
             && d.transform.is_none()
             && !d.dragging()
             && !cropping
@@ -795,7 +808,7 @@ impl OpalApp {
             d.view.zoom.to_bits().hash(&mut h);
             d.view.offset.x.to_bits().hash(&mut h);
             d.view.offset.y.to_bits().hash(&mut h);
-            d.view.angle.to_bits().hash(&mut h);
+            d.view.angle().to_bits().hash(&mut h);
             d.title.hash(&mut h);
             d.saved_at.hash(&mut h);
             d.revision.hash(&mut h);
@@ -1027,7 +1040,7 @@ impl OpalApp {
         }
         if let Some(d) = self.st.active() {
             // The view's angle, while it is turned (or the field is in use).
-            if d.view.angle != 0.0 || self.angle_in_use {
+            if d.view.angle() != 0.0 || self.angle_in_use {
                 parts.push(StatusPart::Angle);
             }
             parts.extend([StatusPart::Zoom, StatusPart::Size, StatusPart::Resolution]);
@@ -1176,11 +1189,11 @@ impl OpalApp {
             StatusPart::Angle => {
                 let unit = self.st.unit();
                 let Some(d) = self.st.active_mut() else { return };
-                let mut angle = f64::from(d.view.angle);
+                let mut angle = f64::from(d.view.angle());
                 let scope = crate::lengths::image_scope(Some(d.doc()), unit, d.doc().resolution);
                 let field = crate::number_field::NumberField::angle(&mut angle, scope);
-                // (Past half a turn either way, wrapped round by `turn_to`.)
-                let r = ui.add(field.range(-360.0..=360.0).speed(0.5).remember("view.angle"));
+                // (Any angle: `turn_to` takes it round, whatever a drag adds up to.)
+                let r = ui.add(field.range(f64::NEG_INFINITY..=f64::INFINITY).speed(0.5).remember("view.angle"));
                 if r.changed() {
                     d.view.turn_to(angle as f32);
                 }

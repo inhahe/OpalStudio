@@ -695,15 +695,16 @@ fn view_angle(ui: &mut egui::Ui, st: &mut AppState) {
     let typed = {
         let d = st.active().expect("checked by the caller");
         let scope = crate::lengths::image_scope(Some(d.doc()), st.unit(), d.doc().resolution);
-        let mut angle = f64::from(d.view.angle);
+        let mut angle = f64::from(d.view.angle());
         ui.horizontal(|ui| {
             let label = ui.label("Angle");
             let field = crate::number_field::NumberField::angle(&mut angle, scope);
-            // (Past half a turn either way, wrapped round by `turn_to`.)
-            ui.add(field.range(-360.0..=360.0).speed(0.5).remember("view.angle")).labelled_by(label.id);
+            // (Any angle: `turn_to` takes it round, whatever a drag adds up to.)
+            ui.add(field.range(f64::NEG_INFINITY..=f64::INFINITY).speed(0.5).remember("view.angle"))
+                .labelled_by(label.id);
             ui.label(RichText::new("clockwise").color(palette.weak_text));
         });
-        (angle != f64::from(d.view.angle)).then_some(angle)
+        (angle != f64::from(d.view.angle())).then_some(angle)
     };
     if let Some(angle) = typed {
         st.active_mut().expect("checked by the caller").view.turn_to(angle as f32);

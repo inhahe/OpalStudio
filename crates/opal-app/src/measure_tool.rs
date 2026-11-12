@@ -136,18 +136,18 @@ fn bearing(from: [f64; 2], to: [f64; 2]) -> f64 {
 /// The largest rectangle of the shape of a `w × h` canvas, in whole pixels, that fits within
 /// it turned by `degrees` about the same middle: what is left of a canvas straightened without
 /// its corners going empty. Its sides differ from the canvas's by even numbers of pixels, so
-/// that it lies on the canvas's grid about its middle.
+/// that it lies on the canvas's grid about its middle; each is a pixel at least (two, for an
+/// even side), which a canvas too thin for any to fit turned is given all the same.
 pub fn inscribed([w, h]: [u32; 2], degrees: f64) -> [u32; 2] {
     let (s, c) = degrees.to_radians().sin_cos();
     let (s, c) = (s.abs(), c.abs());
     let (fw, fh) = (f64::from(w), f64::from(h));
     let k = (fw / (fw * c + fh * s)).min(fh / (fw * s + fh * c)).min(1.0);
     let side = |full: u32, f: f64| {
-        let mut n = (f * k + 1e-9).floor() as u32;
-        if (full - n.min(full)) % 2 == 1 {
-            n -= 1;
-        }
-        n.max(if full % 2 == 0 { 2 } else { 1 }).min(full)
+        let n = ((f * k + 1e-9).floor() as u32).min(full);
+        // Of the canvas's parity, so as to lie on its grid about the same middle.
+        let n = if (full - n).is_multiple_of(2) { n } else { n.saturating_sub(1) };
+        n.max(if full.is_multiple_of(2) { 2 } else { 1 })
     };
     [side(w, fw), side(h, fh)]
 }
@@ -650,13 +650,15 @@ mod tests {
             let [iw, ih] = inscribed([w, h], t);
             assert!(iw >= 1 && ih >= 1 && (w - iw) % 2 == 0 && (h - ih) % 2 == 0, "{w}x{h} at {t}: {iw}x{ih}");
             // Its corners, turned back onto the canvas, within it.
-            let (s, c) = (t as f64).to_radians().sin_cos();
+            let (s, c) = t.to_radians().sin_cos();
             for [x, y] in [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]] {
                 let (x, y) = (x * f64::from(iw) / 2.0, y * f64::from(ih) / 2.0);
                 let (u, v) = (x * c - y * s, x * s + y * c);
                 assert!(u.abs() <= f64::from(w) / 2.0 + 1e-6 && v.abs() <= f64::from(h) / 2.0 + 1e-6, "{w}x{h} at {t}");
             }
         }
+        // Too thin for any whole pixel to fit turned: the least there may be, on the grid.
+        assert_eq!(inscribed([1, 100], 45.0), [1, 2]);
         // Not turned: the canvas itself; turned a little, nearly so.
         assert_eq!(inscribed([400, 300], 0.0), [400, 300]);
         let [iw, _] = inscribed([400, 300], 1.0);

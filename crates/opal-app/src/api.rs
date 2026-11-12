@@ -6223,6 +6223,11 @@ mod tests {
         assert_eq!((trimmed["width"].clone(), trimmed["height"].clone()), (json!(100), json!(130)), "{trimmed}");
         let c = st.active().unwrap().doc().canvas;
         assert_eq!((c.x, c.y), (100, 70));
+        // Nothing to trim (no transparent border, all opaque): no failure, but said; no state.
+        let states = st.active().unwrap().history.nodes().count();
+        let same = call(&mut st, "trim", json!({})).unwrap();
+        assert!(same["notes"].to_string().contains(crate::image_ops::NO_BORDER), "{same}");
+        assert_eq!(st.active().unwrap().history.nodes().count(), states);
         let revealed = call(&mut st, "reveal_all", json!({})).unwrap();
         assert_eq!((revealed["width"].clone(), revealed["height"].clone()), (json!(300), json!(200)), "{revealed}");
         // An image that is all border is refused, and said why.
@@ -6268,11 +6273,12 @@ mod tests {
         let l = st.active().unwrap().doc().layers[0].all_objects();
         let opal_core::document::ObjectKind::Pixels(p) = &l[0].kind else { panic!("pixels") };
         assert!(p.image.pixel(20, 6)[0].to_f32() < 1e-3, "not defringed two pixels in");
+        // (Opaque: neither matte changes anything, and neither makes a state.)
         call(&mut st, "remove_black_matte", json!({ "layers": [layer] })).unwrap();
         call(&mut st, "remove_white_matte", json!({ "layers": [layer] })).unwrap();
         let d = st.active().unwrap();
-        assert_eq!(d.history.nodes().count(), before + 3);
-        assert_eq!(d.history.undo_label(), Some("Remove white matte"));
+        assert_eq!(d.history.nodes().count(), before + 1);
+        assert_eq!(d.history.undo_label(), Some("Defringe"));
         assert!(call(&mut st, "defringe", json!({ "width": 0 })).is_err(), "a width of nought taken");
     }
 

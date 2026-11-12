@@ -1145,7 +1145,8 @@ mod tests {
     fn the_symmetry_s_guide_and_its_handle_go_through_a_turned_view() {
         use egui::Vec2;
         // A view turned a quarter clockwise: canvas up is the screen's right.
-        let mut v = crate::doc::View { viewport: Vec2::new(400.0, 300.0), ..crate::doc::View::default() };
+        let mut v = crate::doc::View::default();
+        v.viewport = Vec2::new(400.0, 300.0);
         v.turn_to(90.0);
         let to_screen = |p: [f64; 2]| v.to_screen(Vec2::new(p[0] as f32, p[1] as f32)).to_pos2();
         let s = Symmetry { order: 1, mirror: true, center: [100.0, 80.0], angle: 0.0 };

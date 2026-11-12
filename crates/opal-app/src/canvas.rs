@@ -127,7 +127,8 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let Some(d) = st.doc_mut(id) else { return };
     // (A button down before this frame, or let go in it, is a drag under way: R pressed in it
     // starts no turn.)
-    let held_before = ctx.input(|i| (i.pointer.any_down() && !i.pointer.any_pressed()) || i.pointer.any_released());
+    // (A press and its release in the same frame, a tap, is no drag under way.)
+    let held_before = ctx.input(|i| (i.pointer.any_down() || i.pointer.any_released()) && !i.pointer.any_pressed());
     let turning = matches!(d.drag, Some(Drag::TurnView(_))) || (r_held && chosen != ToolId::Outline && !held_before);
     let tool = if space {
         ToolId::Hand
@@ -341,17 +342,16 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         && let Some(p) = ctx.input(|i| i.pointer.press_origin())
     {
         let start = bearing(to_px(p));
-        d.drag = Some(Drag::TurnView(crate::doc::TurnDrag { bearing: start, angle: d.view.angle }));
+        d.drag = Some(Drag::TurnView(crate::doc::TurnDrag { bearing: start, angle: d.view.angle(), given_up: false }));
     }
+    // (Esc gives it up: see `OpalApp::editing_keys`.)
     if let Some(Drag::TurnView(t)) = d.drag {
-        if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            d.give_up_drag();
-        } else if ctx.input(|i| i.pointer.primary_down())
+        if !t.given_up
+            && ctx.input(|i| i.pointer.primary_down())
             && let Some(p) = ctx.input(|i| i.pointer.latest_pos())
         {
-            // Within a turn, then to a whole step: a multiple of it either side of straight.
             let a = (t.angle + bearing(to_px(p)) - t.bearing + 180.0).rem_euclid(360.0) - 180.0;
-            d.view.turn_to(if modifiers.shift { (a / turn_step).round() * turn_step } else { a });
+            d.view.turn_to(if modifiers.shift { stepped(a, turn_step) } else { a });
         }
         if !ctx.input(|i| i.pointer.primary_down()) {
             d.drag = None;
@@ -783,6 +783,14 @@ fn draw_outlines(
     }
 }
 
+/// `a` (degrees, -180 to 180) to the nearest multiple of `step` no further than half a turn
+/// either way: one past it, `View::turn_to` would take round to an angle that is not one.
+fn stepped(a: f32, step: f32) -> f32 {
+    let k = (a / step).round();
+    let k = if (k * step).abs() > 180.0 { k - k.signum() } else { k };
+    k * step
+}
+
 /// The snap lines a drag is using, across the whole view.
 pub fn draw_guides(ui: &egui::Ui, guides: &crate::transform::Guides, rect: Rect, to_screen: &dyn Fn([f64; 2]) -> Pos2) {
     let painter = ui.painter().with_clip_rect(rect);
@@ -829,6 +837,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shift_s_steps_of_the_view_stay_within_half_a_turn() {
+        // Steps of 50: 179 is nearer 200, but that is past half a turn (and round, -160).
+        assert_eq!((stepped(179.0, 50.0), stepped(-179.0, 50.0), stepped(170.0, 25.0)), (150.0, -150.0, 175.0));
+        assert_eq!((stepped(180.0, 15.0), stepped(-7.0, 15.0)), (180.0, -0.0));
+    }
+
+    #[test]
     fn a_guide_reaches_across_the_view_however_it_is_turned() {
         let view = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(400.0, 300.0));
         // Upright, across it top to bottom; on its side, left to right; askew, corner to corner.
@@ -840,8 +855,8 @@ mod tests {
         assert!(!view.contains(a) && !view.contains(b));
         // A guide at x = 100 on a view turned a quarter, which shows canvas x down the screen:
         // it runs across the view left to right.
-        let v = crate::doc::View { viewport: Vec2::new(400.0, 300.0), ..crate::doc::View::default() };
-        let mut v = v;
+        let mut v = crate::doc::View::default();
+        v.viewport = Vec2::new(400.0, 300.0);
         v.turn_to(90.0);
         let to_screen = |p: [f64; 2]| view.min + v.to_screen(Vec2::new(p[0] as f32, p[1] as f32));
         let guides = crate::transform::Guides { xs: vec![100.0], ..Default::default() };

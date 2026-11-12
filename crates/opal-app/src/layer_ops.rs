@@ -350,10 +350,9 @@ impl AppState {
         self.edit_later(d.id, "Flatten image", memory, work, |_, _, ()| {});
     }
 
-    /// Turns the image objects of the selected layers (and of the layers inside selected
-    /// groups) into pixel objects, drawn as the canvas shows them.
     /// Defringe, Remove Black Matte or Remove White Matte (`m`) on the selected layers, off
-    /// the interface thread, as one history state (see design.md, *Matting*).
+    /// the interface thread, as one history state (see design.md, *Matting*); none if it
+    /// changes nothing.
     pub(crate) fn matte(&mut self, m: Matting) {
         let d = self.active().expect("available");
         let sel = d.selected_layers();
@@ -362,22 +361,24 @@ impl AppState {
             .iter()
             .filter_map(|&l| d.doc().layer(l))
             .flat_map(|l| l.all_objects())
-            .map(|o| match &o.kind {
-                ObjectKind::Pixels(p) => p.image.tile_count() as u64,
-                ObjectKind::Image(i) => i.image.tile_count() as u64,
-            })
+            .map(|o| o.image().tile_count() as u64)
             .sum();
+        let measure = crate::memory::Measure::here();
         let work = move |doc: &mut Document, _: &mut IdGen, progress: &Progress| {
             progress.begin(total);
+            // Each tile it changes is a new one (the image as it was is kept, to undo to).
+            let mut memory = measure.now();
             for id in sel {
                 let layer = doc.layer_mut(id).ok_or_else(|| TreeError::NoSuchLayer(id).to_string())?;
-                matte_layer(layer, m, progress)?;
+                matte_layer(layer, m, &mut memory, progress)?;
             }
             Ok(())
         };
-        self.edit_later(d.id, m.label(), Allowance::now(), work, |_, _, ()| {});
+        self.edit_later(d.id, m.label(), Allowance::unlimited(), work, |_, _, ()| {});
     }
 
+    /// Turns the image objects of the selected layers (and of the layers inside selected
+    /// groups) into pixel objects, drawn as the canvas shows them.
     pub(crate) fn rasterize(&mut self) {
         let d = self.active().expect("available");
         let sel = d.selected_layers();
@@ -480,48 +481,67 @@ impl Matting {
     }
 }
 
+/// How many tiles a matte works out at once before writing those it changed into the bitmap
+/// (whose tiles may go to disk): what it holds of them beyond it.
+const MATTE_BATCH: usize = 64;
+
 /// `image` matted as `m` says: tile by tile (those with content), each read with the margin
 /// round it that its result depends on, so that it is what the whole bitmap at once would
-/// give; `None` if it was cancelled.
-pub fn matted(image: &RasterImage, m: Matting, progress: &Progress) -> Option<RasterImage> {
+/// give, those it changes taken from `memory`, the rest kept as they are (shared where they
+/// were); `None` if it changes nothing. An error if it was cancelled, or memory ran out.
+pub fn matted(
+    image: &RasterImage,
+    m: Matting,
+    memory: &mut crate::memory::Allowance,
+    progress: &Progress,
+) -> Result<Option<RasterImage>, String> {
     use rayon::prelude::*;
     let coords: Vec<opal_core::tile::TileCoord> = image.tiles().map(|(c, _)| c).collect();
     let margin = m.margin();
-    let done: Vec<(IRect, Vec<opal_core::tile::Pixel>)> = coords
-        .par_iter()
-        .map(|c| {
-            if progress.is_cancelled() {
-                return None;
-            }
-            let tile = c.rect(0);
-            let around = IRect::new(tile.x0 - margin, tile.y0 - margin, tile.x1 + margin, tile.y1 + margin);
-            let mut px = image.read_rect(&around);
-            match m {
-                Matting::Defringe(w) => {
-                    opal_core::matting::defringe(&mut px, around.width() as usize, around.height() as usize, w)
+    let mut out: Option<RasterImage> = None;
+    for batch in coords.chunks(MATTE_BATCH) {
+        let done: Vec<Option<(IRect, Vec<opal_core::tile::Pixel>)>> = batch
+            .par_iter()
+            .map(|c| {
+                if progress.is_cancelled() {
+                    return Err(crate::edits::CANCELLED.to_owned());
                 }
-                Matting::RemoveMatte(matte) => opal_core::matting::remove_matte(&mut px, matte),
-            }
-            // The tile's own pixels, out of the margin.
-            let (w, m) = (around.width() as usize, margin as usize);
-            let own: Vec<opal_core::tile::Pixel> = (0..tile.height() as usize)
-                .flat_map(|y| px[(y + m) * w + m..(y + m) * w + m + tile.width() as usize].to_vec())
-                .collect();
-            progress.advance(1);
-            Some((tile, own))
-        })
-        .collect::<Option<Vec<_>>>()?;
-    let mut out = image.clone();
-    for (tile, px) in done {
-        out.write_rect(&tile, &px);
+                let tile = c.rect(0);
+                let around = IRect::new(tile.x0 - margin, tile.y0 - margin, tile.x1 + margin, tile.y1 + margin);
+                let mut px = image.read_rect(&around);
+                match m {
+                    Matting::Defringe(w) => {
+                        opal_core::matting::defringe(&mut px, around.width() as usize, around.height() as usize, w)
+                    }
+                    Matting::RemoveMatte(matte) => opal_core::matting::remove_matte(&mut px, matte),
+                }
+                // The tile's own pixels, out of the margin.
+                let (w, m) = (around.width() as usize, margin as usize);
+                let own: Vec<opal_core::tile::Pixel> = (0..tile.height() as usize)
+                    .flat_map(|y| px[(y + m) * w + m..(y + m) * w + m + tile.width() as usize].to_vec())
+                    .collect();
+                progress.advance(1);
+                Ok((own != image.read_rect(&tile)).then_some((tile, own)))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        for (tile, px) in done.into_iter().flatten() {
+            memory.take_tiles(opal_core::raster::TILE_BYTES)?;
+            out.get_or_insert_with(|| image.clone()).write_rect(&tile, &px);
+        }
     }
-    Some(out)
+    Ok(out)
 }
 
 /// `layer` and the layers inside it matted as `m` says: their pixel objects, and the bitmaps
 /// their placed images are drawn from (the colours were wrong in the file, not in the
-/// placing), telling `progress` as each tile is done; an error if it was cancelled.
-fn matte_layer(layer: &mut Layer, m: Matting, progress: &Progress) -> Result<(), String> {
+/// placing), what it changes taken from `memory`, telling `progress` as each tile is done;
+/// an error if it was cancelled, or memory ran out. What it does not change is left as it was.
+fn matte_layer(
+    layer: &mut Layer,
+    m: Matting,
+    memory: &mut crate::memory::Allowance,
+    progress: &Progress,
+) -> Result<(), String> {
     match &mut layer.content {
         LayerContent::Objects(objects) => {
             for o in objects {
@@ -529,12 +549,14 @@ fn matte_layer(layer: &mut Layer, m: Matting, progress: &Progress) -> Result<(),
                     ObjectKind::Pixels(p) => &mut p.image,
                     ObjectKind::Image(i) => &mut i.image,
                 };
-                *image = Arc::new(matted(image, m, progress).ok_or_else(|| crate::edits::CANCELLED.to_owned())?);
+                if let Some(new) = matted(image, m, memory, progress)? {
+                    *image = Arc::new(new);
+                }
             }
         }
         LayerContent::Group(children) => {
             for c in children {
-                matte_layer(Arc::make_mut(c), m, progress)?;
+                matte_layer(Arc::make_mut(c), m, memory, progress)?;
             }
         }
     }
@@ -1313,24 +1335,68 @@ mod tests {
         img
     }
 
+    /// `img` matted as `m` says, with memory enough (as it was, if that changes nothing).
+    fn matted_freely(img: &RasterImage, m: Matting) -> RasterImage {
+        matted(img, m, &mut Allowance::unlimited(), &Progress::default()).unwrap().unwrap_or_else(|| img.clone())
+    }
+
+    /// `img` within `bounds` matted as `m` says, all of it at once.
+    fn matted_whole(img: &RasterImage, bounds: &IRect, m: Matting) -> Vec<opal_core::tile::Pixel> {
+        let mut whole = img.read_rect(bounds);
+        match m {
+            Matting::Defringe(w) => {
+                opal_core::matting::defringe(&mut whole, bounds.width() as usize, bounds.height() as usize, w)
+            }
+            Matting::RemoveMatte(matte) => opal_core::matting::remove_matte(&mut whole, matte),
+        }
+        whole
+    }
+
     #[test]
     fn matting_tile_by_tile_gives_what_the_whole_bitmap_at_once_would() {
         let img = fringed();
         let bounds = IRect::new(98, 98, 402, 402);
         for m in [Matting::Defringe(2), Matting::Defringe(9), Matting::RemoveMatte(0.0)] {
-            let tiled = matted(&img, m, &Progress::default()).unwrap();
-            let mut whole = img.read_rect(&bounds);
-            match m {
-                Matting::Defringe(w) => {
-                    opal_core::matting::defringe(&mut whole, bounds.width() as usize, bounds.height() as usize, w)
-                }
-                Matting::RemoveMatte(matte) => opal_core::matting::remove_matte(&mut whole, matte),
-            }
-            assert!(tiled.read_rect(&bounds) == whole, "{m:?}: tiles disagree with the whole");
+            let tiled = matted_freely(&img, m);
+            assert!(tiled.read_rect(&bounds) == matted_whole(&img, &bounds, m), "{m:?}: tiles disagree with the whole");
         }
         // Defringed by two, the red is gone.
-        let p = matted(&img, Matting::Defringe(2), &Progress::default()).unwrap().pixel(150, 101);
+        let p = matted_freely(&img, Matting::Defringe(2)).pixel(150, 101);
         assert!(p[0].to_f32() < 1e-3 && p[2].to_f32() > 0.99, "{p:?}");
+        // A thin red strand from a blue block, across tiles: coloured only near the block, the
+        // same tile by tile.
+        let mut strand = RasterImage::new();
+        for y in 100..200 {
+            for x in 100..200 {
+                strand.set_pixel(x, y, pixel_from_f32([0.0, 0.0, 1.0, 1.0]));
+            }
+        }
+        for x in 200..600 {
+            strand.set_pixel(x, 150, pixel_from_f32([1.0, 0.0, 0.0, 1.0]));
+        }
+        let bounds = IRect::new(90, 90, 610, 210);
+        for w in [1, 3] {
+            let tiled = matted_freely(&strand, Matting::Defringe(w));
+            assert!(
+                tiled.read_rect(&bounds) == matted_whole(&strand, &bounds, Matting::Defringe(w)),
+                "{w}: tiles disagree"
+            );
+            assert_eq!(tiled.pixel(400, 150), strand.pixel(400, 150), "{w}: the strand recoloured far from the block");
+        }
+    }
+
+    #[test]
+    fn a_matte_that_changes_nothing_keeps_the_bitmap_and_its_shared_tiles() {
+        // Opaque white, one tile shared by every place (as a new image's background is).
+        let white = RasterImage::filled(&IRect::new(0, 0, 1000, 600), pixel_from_f32([1.0; 4]));
+        for m in [Matting::RemoveMatte(0.0), Matting::RemoveMatte(1.0), Matting::Defringe(3)] {
+            let same = matted(&white, m, &mut Allowance::memory(Some(0)), &Progress::default());
+            assert!(same.is_ok_and(|s| s.is_none()), "{m:?} changed it, or asked for memory");
+        }
+        // Memory short for the tiles it changes: refused.
+        let why = matted(&fringed(), Matting::Defringe(2), &mut Allowance::memory(Some(1000)), &Progress::default())
+            .unwrap_err();
+        assert!(why.contains("memory"), "{why}");
     }
 
     #[test]

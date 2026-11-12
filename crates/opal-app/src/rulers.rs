@@ -253,8 +253,8 @@ mod tests {
     fn a_turned_view_s_rulers_count_the_axis_along_them_or_none() {
         use crate::doc::View;
         let corner = Vec2::new(-50.0, 0.0);
-        let mut v =
-            View { zoom: 2.0, offset: Vec2::new(100.0, 40.0), viewport: Vec2::new(600.0, 400.0), ..View::default() };
+        let mut v = View::default();
+        (v.zoom, v.offset, v.viewport) = (2.0, Vec2::new(100.0, 40.0), Vec2::new(600.0, 400.0));
         // Straight: x across the top, from the canvas's corner, half a pixel a device pixel.
         let top = scale(&v, Vec2::ZERO, Vec2::X, corner).unwrap();
         assert_eq!(top, Scale { start: f64::from(v.to_canvas(Vec2::ZERO).x + 50.0), per_point: 0.5 });

@@ -891,18 +891,25 @@ The view, not the image, can be turned (`View::angle`, degrees clockwise, each i
 own), as a drawing is turned on a desk; painting needs it most.
 
 - **The Rotate View tool** (R): dragging turns the view about its middle by the angle the
-  pointer sweeps round it (a drag of its own, `Drag::TurnView`, which Esc gives up, putting
-  the angle back, and which ends with its button); Shift makes the angle a multiple of its
-  step (15°, a setting), going round past half a turn. Its settings show the angle, typed in
-  as any field takes it (past ±180° it goes round: 270 is -90), and the commands below;
-  Esc, while it is chosen and nothing is dragged, puts the view straight.
+  pointer sweeps round it (a drag of its own, `Drag::TurnView`, which ends with its button);
+  Esc gives it up, putting the angle back, before anything else Esc would end (a box the
+  turn is over: `OpalApp::editing_keys`), and what is left of the drag then does nothing
+  (`TurnDrag::given_up`), rather than fall to the tool chosen. Shift makes the angle a
+  multiple of its step (15°, a setting), the nearest within half a turn either way (past
+  it, going round, it would be none). Its settings show the angle, typed in as any field
+  takes it, any angle (past ±180° it goes round: 270 is -90, 450 is 90; one past what a
+  number holds turns nothing), and the commands below; Esc, while it is chosen and nothing
+  is dragged, puts the view straight. The angle is set only with its cosine and sine
+  (`View::turn_to`; read by `View::angle`).
 - **R, as in Photoshop** (`OpalApp::rotate_key`): tapped (let go within half a second,
   nothing else pressed meanwhile, no drag under way), it chooses the tool, once let go; held,
   it chooses nothing, and a drag begun on the image while it is held turns the view with
   whichever tool is chosen (as Space scrolls it), the tool staying, a box open (a paste's,
   the crop box) left where it is; but the outline tool's R+drag still redraws the outline.
   Whether a drag turns is decided as its button goes down: R pressed during another drag
-  leaves that drag going, and R let go during a turn does not end it. So R alone among the
+  leaves that drag going, and R let go during a turn does not end it. A tap of a button
+  with R held (pressed and let go within one frame, as touchpads tap) turns nothing and is
+  no click of the tool chosen, and R let go after it is no tap of R. So R alone among the
   tools' keys acts when let go, and a press of it during a drag is held back without a
   word.
 - **The View tab's commands** (its Rotate group): Rotate View Left and Right (a step at a
@@ -917,7 +924,8 @@ own), as a drawing is turned on a desk; painting needs it most.
   reach across the view through their two canvas points, a symmetry's seams and the handle
   turning its axis (whose angle is the canvas's, however the view turns); and every tool
   takes the pointer through the turned view. A paste or a placed file is centred on what the
-  view shows of the canvas (`View::shown`). Zooming keeps the point under the pointer where
+  view shows of the canvas (`View::shown_middle`: the centroid of the viewport cut to the
+  canvas, inside it however the view is turned; the canvas's middle if it shows none). Zooming keeps the point under the pointer where
   it is; scrolling moves the image on the screen as the pointer moves; fitting fits the
   turned canvas. Its
   pixels are lined up with the screen's at whole zooms only while it is straight (and again
@@ -1077,13 +1085,16 @@ The View tab's Compare group (`compare`):
 ### Edits that take long
 
 Merging (Merge Down, Selected, Visible and Group), Stamp Visible, Flatten, Rasterize, Rotate
-and Flip, Rotate by Angle, Resize Image, Crop and straighten, and a script's
-`grow_selection` and `feather_selection` are worked out off the interface thread
+and Flip, Rotate by Angle, Resize Image, Crop and straighten (Straighten's too), Trim, the
+matting commands, and a script's `grow_selection` and `feather_selection` are worked out
+off the interface thread
 (`edits`), from the image as it was (an edit in progress committed first, and a rename left
 open in it finished), their parallel parts on threads of their own (`edits::pool`), so that
 they neither wait behind the background threads' work (the images' views, saves and exports)
 nor keep it waiting, and applied as one history state once done (none, if they changed
-nothing). Their memory is checked before they begin.
+nothing). Their memory is checked before they begin, or, where what they take cannot be
+known until they run (the matting commands, which make new only the tiles they change), as
+they go: refused then, saying so, the image as it was.
 
 - **The image stays as it was meanwhile, and nothing may change it** (`DocState::busy`):
   its commands are unavailable, saying why ("Merge down is under way: wait for it to
@@ -1110,8 +1121,10 @@ nothing). Their memory is checked before they begin.
   have been answered with at once, of the image the edit was of (whichever is active by
   then), and what applying it said as its notes or its failure. If the edit fails then,
   the user is put back on the image the call found active, unless another has been made
-  active since (`AppState::back_to`): not the layers chosen there, which the user may have
-  chosen since (a call refused at once puts those back too). Its failure is named by the call however soon
+  active since (`AppState::back_to`), and the layers chosen in the image edited as the call
+  found them (the call may have chosen others, and the user, the image busy, could not);
+  not those of other images, which the user may have chosen since (a call refused at once
+  puts those back too). Its failure is named by the call however soon
   it comes (`grow_selection: ...`), a refusal told as one (not memory enough, nothing
   selected to copy), a panic as an error; a notification's, which no answer carries, is
   told to the user (`api::Calling`, known to the edit as it begins).
@@ -1276,16 +1289,21 @@ The edge colours of something cut out of one background and put on another, set 
 Layer tab's Matting group; `opal_core::matting`). Each works on the selected layers (those in
 a group selected too), their pixel objects and the bitmaps their placed images are drawn
 from (not the placing: the colours were wrong in the file), as one history state, off the
-interface thread, cancelled with Esc; a locked layer stops it, and says so.
+interface thread (*Edits that take long*: cancelled from the status bar); a locked layer
+stops it, and says so. Only the tiles it changes are made anew, as it goes, a batch at a
+time (whose memory, which may go to disk, is taken as it goes: `layer_ops::matted`); the
+rest are kept as they were, shared where they were, and one that changes nothing makes no
+state.
 
 - **Defringe…** (a width, 1 to 200 pixels; 1 by default): each pixel that shows and lies
   within that many steps of a transparent one (diagonals one step) is given the colour of
   the pixels further in, its alpha kept: ring by ring outwards from those, each pixel the
-  mean of its neighbours already given one. A halo of the old background round a cut-out
-  goes. Content no wider than twice the width has nothing further in, and is left as it is.
-  Worked tile by tile, each read with a margin of twice the width and two pixels round it,
-  which is all its pixels' colours can come from, so the result is the same as the whole
-  bitmap's at once.
+  mean of its neighbours already given one, as many rings as the width. A halo of the old
+  background round a cut-out goes. Content no wider than twice the width has nothing further
+  in, and is left as it is, but for what lies within the width's rings of content that has
+  (a strand's root: a long thin strand keeps its own colours beyond). Worked tile by tile,
+  each read with a margin of twice the width and two pixels round it, which is all its
+  pixels' colours can come from, so the result is the same as the whole bitmap's at once.
 - **Remove Black Matte** and **Remove White Matte**: the colour a partly transparent pixel
   was blended with (black or white) taken back out of it, as if it had been laid over that
   at its alpha: in sRGB terms, as images are blended where mattes come from,
@@ -1534,15 +1552,19 @@ the selection itself (see *Transform Selection*).
   difference of a channel, in the image's 8-bit sRGB terms: a scan's slightly uneven white
   margin is trimmed with 10 or so); and from which sides (top, bottom, left, right; all, by
   default). Worked out off the interface thread, on the image as it shows (its visible layers
-  composited a strip of 64 rows or columns at a time, from each side inwards: only what
-  borders is read): a row or column goes while every pixel of it is the border's
-  (`image_ops::trimmed`). One history state ("Trim"); nothing to trim, or nothing but
-  border, says so. The dialog starts as it was last left. Scripts: `trim(based_on,
+  composited a strip at a time from each side inwards, each strip a row or column of whole
+  tiles, as the image is composited, so that each is composited once: only what borders is
+  read), cancelled from the status bar: a row or column goes while every pixel of it is the
+  border's (`image_ops::trimmed`). One history state ("Trim"); nothing to trim is said (no
+  failure: a script's call is answered, with the note), and nothing but border refused,
+  saying so. The dialog starts as it was last left. Scripts: `trim(based_on,
   tolerance, top, bottom, left, right)`, answered with the canvas.
 - **Reveal All** (Image): the canvas grown to hold all there is, every layer's content,
   hidden layers too, as well as what it holds now (it never shrinks): what a move or a
   paste left past its edges comes back into view. One history state; already all shown,
-  says so. Scripts: `reveal_all()`, answered with the canvas (as `crop_to_content` is).
+  says so; refused, saying so, if all of it spans more than a canvas's largest side (which
+  would leave some out). Scripts: `reveal_all()`, answered with the canvas (as
+  `crop_to_content` is).
 - **Resize Image:** a size in any unit or in percent (aspect ratio locked by default), a
   resolution, and a resampling method. A new resolution keeps the pixels and changes how
   large they print (one history state, "Change resolution", and no pixel touched, so it

@@ -18,12 +18,11 @@ pub struct DocId(pub u64);
 pub struct View {
     pub zoom: f32,
     pub offset: Vec2,
-    /// How far the view is turned, in degrees clockwise (-180 to 180): set by
-    /// [`turn_to`](View::turn_to), which keeps `turning` with it.
-    pub angle: f32,
-    /// The angle's cosine and sine (see [`turning`](View::turning)): set with the angle, by
-    /// `turn_to`, and by nothing else.
-    pub(crate) turned: [f32; 2],
+    /// How far the view is turned, in degrees clockwise (-180 to 180), and its cosine and sine
+    /// (see [`turning`](View::turning)): set together by [`turn_to`](View::turn_to) alone
+    /// (read by [`angle`](View::angle)).
+    angle: f32,
+    turned: [f32; 2],
     /// The viewport's size in device pixels when last shown.
     pub viewport: Vec2,
     /// Where the viewport was on screen when last shown, in points.
@@ -60,6 +59,11 @@ impl View {
     /// is set, not worked out for each point mapped.
     pub fn turning(self) -> (f32, f32) {
         (self.turned[0], self.turned[1])
+    }
+
+    /// How far it is turned, in degrees clockwise (-180 to 180).
+    pub fn angle(self) -> f32 {
+        self.angle
     }
 
     /// `v` (a direction, in device pixels) turned as the view is: clockwise on the screen,
@@ -99,6 +103,47 @@ impl View {
         middle + self.turn(self.to_unturned(canvas) - middle)
     }
 
+    /// The middle (the centroid) of what the view shows of canvas rectangle `canvas`: the
+    /// viewport, turned or not, cut to it; none if it shows none of it.
+    pub fn shown_middle(self, canvas: &opal_core::geom::FRect) -> Option<[f64; 2]> {
+        let corners = [Vec2::ZERO, Vec2::new(self.viewport.x, 0.0), self.viewport, Vec2::new(0.0, self.viewport.y)];
+        let mut poly: Vec<[f64; 2]> = corners
+            .iter()
+            .map(|&c| {
+                let p = self.to_canvas(c);
+                [f64::from(p.x), f64::from(p.y)]
+            })
+            .collect();
+        // Cut by each of the canvas's sides in turn (a convex polygon stays one).
+        for (axis, bound, below) in
+            [(0, canvas.x0, false), (0, canvas.x1, true), (1, canvas.y0, false), (1, canvas.y1, true)]
+        {
+            let inside = |p: &[f64; 2]| if below { p[axis] <= bound } else { p[axis] >= bound };
+            let mut cut = Vec::new();
+            for (i, p) in poly.iter().enumerate() {
+                let q = poly[(i + 1) % poly.len()];
+                if inside(p) {
+                    cut.push(*p);
+                }
+                if inside(p) != inside(&q) {
+                    let t = (bound - p[axis]) / (q[axis] - p[axis]);
+                    cut.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]);
+                }
+            }
+            poly = cut;
+        }
+        // The centroid, by the shoelace formula (`area` twice the polygon's).
+        let (mut area, mut cx, mut cy) = (0.0, 0.0, 0.0);
+        for (i, p) in poly.iter().enumerate() {
+            let q = poly[(i + 1) % poly.len()];
+            let cross = p[0] * q[1] - q[0] * p[1];
+            area += cross;
+            cx += (p[0] + q[0]) * cross;
+            cy += (p[1] + q[1]) * cross;
+        }
+        (area.abs() > 1e-9).then(|| [cx / (3.0 * area), cy / (3.0 * area)])
+    }
+
     /// The smallest canvas rectangle holding all the view shows.
     pub fn shown(self) -> Rect {
         let corners = [Vec2::ZERO, Vec2::new(self.viewport.x, 0.0), self.viewport, Vec2::new(0.0, self.viewport.y)];
@@ -122,6 +167,10 @@ impl View {
     /// Turns the view to `angle` degrees clockwise (taken to -180 to 180), about the
     /// viewport's middle.
     pub fn turn_to(&mut self, angle: f32) {
+        // (An angle past what a number holds turns it nowhere.)
+        if !angle.is_finite() {
+            return;
+        }
         let a = (angle + 180.0).rem_euclid(360.0) - 180.0;
         // Straight again exactly, not nearly, and crisp again at a whole zoom.
         self.angle = if a.abs() < 1e-3 { 0.0 } else { a };
@@ -201,11 +250,14 @@ pub enum Drag {
 }
 
 /// Where a drag turning the view began: the pointer's bearing from the view's middle
-/// (degrees, clockwise) and the view's angle then, which giving it up puts back.
+/// (degrees, clockwise) and the view's angle then, which giving it up puts back; and whether
+/// Esc has given it up, the button still down (what is left of the drag then does nothing,
+/// rather than fall to the tool chosen).
 #[derive(Clone, Copy, Debug)]
 pub struct TurnDrag {
     pub bearing: f32,
     pub angle: f32,
+    pub given_up: bool,
 }
 
 pub struct DocState {
@@ -991,6 +1043,13 @@ mod tests {
         assert_eq!(v.angle, -160.0);
         v.turn_to(360.0004);
         assert_eq!(v.angle, 0.0);
+        // One past what a number holds turns it nowhere.
+        v.turn_to(30.0);
+        for wild in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            v.turn_to(wild);
+            assert_eq!((v.angle, v.turning()), (30.0, (30f32.to_radians().cos(), 30f32.to_radians().sin())));
+        }
+        v.turn_to(0.0);
         // Straight at a whole zoom, its pixels are the screen's again.
         v.zoom_about(2.0, Vec2::new(0.3, 0.3));
         v.turn_to(10.0);

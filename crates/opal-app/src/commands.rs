@@ -1683,7 +1683,7 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
         | StampVisible | ResizeCanvas | CropToContent | Trim | RevealAll | Place | SelectAll | RotateViewLeft
         | RotateViewRight => needs_doc(),
         ResetRotation => {
-            if st.active().ok_or("Open or create an image first.")?.view.angle == 0.0 {
+            if st.active().ok_or("Open or create an image first.")?.view.angle() == 0.0 {
                 return Err("The view is straight already.".into());
             }
             Ok(())

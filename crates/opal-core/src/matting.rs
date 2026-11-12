@@ -52,8 +52,10 @@ pub fn remove_matte(px: &mut [Pixel], matte: f64) {
 /// lies within `reach` pixels of a transparent one (counted in steps, diagonals one step;
 /// what lies past the buffer is transparent) given the colour of the pixels further in, its
 /// alpha kept: ring by ring outwards from those, each pixel the mean of its neighbours given
-/// a colour already. Content no wider than `2 × reach` has nothing further in, and is left
-/// as it is.
+/// a colour already, at most `reach` rings (so a pixel's colour comes from no further than
+/// `2 × reach + 1` pixels round it, which a tile read with that margin keeps). Content no
+/// wider than `2 × reach` has nothing further in, and is left as it is, but for what lies
+/// within `reach` rings of content that has (the root of a thin strand).
 pub fn defringe(px: &mut [Pixel], width: usize, height: usize, reach: u32) {
     assert_eq!(px.len(), width * height, "the buffer is not width × height");
     if reach == 0 || px.is_empty() {
@@ -102,7 +104,10 @@ pub fn defringe(px: &mut [Pixel], width: usize, height: usize, reach: u32) {
         .filter(|&i| colour[i].is_none() && shows(&px[i]))
         .filter(|&i| neighbours(i).filter(|&n| inside(n)).any(|n| colour[index(n)].is_some()))
         .collect();
-    while !ring.is_empty() {
+    for _ in 0..reach {
+        if ring.is_empty() {
+            break;
+        }
         let given: Vec<(usize, [f32; 3])> = ring
             .iter()
             .map(|&i| {
@@ -193,5 +198,29 @@ mod tests {
         let before = thin.clone();
         defringe(&mut thin, w, h, 1);
         assert_eq!(thin, before);
+    }
+
+    #[test]
+    fn a_thin_strand_from_thicker_content_is_coloured_only_near_it() {
+        // A 20 × 20 blue block from (2, 2), and a red strand a pixel thick running 30 pixels
+        // from its right side, on nothing.
+        let (w, h) = (60, 24);
+        let clear = premultiplied([0.0; 3], 0.0);
+        let mut px = vec![clear; w * h];
+        for y in 2..22 {
+            for x in 2..22 {
+                px[y * w + x] = premultiplied([0.0, 0.0, 1.0], 1.0);
+            }
+        }
+        for x in 22..52 {
+            px[12 * w + x] = premultiplied([1.0, 0.0, 0.0], 1.0);
+        }
+        let before = px.clone();
+        defringe(&mut px, w, h, 2);
+        // The block's own edge given its blue; the strand, further than two rings from it, left.
+        assert_eq!(px[12 * w + 21], before[12 * w + 20]);
+        for x in 22..52 {
+            assert_eq!(px[12 * w + x], before[12 * w + x], "the strand recoloured at {x}");
+        }
     }
 }

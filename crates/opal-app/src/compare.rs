@@ -14,7 +14,7 @@ pub fn matched(from: &View, from_corner: Vec2, to: &View, to_corner: Vec2) -> Vi
     let middle = from.to_canvas(from.viewport * 0.5) - from_corner;
     let mut v = *to;
     v.zoom = from.zoom;
-    v.turn_to(from.angle);
+    v.turn_to(from.angle());
     v.offset = to.viewport * 0.5 - (middle + to_corner) * v.zoom;
     v.placed = true;
     v.snap();
@@ -328,9 +328,11 @@ mod tests {
 
     #[test]
     fn a_view_matched_shows_the_same_place_at_the_same_zoom() {
-        let mut from = View { zoom: 2.0, viewport: Vec2::new(800.0, 600.0), placed: true, ..View::default() };
-        from.offset = Vec2::new(-100.0, -40.0);
-        let to = View { zoom: 0.5, viewport: Vec2::new(400.0, 300.0), placed: true, ..View::default() };
+        let mut from = View::default();
+        (from.zoom, from.viewport, from.placed, from.offset) =
+            (2.0, Vec2::new(800.0, 600.0), true, Vec2::new(-100.0, -40.0));
+        let mut to = View::default();
+        (to.zoom, to.viewport, to.placed) = (0.5, Vec2::new(400.0, 300.0), true);
         // The other canvas's corner elsewhere: the same place of its image is matched.
         let m = matched(&from, Vec2::ZERO, &to, Vec2::new(10.0, 20.0));
         assert_eq!(m.zoom, 2.0);
@@ -340,7 +342,7 @@ mod tests {
         // Turned, the other is turned alike, the same place still in its middle.
         from.turn_to(-40.0);
         let m = matched(&from, Vec2::ZERO, &to, Vec2::new(10.0, 20.0));
-        assert_eq!(m.angle, -40.0);
+        assert_eq!(m.angle(), -40.0);
         let middle_from = from.to_canvas(from.viewport * 0.5);
         let middle_to = m.to_canvas(m.viewport * 0.5) - Vec2::new(10.0, 20.0);
         assert!((middle_from - middle_to).length() < 1e-3, "{middle_from:?} {middle_to:?}");

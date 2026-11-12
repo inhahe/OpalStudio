@@ -251,9 +251,18 @@ impl AppState {
             }
             (Some(a), Err(why)) => {
                 self.answered.push((a.n, Err(format!("{}: {why}", a.call.name))));
-                // As a call refused at once has it put back, unless the user has moved on.
-                if let Some(back) = a.call.view.filter(|_| self.active_doc == Some(id)).and_then(|v| v.0) {
-                    self.back_to(back);
+                // As a call refused at once has it put back, unless the user has moved on: the
+                // image, and the layers the call chose in the one it edited (which, busy, the
+                // user could not choose meanwhile), not those chosen in others since.
+                if let Some((back, layers)) = a.call.view.filter(|_| self.active_doc == Some(id)) {
+                    if let Some(back) = back {
+                        self.back_to(back);
+                    }
+                    if let Some((_, state)) = layers.into_iter().find(|(d, _)| *d == id)
+                        && let Some(d) = self.doc_mut(id)
+                    {
+                        d.set_layer_selection_state(state);
+                    }
                 }
             }
             // Told under the name of the call carrying it out, if one is (as its refusal).
@@ -600,7 +609,20 @@ mod tests {
         };
         assert_eq!(st.doc(other).unwrap().active_layer(), Some(upper));
         st.show_doc(first);
-        let view = (Some(first), vec![(other, st.doc(other).unwrap().layer_selection_state())]);
+        // The first image of two layers too, its upper chosen; the call chooses its lower.
+        st.run(Cmd::NewLayer, &egui::Context::default());
+        let (first_lower, first_upper) = {
+            let d = st.doc(first).unwrap();
+            (d.doc().layers[0].id, d.doc().layers[1].id)
+        };
+        let view = (
+            Some(first),
+            vec![
+                (first, st.doc(first).unwrap().layer_selection_state()),
+                (other, st.doc(other).unwrap().layer_selection_state()),
+            ],
+        );
+        st.doc_mut(first).unwrap().select_only(first_lower);
         // The call's edit on the first image; the user, meanwhile, chooses the other's lower layer.
         st.edit_later(
             first,
@@ -616,5 +638,6 @@ mod tests {
         st.finish_edits();
         assert_eq!(st.active_doc, Some(first));
         assert_eq!(st.doc(other).unwrap().active_layer(), Some(lower), "the layer chosen meanwhile undone");
+        assert_eq!(st.doc(first).unwrap().active_layer(), Some(first_upper), "the call's choice left");
     }
 }
