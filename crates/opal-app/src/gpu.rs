@@ -32,8 +32,7 @@ struct View {
     backdrop: vec4<f32>,
     encode_srgb: u32,
     filter_smooth: u32,
-    _p1: u32,
-    _p2: u32,
+    turn: vec2<f32>,
 };
 
 @group(0) @binding(0) var<uniform> view: View;
@@ -58,24 +57,42 @@ fn place(p: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(p.x / view.vp_size.x * 2.0 - 1.0, 1.0 - p.y / view.vp_size.y * 2.0, 0.0, 1.0);
 }
 
+// A point as the turned view shows it (`turn` its angle's cosine and sine), and back: about
+// the viewport's middle, clockwise on the screen, whose y goes down.
+fn turned(p: vec2<f32>) -> vec2<f32> {
+    let m = view.vp_size * 0.5;
+    let d = p - m;
+    return m + vec2<f32>(d.x * view.turn.x - d.y * view.turn.y, d.x * view.turn.y + d.y * view.turn.x);
+}
+
+fn unturned(p: vec2<f32>) -> vec2<f32> {
+    let m = view.vp_size * 0.5;
+    let d = p - m;
+    return m + vec2<f32>(d.x * view.turn.x + d.y * view.turn.y, d.y * view.turn.x - d.x * view.turn.y);
+}
+
+// Tiles are placed as if the view were not turned (`px`, which the checkerboard and the
+// canvas's edge are worked out in), and turned where they are drawn.
 @vertex
 fn vs_tile(@builtin(vertex_index) vi: u32, @location(0) rect: vec4<f32>) -> VsOut {
     let c = corner(vi);
     let p = mix(rect.xy, rect.zw, c);
     var out: VsOut;
-    out.pos = place(p);
+    out.pos = place(turned(p));
     out.px = p;
     out.uv = c;
     return out;
 }
 
+// The backdrop covers the viewport; each of its pixels is worked out where it would be were
+// the view not turned.
 @vertex
 fn vs_bg(@builtin(vertex_index) vi: u32) -> VsOut {
     let c = corner(vi);
     let p = c * view.vp_size;
     var out: VsOut;
     out.pos = place(p);
-    out.px = p;
+    out.px = unturned(p);
     out.uv = c;
     return out;
 }
@@ -166,10 +183,12 @@ pub struct ViewUniforms {
     pub encode_srgb: u32,
     /// 1 to filter smoothly (averaging over each screen pixel), 0 for sharp pixels.
     pub smooth: u32,
-    pub _pad: [u32; 2],
+    /// The cosine and sine of the angle the view is turned by (see `View::turning`).
+    pub turn: [f32; 2],
 }
 
-/// One tile to draw: where (device pixels, `[x0, y0, x1, y1]` from the viewport's corner)
+/// One tile to draw: where (device pixels, `[x0, y0, x1, y1]` from the viewport's corner, were
+/// the view not turned: the shader turns it)
 /// and its pixels with its neighbors', row by row from the top-left (the tile itself is
 /// `sources[4]`).
 pub struct TileDraw {

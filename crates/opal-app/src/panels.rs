@@ -679,6 +679,32 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
         ui.label(RichText::new("Box").strong());
         crate::box_fields::crop(ui, st, id, "crop-panel");
     }
+    if tool == crate::tools::ToolId::RotateView && st.active().is_some() {
+        view_angle(ui, st);
+    }
+}
+
+/// The active image's view's angle, typed in as any field takes it, and the View tab's
+/// commands that turn it.
+fn view_angle(ui: &mut egui::Ui, st: &mut AppState) {
+    ui.separator();
+    let palette = st.palette;
+    let typed = {
+        let d = st.active().expect("checked by the caller");
+        let scope = crate::lengths::image_scope(Some(d.doc()), st.unit(), d.doc().resolution);
+        let mut angle = f64::from(d.view.angle);
+        ui.horizontal(|ui| {
+            let label = ui.label("Angle");
+            let field = crate::number_field::NumberField::angle(&mut angle, scope);
+            ui.add(field.range(-180.0..=180.0).speed(0.5).remember("view.angle")).labelled_by(label.id);
+            ui.label(RichText::new("clockwise").color(palette.weak_text));
+        });
+        (angle != f64::from(d.view.angle)).then_some(angle)
+    };
+    if let Some(angle) = typed {
+        st.active_mut().expect("checked by the caller").view.turn_to(angle as f32);
+    }
+    command_buttons(ui, st, &[Cmd::RotateViewLeft, Cmd::RotateViewRight, Cmd::ResetRotation]);
 }
 
 /// The buttons for Layer › Align's commands: a row for aligning, and (`distribute`) one for
@@ -693,21 +719,29 @@ fn align_buttons(ui: &mut egui::Ui, st: &mut AppState, distribute: bool) {
     ui.separator();
     ui.label(RichText::new("Align").strong());
     for row in rows {
-        ui.horizontal(|ui| {
-            for &cmd in *row {
-                let info = cmd.info();
-                let available = crate::commands::availability(st, cmd);
-                let r = ui.add_enabled(available.is_ok(), egui::Button::new(crate::theme::icon(info.icon, 18.0)));
-                let r = match &available {
-                    Ok(()) => r.on_hover_text(format!("{}: {}", info.name, info.description)),
-                    Err(why) => r.on_disabled_hover_text(format!("{}: {why}", info.name)),
-                };
-                if r.clicked() {
-                    st.queue.push(cmd);
-                }
-            }
-        });
+        command_buttons(ui, st, row);
     }
+}
+
+/// A row of buttons running `cmds`, each by its icon, saying what it does, or why it is not
+/// available when it is not.
+fn command_buttons(ui: &mut egui::Ui, st: &mut AppState, cmds: &[Cmd]) {
+    ui.horizontal(|ui| {
+        for &cmd in cmds {
+            let info = cmd.info();
+            let available = availability(st, cmd);
+            let r = ui.add_enabled(available.is_ok(), egui::Button::new(icon(info.icon, 18.0)));
+            let r = match &available {
+                Ok(()) => r.on_hover_text(format!("{}: {}", info.name, info.description)),
+                Err(why) => r.on_disabled_hover_text(format!("{}: {why}", info.name)),
+            };
+            // Read out by its name (the icon alone says nothing to a screen reader).
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, available.is_ok(), info.name));
+            if r.clicked() {
+                st.queue.push(cmd);
+            }
+        }
+    });
 }
 
 /// While the outline tool draws with a symmetry: where its center and axis are, and a button

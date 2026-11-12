@@ -12,6 +12,7 @@ pub enum ToolId {
     Crop,
     Hand,
     Zoom,
+    RotateView,
 }
 
 /// What the user needs to know about a tool.
@@ -74,8 +75,8 @@ impl ToolId {
     }
 
     /// Every tool, in toolbar order.
-    pub const ALL: [ToolId; 6] =
-        [ToolId::Move, ToolId::Select, ToolId::Outline, ToolId::Crop, ToolId::Hand, ToolId::Zoom];
+    pub const ALL: [ToolId; 7] =
+        [ToolId::Move, ToolId::Select, ToolId::Outline, ToolId::Crop, ToolId::Hand, ToolId::Zoom, ToolId::RotateView];
 
     pub fn info(self) -> &'static ToolInfo {
         match self {
@@ -85,6 +86,7 @@ impl ToolId {
             ToolId::Crop => &CROP,
             ToolId::Hand => &HAND,
             ToolId::Zoom => &ZOOM,
+            ToolId::RotateView => &ROTATE_VIEW,
         }
     }
 }
@@ -460,6 +462,34 @@ static ZOOM: ToolInfo = ToolInfo {
            right or left to zoom in or out smoothly around where the drag started. With any \
            tool, the mouse wheel zooms around the pointer (see Preferences › Navigation).",
     settings: ZOOM_SETTINGS,
+    variants: None,
+};
+
+pub static ROTATE_VIEW_SETTINGS: &[Def] = &[Def {
+    key: "rotate_view.step",
+    label: "Steps of",
+    help: "How far the view turns at a time: dragging with Shift held turns it to whole steps, \
+           and the View tab's Rotate View Left and Right turn it a step.",
+    section: "Rotate View",
+    kind: Kind::Float { min: 1.0, max: 90.0, decimals: 0, suffix: "°", log: false },
+    default: Init::Float(15.0),
+    advanced: false,
+}];
+
+static ROTATE_VIEW: ToolInfo = ToolInfo {
+    id: "rotate_view",
+    name: "Rotate View",
+    icon: icons::ROTATE_VIEW,
+    key: Key::R,
+    description: "Drag to turn the view (not the image); Shift turns it in steps. Esc puts it straight.",
+    help: "Drag round the middle of the view to turn it, as you would turn a drawing on a desk: \
+           the image itself does not change. Hold Shift to turn it in steps (15° unless the \
+           tool's settings say otherwise). Type an angle in the tool's settings, or press Esc \
+           (or Reset there) to put it straight again. The View tab's Rotate View Left and Right \
+           turn it a step at a time, and Reset Rotation puts it straight. With any other tool, \
+           hold R and drag to turn the view for as long as R is held (with the outline tool, \
+           R+drag redraws the outline instead); tap R to choose this tool.",
+    settings: ROTATE_VIEW_SETTINGS,
     variants: None,
 };
 

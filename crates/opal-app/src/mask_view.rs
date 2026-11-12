@@ -2,7 +2,7 @@
 //! Selection Overlay): red where nothing is selected, fading out as pixels are more selected,
 //! so that a soft selection's falloff shows.
 
-use eframe::egui::{self, Color32, ColorImage, Mesh, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
+use eframe::egui::{self, Color32, ColorImage, Mesh, Pos2, Rect, TextureHandle, TextureOptions};
 use opal_core::mask::{Mask, MaskTile, fraction};
 use opal_core::tile::{TILE_SIZE, TileCoord};
 use std::collections::HashMap;
@@ -35,10 +35,12 @@ fn tint(level: u16, opacity: f32) -> Color32 {
 }
 
 /// Draws `mask` over `canvas` (document pixels), shown in `rect` (screen points) through
-/// `view` (`ppp` device pixels a point): red, `opacity` of it where nothing is selected, less
-/// as pixels are more selected; past the canvas, where nothing is drawn, nothing. Uniform
-/// stretches are drawn as rectangles; tiles with levels of their own as textures (`textures`
-/// keeps them), or, too small to tell, as their mean level.
+/// `view` (`ppp` device pixels a point, turned as it is): red, `opacity` of it where nothing
+/// is selected, less as pixels are more selected; past the canvas, where nothing is drawn,
+/// nothing. Uniform stretches are drawn as quadrilaterals; tiles with levels of their own as
+/// textures (`textures` keeps them), or, too small to tell, as their mean level. Each is cut
+/// to the canvas where it is in the canvas's own pixels, so that it is cut along the canvas's
+/// edge however the view turns it.
 #[allow(clippy::too_many_arguments)]
 pub fn draw(
     ui: &egui::Ui,
@@ -50,24 +52,43 @@ pub fn draw(
     opacity: f32,
     textures: &mut Textures,
 ) {
-    let to_doc = |p: Pos2| view.to_canvas((p - rect.min) * ppp);
-    let to_screen = |x: i64, y: i64| rect.min + view.to_screen(Vec2::new(x as f32, y as f32)) / ppp;
-    let shown = rect.intersect(Rect::from_min_max(to_screen(canvas.x0, canvas.y0), to_screen(canvas.x1, canvas.y1)));
+    let to_screen = |p: Pos2| rect.min + view.to_screen(p.to_vec2()) / ppp;
+    let canvas = Rect::from_min_max(
+        Pos2::new(canvas.x0 as f32, canvas.y0 as f32),
+        Pos2::new(canvas.x1 as f32, canvas.y1 as f32),
+    );
+    // What of the canvas the view shows.
+    let shown = view.shown().intersect(canvas);
     if !shown.is_positive() {
         textures.kept.clear();
         return;
     }
-    let painter = ui.painter().with_clip_rect(shown);
-    let (a, b) = (to_doc(shown.min), to_doc(shown.max));
-    let first = TileCoord::containing(a.x.floor() as i64, a.y.floor() as i64);
-    let last = TileCoord::containing(b.x.ceil() as i64, b.y.ceil() as i64);
-    let side = i64::from(TILE_SIZE);
-    let across = TILE_SIZE as f32 * view.zoom / ppp;
+    let painter = ui.painter().with_clip_rect(rect);
+    let first = TileCoord::containing(shown.min.x.floor() as i64, shown.min.y.floor() as i64);
+    let last = TileCoord::containing(shown.max.x.ceil() as i64, shown.max.y.ceil() as i64);
+    let side = TILE_SIZE as f32;
+    let across = side * view.zoom / ppp;
+    // Tile row `y`'s stretch of columns `x0` to `x1` (whole tiles), cut to the canvas.
+    let stretch = |x0: i32, x1: i32, y: i32| {
+        let r = Rect::from_min_max(Pos2::new(x0 as f32, y as f32) * side, Pos2::new(x1 as f32, (y + 1) as f32) * side);
+        r.intersect(canvas)
+    };
+    let corners = |r: Rect| [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()];
+    // As meshes, not polygons, whose edges are feathered: where two meet, the seam would show.
+    let quad = |mesh: &mut Mesh, part: Rect, uv: &dyn Fn(Pos2) -> Pos2, color: Color32| {
+        for c in corners(part) {
+            mesh.vertices.push(egui::epaint::Vertex { pos: to_screen(c), uv: uv(c), color });
+        }
+        let n = mesh.vertices.len() as u32 - 4;
+        mesh.add_triangle(n, n + 1, n + 2);
+        mesh.add_triangle(n, n + 2, n + 3);
+    };
     let fill = |x0: i32, x1: i32, y: i32, color: Color32| {
-        if color.a() > 0 && x0 < x1 {
-            let (y0, y1) = (i64::from(y) * side, i64::from(y + 1) * side);
-            let r = Rect::from_min_max(to_screen(i64::from(x0) * side, y0), to_screen(i64::from(x1) * side, y1));
-            painter.rect_filled(r, 0.0, color);
+        let r = stretch(x0, x1, y);
+        if color.a() > 0 && r.is_positive() {
+            let mut mesh = Mesh::default();
+            quad(&mut mesh, r, &|_| egui::epaint::WHITE_UV, color);
+            painter.add(egui::Shape::mesh(mesh));
         }
     };
     let mut drawn = HashMap::new();
@@ -109,11 +130,15 @@ pub fn draw(
                     },
                 )
             });
-            let corner = TileCoord::new(x0, y).rect(0);
-            let r = Rect::from_min_max(to_screen(corner.x0, corner.y0), to_screen(corner.x1, corner.y1));
+            // The part of the tile on the canvas, and where that is in its texture.
+            let part = stretch(x0, x0 + 1, y);
+            if !part.is_positive() {
+                continue;
+            }
+            let tile = Pos2::new(x0 as f32, y as f32) * side;
+            let color = Color32::from_white_alpha((opacity * 255.0).round() as u8);
             let mut mesh = Mesh::with_texture(texture.id());
-            let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-            mesh.add_rect_with_uv(r, uv, Color32::from_white_alpha((opacity * 255.0).round() as u8));
+            quad(&mut mesh, part, &|p: Pos2| ((p - tile) / side).to_pos2(), color);
             painter.add(egui::Shape::mesh(mesh));
         }
         fill(at, last.x + 1, y, tint(mask.outside(), opacity));

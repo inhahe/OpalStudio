@@ -825,8 +825,9 @@ it would carry on past an undo or a deselect and leave states nobody meant.
     included; the crop box goes, and egui itself ends the drag on it.
   - Space, the hand, to scroll.
   - Tab during a redrawing (*Reshaping an outline*).
-  - The view's commands, which change nothing a drag works out its edit from: zoom, the
-    rulers, off-canvas content, the selection overlay (`app::acts_during_drag`). Not the
+  - The view's commands, which change nothing a drag works out its edit from: zoom, turning
+    the view, the rulers, off-canvas content, the selection overlay
+    (`app::acts_during_drag`). Not the
     screen modes: they draw the canvas elsewhere, which would no longer know the button
     held on it.
 - The canvas notes whether a button pressed on it is held (`AppState::canvas_held_now`).
@@ -883,6 +884,40 @@ it would carry on past an undo or a deselect and leave states nobody meant.
   the twenty or so tools planned take about 375 px: comfortable on a screen 1920 px wide,
   but on a laptop showing 1280–1536 px it leaves the command groups noticeably less room.
   That is what the side strip is for.
+
+### Rotating the view
+
+The view, not the image, can be turned (`View::angle`, degrees clockwise, each image its
+own), as a drawing is turned on a desk; painting needs it most.
+
+- **The Rotate View tool** (R): dragging turns the view about its middle by the angle the
+  pointer sweeps round it; Shift makes the angle a multiple of its step (15°, a setting).
+  Its settings show the angle, typed in as any field takes it, and the commands below; Esc,
+  while it is chosen, puts the view straight.
+- **R, as in Photoshop** (`OpalApp::rotate_key`): tapped, it chooses the tool, once let go;
+  held, it chooses nothing, and a drag on the image while it is held turns the view with
+  whichever tool is chosen (as Space scrolls it), the tool staying; but the outline tool's
+  R+drag still redraws the outline. So R alone among the tools' keys acts when let go, and a
+  press of it during a drag is held back without a word.
+- **The View tab's commands** (its Rotate group): Rotate View Left and Right (a step at a
+  time) and Reset Rotation, which puts it straight again. While the view is turned, the
+  status bar shows its angle, which can be typed into there too.
+- **What turns with it:** everything drawn on the canvas, the image (the shader turns its
+  tiles about the viewport's middle, and works out the checkerboard and what lies past the
+  canvas in the canvas's own axes, so neither turns with the screen), the selection's
+  outline and overlay (drawn as meshes cut to the canvas in its own pixels, so cut along its
+  edge however it is turned, and with no seams between them), the boxes, the guides, which
+  reach across the view through their two canvas points; and every tool takes the pointer
+  through the turned view. Zooming keeps the point under the pointer where it is; scrolling
+  moves the image on the screen as the pointer moves; fitting fits the turned canvas. Its
+  pixels are lined up with the screen's at whole zooms only while it is straight (and again
+  once it is put straight).
+- **The rulers** count the canvas's own axes, so they show them while the view is turned
+  by a multiple of 90° (either axis along either ruler, counting either way); turned by
+  another angle, no axis runs along them, and they show only where the pointer is.
+- **Comparing:** Match Zoom and Location, and Lock Views, give the other images the
+  active one's angle too.
+- Not kept in the file, nor between sessions: it is how the image is looked at.
 
 ### Tool settings panel
 

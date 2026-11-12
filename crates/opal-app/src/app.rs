@@ -43,6 +43,9 @@ pub struct OpalApp {
     /// Whether Alt was down last frame, and whether it has been pressed alone (for keytips).
     alt_down: bool,
     alt_alone: bool,
+    /// While R is held (pressed outside a field): whether anything was dragged meanwhile (see
+    /// [`OpalApp::rotate_key`]).
+    r_held: Option<bool>,
     /// Whether a field had the keyboard at the end of the last frame: the keys pressed since
     /// are its, though egui lets go of the focus on Esc before the frame begins.
     field_had_keys: bool,
@@ -136,6 +139,7 @@ impl OpalApp {
             status_given: None,
             work_area,
             alt_alone: false,
+            r_held: None,
             persist,
             server,
             server_waits,
@@ -309,10 +313,37 @@ impl OpalApp {
                 self.st.queue.push(cmd);
             }
         }
-        for t in ToolId::ALL {
+        // (The Rotate View tool's key chooses it when let go: see `rotate_key`.)
+        for t in ToolId::ALL.into_iter().filter(|&t| t != ToolId::RotateView) {
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, t.info().key)) {
                 self.st.set_tool(t);
             }
+        }
+    }
+
+    /// R, the Rotate View tool's key, as in Photoshop: tapped, it chooses the tool, once let
+    /// go; held, it chooses nothing (while it is held, a drag on the image with any other tool
+    /// turns the view, and the outline tool's redraws: R+drag), so a drag meanwhile keeps the
+    /// tool there was.
+    fn rotate_key(&mut self, ctx: &egui::Context) {
+        let typing = ctx.egui_wants_keyboard_input() || self.field_had_keys;
+        let key = ToolId::RotateView.info().key;
+        let (pressed, released, pointer) = ctx.input(|i| {
+            let pressed = i.events.iter().any(|e| {
+                matches!(e, Event::Key { key: k, pressed: true, repeat: false, modifiers, .. } if *k == key && modifiers.is_none())
+            });
+            let released = i.events.iter().any(|e| matches!(e, Event::Key { key: k, pressed: false, .. } if *k == key));
+            (pressed, released, i.pointer.any_down())
+        });
+        // (Not a keytip's R, nor one typed or pressed behind a dialog.)
+        if pressed && !typing && !self.st.dialog_open() && self.st.ribbon.keytips == Keytips::Off {
+            self.r_held = Some(false);
+        }
+        if let Some(dragged) = &mut self.r_held {
+            *dragged |= pointer;
+        }
+        if released && self.r_held.take() == Some(false) {
+            self.st.set_tool(ToolId::RotateView);
         }
     }
 
@@ -390,6 +421,7 @@ impl OpalApp {
         let sampling = crate::prefs::sampling(&self.st.prefs, "transform");
         let outline_smooth = self.st.tool_settings(ToolId::Outline).bool("outline.smooth");
         let outline_tool = self.st.tool() == ToolId::Outline;
+        let rotate_tool = self.st.tool() == ToolId::RotateView;
         let Some(d) = self.st.active_mut() else { return };
         // While an edit is under way on the image, they change nothing (see `edits`).
         if d.busy.is_some() {
@@ -446,6 +478,16 @@ impl OpalApp {
                 d.revision += 1;
                 return;
             }
+        }
+        // The Rotate View tool's Esc puts the view straight, when no box takes it.
+        if rotate_tool
+            && d.view.angle != 0.0
+            && d.transform.is_none()
+            && !cropping
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            d.view.turn_to(0.0);
+            return;
         }
         // Before and After ends with Esc, when no box takes it.
         if d.compare.is_some()
@@ -730,6 +772,7 @@ impl OpalApp {
             d.view.zoom.to_bits().hash(&mut h);
             d.view.offset.x.to_bits().hash(&mut h);
             d.view.offset.y.to_bits().hash(&mut h);
+            d.view.angle.to_bits().hash(&mut h);
             d.title.hash(&mut h);
             d.saved_at.hash(&mut h);
             d.revision.hash(&mut h);
@@ -933,7 +976,11 @@ impl OpalApp {
         if self.st.gpu.memory.is_some() {
             parts.push(StatusPart::Gpu);
         }
-        if self.st.active().is_some() {
+        if let Some(d) = self.st.active() {
+            // The view's angle, while it is turned.
+            if d.view.angle != 0.0 {
+                parts.push(StatusPart::Angle);
+            }
             parts.extend([StatusPart::Zoom, StatusPart::Size, StatusPart::Resolution]);
             if self.st.cursor_shown.is_some() {
                 parts.push(StatusPart::Pointer);
@@ -1077,6 +1124,20 @@ impl OpalApp {
                 }
                 r.on_hover_text("Zoom: drag or type a value");
             }
+            StatusPart::Angle => {
+                let unit = self.st.unit();
+                let Some(d) = self.st.active_mut() else { return };
+                let mut angle = f64::from(d.view.angle);
+                let scope = crate::lengths::image_scope(Some(d.doc()), unit, d.doc().resolution);
+                let field = crate::number_field::NumberField::angle(&mut angle, scope);
+                let r = ui.add(field.range(-180.0..=180.0).speed(0.5).remember("view.angle"));
+                if r.changed() {
+                    d.view.turn_to(angle as f32);
+                }
+                r.on_hover_text(
+                    "The view is turned (not the image): drag or type a value; Reset Rotation puts it straight",
+                );
+            }
             StatusPart::Size => {
                 let (unit, per) = (self.st.unit(), self.st.resolution_unit());
                 let Some(d) = self.st.active() else { return };
@@ -1133,6 +1194,7 @@ enum StatusPart {
     Write,
     Disk,
     Gpu,
+    Angle,
     Zoom,
     Size,
     Resolution,
@@ -1141,12 +1203,13 @@ enum StatusPart {
 
 impl StatusPart {
     /// The order they are left out in where the bar is too short for all of them.
-    const LEAST_NEEDED_FIRST: [StatusPart; 9] = [
+    const LEAST_NEEDED_FIRST: [StatusPart; 10] = [
         StatusPart::Disk,
         StatusPart::Gpu,
         StatusPart::Pointer,
         StatusPart::Resolution,
         StatusPart::Size,
+        StatusPart::Angle,
         StatusPart::Zoom,
         StatusPart::Scripts,
         StatusPart::Write,
@@ -1208,6 +1271,7 @@ impl eframe::App for OpalApp {
         if self.st.renaming.as_ref().is_some_and(|r| Some(r.0) != self.st.active_doc) {
             self.st.finish_rename(true);
         }
+        self.rotate_key(&ctx);
         self.handle_keys(&ctx);
         self.handle_dropped_files(&ctx);
         self.poll_gpu();
@@ -1354,6 +1418,9 @@ fn acts_during_drag(cmd: Cmd) -> bool {
             | Cmd::ZoomOut
             | Cmd::ZoomFit
             | Cmd::Zoom100
+            | Cmd::RotateViewLeft
+            | Cmd::RotateViewRight
+            | Cmd::ResetRotation
             | Cmd::ToggleRulers
             | Cmd::ToggleOffCanvas
             | Cmd::ToggleSelectionOverlay
@@ -1376,7 +1443,8 @@ fn keys_held_back(ctx: &egui::Context) -> bool {
     };
     let acts = |key: Key, modifiers: Modifiers| {
         shortcuts.iter().any(|(s, _)| matches(s, key, modifiers))
-            || (modifiers.is_none() && ToolId::ALL.iter().any(|t| t.info().key == key))
+            // (Not the Rotate View tool's, which chooses it only if nothing is dragged.)
+            || (modifiers.is_none() && ToolId::ALL.iter().any(|&t| t != ToolId::RotateView && t.info().key == key))
             || matches!(
                 key,
                 Key::ArrowLeft

@@ -94,6 +94,9 @@ pub enum Cmd {
     Rename,
     ZoomIn,
     ZoomOut,
+    RotateViewLeft,
+    RotateViewRight,
+    ResetRotation,
     ZoomFit,
     Zoom100,
     ToggleOffCanvas,
@@ -150,7 +153,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 105] = [
+    pub const ALL: [Cmd; 108] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -235,6 +238,9 @@ impl Cmd {
         Cmd::Rename,
         Cmd::ZoomIn,
         Cmd::ZoomOut,
+        Cmd::RotateViewLeft,
+        Cmd::RotateViewRight,
+        Cmd::ResetRotation,
         Cmd::ZoomFit,
         Cmd::Zoom100,
         Cmd::ToggleOffCanvas,
@@ -952,6 +958,30 @@ impl Cmd {
                  Preferences › Navigation.",
                 const { &[ctrl(Key::Num0)] },
             ),
+            Cmd::RotateViewLeft => i(
+                "Rotate View Left",
+                icons::ROTATE_VIEW_LEFT,
+                "Turn the view a step counterclockwise (the image itself does not change).",
+                "One step of the Rotate View tool's settings (15° unless they say otherwise), about \
+                 the middle of the view. Reset Rotation puts it straight.",
+                &[],
+            ),
+            Cmd::RotateViewRight => i(
+                "Rotate View Right",
+                icons::ROTATE_VIEW_RIGHT,
+                "Turn the view a step clockwise (the image itself does not change).",
+                "One step of the Rotate View tool's settings (15° unless they say otherwise), about \
+                 the middle of the view. Reset Rotation puts it straight.",
+                &[],
+            ),
+            Cmd::ResetRotation => i(
+                "Reset Rotation",
+                icons::STRAIGHT_VIEW,
+                "Put the view straight again.",
+                "Undoes turning the view, however it was turned (the Rotate View tool, or Rotate View \
+                 Left and Right). With the Rotate View tool, Esc does it too.",
+                &[],
+            ),
             Cmd::Zoom100 => i(
                 "Actual Pixels",
                 icons::ZOOM_100,
@@ -1397,6 +1427,14 @@ pub static RIBBON: &[Tab] = &[
                 cmds: &[Cmd::ZoomFit, Cmd::Zoom100, Cmd::ZoomIn, Cmd::ZoomOut],
             },
             Group {
+                name: "Rotate",
+                description: "Turning the view, not the image, as a drawing is turned on a desk. The \
+                              Rotate View tool (R) turns it by dragging.",
+                large: 0,
+                icons: false,
+                cmds: &[Cmd::RotateViewLeft, Cmd::RotateViewRight, Cmd::ResetRotation],
+            },
+            Group {
                 name: "Canvas",
                 description: "What is shown on and around the canvas.",
                 large: 1,
@@ -1470,6 +1508,9 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
                 | Close
                 | ZoomIn
                 | ZoomOut
+                | RotateViewLeft
+                | RotateViewRight
+                | ResetRotation
                 | ZoomFit
                 | Zoom100
                 | ToggleOffCanvas
@@ -1539,7 +1580,15 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             Ok(())
         }
         Save | SaveAs | Export | Close | ZoomIn | ZoomOut | ZoomFit | Zoom100 | NewLayer | NewGroup | CopyMerged
-        | StampVisible | ResizeCanvas | CropToContent | Place | SelectAll => needs_doc(),
+        | StampVisible | ResizeCanvas | CropToContent | Place | SelectAll | RotateViewLeft | RotateViewRight => {
+            needs_doc()
+        }
+        ResetRotation => {
+            if st.active().ok_or("Open or create an image first.")?.view.angle == 0.0 {
+                return Err("The view is straight already.".into());
+            }
+            Ok(())
+        }
         LoadSelection => {
             let d = st.active().ok_or("Open or create an image first.")?;
             if d.doc().saved.is_empty() {

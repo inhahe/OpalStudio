@@ -4257,9 +4257,9 @@ fn ctrl_shift_brackets_bring_to_front_as_the_keys_arrive_and_the_box_aligns_from
     h.run();
     assert!(h.state().state().active().unwrap().transform.is_some(), "no box");
     // (Below the box's own settings: scrolled to, as the user would.)
-    h.get_by_label(&crate::icons::ALIGN_LEFT.to_string()).scroll_to_me();
+    h.get_by_label("Align Left Edges").scroll_to_me();
     h.run();
-    h.get_by_label(&crate::icons::ALIGN_LEFT.to_string()).click();
+    h.get_by_label("Align Left Edges").click();
     h.run();
     let s = h.state().state().active().unwrap().transform.as_ref().unwrap();
     let left = s.frame.corners().map(|p| s.current.apply(p)[0]).into_iter().fold(f64::MAX, f64::min);
@@ -4768,4 +4768,213 @@ fn a_reference_opens_in_a_pane_of_its_own_beside_the_image_being_edited() {
     let mut shown = h.state().shown_docs();
     shown.sort_by_key(|d| d.0);
     assert_eq!(shown, vec![doc_ids(&h)[0], reference], "the reference was not left beside the others");
+}
+
+/// The color the rendering `img` has where the active image's view (turned or not) shows the
+/// screen point `at` (points).
+fn color_on_screen(h: &Harness<'static, OpalApp>, img: &image::RgbaImage, at: egui::Pos2) -> [u8; 4] {
+    let p = at * h.ctx.pixels_per_point();
+    img.get_pixel(p.x as u32, p.y as u32).0
+}
+
+#[test]
+fn the_rotate_view_tool_turns_the_view_and_esc_puts_it_straight() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 100);
+    // Its left end selected, the overlay on: the rest shows red, which tells the ends apart.
+    select_rect(&mut h, [0.0, 0.0, 50.0, 100.0]);
+    command(&mut h, Cmd::ToggleSelectionOverlay);
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::RotateView);
+    h.run();
+    // A quarter turn swept clockwise round the view's middle, Shift held: 90° exactly.
+    let middle = h.state().state().active().unwrap().view.screen_rect.center();
+    let round = |deg: f32| middle + egui::Vec2::angled(deg.to_radians()) * 150.0;
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    h.hover_at(round(0.0));
+    h.run();
+    h.drag_at(round(0.0));
+    h.run();
+    for deg in [20.0, 50.0, 88.0] {
+        h.hover_at(round(deg));
+        h.run();
+    }
+    h.drop_at(round(88.0));
+    h.run();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().view.angle, 90.0);
+    // The strip stands down the view, its left end at the top; beside it, the backdrop, red
+    // nowhere past the canvas.
+    let img = render(&mut h, "view-turned");
+    let (top, bottom, beside) = (
+        color_on_screen(&h, &img, middle + egui::vec2(0.0, -175.0)),
+        color_on_screen(&h, &img, middle + egui::vec2(0.0, 175.0)),
+        color_on_screen(&h, &img, middle + egui::vec2(150.0, 0.0)),
+    );
+    assert_eq!(top, [255, 255, 255, 255], "the selected end is not at the top");
+    assert!(bottom[0] > 245 && bottom[1] < 160, "the other end is not at the bottom: {bottom:?}");
+    assert!(beside[0] < 100, "something drawn beside the strip: {beside:?}");
+    // (The overlay's tiles reach past the canvas's far side, here to the strip's left.)
+    let left = color_on_screen(&h, &img, middle + egui::vec2(-150.0, 0.0));
+    assert!(left[0] < 100, "something drawn beside the strip: {left:?}");
+    // Esc, with the tool, puts it straight.
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(h.state().state().active().unwrap().view.angle, 0.0);
+}
+
+#[test]
+fn the_view_turns_by_steps_and_a_typed_angle_and_back() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    let angle = |h: &Harness<'static, OpalApp>| h.state().state().active().unwrap().view.angle;
+    assert!(crate::commands::availability(h.state().state(), Cmd::ResetRotation).is_err(), "straight already");
+    command(&mut h, Cmd::RotateViewRight);
+    command(&mut h, Cmd::RotateViewRight);
+    assert_eq!(angle(&h), 30.0);
+    for _ in 0..3 {
+        command(&mut h, Cmd::RotateViewLeft);
+    }
+    assert_eq!(angle(&h), -15.0);
+    // While it is turned, the status bar shows by how much.
+    let shows = |h: &Harness<'static, OpalApp>, v: f64| {
+        h.query_all(
+            egui_kittest::kittest::by().predicate(move |n| n.numeric_value().is_some_and(|x| (x - v).abs() < 1e-6)),
+        )
+        .count()
+    };
+    assert!(shows(&h, -15.0) >= 1, "the status bar does not show the angle");
+    // The tool's settings take an angle typed in.
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::RotateView);
+    h.run();
+    type_into(&mut h, egui_kittest::kittest::by().label("Angle"), "30+15");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert_eq!(angle(&h), 45.0);
+    // Its corners where the view turns them: the top-left one, 150 by 100 pixels from the
+    // middle, turned 45° clockwise, is 35 left of it and 177 up; the canvas just below it,
+    // the backdrop just above.
+    let img = render(&mut h, "view-45");
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let corner = v.screen_rect.min + v.to_screen(egui::Vec2::ZERO) / ppp;
+    let middle = v.screen_rect.min + v.to_screen(egui::vec2(150.0, 100.0)) / ppp;
+    let from_middle = corner - middle;
+    assert!((from_middle - egui::vec2(-35.4, -176.8)).length() < 1.0, "{from_middle:?}");
+    assert_eq!(color_on_screen(&h, &img, corner + egui::vec2(0.0, 6.0)), [255, 255, 255, 255]);
+    assert!(color_on_screen(&h, &img, corner + egui::vec2(0.0, -6.0))[0] < 100, "the canvas past its corner");
+    command(&mut h, Cmd::ResetRotation);
+    assert_eq!(angle(&h), 0.0);
+    assert_eq!(shows(&h, 45.0), 0, "an angle still shown");
+}
+
+#[test]
+fn a_selection_drawn_on_a_turned_view_is_where_the_pointer_went() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 400, 300);
+    h.state_mut().state_mut().active_mut().unwrap().view.turn_to(90.0);
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Select);
+    h.run();
+    drag_image(&mut h, &[[100.0, 20.0], [150.0, 40.0], [200.0, 60.0]], egui::Modifiers::NONE);
+    let Some(opal_core::mask::Extent::Within(b)) = selected(&h) else { panic!("nothing selected") };
+    assert!(
+        (b.x0 - 100).abs() <= 1 && (b.y0 - 20).abs() <= 1 && (b.x1 - 200).abs() <= 1 && (b.y1 - 60).abs() <= 1,
+        "selected {b:?}"
+    );
+}
+
+#[test]
+fn r_held_turns_the_view_with_any_tool_and_tapped_chooses_rotate_view() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Select);
+    h.run();
+    let r = |h: &mut Harness<'static, OpalApp>, pressed: bool| {
+        let modifiers = egui::Modifiers::NONE;
+        h.event(egui::Event::Key { key: egui::Key::R, physical_key: None, pressed, repeat: false, modifiers });
+        h.run();
+    };
+    // Held while dragging round the middle: the view turns, and the Select tool stays.
+    let middle = h.state().state().active().unwrap().view.screen_rect.center();
+    let round = |deg: f32| middle + egui::Vec2::angled(deg.to_radians()) * 150.0;
+    r(&mut h, true);
+    h.hover_at(round(0.0));
+    h.run();
+    h.drag_at(round(0.0));
+    h.run();
+    for deg in [20.0, 40.0, 60.0] {
+        h.hover_at(round(deg));
+        h.run();
+    }
+    h.drop_at(round(60.0));
+    h.run();
+    r(&mut h, false);
+    let st = h.state().state();
+    assert!((st.active().unwrap().view.angle - 60.0).abs() < 1.0, "turned {}", st.active().unwrap().view.angle);
+    assert_eq!(st.tool(), crate::tools::ToolId::Select, "the tool changed");
+    assert!(selected(&h).is_none(), "the drag selected");
+    // Tapped, it chooses the Rotate View tool.
+    r(&mut h, true);
+    r(&mut h, false);
+    assert_eq!(h.state().state().tool(), crate::tools::ToolId::RotateView);
+}
+
+#[test]
+fn a_turned_view_scrolls_as_the_pointer_and_the_fingers_move() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 300, 200);
+    h.state_mut().state_mut().active_mut().unwrap().view.turn_to(90.0);
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::Hand);
+    h.run();
+    // Where the canvas's middle is on the screen.
+    let at = |h: &Harness<'static, OpalApp>| {
+        let v = h.state().state().active().unwrap().view;
+        v.screen_rect.min + v.to_screen(egui::vec2(150.0, 100.0)) / h.ctx.pixels_per_point()
+    };
+    let near = |a: egui::Pos2, b: egui::Pos2| (a - b).length() < 1.0;
+    // Dragged with the hand, it goes where the pointer goes.
+    let start = at(&h);
+    h.hover_at(start);
+    h.run();
+    h.drag_at(start);
+    h.run();
+    h.hover_at(start + egui::vec2(40.0, 25.0));
+    h.run();
+    h.drop_at(start + egui::vec2(40.0, 25.0));
+    h.run();
+    assert!(near(at(&h), start + egui::vec2(40.0, 25.0)), "{:?} {:?}", at(&h), start);
+    // Scrolled with two fingers over it, it goes as they do.
+    let start = at(&h);
+    h.hover_at(start);
+    h.run();
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(-30.0, 10.0),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Unknown,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    assert!(near(at(&h), start + egui::vec2(-30.0, 10.0)), "{:?} {:?}", at(&h), start);
+}
+
+#[test]
+fn a_turned_view_draws_all_of_the_image_it_shows() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 1200, 1200);
+    command(&mut h, Cmd::Zoom100);
+    h.state_mut().state_mut().active_mut().unwrap().view.turn_to(45.0);
+    h.run();
+    // Points the turned view shows away from the line its corners make in the canvas: drawn
+    // as the rest is.
+    let img = render(&mut h, "view-45-large");
+    for [x, y] in [[600.0, 330.0], [600.0, 870.0], [330.0, 600.0], [870.0, 600.0]] {
+        assert_eq!(pixel_at_canvas(&h, &img, x, y), [255, 255, 255], "not drawn at {x}, {y}");
+    }
 }

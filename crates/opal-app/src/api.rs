@@ -678,6 +678,9 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
         | ConnectAssistant
         | ZoomIn
         | ZoomOut
+        | RotateViewLeft
+        | RotateViewRight
+        | ResetRotation
         | ZoomFit
         | Zoom100
         | ToggleOffCanvas

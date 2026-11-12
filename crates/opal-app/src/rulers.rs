@@ -3,7 +3,7 @@
 //! resolution, with the pointer's place marked on each.
 
 use crate::theme::Palette;
-use eframe::egui::{self, Align2, Pos2, Rect, Stroke};
+use eframe::egui::{self, Align2, Pos2, Rect, Stroke, Vec2};
 use opal_core::units::Unit;
 
 /// How thick a ruler is, in points.
@@ -96,12 +96,58 @@ pub fn marks(start: f64, per_point: f64, length: f32, unit: Unit, ppi: f64) -> V
     out
 }
 
-/// What a ruler is drawn with.
-pub struct Ruling {
-    /// The canvas's top-left corner on screen, in points.
-    pub origin: Pos2,
-    /// Document pixels a point.
+/// What a ruler counts: the length at its start (document pixels from the canvas's corner,
+/// along the canvas's axis that runs along the ruler), and how much that changes a point
+/// along it (less than nought where the axis runs the other way: the view turned).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Scale {
+    pub start: f64,
     pub per_point: f64,
+}
+
+impl Scale {
+    /// The marks of a ruler `length` points long counting as this does (see [`marks`]).
+    fn marks(self, length: f32, unit: Unit, ppi: f64) -> Vec<Mark> {
+        if self.per_point >= 0.0 {
+            return marks(self.start, self.per_point, length, unit, ppi);
+        }
+        // Counting down: the marks of the ruler read from its end, put back in place.
+        let end = self.start + self.per_point * f64::from(length);
+        let mut out = marks(end, -self.per_point, length, unit, ppi);
+        for m in &mut out {
+            m.at = length - m.at;
+        }
+        out
+    }
+}
+
+/// What runs along a ruler lying along the view's edge from `at` (device pixels from the
+/// view's corner) in direction `dir` (device pixels, a point long), as `view` shows the
+/// canvas: the canvas's axis that does, counted from `corner` (the canvas's top-left, in
+/// document pixels); none if neither does (the view turned by other than a multiple of
+/// 90°).
+pub fn scale(view: &crate::doc::View, at: Vec2, dir: Vec2, corner: Vec2) -> Option<Scale> {
+    let a = view.to_canvas(at) - corner;
+    // From the direction, not two points, which far out would lose their precision.
+    let step = view.unturn(dir) / view.zoom;
+    let tiny = step.length() * 1e-4;
+    let (start, per_point) = if step.y.abs() <= tiny {
+        (a.x, step.x)
+    } else if step.x.abs() <= tiny {
+        (a.y, step.y)
+    } else {
+        return None;
+    };
+    Some(Scale { start: f64::from(start), per_point: f64::from(per_point) })
+}
+
+/// What the rulers are drawn with.
+pub struct Ruling {
+    /// What the top ruler counts, and the left: none where no axis of the canvas runs along
+    /// it (the view turned by other than a multiple of 90°), which then marks only the
+    /// pointer.
+    pub top: Option<Scale>,
+    pub left: Option<Scale>,
     pub unit: Unit,
     pub ppi: f64,
     /// The pointer, if it is over the view.
@@ -124,10 +170,11 @@ pub fn draw(ui: &egui::Ui, corner: Rect, top: Rect, left: Rect, ruling: &Ruling,
     painter.line_segment([corner.left_bottom(), corner.right_bottom()], edge);
     painter.line_segment([corner.right_top(), corner.right_bottom()], edge);
     painter.text(corner.center(), Align2::CENTER_CENTER, ruling.unit.id(), font.clone(), ink);
-    let along = |p: f32, o: f32| f64::from(p - o) * ruling.per_point;
-    // Across the top: x from the canvas's left edge.
+    // Across the top: x from the canvas's left edge (or whichever axis runs along it).
     let top_clip = painter.with_clip_rect(top);
-    for m in marks(along(top.left(), ruling.origin.x), ruling.per_point, top.width(), ruling.unit, ruling.ppi) {
+    let marks_of =
+        |scale: Option<Scale>, length: f32| scale.map(|s| s.marks(length, ruling.unit, ruling.ppi)).unwrap_or_default();
+    for m in marks_of(ruling.top, top.width()) {
         let x = top.left() + m.at;
         let y0 = top.bottom() - THICK * m.reach;
         top_clip.line_segment([Pos2::new(x, y0), Pos2::new(x, top.bottom())], Stroke::new(1.0, ink));
@@ -135,9 +182,10 @@ pub fn draw(ui: &egui::Ui, corner: Rect, top: Rect, left: Rect, ruling: &Ruling,
             top_clip.text(Pos2::new(x + 2.0, top.top() + 1.0), Align2::LEFT_TOP, label, font.clone(), ink);
         }
     }
-    // Down the left: y from the canvas's top edge, labels turned to run up the ruler.
+    // Down the left: y from the canvas's top edge (or whichever), labels turned to run up the
+    // ruler.
     let left_clip = painter.with_clip_rect(left);
-    for m in marks(along(left.top(), ruling.origin.y), ruling.per_point, left.height(), ruling.unit, ruling.ppi) {
+    for m in marks_of(ruling.left, left.height()) {
         let y = left.top() + m.at;
         let x0 = left.right() - THICK * m.reach;
         left_clip.line_segment([Pos2::new(x0, y), Pos2::new(left.right(), y)], Stroke::new(1.0, ink));
@@ -190,6 +238,36 @@ mod tests {
         // Tenths of an inch, zoomed in, labeled with their decimal (and nothing with "0.0").
         let m = marks(0.0, 0.25, 300.0, Unit::In, 300.0);
         assert_eq!(m.iter().filter_map(|m| m.label.clone()).take(3).collect::<Vec<_>>(), ["0", "0.1", "0.2"]);
+    }
+
+    #[test]
+    fn a_ruler_the_canvas_runs_the_other_way_along_counts_down() {
+        // At 100%, from 300 px at its start down to 0 at 300 points along.
+        let m = Scale { start: 300.0, per_point: -1.0 }.marks(300.0, Unit::Px, 72.0);
+        let labeled: Vec<(f32, String)> = m.iter().filter_map(|m| Some((m.at.round(), m.label.clone()?))).collect();
+        let want = [(300.0, "0"), (200.0, "100"), (100.0, "200"), (0.0, "300")];
+        assert_eq!(labeled, want.map(|(at, l)| (at, l.to_owned())));
+    }
+
+    #[test]
+    fn a_turned_view_s_rulers_count_the_axis_along_them_or_none() {
+        use crate::doc::View;
+        let corner = Vec2::new(-50.0, 0.0);
+        let mut v =
+            View { zoom: 2.0, offset: Vec2::new(100.0, 40.0), viewport: Vec2::new(600.0, 400.0), ..View::default() };
+        // Straight: x across the top, from the canvas's corner, half a pixel a device pixel.
+        let top = scale(&v, Vec2::ZERO, Vec2::X, corner).unwrap();
+        assert_eq!(top, Scale { start: f64::from(v.to_canvas(Vec2::ZERO).x + 50.0), per_point: 0.5 });
+        // A quarter turn clockwise: y along the top, counting down; x down the left.
+        v.turn_to(90.0);
+        let (top, left) =
+            (scale(&v, Vec2::ZERO, Vec2::X, corner).unwrap(), scale(&v, Vec2::ZERO, Vec2::Y, corner).unwrap());
+        let at = v.to_canvas(Vec2::ZERO) - corner;
+        assert!((top.start - f64::from(at.y)).abs() < 1e-3 && (top.per_point + 0.5).abs() < 1e-6, "{top:?}");
+        assert!((left.start - f64::from(at.x)).abs() < 1e-3 && (left.per_point - 0.5).abs() < 1e-6, "{left:?}");
+        // Turned otherwise, neither axis runs along either.
+        v.turn_to(30.0);
+        assert_eq!((scale(&v, Vec2::ZERO, Vec2::X, corner), scale(&v, Vec2::ZERO, Vec2::Y, corner)), (None, None));
     }
 
     #[test]

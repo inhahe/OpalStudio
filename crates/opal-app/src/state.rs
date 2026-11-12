@@ -822,6 +822,13 @@ impl AppState {
                 let center = v.viewport * 0.5;
                 v.zoom_about(z, center);
             }
+            Cmd::RotateViewLeft | Cmd::RotateViewRight => {
+                let step = self.tool_settings(ToolId::RotateView).f64("rotate_view.step") as f32;
+                let by = if cmd == Cmd::RotateViewLeft { -step } else { step };
+                let v = &mut self.active_mut().expect("available").view;
+                v.turn_to(v.angle + by);
+            }
+            Cmd::ResetRotation => self.active_mut().expect("available").view.turn_to(0.0),
             Cmd::ZoomFit => {
                 let fit_max = (self.prefs.f64("nav.fit_max") / 100.0) as f32;
                 let d = self.active_mut().expect("available");

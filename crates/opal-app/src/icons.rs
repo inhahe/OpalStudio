@@ -52,6 +52,12 @@ pub const ZOOM_FIT: char = '\u{ee8c}';
 pub const FULL_SCREEN: char = '\u{e684}';
 pub const ZOOM_100: char = '\u{f70a}';
 pub const HAND: char = '\u{e6db}';
+/// A page turned (rotate_right): the Rotate View tool.
+pub const ROTATE_VIEW: char = '\u{ea39}';
+pub const ROTATE_VIEW_LEFT: char = '\u{f13f}';
+pub const ROTATE_VIEW_RIGHT: char = '\u{f13d}';
+/// North up (compass_true_north): the view put straight.
+pub const STRAIGHT_VIEW: char = '\u{f0a24}';
 pub const HELP: char = '\u{f63d}';
 pub const SEARCH: char = '\u{f68f}';
 pub const INFO: char = '\u{f4a3}';

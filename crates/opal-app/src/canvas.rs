@@ -29,6 +29,14 @@ struct ZoomDrag {
     zoom: f32,
 }
 
+/// Where a Rotate View drag started: the pointer's bearing from the view's middle (degrees,
+/// clockwise) and the view's angle then.
+#[derive(Clone, Copy)]
+struct RotateDrag {
+    bearing: f32,
+    angle: f32,
+}
+
 /// The preferences the canvas uses, read once per frame.
 struct CanvasPrefs {
     fit_max: f32,
@@ -105,6 +113,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     // where it does not say).
     let texture_budget = (st.gpu.memory.map_or(1 << 30, |(_, budget)| budget / 2) / crate::gpu::TEXTURE_BYTES) as usize;
     let zs = st.tool_settings(ToolId::Zoom).clone();
+    let turn_step = st.tool_settings(ToolId::RotateView).f64("rotate_view.step") as f32;
     let ms = st.tool_settings(ToolId::Move).clone();
     let select = crate::select_tool::Options::of(st.tool_settings(ToolId::Select));
     let outlining = crate::outline_tool::Options::of(st.tool_settings(ToolId::Outline));
@@ -116,8 +125,17 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let palette = st.palette;
     let unit = st.unit();
     let space = ctx.input(|i| i.key_down(Key::Space)) && !ctx.egui_wants_keyboard_input();
+    // R held turns the view with any tool, for as long as it is (but the outline tool's, whose
+    // R+drag redraws the outline).
+    let turning = ctx.input(|i| i.key_down(ToolId::RotateView.info().key)) && !ctx.egui_wants_keyboard_input();
     let chosen = st.tool();
-    let tool = if space { ToolId::Hand } else { chosen };
+    let tool = if space {
+        ToolId::Hand
+    } else if turning && chosen != ToolId::Outline {
+        ToolId::RotateView
+    } else {
+        chosen
+    };
     let mut notice = None;
     let Some(d) = st.doc_mut(id) else { return };
     d.drawn = ctx.cumulative_pass_nr();
@@ -128,7 +146,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     // While an edit is under way on the image, it may only be looked at: every tool is the
     // hand, but the zoom (see `edits`).
     let frozen = d.busy.is_some();
-    let tool = if frozen && tool != ToolId::Zoom { ToolId::Hand } else { tool };
+    let tool = if frozen && !matches!(tool, ToolId::Zoom | ToolId::RotateView) { ToolId::Hand } else { tool };
     let canvas = crate::doc::canvas_rect(&d.doc().canvas);
     // A view resized (a pane's border dragged, the panes tiled) keeps the point in its middle
     // there. The offset moves by whole pixels, half of each size, so as not to drift.
@@ -167,7 +185,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
                         };
                         // Shift turns vertical wheel motion into horizontal scrolling.
                         let px = if modifiers.shift && px.x == 0.0 { Vec2::new(px.y, 0.0) } else { px };
-                        d.view.offset += px;
+                        d.view.scroll(px);
                     }
                 }
                 Event::Zoom(factor) => {
@@ -183,7 +201,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let panning = response.dragged_by(PointerButton::Middle)
         || (tool == ToolId::Hand && !box_active && response.dragged_by(PointerButton::Primary));
     if panning {
-        d.view.offset += response.drag_delta() * ppp;
+        d.view.scroll(response.drag_delta() * ppp);
     }
     let modifiers = ctx.input(|i| i.modifiers);
     let to_doc = |p: Pos2, v: &crate::doc::View| {
@@ -307,10 +325,35 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
             ctx.data_mut(|m| m.remove::<ZoomDrag>(drag_id));
         }
     }
+    // The Rotate View tool: the view turned about its middle by the angle the pointer sweeps
+    // round it (to whole steps with Shift).
+    if tool == ToolId::RotateView && !boxed {
+        let drag_id = response.id.with("rotate-drag");
+        let bearing = |p: Vec2| {
+            let from = p - vp * 0.5;
+            from.y.atan2(from.x).to_degrees()
+        };
+        if response.dragged_by(PointerButton::Primary)
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            if response.drag_started() {
+                let start = RotateDrag { bearing: bearing(to_px(p - response.drag_delta())), angle: d.view.angle };
+                ctx.data_mut(|m| m.insert_temp(drag_id, start));
+            }
+            if let Some(start) = ctx.data(|m| m.get_temp::<RotateDrag>(drag_id)) {
+                let a = start.angle + bearing(to_px(p)) - start.bearing;
+                let a = if modifiers.shift { (a / turn_step).round() * turn_step } else { a };
+                d.view.turn_to(a);
+            }
+        }
+        if response.drag_stopped() {
+            ctx.data_mut(|m| m.remove::<RotateDrag>(drag_id));
+        }
+    }
     let cursor = match tool {
         _ if response.dragged_by(PointerButton::Middle) => CursorIcon::Grabbing,
-        ToolId::Hand if response.dragged() => CursorIcon::Grabbing,
-        ToolId::Hand => CursorIcon::Grab,
+        ToolId::Hand | ToolId::RotateView if response.dragged() => CursorIcon::Grabbing,
+        ToolId::Hand | ToolId::RotateView => CursorIcon::Grab,
         ToolId::Zoom if ctx.input(|i| i.modifiers.alt) => CursorIcon::ZoomOut,
         ToolId::Zoom => CursorIcon::ZoomIn,
         ToolId::Move => CursorIcon::Move,
@@ -338,9 +381,13 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     // ---- Drawing --------------------------------------------------------------------
     let view = d.view;
     let level = level_for(view.zoom, prefs.sharper);
-    let c0 = view.to_canvas(Vec2::ZERO);
-    let c1 = view.to_canvas(vp);
-    let visible = IRect::new(c0.x.floor() as i64, c0.y.floor() as i64, c1.x.ceil() as i64 + 1, c1.y.ceil() as i64 + 1);
+    let seen = view.shown();
+    let visible = IRect::new(
+        seen.min.x.floor() as i64,
+        seen.min.y.floor() as i64,
+        seen.max.x.ceil() as i64 + 1,
+        seen.max.y.ceil() as i64 + 1,
+    );
     // One tile more on every side, so the borders of the visible tiles are up to date.
     let span = i64::from(TILE_SIZE) << level;
     let wider = IRect::new(visible.x0 - span, visible.y0 - span, visible.x1 + span, visible.y1 + span);
@@ -364,7 +411,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     let nearest = view.zoom >= prefs.sharp_from;
     let uniforms_of = |canvas: Rect| ViewUniforms {
         vp_size: [vp.x, vp.y],
-        canvas_origin: view.to_screen(canvas.min.to_vec2()).into(),
+        canvas_origin: view.to_unturned(canvas.min.to_vec2()).into(),
         canvas_size: (canvas.size() * view.zoom).into(),
         checker_px: (prefs.checker_size * ppp).max(1.0),
         off_canvas: prefs.off_canvas,
@@ -373,7 +420,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         backdrop: theme::linear(palette.backdrop),
         encode_srgb: 0,
         smooth: u32::from(!nearest),
-        _pad: [0; 2],
+        turn: view.turning().into(),
     };
     let frame = ctx.cumulative_frame_nr();
     let callback = CanvasCallback {
@@ -449,22 +496,19 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
         }
     }
     if prefs.border {
-        let min = rect.min + view.to_screen(canvas.min.to_vec2()) / ppp;
-        let r = Rect::from_min_size(min, canvas.size() * view.zoom / ppp);
-        ui.painter().with_clip_rect(rect).rect_stroke(
-            r,
-            0.0,
-            Stroke::new(1.0, palette.separator),
-            egui::StrokeKind::Outside,
-        );
+        // Just outside the canvas, as the view turns it.
+        let outside = canvas.expand(0.5 * ppp / view.zoom);
+        let corners = [outside.left_top(), outside.right_top(), outside.right_bottom(), outside.left_bottom()];
+        let corners = corners.map(|c| rect.min + view.to_screen(c.to_vec2()) / ppp).to_vec();
+        ui.painter().with_clip_rect(rect).add(egui::Shape::closed_line(corners, Stroke::new(1.0, palette.separator)));
     }
     if rulers {
         let corner = Rect::from_min_max(avail.min, rect.min);
         let top = Rect::from_min_max(Pos2::new(rect.left(), avail.top()), rect.right_top());
         let left = Rect::from_min_max(Pos2::new(avail.left(), rect.top()), rect.left_bottom());
         let ruling = crate::rulers::Ruling {
-            origin: rect.min + view.to_screen(canvas.min.to_vec2()) / ppp,
-            per_point: f64::from(ppp / view.zoom),
+            top: crate::rulers::scale(&view, Vec2::ZERO, Vec2::X * ppp, canvas.min.to_vec2()),
+            left: crate::rulers::scale(&view, Vec2::ZERO, Vec2::Y * ppp, canvas.min.to_vec2()),
             unit,
             ppi: d.doc().resolution,
             pointer: response.hover_pos(),
@@ -575,8 +619,9 @@ pub(crate) const ANTS_STEP_MS: u64 = 100;
 /// image's own (see [`CanvasCallback::view_key`]).
 const COMPARED: u64 = 1 << 63;
 
-/// The tiles of `shown` (made at `level`) within `visible`, as `view` draws them: each with
-/// the tiles round it, which its edges are sampled from.
+/// The tiles of `shown` (made at `level`) within `visible`, as `view` draws them (where they
+/// would be were it not turned: the shader turns them): each with the tiles round it, which
+/// its edges are sampled from.
 fn tile_draws(
     shown: Option<&crate::projector::Shown>,
     level: u32,
@@ -597,8 +642,8 @@ fn tile_draws(
                 sources[((dy + 1) * 3 + dx + 1) as usize] = shown.tiles.get(&n).cloned();
             }
         }
-        let p0 = view.to_screen(Vec2::new(r.x0 as f32, r.y0 as f32));
-        let p1 = view.to_screen(Vec2::new(r.x1 as f32, r.y1 as f32));
+        let p0 = view.to_unturned(Vec2::new(r.x0 as f32, r.y0 as f32));
+        let p1 = view.to_unturned(Vec2::new(r.x1 as f32, r.y1 as f32));
         draws.push(TileDraw { coord, rect: [p0.x, p0.y, p1.x, p1.y], sources });
     }
     draws
@@ -716,14 +761,25 @@ fn draw_outlines(
 pub fn draw_guides(ui: &egui::Ui, guides: &crate::transform::Guides, rect: Rect, to_screen: &dyn Fn([f64; 2]) -> Pos2) {
     let painter = ui.painter().with_clip_rect(rect);
     let stroke = Stroke::new(1.0, Color32::from_rgb(230, 60, 200));
-    for &x in &guides.xs {
-        let sx = to_screen([x, 0.0]).x;
-        painter.line_segment([Pos2::new(sx, rect.top()), Pos2::new(sx, rect.bottom())], stroke);
+    for line in guide_lines(guides, rect, to_screen) {
+        painter.line_segment(line, stroke);
     }
-    for &y in &guides.ys {
-        let sy = to_screen([0.0, y]).y;
-        painter.line_segment([Pos2::new(rect.left(), sy), Pos2::new(rect.right(), sy)], stroke);
-    }
+}
+
+/// Where `guides` are drawn: each across the whole view `rect`, however the view turns it.
+fn guide_lines(guides: &crate::transform::Guides, rect: Rect, to_screen: &dyn Fn([f64; 2]) -> Pos2) -> Vec<[Pos2; 2]> {
+    let xs = guides.xs.iter().map(|&x| across(rect, to_screen([x, 0.0]), to_screen([x, 1.0])));
+    let ys = guides.ys.iter().map(|&y| across(rect, to_screen([0.0, y]), to_screen([1.0, y])));
+    xs.chain(ys).collect()
+}
+
+/// The ends of the line through screen points `p` and `q` reaching across all of `rect` (and
+/// past it, to be clipped to it).
+fn across(rect: Rect, p: Pos2, q: Pos2) -> [Pos2; 2] {
+    let dir = (q - p).normalized();
+    let middle = p + dir * (rect.center() - p).dot(dir);
+    let reach = rect.size().length();
+    [middle - dir * reach, middle + dir * reach]
 }
 
 /// The canvas's context menu; `None` is a separator.
@@ -743,6 +799,27 @@ const CANVAS_MENU: &[Option<Cmd>] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_guide_reaches_across_the_view_however_it_is_turned() {
+        let view = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(400.0, 300.0));
+        // Upright, across it top to bottom; on its side, left to right; askew, corner to corner.
+        let [a, b] = across(view, Pos2::new(50.0, 100.0), Pos2::new(50.0, 101.0));
+        assert!(a.x == 50.0 && b.x == 50.0 && a.y.min(b.y) <= view.top() && a.y.max(b.y) >= view.bottom());
+        let [a, b] = across(view, Pos2::new(300.0, 60.0), Pos2::new(299.0, 60.0));
+        assert!(a.y == 60.0 && b.y == 60.0 && a.x.min(b.x) <= view.left() && a.x.max(b.x) >= view.right());
+        let [a, b] = across(view, view.center(), view.center() + Vec2::new(4.0, 3.0));
+        assert!(!view.contains(a) && !view.contains(b));
+        // A guide at x = 100 on a view turned a quarter, which shows canvas x down the screen:
+        // it runs across the view left to right.
+        let v = crate::doc::View { viewport: Vec2::new(400.0, 300.0), ..crate::doc::View::default() };
+        let mut v = v;
+        v.turn_to(90.0);
+        let to_screen = |p: [f64; 2]| view.min + v.to_screen(Vec2::new(p[0] as f32, p[1] as f32));
+        let guides = crate::transform::Guides { xs: vec![100.0], ..Default::default() };
+        let [[a, b]] = guide_lines(&guides, view, &to_screen)[..] else { panic!("one line") };
+        assert!((a.y - b.y).abs() < 1e-3 && a.x.min(b.x) <= view.left() && a.x.max(b.x) >= view.right(), "{a:?} {b:?}");
+    }
 
     #[test]
     fn levels_follow_the_zoom() {

@@ -6,14 +6,15 @@ use crate::doc::{DocId, View};
 use eframe::egui::Vec2;
 use egui_tiles::{Container, Tile, TileId, Tiles, Tree};
 
-/// `to`'s view made to show what `from` shows: the same zoom, and in the middle of its
-/// viewport the point of its image that `from` shows in the middle of its own, both counted
-/// from their canvases' corners (`from_corner`, `to_corner`: where each canvas's top-left
-/// is, in canvas pixels).
+/// `to`'s view made to show what `from` shows: the same zoom and angle, and in the middle of
+/// its viewport the point of its image that `from` shows in the middle of its own, both
+/// counted from their canvases' corners (`from_corner`, `to_corner`: where each canvas's
+/// top-left is, in canvas pixels). (The middle stays where it is as a view turns.)
 pub fn matched(from: &View, from_corner: Vec2, to: &View, to_corner: Vec2) -> View {
     let middle = from.to_canvas(from.viewport * 0.5) - from_corner;
     let mut v = *to;
     v.zoom = from.zoom;
+    v.angle = from.angle;
     v.offset = to.viewport * 0.5 - (middle + to_corner) * v.zoom;
     v.placed = true;
     v.snap();
@@ -296,6 +297,13 @@ mod tests {
         // The other canvas's corner elsewhere: the same place of its image is matched.
         let m = matched(&from, Vec2::ZERO, &to, Vec2::new(10.0, 20.0));
         assert_eq!(m.zoom, 2.0);
+        let middle_from = from.to_canvas(from.viewport * 0.5);
+        let middle_to = m.to_canvas(m.viewport * 0.5) - Vec2::new(10.0, 20.0);
+        assert!((middle_from - middle_to).length() < 1e-3, "{middle_from:?} {middle_to:?}");
+        // Turned, the other is turned alike, the same place still in its middle.
+        from.turn_to(-40.0);
+        let m = matched(&from, Vec2::ZERO, &to, Vec2::new(10.0, 20.0));
+        assert_eq!(m.angle, -40.0);
         let middle_from = from.to_canvas(from.viewport * 0.5);
         let middle_to = m.to_canvas(m.viewport * 0.5) - Vec2::new(10.0, 20.0);
         assert!((middle_from - middle_to).length() < 1e-3, "{middle_from:?} {middle_to:?}");

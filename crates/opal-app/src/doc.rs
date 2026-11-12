@@ -11,11 +11,15 @@ use std::path::PathBuf;
 pub struct DocId(pub u64);
 
 /// How the canvas is shown: `zoom` device pixels per canvas pixel, with canvas pixel (0, 0)
-/// at `offset` device pixels from the viewport's top-left corner.
+/// at `offset` device pixels from the viewport's top-left corner, were the view not turned;
+/// then turned `angle` degrees clockwise about the viewport's middle (design.md, *Rotating
+/// the view*).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct View {
     pub zoom: f32,
     pub offset: Vec2,
+    /// How far the view is turned, in degrees clockwise (-180 to 180).
+    pub angle: f32,
     /// The viewport's size in device pixels when last shown.
     pub viewport: Vec2,
     /// Where the viewport was on screen when last shown, in points.
@@ -29,6 +33,7 @@ impl Default for View {
         View {
             zoom: 1.0,
             offset: Vec2::ZERO,
+            angle: 0.0,
             viewport: Vec2::ZERO,
             screen_rect: eframe::egui::Rect::NOTHING,
             placed: false,
@@ -45,14 +50,58 @@ pub const MIN_ZOOM: f32 = 1.0 / 1024.0;
 pub const MAX_ZOOM: f32 = 128.0;
 
 impl View {
+    /// The cosine and sine of the angle: exactly 1 and 0 when it is 0, so that a view not
+    /// turned maps points exactly as it did before views turned.
+    pub fn turning(self) -> (f32, f32) {
+        if self.angle == 0.0 {
+            (1.0, 0.0)
+        } else {
+            let a = self.angle.to_radians();
+            (a.cos(), a.sin())
+        }
+    }
+
+    /// `v` (a direction, in device pixels) turned as the view is: clockwise on the screen,
+    /// whose y goes down.
+    pub fn turn(self, v: Vec2) -> Vec2 {
+        let (c, s) = self.turning();
+        Vec2::new(v.x * c - v.y * s, v.x * s + v.y * c)
+    }
+
+    /// `v` turned back (see [`turn`](Self::turn)).
+    pub fn unturn(self, v: Vec2) -> Vec2 {
+        let (c, s) = self.turning();
+        Vec2::new(v.x * c + v.y * s, v.y * c - v.x * s)
+    }
+
+    /// Where a point on the screen (device pixels from the viewport's corner) would be were
+    /// the view not turned.
+    pub fn unturned(self, px: Vec2) -> Vec2 {
+        let middle = self.viewport * 0.5;
+        middle + self.unturn(px - middle)
+    }
+
+    /// Where a canvas point would be on the screen were the view not turned: what the GPU
+    /// places tiles by, before it turns them.
+    pub fn to_unturned(self, canvas: Vec2) -> Vec2 {
+        canvas * self.zoom + self.offset
+    }
+
     /// Canvas coordinates of a point given in device pixels from the viewport's corner.
     pub fn to_canvas(self, px: Vec2) -> Vec2 {
-        (px - self.offset) / self.zoom
+        (self.unturned(px) - self.offset) / self.zoom
     }
 
     /// Device pixels from the viewport's corner of a canvas point.
     pub fn to_screen(self, canvas: Vec2) -> Vec2 {
-        canvas * self.zoom + self.offset
+        let middle = self.viewport * 0.5;
+        middle + self.turn(self.to_unturned(canvas) - middle)
+    }
+
+    /// The smallest canvas rectangle holding all the view shows.
+    pub fn shown(self) -> Rect {
+        let corners = [Vec2::ZERO, Vec2::new(self.viewport.x, 0.0), self.viewport, Vec2::new(0.0, self.viewport.y)];
+        Rect::from_points(&corners.map(|c| self.to_canvas(c).to_pos2()))
     }
 
     /// Zooms to `zoom`, keeping the canvas point under device pixel `anchor` where it is.
@@ -60,18 +109,36 @@ impl View {
         let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
         let c = self.to_canvas(anchor);
         self.zoom = zoom;
-        self.offset = anchor - c * zoom;
+        self.offset = self.unturned(anchor) - c * zoom;
         self.snap();
     }
 
-    /// Fits `canvas` (in canvas pixels) into a viewport of `viewport` device pixels,
-    /// centered, with a margin, never zooming past `max`.
+    /// Moves what the view shows `delta` device pixels across the screen.
+    pub fn scroll(&mut self, delta: Vec2) {
+        self.offset += self.unturn(delta);
+    }
+
+    /// Turns the view to `angle` degrees clockwise (taken to -180 to 180), about the
+    /// viewport's middle.
+    pub fn turn_to(&mut self, angle: f32) {
+        let a = (angle + 180.0).rem_euclid(360.0) - 180.0;
+        // Straight again exactly, not nearly, and crisp again at a whole zoom.
+        self.angle = if a.abs() < 1e-3 { 0.0 } else { a };
+        self.snap();
+    }
+
+    /// Fits `canvas` (in canvas pixels), as the view turns it, into a viewport of `viewport`
+    /// device pixels, centered, with a margin, never zooming past `max`.
     pub fn fit(&mut self, canvas: Rect, viewport: Vec2, max: f32) {
         let margin = 0.92;
+        let (c, s) = self.turning();
         let size = canvas.size();
-        let z = (viewport.x / size.x).min(viewport.y / size.y) * margin;
+        let turned = Vec2::new(size.x * c.abs() + size.y * s.abs(), size.x * s.abs() + size.y * c.abs());
+        let z = (viewport.x / turned.x).min(viewport.y / turned.y) * margin;
         self.zoom = z.clamp(MIN_ZOOM, max.max(MIN_ZOOM));
-        self.offset = (viewport - size * self.zoom) * 0.5 - canvas.min.to_vec2() * self.zoom;
+        // Its middle in the viewport's, which the view turns about.
+        self.viewport = viewport;
+        self.offset = viewport * 0.5 - canvas.center().to_vec2() * self.zoom;
         self.placed = true;
         self.snap();
     }
@@ -82,11 +149,13 @@ impl View {
     }
 
     /// At whole-number zoom levels, aligns canvas pixels with device pixels so they stay
-    /// crisp.
+    /// crisp: where the view is straight, as only there they can be.
     pub fn snap(&mut self) {
         if self.zoom >= 1.0 && (self.zoom - self.zoom.round()).abs() < 1e-4 {
             self.zoom = self.zoom.round();
-            self.offset = Vec2::new(self.offset.x.round(), self.offset.y.round());
+            if self.angle == 0.0 {
+                self.offset = Vec2::new(self.offset.x.round(), self.offset.y.round());
+            }
         }
     }
 }
@@ -852,6 +921,55 @@ mod tests {
             (center - Vec2::new(250.0, 250.0)).length() < 1.0,
             "the canvas is centered wherever it lies: {center:?}"
         );
+    }
+
+    #[test]
+    fn a_turned_view_turns_about_its_middle_and_zooms_scrolls_and_fits_as_it_shows() {
+        let near = |a: Vec2, b: Vec2| (a - b).length() < 1e-2;
+        let mut v = View {
+            zoom: 2.0,
+            offset: Vec2::new(30.0, -40.0),
+            viewport: Vec2::new(800.0, 600.0),
+            placed: true,
+            ..View::default()
+        };
+        let middle = v.to_canvas(v.viewport * 0.5);
+        v.turn_to(37.0);
+        // The middle stays; every point comes back as it went; canvas x runs 37° below the
+        // screen's x, clockwise.
+        assert!(near(v.to_canvas(v.viewport * 0.5), middle));
+        for p in [Vec2::ZERO, Vec2::new(123.0, 456.0), Vec2::new(-80.0, 900.0)] {
+            assert!(near(v.to_screen(v.to_canvas(p)), p), "{p:?}");
+        }
+        let along = v.to_screen(middle + Vec2::X) - v.to_screen(middle);
+        assert!(near(along, Vec2::angled(37f32.to_radians()) * 2.0), "{along:?}");
+        // Zooming keeps the point under the pointer; scrolling moves the image as the pointer moves.
+        let anchor = Vec2::new(100.0, 500.0);
+        let under = v.to_canvas(anchor);
+        v.zoom_about(3.0, anchor);
+        assert!(near(v.to_canvas(anchor), under));
+        let before = v.to_screen(under);
+        v.scroll(Vec2::new(25.0, -10.0));
+        assert!(near(v.to_screen(under), before + Vec2::new(25.0, -10.0)));
+        // Fitting fits the canvas as the view turns it: a long strip turned upright fits by its
+        // length down the viewport.
+        let strip = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 100.0));
+        v.turn_to(90.0);
+        v.fit(strip, Vec2::new(800.0, 600.0), 10.0);
+        let ends = [v.to_screen(Vec2::ZERO), v.to_screen(Vec2::new(1000.0, 100.0))];
+        assert!((ends[0].y - ends[1].y).abs() <= 600.0 && (ends[0].y - ends[1].y).abs() > 500.0, "{ends:?}");
+        assert!(near(v.to_screen(strip.center().to_vec2()), Vec2::new(400.0, 300.0)));
+        // Angles are kept within a turn; nearly straight is straight.
+        v.turn_to(200.0);
+        assert_eq!(v.angle, -160.0);
+        v.turn_to(360.0004);
+        assert_eq!(v.angle, 0.0);
+        // Straight at a whole zoom, its pixels are the screen's again.
+        v.zoom_about(2.0, Vec2::new(0.3, 0.3));
+        v.turn_to(10.0);
+        v.scroll(Vec2::new(0.4, 0.3));
+        v.turn_to(0.0);
+        assert_eq!(v.offset, v.offset.round(), "not crisp");
     }
 
     #[test]
