@@ -40,6 +40,16 @@ pub enum Cmd {
     DeleteLayer,
     MoveUp,
     MoveDown,
+    AlignLeft,
+    AlignHorizontalCenters,
+    AlignRight,
+    AlignTop,
+    AlignVerticalCenters,
+    AlignBottom,
+    DistributeHorizontalCenters,
+    DistributeVerticalCenters,
+    DistributeHorizontalSpace,
+    DistributeVerticalSpace,
     MergeDown,
     MergeSelected,
     MergeVisible,
@@ -125,7 +135,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 80] = [
+    pub const ALL: [Cmd; 90] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -156,6 +166,16 @@ impl Cmd {
         Cmd::DeleteLayer,
         Cmd::MoveUp,
         Cmd::MoveDown,
+        Cmd::AlignLeft,
+        Cmd::AlignHorizontalCenters,
+        Cmd::AlignRight,
+        Cmd::AlignTop,
+        Cmd::AlignVerticalCenters,
+        Cmd::AlignBottom,
+        Cmd::DistributeHorizontalCenters,
+        Cmd::DistributeVerticalCenters,
+        Cmd::DistributeHorizontalSpace,
+        Cmd::DistributeVerticalSpace,
         Cmd::MergeDown,
         Cmd::MergeSelected,
         Cmd::MergeVisible,
@@ -462,6 +482,64 @@ impl Cmd {
                 "Move the active layer one place down.",
                 "Within its group. Drag layers in the Layers panel to move them anywhere.",
                 const { &[ctrl(Key::OpenBracket)] },
+            ),
+            Cmd::AlignLeft => {
+                i("Align Left Edges", icons::ALIGN_LEFT, "Line the selected layers' left edges up.", ALIGN_HELP, &[])
+            }
+            Cmd::AlignHorizontalCenters => i(
+                "Align Horizontal Centers",
+                icons::ALIGN_HORIZONTAL_CENTERS,
+                "Line the selected layers' centers up on a vertical line.",
+                ALIGN_HELP,
+                &[],
+            ),
+            Cmd::AlignRight => {
+                i("Align Right Edges", icons::ALIGN_RIGHT, "Line the selected layers' right edges up.", ALIGN_HELP, &[])
+            }
+            Cmd::AlignTop => {
+                i("Align Top Edges", icons::ALIGN_TOP, "Line the selected layers' top edges up.", ALIGN_HELP, &[])
+            }
+            Cmd::AlignVerticalCenters => i(
+                "Align Vertical Centers",
+                icons::ALIGN_VERTICAL_CENTERS,
+                "Line the selected layers' centers up on a horizontal line.",
+                ALIGN_HELP,
+                &[],
+            ),
+            Cmd::AlignBottom => i(
+                "Align Bottom Edges",
+                icons::ALIGN_BOTTOM,
+                "Line the selected layers' bottom edges up.",
+                ALIGN_HELP,
+                &[],
+            ),
+            Cmd::DistributeHorizontalCenters => i(
+                "Distribute Horizontally",
+                icons::DISTRIBUTE_HORIZONTAL,
+                "Space the selected layers' centers evenly from side to side.",
+                DISTRIBUTE_HELP,
+                &[],
+            ),
+            Cmd::DistributeVerticalCenters => i(
+                "Distribute Vertically",
+                icons::DISTRIBUTE_VERTICAL,
+                "Space the selected layers' centers evenly from top to bottom.",
+                DISTRIBUTE_HELP,
+                &[],
+            ),
+            Cmd::DistributeHorizontalSpace => i(
+                "Distribute Horizontal Space",
+                icons::SPACE_HORIZONTAL,
+                "Make the gaps between the selected layers, side to side, all alike.",
+                DISTRIBUTE_HELP,
+                &[],
+            ),
+            Cmd::DistributeVerticalSpace => i(
+                "Distribute Vertical Space",
+                icons::SPACE_VERTICAL,
+                "Make the gaps between the selected layers, top to bottom, all alike.",
+                DISTRIBUTE_HELP,
+                &[],
             ),
             Cmd::MergeDown => i(
                 "Merge Down",
@@ -884,8 +962,25 @@ pub struct Group {
     pub description: &'static str,
     /// The first `large` commands get large buttons; the rest are stacked small ones.
     pub large: usize,
+    /// Whether its buttons show their icons alone (their names in their tooltips), stacked three
+    /// to a column, however wide the ribbon: for many commands whose icons say what they do.
+    pub icons: bool,
     pub cmds: &'static [Cmd],
 }
+
+/// What every Align command's help says.
+const ALIGN_HELP: &str = "Each layer goes by the bounds of what it shows (a group by all inside it), and moves by \
+                          whole pixels. What they line up with is the Move tool's Align to: the box round the \
+                          selected layers (with one selected, the canvas), the canvas, the box round what is \
+                          selected, or the active layer, which stays where it is. While the transform box is \
+                          open, the box is aligned instead, to the canvas or the selection.";
+
+/// What every Distribute command's help says.
+const DISTRIBUTE_HELP: &str = "In the order they lie along the line. Among themselves (Align to: the selected \
+                               layers, or the active layer) the outermost two stay, and three are needed; across \
+                               the canvas or the selection, the first goes to its one side and the last to the \
+                               other, and two are enough. Each layer goes by the bounds of what it shows, and \
+                               moves by whole pixels.";
 
 pub static RIBBON: &[Tab] = &[
     Tab {
@@ -896,6 +991,7 @@ pub static RIBBON: &[Tab] = &[
                 description: "Creating, opening, saving and exporting images, and placing image files \
                               into them.",
                 large: 3,
+                icons: false,
                 cmds: &[Cmd::New, Cmd::Open, Cmd::Save, Cmd::Place, Cmd::SaveAs, Cmd::Export, Cmd::Close],
             },
             Group {
@@ -903,12 +999,14 @@ pub static RIBBON: &[Tab] = &[
                 description: "Running Python scripts that drive Opal Studio. What they print \
                               shows in the Console panel.",
                 large: 1,
+                icons: false,
                 cmds: &[Cmd::RunScript, Cmd::ConnectAssistant],
             },
             Group {
                 name: "Application",
                 description: "Settings for Opal Studio itself.",
                 large: 1,
+                icons: false,
                 cmds: &[Cmd::Preferences, Cmd::Exit],
             },
         ],
@@ -921,30 +1019,35 @@ pub static RIBBON: &[Tab] = &[
                 description: "Moving back and forth through what you have done. The History \
                               panel shows every step, branches included.",
                 large: 2,
+                icons: false,
                 cmds: &[Cmd::Undo, Cmd::Redo],
             },
             Group {
                 name: "Clipboard",
                 description: "Copying and pasting images, here and between programs.",
                 large: 1,
+                icons: false,
                 cmds: &[Cmd::Paste, Cmd::Cut, Cmd::Copy, Cmd::CopyMerged, Cmd::PasteInPlace],
             },
             Group {
                 name: "Transform",
                 description: "Moving, scaling and rotating layers. The Move tool (V) moves them too.",
                 large: 1,
+                icons: false,
                 cmds: &[Cmd::Transform, Cmd::ReapplyPlacement, Cmd::ReapplyAllPlacements],
             },
             Group {
                 name: "Layers",
                 description: "The most used layer commands. The Layer tab has all of them.",
                 large: 1,
+                icons: false,
                 cmds: &[Cmd::NewLayer, Cmd::Duplicate, Cmd::DeleteLayer],
             },
             Group {
                 name: "View",
                 description: "Seeing the whole image, or its actual pixels.",
                 large: 2,
+                icons: false,
                 cmds: &[Cmd::ZoomFit, Cmd::Zoom100],
             },
         ],
@@ -956,12 +1059,14 @@ pub static RIBBON: &[Tab] = &[
                 name: "Size",
                 description: "The size of the image, and of the canvas it is shown on.",
                 large: 2,
+                icons: false,
                 cmds: &[Cmd::ResizeImage, Cmd::ResizeCanvas, Cmd::CropToContent],
             },
             Group {
                 name: "Rotate",
                 description: "Turning and mirroring the whole image.",
                 large: 2,
+                icons: false,
                 cmds: &[
                     Cmd::RotateCw,
                     Cmd::RotateCcw,
@@ -981,6 +1086,7 @@ pub static RIBBON: &[Tab] = &[
                 description: "What commands act on: all of the canvas, nothing, or the opposite. The \
                               Select tool (M) draws rectangles and ellipses, and single rows and columns.",
                 large: 1,
+                icons: false,
                 cmds: &[Cmd::SelectAll, Cmd::Deselect, Cmd::Reselect, Cmd::InvertSelection, Cmd::SelectLayerPixels],
             },
             Group {
@@ -988,6 +1094,7 @@ pub static RIBBON: &[Tab] = &[
                 description: "Changing the selection: its edge moved out or in, softened, smoothed or made \
                               a band, or the whole of it moved, sized or turned in a box.",
                 large: 0,
+                icons: false,
                 cmds: &[
                     Cmd::GrowSelection,
                     Cmd::FeatherSelection,
@@ -1000,12 +1107,14 @@ pub static RIBBON: &[Tab] = &[
                 name: "Saved",
                 description: "Selections kept by name in the image, and its file, to load back.",
                 large: 0,
+                icons: false,
                 cmds: &[Cmd::SaveSelection, Cmd::LoadSelection],
             },
             Group {
                 name: "Selected",
                 description: "Acting on what is selected, as much of each pixel as it is selected.",
                 large: 1,
+                icons: false,
                 cmds: &[Cmd::Clear, Cmd::Cut, Cmd::CropToSelection, Cmd::LayerViaCopy, Cmd::LayerViaCut],
             },
         ],
@@ -1017,6 +1126,7 @@ pub static RIBBON: &[Tab] = &[
                 name: "New",
                 description: "Adding layers and groups.",
                 large: 2,
+                icons: false,
                 cmds: &[Cmd::NewLayer, Cmd::NewGroup, Cmd::Duplicate, Cmd::LayerViaCopy, Cmd::GroupLayers],
             },
             Group {
@@ -1024,12 +1134,34 @@ pub static RIBBON: &[Tab] = &[
                 description: "Changing the order of layers. Dragging in the Layers panel also \
                               moves layers into and out of groups.",
                 large: 0,
+                icons: false,
                 cmds: &[Cmd::MoveUp, Cmd::MoveDown],
+            },
+            Group {
+                name: "Align",
+                description: "Lining the selected layers up, and spacing them evenly, to what the Move tool's \
+                              Align to says: the layers themselves, the canvas, the selection, or the active \
+                              layer.",
+                large: 0,
+                icons: true,
+                cmds: &[
+                    Cmd::AlignLeft,
+                    Cmd::AlignHorizontalCenters,
+                    Cmd::AlignRight,
+                    Cmd::AlignTop,
+                    Cmd::AlignVerticalCenters,
+                    Cmd::AlignBottom,
+                    Cmd::DistributeHorizontalCenters,
+                    Cmd::DistributeVerticalCenters,
+                    Cmd::DistributeHorizontalSpace,
+                    Cmd::DistributeVerticalSpace,
+                ],
             },
             Group {
                 name: "Combine",
                 description: "Combining layers into one. Combining keeps the look exactly.",
                 large: 2,
+                icons: false,
                 cmds: &[
                     Cmd::MergeDown,
                     Cmd::MergeSelected,
@@ -1043,15 +1175,23 @@ pub static RIBBON: &[Tab] = &[
                 name: "Convert",
                 description: "Turning editable content into plain pixels.",
                 large: 1,
+                icons: false,
                 cmds: &[Cmd::Rasterize],
             },
             Group {
                 name: "Properties",
                 description: "Changing the active layer's visibility, protection and name.",
                 large: 0,
+                icons: false,
                 cmds: &[Cmd::ToggleVisible, Cmd::ToggleLock, Cmd::Rename],
             },
-            Group { name: "Remove", description: "Removing layers.", large: 1, cmds: &[Cmd::DeleteLayer] },
+            Group {
+                name: "Remove",
+                description: "Removing layers.",
+                large: 1,
+                icons: false,
+                cmds: &[Cmd::DeleteLayer],
+            },
         ],
     },
     Tab {
@@ -1062,18 +1202,21 @@ pub static RIBBON: &[Tab] = &[
                 description: "How large the image is shown. The mouse wheel and the Zoom tool \
                               zoom too.",
                 large: 2,
+                icons: false,
                 cmds: &[Cmd::ZoomFit, Cmd::Zoom100, Cmd::ZoomIn, Cmd::ZoomOut],
             },
             Group {
                 name: "Canvas",
                 description: "What is shown on and around the canvas.",
                 large: 1,
+                icons: false,
                 cmds: &[Cmd::ToggleOffCanvas, Cmd::ToggleRulers, Cmd::ToggleSelectionOverlay],
             },
             Group {
                 name: "Interface",
                 description: "How Opal Studio itself looks.",
                 large: 0,
+                icons: false,
                 cmds: &[Cmd::ScreenMode, Cmd::ToggleTheme, Cmd::ToggleRibbon, Cmd::CycleToolsPlace, Cmd::ResetPanels],
             },
         ],
@@ -1085,12 +1228,14 @@ pub static RIBBON: &[Tab] = &[
                 name: "Help",
                 description: "Finding out how things work.",
                 large: 1,
+                icons: false,
                 cmds: &[Cmd::Help, Cmd::Search, Cmd::Shortcuts, Cmd::About],
             },
             Group {
                 name: "Developer",
                 description: "For trying out parts of Opal Studio during development.",
                 large: 0,
+                icons: false,
                 cmds: &[Cmd::WidgetGallery],
             },
         ],
@@ -1319,6 +1464,19 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
                 Some(l) => Err(format!("\"{}\" is locked. Unlock it first.", l.name)),
                 None => Ok(()),
             }
+        }
+        AlignLeft
+        | AlignHorizontalCenters
+        | AlignRight
+        | AlignTop
+        | AlignVerticalCenters
+        | AlignBottom
+        | DistributeHorizontalCenters
+        | DistributeVerticalCenters
+        | DistributeHorizontalSpace
+        | DistributeVerticalSpace => {
+            let how = crate::arrange::Arrange::of(cmd).expect("one of them");
+            crate::arrange::refused(st, how, crate::arrange::To::chosen(st))
         }
         MoveUp | MoveDown => {
             let d = st.active().ok_or("Open or create an image first.")?;

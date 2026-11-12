@@ -865,7 +865,10 @@ it would carry on past an undo or a deselect and leave states nobody meant.
   none: their own single keys (H, Z) already work without Alt.
 - **Command search:** a search box at the ribbon's right end finds any command by name.
 - **Sizes:** full (icons and labels) or a single line. As the window narrows, groups shrink
-  in steps: large buttons become small ones, then a whole group collapses into a dropdown.
+  in steps, from the right: large buttons become small ones, small ones their icons alone
+  (three to a column), then a whole group collapses into a dropdown. A group of many
+  commands whose icons say what they do (Align) shows its icons alone however wide the
+  window (`Group::icons`), so that it does not crowd out the groups beside it.
 
 ### Tools
 
@@ -1018,6 +1021,32 @@ nothing). Their memory is checked before they begin.
   transform*). The arrow keys nudge by one pixel, and with Shift by ten (adjustable), with
   any tool. Clicking first selects the layer under the pointer (a setting turns that off,
   to drag the selected layers from anywhere).
+- **Align and distribute** the selected layers (Layer › Align, and the Move tool's
+  settings), each by the bounds of what it shows (a group by all inside it), and moved by
+  whole pixels, as the Move tool moves them. Each is one history state.
+  - **Align** puts their left edges, horizontal centers, right edges, top edges, vertical
+    centers or bottom edges on those of the target. The target is the Move tool's *Align
+    to* setting:
+    - *Selected layers*, the box round them all. With one layer selected, the canvas, as in
+      Photoshop.
+    - *Canvas*.
+    - *Selection*, the box round what is selected.
+    - *Active layer*, which stays where it is, the key the others line up to (the layer
+      last clicked; a script names it first).
+  - **Distribute** spaces them evenly: their horizontal or vertical centers, or the gaps
+    between them, horizontally or vertically, in the order they lie along the line.
+    - Among themselves (*Selected layers* or *Active layer*), the outermost two stay, and
+      three or more are needed.
+    - Across the canvas or the selection, the first's leading edge goes to its start and
+      the last's trailing edge to its end, and two are enough.
+  - While the transform box is open, Align moves the box instead: to the canvas, or to the
+    selection with *Align to* Selection. This is the paste-then-center workflow. Distribute
+    waits for the box to be applied.
+  - Refused, saying why, when a layer to move is locked (or in a locked group), when too
+    few layers show anything, or when there is no selection to align to. When nothing would
+    move, the status bar says they are aligned (or spaced) already.
+  - Scripts: `align_left` … `distribute_vertical_space`, each taking the layers (the first
+    the key) and `to`.
 - **Sample from** (which layers a tool reads): current layer, layers below, all visible, or a
   chosen set (checkboxes in the layers panel; sets can be named and reused). Present on every
   tool that reads pixels: Clone, Heal, Mix, Detail, the eyedropper, the magic wand, color

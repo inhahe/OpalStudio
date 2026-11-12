@@ -32,7 +32,7 @@ pub struct MoveDrag {
 }
 
 /// Moves everything in `layer` (and the layers inside it) by `d` whole pixels.
-fn shift(layer: &mut Layer, d: [i64; 2]) {
+pub(crate) fn shift(layer: &mut Layer, d: [i64; 2]) {
     match &mut layer.content {
         LayerContent::Objects(objects) => {
             for o in objects {
@@ -87,10 +87,7 @@ impl DocState {
     /// The bounds of the selected layers' content.
     pub fn selected_layers_bounds(&self) -> Option<FRect> {
         let doc = self.doc();
-        self.selected_layers()
-            .iter()
-            .filter_map(|&l| doc.layer(l)?.bounds())
-            .reduce(|a, b| FRect::new(a.x0.min(b.x0), a.y0.min(b.y0), a.x1.max(b.x1), a.y1.max(b.y1)))
+        self.selected_layers().iter().filter_map(|&l| doc.layer(l)?.bounds()).reduce(|a, b| a.union(&b))
     }
 
     /// Shows the selected layers moved by `d` from where they are in history, as a pending

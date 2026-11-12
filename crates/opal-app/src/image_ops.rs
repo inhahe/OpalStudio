@@ -276,7 +276,7 @@ pub fn visible_bounds(doc: &Document) -> Option<IRect> {
                         if let Some(b) = o.bounds() {
                             *out = Some(match *out {
                                 None => b,
-                                Some(a) => FRect::new(a.x0.min(b.x0), a.y0.min(b.y0), a.x1.max(b.x1), a.y1.max(b.y1)),
+                                Some(a) => a.union(&b),
                             });
                         }
                     }

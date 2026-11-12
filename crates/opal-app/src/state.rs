@@ -698,6 +698,21 @@ impl AppState {
             Cmd::LayerViaCut => self.layer_via(true),
             Cmd::GroupLayers => self.group_layers(),
             Cmd::DeleteLayer => self.delete_layers(),
+            Cmd::AlignLeft
+            | Cmd::AlignHorizontalCenters
+            | Cmd::AlignRight
+            | Cmd::AlignTop
+            | Cmd::AlignVerticalCenters
+            | Cmd::AlignBottom
+            | Cmd::DistributeHorizontalCenters
+            | Cmd::DistributeVerticalCenters
+            | Cmd::DistributeHorizontalSpace
+            | Cmd::DistributeVerticalSpace => {
+                let how = crate::arrange::Arrange::of(cmd).expect("one of them");
+                if let Err(why) = self.arrange(how, crate::arrange::To::chosen(self)) {
+                    self.message(MessageKind::Info, cmd.info().name, why);
+                }
+            }
             Cmd::MoveUp => self.move_layer(true),
             Cmd::MoveDown => self.move_layer(false),
             Cmd::MergeDown => self.merge_down(),

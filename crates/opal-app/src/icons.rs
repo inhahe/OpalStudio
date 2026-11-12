@@ -24,6 +24,22 @@ pub const LOCK: char = '\u{e78f}';
 pub const UNLOCK: char = '\u{e795}';
 pub const ARROW_UP: char = '\u{f19b}';
 pub const ARROW_DOWN: char = '\u{f148}';
+pub const ALIGN_LEFT: char = '\u{e033}';
+/// Items stacked on a vertical line: their horizontal centers lined up.
+pub const ALIGN_HORIZONTAL_CENTERS: char = '\u{e02b}';
+pub const ALIGN_RIGHT: char = '\u{e039}';
+pub const ALIGN_TOP: char = '\u{e04a}';
+/// Items side by side on a horizontal line: their vertical centers lined up.
+pub const ALIGN_VERTICAL_CENTERS: char = '\u{e025}';
+pub const ALIGN_BOTTOM: char = '\u{e01f}';
+/// Two side by side, far apart.
+pub const DISTRIBUTE_HORIZONTAL: char = '\u{e041}';
+/// Two stacked, far apart.
+pub const DISTRIBUTE_VERTICAL: char = '\u{e040}';
+/// Three side by side, evenly.
+pub const SPACE_HORIZONTAL: char = '\u{e042}';
+/// Three stacked, evenly.
+pub const SPACE_VERTICAL: char = '\u{e043}';
 pub const ZOOM_IN: char = '\u{f8c4}';
 pub const ZOOM_OUT: char = '\u{f8c6}';
 pub const ZOOM_FIT: char = '\u{ee8c}';

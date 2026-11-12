@@ -638,6 +638,10 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
     if settings::settings_ui(ui, settings, show, &palette, info.id) {
         st.settings_touched();
     }
+    // Layer › Align's commands, which go by the Move tool's Align to (above).
+    if tool == crate::tools::ToolId::Move {
+        align_buttons(ui, st);
+    }
     // The outline edited (the selection's last step), its points picked; the symmetry's place.
     if tool == crate::tools::ToolId::Outline {
         outline_points(ui, st);
@@ -650,6 +654,34 @@ pub fn tool_settings_panel(ui: &mut egui::Ui, st: &mut AppState) {
         ui.separator();
         ui.label(RichText::new("Box").strong());
         crate::box_fields::crop(ui, st, id, "crop-panel");
+    }
+}
+
+/// The Move tool's buttons for Layer › Align's commands, a row for aligning and one for
+/// distributing, each saying why it is not available when it is not.
+fn align_buttons(ui: &mut egui::Ui, st: &mut AppState) {
+    use crate::commands::Cmd::*;
+    let rows: [&[crate::commands::Cmd]; 2] = [
+        &[AlignLeft, AlignHorizontalCenters, AlignRight, AlignTop, AlignVerticalCenters, AlignBottom],
+        &[DistributeHorizontalCenters, DistributeVerticalCenters, DistributeHorizontalSpace, DistributeVerticalSpace],
+    ];
+    ui.separator();
+    ui.label(RichText::new("Align").strong());
+    for row in rows {
+        ui.horizontal(|ui| {
+            for &cmd in row {
+                let info = cmd.info();
+                let available = crate::commands::availability(st, cmd);
+                let r = ui.add_enabled(available.is_ok(), egui::Button::new(crate::theme::icon(info.icon, 18.0)));
+                let r = match &available {
+                    Ok(()) => r.on_hover_text(format!("{}: {}", info.name, info.description)),
+                    Err(why) => r.on_disabled_hover_text(format!("{}: {why}", info.name)),
+                };
+                if r.clicked() {
+                    st.queue.push(cmd);
+                }
+            }
+        });
     }
 }
 

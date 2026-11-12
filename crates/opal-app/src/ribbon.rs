@@ -2,7 +2,8 @@
 //! search, all generated from the command registry.
 //!
 //! When the window is too narrow, groups shrink from the right: large buttons become small
-//! ones, then the whole group collapses into one button that opens its commands. The tools
+//! ones, small ones their icons alone, then the whole group collapses into one button that
+//! opens its commands. A group of icons (`Group::icons`) starts as icons alone. The tools
 //! never shrink.
 
 use crate::commands::{Cmd, Group, RIBBON, availability, checked};
@@ -26,7 +27,8 @@ const TOOL_SIZE: f32 = 30.0;
 enum Stage {
     Large,
     Small,
-    /// Single-line ribbon only: icons without labels.
+    /// Icons without labels: in a row in the single-line ribbon, three to a column in the
+    /// two-line one.
     IconsOnly,
     Collapsed,
 }
@@ -195,7 +197,8 @@ fn group_width(ui: &egui::Ui, g: &Group, stage: Stage, single: bool) -> f32 {
         }
         (Stage::Small, true) => g.cmds.iter().map(|c| small_width(ui, c.info().name)).sum(),
         (Stage::Small, false) => small_columns(ui, g.cmds),
-        (Stage::IconsOnly, _) => g.cmds.len() as f32 * (SMALL_H + 6.0),
+        (Stage::IconsOnly, true) => g.cmds.len() as f32 * (SMALL_H + 6.0),
+        (Stage::IconsOnly, false) => g.cmds.len().div_ceil(3) as f32 * (SMALL_H + 6.0),
         (Stage::Collapsed, true) => collapsed_single_width(ui, g),
         (Stage::Collapsed, false) => large_width(ui, g.name),
     };
@@ -240,14 +243,16 @@ fn split_label(name: &str) -> Vec<&str> {
     vec![&name[..split], &name[split + 1..]]
 }
 
-/// Picks each group's stage so all fit in `width`, shrinking from the right.
+/// Picks each group's stage so all fit in `width`, shrinking from the right; a group of
+/// icons starts as icons alone.
 fn stages(ui: &egui::Ui, groups: &[Group], width: f32, single: bool) -> Vec<Stage> {
     let ladder: &[Stage] = if single {
         &[Stage::Small, Stage::IconsOnly, Stage::Collapsed]
     } else {
-        &[Stage::Large, Stage::Small, Stage::Collapsed]
+        &[Stage::Large, Stage::Small, Stage::IconsOnly, Stage::Collapsed]
     };
-    let mut level = vec![0usize; groups.len()];
+    let icons = ladder.iter().position(|&s| s == Stage::IconsOnly).expect("on both ladders");
+    let mut level: Vec<usize> = groups.iter().map(|g| if g.icons { icons } else { 0 }).collect();
     let total = |level: &[usize]| -> f32 {
         groups.iter().zip(level).map(|(g, &l)| group_width(ui, g, ladder[l], single) + 4.0).sum()
     };
@@ -319,11 +324,21 @@ fn groups(ui: &mut egui::Ui, st: &mut AppState, tab: usize, area: Rect, single: 
                     }
                 }
             }
-            Stage::IconsOnly => {
+            Stage::IconsOnly if single => {
                 for &cmd in g.cmds {
                     let b =
                         Rect::from_min_size(Pos2::new(cx, content.top()), Vec2::new(SMALL_H + 6.0, content.height()));
                     ribbon_button(ui, st, cmd, b, Style::Icon, key_of(cmd));
+                    cx += SMALL_H + 6.0;
+                }
+            }
+            Stage::IconsOnly => {
+                for col in g.cmds.chunks(3) {
+                    for (row, &cmd) in col.iter().enumerate() {
+                        let at = Pos2::new(cx, content.top() + row as f32 * (SMALL_H + 1.0));
+                        let b = Rect::from_min_size(at, Vec2::new(SMALL_H + 6.0, SMALL_H));
+                        ribbon_button(ui, st, cmd, b, Style::Icon, key_of(cmd));
+                    }
                     cx += SMALL_H + 6.0;
                 }
             }
@@ -755,6 +770,24 @@ mod tests {
         assert_eq!(search("layer new").first(), Some(&Cmd::NewLayer));
         assert!(search("qqqq").is_empty());
         assert!(search("   ").is_empty());
+    }
+
+    #[test]
+    fn a_group_of_icons_shows_them_alone_however_wide_and_shrinks_like_the_rest() {
+        let layer = RIBBON.iter().find(|t| t.name == "Layer").expect("a Layer tab");
+        let align = layer.groups.iter().position(|g| g.name == "Align").expect("an Align group");
+        let ctx = egui::Context::default();
+        let mut frame = ctx.run_ui(Default::default(), |ui| {
+            for single in [false, true] {
+                let wide = stages(ui, layer.groups, 10_000.0, single);
+                assert_eq!(wide[align], Stage::IconsOnly);
+                let roomiest = if single { Stage::Small } else { Stage::Large };
+                assert!(wide.iter().enumerate().all(|(i, &s)| i == align || s == roomiest), "{wide:?}");
+                assert!(stages(ui, layer.groups, 10.0, single).iter().all(|&s| s == Stage::Collapsed));
+            }
+        });
+        // (The font's texture, made for measuring, goes nowhere.)
+        frame.textures_delta.clear();
     }
 
     #[test]

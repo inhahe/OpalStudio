@@ -112,6 +112,23 @@ pub static MOVE_SETTINGS: &[Def] = &[
         default: Init::Float(10.0),
         advanced: true,
     },
+    Def {
+        key: "move.align_to",
+        label: "Align to",
+        help: "What Align lines the selected layers up with, and what Distribute spaces them across: \
+               the box round the selected layers themselves (with one selected, the canvas; \
+               distributing, among themselves, the outermost two staying); the canvas; the box round \
+               what is selected; or the active layer, which stays where it is.",
+        section: "Align",
+        kind: Kind::Choice(&[
+            ("layers", "Selected layers"),
+            ("canvas", "Canvas"),
+            ("selection", "Selection"),
+            ("key", "Active layer"),
+        ]),
+        default: Init::Choice("layers"),
+        advanced: false,
+    },
 ];
 
 pub static SELECT_SETTINGS: &[Def] = &[

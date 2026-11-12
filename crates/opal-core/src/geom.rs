@@ -101,6 +101,11 @@ impl FRect {
         r
     }
 
+    /// The smallest rectangle containing both.
+    pub fn union(&self, other: &FRect) -> FRect {
+        FRect::new(self.x0.min(other.x0), self.y0.min(other.y0), self.x1.max(other.x1), self.y1.max(other.y1))
+    }
+
     /// The rectangle grown by `m` on every side.
     pub fn expand(&self, m: f64) -> FRect {
         FRect::new(self.x0 - m, self.y0 - m, self.x1 + m, self.y1 + m)

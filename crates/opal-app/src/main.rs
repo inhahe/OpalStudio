@@ -4,6 +4,7 @@
 
 mod api;
 mod app;
+mod arrange;
 mod assistant;
 mod background;
 mod box_fields;

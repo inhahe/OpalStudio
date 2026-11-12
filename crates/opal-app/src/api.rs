@@ -451,6 +451,30 @@ pub fn params(cmd: Cmd) -> Option<&'static [Param]> {
             &[DOCUMENT, LAYERS]
         }
         MoveUp | MoveDown | MergeDown | MergeGroup | ReapplyPlacement => &[DOCUMENT, LAYER],
+        AlignLeft
+        | AlignHorizontalCenters
+        | AlignRight
+        | AlignTop
+        | AlignVerticalCenters
+        | AlignBottom
+        | DistributeHorizontalCenters
+        | DistributeVerticalCenters
+        | DistributeHorizontalSpace
+        | DistributeVerticalSpace => &[
+            DOCUMENT,
+            Param {
+                name: "layers",
+                kind: Kind::Layers,
+                help: "The layers, by id: the first the active one, which they line up to with `to` key.",
+                otherwise: Otherwise::Now("the selected layers"),
+            },
+            Param {
+                name: "to",
+                kind: Kind::Choice(&crate::arrange::To::NAMES),
+                help: "What they line up with, or spread across: the box round them (aligning one, the canvas;                        distributing, among themselves, the outermost two staying), the canvas, the box round                        what is selected, or the active layer (the first given), which stays.",
+                otherwise: Otherwise::Value("\"layers\""),
+            },
+        ],
         ResizeImage => &[
             DOCUMENT,
             RESIZED_WIDTH,
@@ -2232,7 +2256,13 @@ impl AppState {
         if let Err(why) = self.target(args) {
             return now(Err(why));
         }
-        if let Err(why) = availability(self, cmd) {
+        // Aligning goes by what the call says it aligns to, not by the Move tool's setting.
+        let to = args.text("to").and_then(crate::arrange::To::named).unwrap_or(crate::arrange::To::Layers);
+        let refused = match crate::arrange::Arrange::of(cmd) {
+            Some(how) => crate::arrange::refused(self, how, to),
+            None => availability(self, cmd),
+        };
+        if let Err(why) = refused {
             return now(Err(format!("{}: {why}", cmd.info().name)));
         }
         let doc = self.active_doc;
@@ -2516,6 +2546,22 @@ impl AppState {
             Cmd::Reselect => {
                 self.run(cmd, ctx);
                 self.reply_when_done(|st, id| selection_json(st.doc(id).expect("open")))
+            }
+            Cmd::AlignLeft
+            | Cmd::AlignHorizontalCenters
+            | Cmd::AlignRight
+            | Cmd::AlignTop
+            | Cmd::AlignVerticalCenters
+            | Cmd::AlignBottom
+            | Cmd::DistributeHorizontalCenters
+            | Cmd::DistributeVerticalCenters
+            | Cmd::DistributeHorizontalSpace
+            | Cmd::DistributeVerticalSpace => {
+                let how = crate::arrange::Arrange::of(cmd).expect("one of them");
+                match self.arrange(how, to) {
+                    Ok(()) => now(Ok(self.selected_layers_json_of(doc.expect("available")))),
+                    Err(why) => now(Err(format!("{}: {why}", cmd.info().name))),
+                }
             }
             _ => {
                 // The rest take no more than the image and layers set above.
@@ -4130,6 +4176,38 @@ mod tests {
             Reply::Now(r) => r,
             Reply::Later(n) => panic!("{name} answers later ({n})"),
         }
+    }
+
+    #[test]
+    fn scripts_align_layers_to_what_they_say_the_first_given_the_key() {
+        use opal_core::document::{IdGen, Position};
+        let mut st = AppState::new();
+        now(&mut st, "new", json!({ "width": 400, "height": 300, "background": "transparent" })).unwrap();
+        let red = opal_core::tile::pixel_from_f32([1.0, 0.0, 0.0, 1.0]);
+        let mut ids = Vec::new();
+        st.active_mut()
+            .unwrap()
+            .apply("Layers", |doc, made: &mut IdGen| {
+                for r in [IRect::new(10, 10, 50, 30), IRect::new(100, 60, 120, 100)] {
+                    let id = made.layer();
+                    let layer = Layer::new_raster(id, made.object(), "L", RasterImage::filled(&r, red));
+                    doc.insert(Position { parent: None, index: doc.layers.len() }, layer)?;
+                    ids.push(id.0);
+                }
+                Ok::<(), opal_core::document::TreeError>(())
+            })
+            .unwrap();
+        let top = |st: &AppState, id: u64| st.active().unwrap().doc().layer(LayerId(id)).unwrap().bounds().unwrap().y0;
+        // The Move tool's setting is the interface's: a call says its own, or aligns them to each other.
+        let settings = st.tool_settings.get_mut(&crate::tools::ToolId::Move).unwrap();
+        settings.set("move.align_to", crate::settings::Value::Choice("canvas".into()));
+        now(&mut st, "align_top", json!({ "layers": [ids[1], ids[0]], "to": "key" })).unwrap();
+        assert_eq!((top(&st, ids[0]), top(&st, ids[1])), (60.0, 60.0), "the first given moved");
+        now(&mut st, "align_bottom", json!({ "layers": ids })).unwrap();
+        assert_eq!((top(&st, ids[0]), top(&st, ids[1])), (80.0, 60.0));
+        // Nothing selected to align to: refused, saying so.
+        let why = now(&mut st, "align_left", json!({ "to": "selection" })).unwrap_err();
+        assert!(why.starts_with("Align Left Edges: Nothing is selected"), "{why}");
     }
 
     #[test]
