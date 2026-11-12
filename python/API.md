@@ -316,6 +316,49 @@ Move the active layer one place down.
 | `document` | document | The image, by id. Default: the active image. |
 | `layer` | layer | The layer, by id. Default: the active layer. |
 
+### `bring_to_front`
+
+Move the selected layers to the top of their group.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `layers` | layers | The layers, by id. Default: the selected layers. |
+
+### `send_to_back`
+
+Move the selected layers to the bottom of their group.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `layers` | layers | The layers, by id. Default: the selected layers. |
+
+### `reverse_layers`
+
+Turn the selected layers' order round.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+| `layers` | layers | The layers, by id. Default: the selected layers. |
+
+### `select_all_layers`
+
+Select every layer.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+
+### `deselect_layers`
+
+Select no layer.
+
+| Parameter | Kind | |
+|---|---|---|
+| `document` | document | The image, by id. Default: the active image. |
+
 ### `align_left`
 
 Line the selected layers' left edges up.

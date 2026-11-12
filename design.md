@@ -1047,6 +1047,17 @@ nothing). Their memory is checked before they begin.
     move, the status bar says they are aligned (or spaced) already.
   - Scripts: `align_left` … `distribute_vertical_space`, each taking the layers (the first
     the key) and `to`.
+- **Arrange** (Layer › Arrange):
+  - Move Up and Move Down: the active layer one place (Ctrl+] and Ctrl+[).
+  - Bring to Front and Send to Back (Ctrl+Shift+] and Ctrl+Shift+[): the selected layers to
+    the top or the bottom of the group each is in, keeping the order they had.
+  - Reverse: the selected layers' order turned round, in the places they hold, which must
+    be in one group.
+  - Each is one history state. Each is refused, saying why, when the group they would move
+    in is locked, or when they are where it would put them already.
+- **Select All Layers** (Ctrl+Alt+A) selects every layer at the top level (a group as a
+  whole), the topmost made active. **Deselect Layers** selects none. Neither is a history
+  state, as no layer selection is.
 - **Sample from** (which layers a tool reads): current layer, layers below, all visible, or a
   chosen set (checkboxes in the layers panel; sets can be named and reused). Present on every
   tool that reads pixels: Clone, Heal, Mix, Detail, the eyedropper, the magic wand, color

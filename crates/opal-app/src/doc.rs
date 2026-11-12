@@ -294,6 +294,19 @@ impl DocState {
         self.selected = HashSet::from([id]);
     }
 
+    /// Selects every layer at the top level (a group as a whole), the topmost made active.
+    pub fn select_all_layers(&mut self) {
+        let doc = self.history.doc();
+        self.selected = doc.layers.iter().map(|l| l.id).collect();
+        self.active = doc.layers.last().map(|l| l.id);
+    }
+
+    /// Selects no layer.
+    pub fn deselect_layers(&mut self) {
+        self.selected.clear();
+        self.active = None;
+    }
+
     /// Adds `id` to the selection, making it active, or takes it out (unless it is the only
     /// one selected); the active layer then moves to another selected layer.
     pub fn toggle_selected(&mut self, id: LayerId) {

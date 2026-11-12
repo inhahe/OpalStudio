@@ -40,6 +40,12 @@ pub const DISTRIBUTE_VERTICAL: char = '\u{e040}';
 pub const SPACE_HORIZONTAL: char = '\u{e042}';
 /// Three stacked, evenly.
 pub const SPACE_VERTICAL: char = '\u{e043}';
+pub const TO_FRONT: char = '\u{e9ae}';
+pub const TO_BACK: char = '\u{e9ac}';
+pub const REVERSE: char = '\u{f18a}';
+/// Squares overlapping: layers, all selected.
+pub const SELECT_LAYERS: char = '\u{eb96}';
+pub const DESELECT_LAYERS: char = '\u{e4c7}';
 pub const ZOOM_IN: char = '\u{f8c4}';
 pub const ZOOM_OUT: char = '\u{f8c6}';
 pub const ZOOM_FIT: char = '\u{ee8c}';

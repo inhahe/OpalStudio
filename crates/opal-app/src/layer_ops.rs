@@ -159,6 +159,15 @@ impl AppState {
         self.report(result);
     }
 
+    /// Changes the order of the selected layers of the active image as `how` says, as one
+    /// history state (refused as [`order_refused`] says).
+    pub(crate) fn order_layers(&mut self, how: Order) {
+        let d = self.active_mut().expect("available");
+        let ids = d.selected_layers();
+        let result = d.apply(how.label(), |doc, _| reordered(doc, &ids, how));
+        self.report(result);
+    }
+
     /// Moves a layer to `to` (from dragging in the Layers panel).
     pub fn move_layer_to(&mut self, id: LayerId, to: Position) {
         let Some(d) = self.active_mut() else { return };
@@ -590,6 +599,90 @@ pub(crate) fn copy_with_new_ids(layer: &Layer, ids: &mut IdGen) -> Layer {
     c
 }
 
+/// How the selected layers' order changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Order {
+    /// Each to the top of its group, in the order they had.
+    Front,
+    /// Each to the bottom of its group, in the order they had.
+    Back,
+    /// Turned round, in the places they hold (in one group).
+    Reverse,
+}
+
+impl Order {
+    /// The history state it makes.
+    fn label(self) -> &'static str {
+        match self {
+            Order::Front => "Bring to front",
+            Order::Back => "Send to back",
+            Order::Reverse => "Reverse layers",
+        }
+    }
+}
+
+/// `doc` with the layers `ids` (in document order) put in order as `how` says.
+fn reordered(doc: &mut Document, ids: &[LayerId], how: Order) -> Result<(), TreeError> {
+    if how == Order::Reverse {
+        return doc.reverse(ids);
+    }
+    // Bottom to top, each to the top of its group, keeps their order; top to bottom, each to
+    // the bottom.
+    let ids: Vec<LayerId> = if how == Order::Front { ids.to_vec() } else { ids.iter().rev().copied().collect() };
+    for id in ids {
+        let parent = doc.position(id).ok_or(TreeError::NoSuchLayer(id))?.parent;
+        let n = doc.siblings(parent).map_or(0, <[_]>::len);
+        doc.move_layer(id, Position { parent, index: if how == Order::Front { n - 1 } else { 0 } })?;
+    }
+    Ok(())
+}
+
+/// Why Bring to Front, Send to Back or Reverse (`cmd`) cannot act on the active image's
+/// selected layers now, if it cannot: none selected; a group they would move in locked; for
+/// Reverse, fewer than two, or not all in one group; or they are where it would put them
+/// already.
+pub(crate) fn order_refused(st: &AppState, cmd: crate::commands::Cmd) -> Result<(), String> {
+    use crate::commands::Cmd;
+    let d = st.active().ok_or("Open or create an image first.")?;
+    let ids = d.selected_layers();
+    if ids.is_empty() {
+        return Err("Select the layers to arrange in the Layers panel first.".into());
+    }
+    let doc = d.doc();
+    for &id in &ids {
+        if let Some(g) = crate::commands::groups_above(doc, id).into_iter().find(|g| g.locked) {
+            return Err(format!("\"{}\" is locked: what it holds stays as it is. Unlock it first.", g.name));
+        }
+    }
+    let how = match cmd {
+        Cmd::BringToFront => Order::Front,
+        Cmd::SendToBack => Order::Back,
+        _ => {
+            if ids.len() < 2 {
+                return Err("Select two layers or more to reverse their order.".into());
+            }
+            let parent = |id| doc.position(id).map(|p| p.parent);
+            if ids.iter().any(|&id| parent(id) != parent(ids[0])) {
+                return Err(
+                    "The selected layers must all be in one group (or all outside groups) to reverse them.".into()
+                );
+            }
+            Order::Reverse
+        }
+    };
+    let mut after = doc.clone();
+    reordered(&mut after, &ids, how).map_err(|e| e.to_string())?;
+    let order = |doc: &Document| ids.iter().map(|&id| doc.position(id)).collect::<Vec<_>>();
+    if order(&after) == order(doc) {
+        return Err(match how {
+            Order::Front => "They are at the top of their groups already.".into(),
+            Order::Back => "They are at the bottom of their groups already.".into(),
+            Order::Reverse => "Reversed, they would stay as they are.".into(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,6 +717,73 @@ mod tests {
         })
         .unwrap();
         id.unwrap()
+    }
+
+    #[test]
+    fn layers_go_to_the_front_or_back_of_their_groups_or_turn_round_and_say_why_not() {
+        use crate::commands::Cmd;
+        let mut st = app(10, 10);
+        // Above the background: a, b, c, a group g holding x and y, and d.
+        let [a, b, c] = [(); 3].map(|()| add_layer(&mut st, None, true));
+        let g = {
+            let d = st.active_mut().unwrap();
+            let g = d.ids.layer();
+            d.apply::<TreeError>("Group", |doc, _| {
+                let n = doc.layers.len();
+                doc.insert(Position { parent: None, index: n }, Layer::new_group(g, "g"))
+            })
+            .unwrap();
+            g
+        };
+        let x = add_layer(&mut st, Some(g), true);
+        let y = add_layer(&mut st, Some(g), true);
+        let top = add_layer(&mut st, None, true);
+        let order = |st: &AppState, parent: Option<LayerId>| -> Vec<LayerId> {
+            st.active().unwrap().doc().siblings(parent).unwrap().iter().map(|l| l.id).collect()
+        };
+        let background = order(&st, None)[0];
+        // a and b (in that order) and x: a, b to the top level's top in their order, x to g's.
+        let d = st.active_mut().unwrap();
+        d.select_only(a);
+        d.toggle_selected(b);
+        d.toggle_selected(x);
+        st.order_layers(Order::Front);
+        assert_eq!(order(&st, None), vec![background, c, g, top, a, b]);
+        assert_eq!(order(&st, Some(g)), vec![y, x]);
+        assert_eq!(st.active().unwrap().history.undo_label(), Some("Bring to front"));
+        // There already: refused, saying so.
+        let why = order_refused(&st, Cmd::BringToFront).unwrap_err();
+        assert!(why.contains("at the top of their groups already"), "{why}");
+        // To the back: a, b under the background, x under y.
+        st.order_layers(Order::Back);
+        assert_eq!(order(&st, None), vec![a, b, background, c, g, top]);
+        assert_eq!(order(&st, Some(g)), vec![x, y]);
+        // Reversed: not with x in another group; a, b and c, a and c swapping.
+        assert!(order_refused(&st, Cmd::ReverseLayers).unwrap_err().contains("must all be in one group"));
+        let d = st.active_mut().unwrap();
+        d.select_only(a);
+        d.toggle_selected(c);
+        assert_eq!(order_refused(&st, Cmd::ReverseLayers), Ok(()));
+        st.order_layers(Order::Reverse);
+        assert_eq!(order(&st, None), vec![c, b, background, a, g, top]);
+        // One alone is not reversed; in a locked group, nothing moves.
+        st.active_mut().unwrap().select_only(c);
+        assert!(order_refused(&st, Cmd::ReverseLayers).unwrap_err().contains("two layers or more"));
+        st.active_mut()
+            .unwrap()
+            .apply::<()>("Lock", |doc, _| {
+                doc.layer_mut(g).unwrap().locked = true;
+                Ok(())
+            })
+            .unwrap();
+        st.active_mut().unwrap().select_only(y);
+        assert!(order_refused(&st, Cmd::SendToBack).unwrap_err().contains("\"g\" is locked"));
+        // All the layers at the top level, the topmost active; then none.
+        let d = st.active_mut().unwrap();
+        d.select_all_layers();
+        assert_eq!((d.selected_layers(), d.active_layer()), (vec![c, b, background, a, g, top], Some(top)));
+        d.deselect_layers();
+        assert_eq!((d.selected_layers(), d.active_layer()), (vec![], None));
     }
 
     #[test]

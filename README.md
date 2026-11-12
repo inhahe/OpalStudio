@@ -132,8 +132,9 @@ cargo test --workspace                     # all tests, interface tests included
   selected, takes it away, or keeps what is in both, inverted if you like.
   Selections are part of history, and turn, flip and resize with the image.
 - **Layers and groups.** Add, duplicate, delete, group, reorder (buttons or dragging,
-  into and out of groups), rename, hide, lock, change opacity; select several with Ctrl
-  and Shift; merge down, merge selected, merge visible, merge a group, stamp visible,
+  into and out of groups; Bring to Front and Send to Back within each group, Reverse),
+  rename, hide, lock, change opacity; select several with Ctrl and Shift, or all of them
+  (Ctrl+Alt+A), or none; merge down, merge selected, merge visible, merge a group, stamp visible,
   flatten; rasterize; thumbnails. Layers have no edges: content past the canvas is kept and
   shown dimmed.
 - **Long edits in the background.** Merging, flattening, rasterizing, rotating, flipping,

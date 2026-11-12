@@ -232,6 +232,34 @@ class Editor:
         document: The image, by id. Default: the active image.
         layer: The layer, by id. Default: the active layer.
         """
+    def bring_to_front(self, *, document: int | None = None, layers: list[int] | None = None) -> Any:
+        """Move the selected layers to the top of their group.
+
+        document: The image, by id. Default: the active image.
+        layers: The layers, by id. Default: the selected layers.
+        """
+    def send_to_back(self, *, document: int | None = None, layers: list[int] | None = None) -> Any:
+        """Move the selected layers to the bottom of their group.
+
+        document: The image, by id. Default: the active image.
+        layers: The layers, by id. Default: the selected layers.
+        """
+    def reverse_layers(self, *, document: int | None = None, layers: list[int] | None = None) -> Any:
+        """Turn the selected layers' order round.
+
+        document: The image, by id. Default: the active image.
+        layers: The layers, by id. Default: the selected layers.
+        """
+    def select_all_layers(self, *, document: int | None = None) -> Any:
+        """Select every layer.
+
+        document: The image, by id. Default: the active image.
+        """
+    def deselect_layers(self, *, document: int | None = None) -> Any:
+        """Select no layer.
+
+        document: The image, by id. Default: the active image.
+        """
     def align_left(self, *, document: int | None = None, layers: list[int] | None = None, to: Literal["layers", "canvas", "selection", "key"] = "layers") -> Any:
         """Line the selected layers' left edges up.
 

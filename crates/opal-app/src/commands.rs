@@ -40,6 +40,11 @@ pub enum Cmd {
     DeleteLayer,
     MoveUp,
     MoveDown,
+    BringToFront,
+    SendToBack,
+    ReverseLayers,
+    SelectAllLayers,
+    DeselectLayers,
     AlignLeft,
     AlignHorizontalCenters,
     AlignRight,
@@ -135,7 +140,7 @@ const fn plain(key: Key) -> KeyboardShortcut {
 }
 
 impl Cmd {
-    pub const ALL: [Cmd; 90] = [
+    pub const ALL: [Cmd; 95] = [
         Cmd::New,
         Cmd::Open,
         Cmd::Save,
@@ -166,6 +171,11 @@ impl Cmd {
         Cmd::DeleteLayer,
         Cmd::MoveUp,
         Cmd::MoveDown,
+        Cmd::BringToFront,
+        Cmd::SendToBack,
+        Cmd::ReverseLayers,
+        Cmd::SelectAllLayers,
+        Cmd::DeselectLayers,
         Cmd::AlignLeft,
         Cmd::AlignHorizontalCenters,
         Cmd::AlignRight,
@@ -482,6 +492,45 @@ impl Cmd {
                 "Move the active layer one place down.",
                 "Within its group. Drag layers in the Layers panel to move them anywhere.",
                 const { &[ctrl(Key::OpenBracket)] },
+            ),
+            Cmd::BringToFront => i(
+                "Bring to Front",
+                icons::TO_FRONT,
+                "Move the selected layers to the top of their group.",
+                "Each to the top of the group it is in (or of the image), the selected ones keeping \
+                 the order they had.",
+                const { &[ctrl_shift(Key::CloseBracket)] },
+            ),
+            Cmd::SendToBack => i(
+                "Send to Back",
+                icons::TO_BACK,
+                "Move the selected layers to the bottom of their group.",
+                "Each to the bottom of the group it is in (or of the image), the selected ones \
+                 keeping the order they had.",
+                const { &[ctrl_shift(Key::OpenBracket)] },
+            ),
+            Cmd::ReverseLayers => i(
+                "Reverse",
+                icons::REVERSE,
+                "Turn the selected layers' order round.",
+                "In the places they hold: the lowest takes the highest's place, and so on. They \
+                 must be in one group (or all outside groups).",
+                &[],
+            ),
+            Cmd::SelectAllLayers => i(
+                "Select All Layers",
+                icons::SELECT_LAYERS,
+                "Select every layer.",
+                "Every layer outside a group, and every group as a whole (a command acting on a \
+                 group acts on all inside it); the topmost becomes the active layer.",
+                const { &[ctrl_alt(Key::A)] },
+            ),
+            Cmd::DeselectLayers => i(
+                "Deselect Layers",
+                icons::DESELECT_LAYERS,
+                "Select no layer.",
+                "Commands acting on layers then say to select one first.",
+                &[],
             ),
             Cmd::AlignLeft => {
                 i("Align Left Edges", icons::ALIGN_LEFT, "Line the selected layers' left edges up.", ALIGN_HELP, &[])
@@ -1090,6 +1139,13 @@ pub static RIBBON: &[Tab] = &[
                 cmds: &[Cmd::SelectAll, Cmd::Deselect, Cmd::Reselect, Cmd::InvertSelection, Cmd::SelectLayerPixels],
             },
             Group {
+                name: "Layers",
+                description: "Which layers commands act on: all of them, or none. Click, Ctrl+click and                               Shift+click in the Layers panel choose them one by one.",
+                large: 0,
+                icons: false,
+                cmds: &[Cmd::SelectAllLayers, Cmd::DeselectLayers],
+            },
+            Group {
                 name: "Modify",
                 description: "Changing the selection: its edge moved out or in, softened, smoothed or made \
                               a band, or the whole of it moved, sized or turned in a box.",
@@ -1135,7 +1191,7 @@ pub static RIBBON: &[Tab] = &[
                               moves layers into and out of groups.",
                 large: 0,
                 icons: false,
-                cmds: &[Cmd::MoveUp, Cmd::MoveDown],
+                cmds: &[Cmd::MoveUp, Cmd::MoveDown, Cmd::BringToFront, Cmd::SendToBack, Cmd::ReverseLayers],
             },
             Group {
                 name: "Align",
@@ -1478,6 +1534,12 @@ pub fn availability(st: &AppState, cmd: Cmd) -> Result<(), String> {
             let how = crate::arrange::Arrange::of(cmd).expect("one of them");
             crate::arrange::refused(st, how, crate::arrange::To::chosen(st))
         }
+        BringToFront | SendToBack | ReverseLayers => crate::layer_ops::order_refused(st, cmd),
+        SelectAllLayers => {
+            let d = st.active().ok_or("Open or create an image first.")?;
+            if d.doc().layers.is_empty() { Err("The image has no layers.".into()) } else { Ok(()) }
+        }
+        DeselectLayers => selected_layers(st).map(|_| ()),
         MoveUp | MoveDown => {
             let d = st.active().ok_or("Open or create an image first.")?;
             let l = active_layer(st)?;

@@ -441,6 +441,8 @@ pub enum TreeError {
     IndexOutOfRange,
     /// A group cannot be moved into itself or one of its descendants.
     IntoItself,
+    /// The layers named are not all in one group (or all at the top level).
+    NotSiblings,
 }
 
 impl std::fmt::Display for TreeError {
@@ -450,6 +452,7 @@ impl std::fmt::Display for TreeError {
             TreeError::NotAGroup(id) => write!(f, "layer {} is not a group", id.0),
             TreeError::IndexOutOfRange => f.write_str("position out of range"),
             TreeError::IntoItself => f.write_str("a group cannot be moved into itself"),
+            TreeError::NotSiblings => f.write_str("the layers are not all in one group"),
         }
     }
 }
@@ -697,6 +700,28 @@ impl Document {
         Ok(())
     }
 
+    /// Turns the order of the layers `ids` round, in the places they hold among their
+    /// siblings (all in one group, or all at the top level): the lowest of them takes the
+    /// highest's place, and so on.
+    pub fn reverse(&mut self, ids: &[LayerId]) -> Result<(), TreeError> {
+        let mut parent = None;
+        let mut places = Vec::with_capacity(ids.len());
+        for &id in ids {
+            let pos = self.position(id).ok_or(TreeError::NoSuchLayer(id))?;
+            if *parent.get_or_insert(pos.parent) != pos.parent {
+                return Err(TreeError::NotSiblings);
+            }
+            places.push(pos.index);
+        }
+        places.sort_unstable();
+        let siblings = self.siblings_mut(parent.flatten())?;
+        let layers: Vec<Arc<Layer>> = places.iter().map(|&i| siblings[i].clone()).collect();
+        for (&i, layer) in places.iter().zip(layers.into_iter().rev()) {
+            siblings[i] = layer;
+        }
+        Ok(())
+    }
+
     /// Whether `layer` is inside the group `ancestor`, at any depth.
     pub fn is_descendant(&self, layer: LayerId, ancestor: LayerId) -> bool {
         match (self.path(layer), self.path(ancestor)) {
@@ -731,6 +756,22 @@ mod tests {
         assert_eq!(pos, Position { parent: None, index: 1 });
         assert_eq!(removed.name, "b");
         assert_eq!(d.layer_ids(), vec![l[0], l[2]]);
+    }
+
+    #[test]
+    fn layers_reversed_swap_the_places_they_hold() {
+        let mut ids = IdGen::default();
+        let (mut d, l) = doc_with(&mut ids, &["a", "b", "c", "d", "e"]);
+        // b, c and e: e takes b's place, c stays in the middle, b takes e's.
+        d.reverse(&[l[1], l[2], l[4]]).unwrap();
+        assert_eq!(d.layer_ids(), vec![l[0], l[4], l[2], l[3], l[1]]);
+        // Not all in one group: refused, changing nothing.
+        let g = ids.layer();
+        d.insert(Position { parent: None, index: 5 }, Layer::new_group(g, "g")).unwrap();
+        let inside = ids.layer();
+        d.insert(Position { parent: Some(g), index: 0 }, Layer::new_empty(inside, "i")).unwrap();
+        assert_eq!(d.reverse(&[l[0], inside]), Err(TreeError::NotSiblings));
+        assert_eq!(d.layer_ids()[..5], [l[0], l[4], l[2], l[3], l[1]]);
     }
 
     #[test]

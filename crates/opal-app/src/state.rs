@@ -713,6 +713,17 @@ impl AppState {
                     self.message(MessageKind::Info, cmd.info().name, why);
                 }
             }
+            Cmd::BringToFront => self.order_layers(crate::layer_ops::Order::Front),
+            Cmd::SendToBack => self.order_layers(crate::layer_ops::Order::Back),
+            Cmd::ReverseLayers => self.order_layers(crate::layer_ops::Order::Reverse),
+            Cmd::SelectAllLayers => {
+                let d = self.active_mut().expect("available");
+                d.select_all_layers();
+            }
+            Cmd::DeselectLayers => {
+                let d = self.active_mut().expect("available");
+                d.deselect_layers();
+            }
             Cmd::MoveUp => self.move_layer(true),
             Cmd::MoveDown => self.move_layer(false),
             Cmd::MergeDown => self.merge_down(),
