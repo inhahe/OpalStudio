@@ -342,6 +342,42 @@ fn strip(from: i64, to: i64, forward: bool) -> i64 {
 /// straight alpha, row by row; or why not (the edit cancelled).
 pub type StripReader<'a> = dyn Fn(&IRect) -> Result<Vec<[u8; 4]>, String> + 'a;
 
+/// How many of `band`'s lines (its rows, or with `rows` false its columns), counted from its
+/// start (`forward`) or its end, are border (`border`) all along: read through `read` a tile
+/// at a time along them (the band lies within one row, or column, of tiles), each but the
+/// first only as far as those before left lines all border.
+fn border_lines(
+    band: &IRect,
+    rows: bool,
+    forward: bool,
+    read: &StripReader<'_>,
+    border: &dyn Fn(&[u8; 4]) -> bool,
+) -> Result<i64, String> {
+    let n = if rows { band.height() } else { band.width() };
+    let (mut at, to) = if rows { (band.x0, band.x1) } else { (band.y0, band.y1) };
+    let mut all = n;
+    while at < to && all > 0 {
+        let step = strip(at, to, true);
+        let piece = if rows {
+            IRect::new(at, band.y0, at + step, band.y1)
+        } else {
+            IRect::new(band.x0, at, band.x1, at + step)
+        };
+        let px = read(&piece)?;
+        let w = piece.width() as usize;
+        let line = |i: usize| {
+            if rows { px[i * w..(i + 1) * w].iter().all(border) } else { px.chunks(w).all(|row| border(&row[i])) }
+        };
+        let mut k = 0;
+        while k < all && line(if forward { k } else { n - 1 - k } as usize) {
+            k += 1;
+        }
+        all = k;
+        at += step;
+    }
+    Ok(all)
+}
+
 /// `canvas` cut in to what is not border, as `spec` says, the image read through `read`
 /// (8-bit sRGB pixels with straight alpha, row by row, of a rectangle; an error stops it,
 /// the edit cancelled): from each side asked for, a row or column goes while every pixel of
@@ -370,14 +406,10 @@ pub fn trimmed(canvas: IRect, spec: &Trim, read: &StripReader<'_>) -> Result<Opt
         while gone < r.height() {
             let n = strip(r.y0 + gone * i64::from(from_top), r.y1 - gone * i64::from(!from_top), from_top);
             let (y0, y1) = if from_top { (r.y0 + gone, r.y0 + gone + n) } else { (r.y1 - gone - n, r.y1 - gone) };
-            let strip = read(&IRect::new(r.x0, y0, r.x1, y1))?;
-            let width = r.width() as usize;
-            let order: Vec<usize> = if from_top { (0..n as usize).collect() } else { (0..n as usize).rev().collect() };
-            for row in order {
-                if !strip[row * width..(row + 1) * width].iter().all(border) {
-                    return Ok(gone);
-                }
-                gone += 1;
+            let k = border_lines(&IRect::new(r.x0, y0, r.x1, y1), true, from_top, read, &border)?;
+            gone += k;
+            if k < n {
+                return Ok(gone);
             }
         }
         Ok(gone)
@@ -400,14 +432,10 @@ pub fn trimmed(canvas: IRect, spec: &Trim, read: &StripReader<'_>) -> Result<Opt
         while gone < r.width() {
             let n = strip(r.x0 + gone * i64::from(from_left), r.x1 - gone * i64::from(!from_left), from_left);
             let (x0, x1) = if from_left { (r.x0 + gone, r.x0 + gone + n) } else { (r.x1 - gone - n, r.x1 - gone) };
-            let strip = read(&IRect::new(x0, r.y0, x1, r.y1))?;
-            let width = n as usize;
-            let order: Vec<usize> = if from_left { (0..width).collect() } else { (0..width).rev().collect() };
-            for col in order {
-                if !strip.chunks(width).all(|row| border(&row[col])) {
-                    return Ok(gone);
-                }
-                gone += 1;
+            let k = border_lines(&IRect::new(x0, r.y0, x1, r.y1), false, from_left, read, &border)?;
+            gone += k;
+            if k < n {
+                return Ok(gone);
             }
         }
         Ok(gone)
@@ -518,14 +546,13 @@ impl AppState {
         let doc = self.active_doc.expect("available");
         let spec = spec.clone();
         let work = move |doc: &mut Document, _: &mut IdGen, progress: &Progress| {
-            use rayon::prelude::*;
             let layers = &doc.layers;
             // (How far it has got cannot be told: it stops where the border does.)
             let read = |r: &IRect| {
                 let strip =
                     opal_core::composite::composite_until(layers, Some(r), &mut |_, _| !progress.is_cancelled())
                         .ok_or_else(|| crate::edits::CANCELLED.to_owned())?;
-                Ok(strip.read_rect(r).into_par_iter().map(opal_io::pixels::to_srgb8).collect::<Vec<[u8; 4]>>())
+                Ok(strip.read_rect(r).into_iter().map(opal_io::pixels::to_srgb8).collect::<Vec<[u8; 4]>>())
             };
             let canvas = doc.canvas.rect();
             let Some(r) = trimmed(canvas, &spec, &read)? else {
@@ -887,14 +914,13 @@ mod tests {
         assert_eq!(visible_bounds(&d), Some(IRect::new(10, 20, 13, 22)));
     }
 
-    /// What an image `w` × `h` at the origin shows, as Trim reads it: `at(x, y)` each pixel.
     /// What reads a `w × h` image whose pixel at `(x, y)` is `at(x, y)`: never past it, and
     /// (but for a corner) never a rectangle past an edge between tiles.
     fn reader(w: i64, h: i64, at: impl Fn(i64, i64) -> [u8; 4]) -> impl Fn(&IRect) -> Result<Vec<[u8; 4]>, String> {
         move |r: &IRect| {
             assert!(r.x0 >= 0 && r.y0 >= 0 && r.x1 <= w && r.y1 <= h, "read past the image: {r:?}");
             let tile = |v: i64| v.div_euclid(i64::from(opal_core::tile::TILE_SIZE));
-            assert!(tile(r.x0) == tile(r.x1 - 1) || tile(r.y0) == tile(r.y1 - 1), "a strip across tiles: {r:?}");
+            assert!(tile(r.x0) == tile(r.x1 - 1) && tile(r.y0) == tile(r.y1 - 1), "a read across tiles: {r:?}");
             Ok((r.y0..r.y1).flat_map(|y| (r.x0..r.x1).map(move |x| (x, y))).map(|(x, y)| at(x, y)).collect())
         }
     }
@@ -937,13 +963,13 @@ mod tests {
         // All border, trimmed from the bottom up (not the top): nothing left after it, and no
         // column read then.
         let bottom = Trim { sides: [false, true, true, true], ..Trim::default() };
-        let reads = std::cell::Cell::new(0);
-        let counted = |r: &IRect| {
-            reads.set(reads.get() + 1);
+        let reads = std::cell::RefCell::new(Vec::new());
+        let kept = |r: &IRect| {
+            reads.borrow_mut().push(*r);
             empty(r)
         };
-        assert_eq!(trimmed(canvas, &bottom, &counted), Ok(None));
-        assert_eq!(reads.get(), 1, "read past where all of it went");
+        assert_eq!(trimmed(canvas, &bottom, &kept), Ok(None));
+        assert!(reads.borrow().iter().all(|r| !r.is_empty()), "read past where all of it went: {:?}", reads.borrow());
         // Taller than a tile, from the edges in: each strip within a row of tiles (as the
         // reader checks).
         let tall = IRect::new(0, 100, 50, 700);

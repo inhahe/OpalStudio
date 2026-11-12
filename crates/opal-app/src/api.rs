@@ -857,7 +857,7 @@ const QUERIES: &[(&str, &str, &[Param])] = &[
             },
             Param {
                 name: "size",
-                kind: Kind::Choice(&["1", "3", "5", "11", "31", "51", "101"]),
+                kind: Kind::Choice(crate::color_sampler::SIZE_IDS),
                 help: "How many pixels a side the square averaged about it is.",
                 otherwise: Otherwise::Value("\"1\""),
             },
@@ -2560,7 +2560,7 @@ impl AppState {
                 let size = args.text("size").and_then(|s| s.parse().ok()).unwrap_or(1);
                 let shown = args.text("shown_as").and_then(crate::color_sampler::Shown::from_id).unwrap_or_default();
                 let layers = d.doc().layers.clone();
-                let read = d.readings[0].get(&layers, p, size);
+                let (read, _) = d.readings[0].get(&layers, p, size, false);
                 Ok(crate::color_sampler::color_json(&read, shown))
             }
             "saved_selections" => {
@@ -2774,12 +2774,12 @@ impl AppState {
                     .unwrap_or_else(|| self.tool_settings(crate::tools::ToolId::Measure).bool("measure.crop"));
                 match self.straighten(crop) {
                     Ok(()) => self.reply_when_done(|st, id| st.canvas_json_of(id)),
-                    Err(why) => now(Err(why)),
+                    Err(why) => now(Err(format!("{}: {why}", cmd.info().name))),
                 }
             }
             Cmd::StraightenLayers => match self.straighten_layers() {
                 Ok(()) => self.reply_when_done(|st, id| st.selected_layers_json_of(id)),
-                Err(why) => now(Err(why)),
+                Err(why) => now(Err(format!("{}: {why}", cmd.info().name))),
             },
             Cmd::RotateBy => {
                 let degrees = args.number("degrees");
@@ -3228,8 +3228,6 @@ impl AppState {
         self.reply_when_done(|st, id| selection_json(st.doc(id).expect("its image")))
     }
 
-    /// Selects what the outline `args` give encloses (`select_outline`); what is selected then,
-    /// as the `selection` query tells it.
     /// Measures on the image `args` names between the points it gives, as the Measure tool
     /// does: two, a line from the first to the second; three, a protractor's second arm too,
     /// from the first to the third. Answers as the `measurement` query does.
@@ -3281,7 +3279,9 @@ impl AppState {
             at(0, "x").or(was.map(|w| w.0[0])).expect("given, or there"),
             at(1, "y").or(was.map(|w| w.0[1])).expect("given, or there"),
         ];
-        if !c.rect().contains(p[0], p[1]) {
+        // (Where it is moved to: one a crop left off the canvas may be shown otherwise there.)
+        let moved = index.is_none() || args.opt_int("x").is_some() || args.opt_int("y").is_some();
+        if moved && !c.rect().contains(p[0], p[1]) {
             return Err(format!("{name}: The pixel ({}, {}) is off the canvas.", p[0] - c.x, p[1] - c.y));
         }
         let shown = args.text("shown_as").and_then(Shown::from_id).or(was.map(|w| w.1)).unwrap_or(new);
@@ -3310,7 +3310,7 @@ impl AppState {
         let size = crate::color_sampler::sample_size(self.tool_settings(crate::tools::ToolId::ColorSampler));
         let d = self.doc_mut(id).expect("found");
         let c = d.doc().canvas;
-        let readings = d.sampler_readings(size);
+        let (readings, _) = d.sampler_readings(size, false);
         let pixels = d.sampler_pixels();
         let list: Vec<Value> = readings
             .iter()
@@ -3332,6 +3332,8 @@ impl AppState {
         json!(list)
     }
 
+    /// Selects what the outline `args` give encloses (`select_outline`); what is selected then,
+    /// as the `selection` query tells it.
     fn select_outline_by_args(&mut self, args: &Args) -> Result<Value, String> {
         use opal_core::outline::{Outline, Segment};
         let id = self.which(args)?;
@@ -6491,7 +6493,7 @@ mod tests {
         now(&mut st, "new", json!({ "width": 400, "height": 300 })).unwrap();
         assert_eq!(now(&mut st, "measurement", json!({})).unwrap(), Value::Null);
         let why = call(&mut st, "straighten", json!({})).unwrap_err();
-        assert!(why.contains("Measure a line first"), "{why}");
+        assert!(why.starts_with("Straighten: ") && why.contains("Measure a line first"), "{why}");
         // A line rising a tenth of its run, from the canvas's corner.
         let m = now(&mut st, "measure", json!({ "points": [[0, 120], [200, 100]] })).unwrap();
         let t = (0.1_f64).atan().to_degrees();
@@ -6553,6 +6555,12 @@ mod tests {
         );
         let left = now(&mut st, "delete_color_sampler", json!({ "number": 1 })).unwrap();
         assert_eq!((left.as_array().unwrap().len(), left[0]["at"].clone()), (1, json!([0, 0])));
+        // One a crop left off the canvas: shown otherwise all the same, moved only onto it.
+        now(&mut st, "add_color_sampler", json!({ "x": 39, "y": 29 })).unwrap();
+        call(&mut st, "crop", json!({ "width": 20, "height": 20 })).unwrap();
+        let off = now(&mut st, "move_color_sampler", json!({ "number": 2, "shown_as": "lab" })).unwrap();
+        assert_eq!(off[1]["color"]["shown_as"], json!("lab"));
+        assert!(now(&mut st, "move_color_sampler", json!({ "number": 2, "x": 30 })).is_err());
         // A colour anywhere: at the corner, four of a 3 × 3 square's pixels on the canvas.
         let corner = now(&mut st, "color_at", json!({ "x": 0, "y": 0, "size": "3", "shown_as": "lab" })).unwrap();
         assert!((corner["alpha"].as_f64().unwrap() - 4.0 / 9.0).abs() < 1e-3, "{corner}");

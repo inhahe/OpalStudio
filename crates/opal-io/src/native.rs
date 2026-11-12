@@ -59,7 +59,8 @@ pub const MIME_TYPE: &str = "application/x-opal-studio";
 /// the image (`selections`, `masks/<n>.bin`); version 4, metadata (`metadata/…`); version 5,
 /// color samplers (`samplers`).
 pub const FORMAT_VERSION: u32 = 5;
-/// The most color samplers a file is read with (more are a damaged or hostile file's).
+/// The most color samplers a file is read with (more are a damaged or hostile file's, and
+/// left out).
 const MOST_PINNED: usize = 1000;
 
 /// A color sampler pinned on an image, as its file keeps it: the pixel it samples, in
@@ -615,17 +616,21 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
 
     check_ids(&file.layers, &mut HashSet::new(), path)?;
     let c = &file.canvas;
-    if c.x.abs() > MAX_COORD || c.y.abs() > MAX_COORD || c.width == 0 || c.height == 0 {
+    let near = |v: i64| (-MAX_COORD..=MAX_COORD).contains(&v);
+    if !near(c.x) || !near(c.y) || c.width == 0 || c.height == 0 {
         return Err(bad(format!("the canvas is {}×{} at ({}, {}), out of range", c.width, c.height, c.x, c.y)));
     }
     if !opal_core::units::valid_ppi(file.resolution) {
         return Err(bad(format!("the resolution {} is out of range", file.resolution)));
     }
-    if file.samplers.len() > MOST_PINNED
-        || file.samplers.iter().any(|p| p.at.iter().any(|v| v.abs() > MAX_COORD) || p.shown.len() > 64)
-    {
-        return Err(bad("its color samplers are out of range".into()));
-    }
+    // Samplers are no part of the image: one out of range (a damaged file's, or one far off
+    // the canvas carried by many resizes) is left out, not the image.
+    let samplers: Vec<Pinned> = file
+        .samplers
+        .into_iter()
+        .filter(|p| p.at.iter().all(|&v| near(v)) && p.shown.len() <= 64)
+        .take(MOST_PINNED)
+        .collect();
     if file.next_id >= MAX_ID {
         return Err(bad(format!("next identifier {} is out of range", file.next_id)));
     }
@@ -702,7 +707,7 @@ pub fn load_from(reader: impl Read + Seek, path: &Path, free: Option<Free>) -> R
     };
     let mut ids = IdGen::starting_at(file.next_id);
     ids.reserve_above(&doc);
-    Ok(Loaded { doc, ids, samplers: file.samplers })
+    Ok(Loaded { doc, ids, samplers })
 }
 
 /// The metadata a file keeps, as `which` (its `document.json`'s) says it has.
@@ -1415,9 +1420,12 @@ mod tests {
         save(&doc, &ids, &[], &path, &Progress::default()).unwrap();
         assert!(load(&path, None).unwrap().samplers.is_empty());
         // Out of range: refused.
-        let far = vec![Pinned { at: [i64::MAX, 0], shown: "srgb".into() }];
-        save(&doc, &ids, &far, &path, &Progress::default()).unwrap();
-        assert!(load(&path, None).is_err());
+        // Out of range (a damaged file's, or one carried far off): left out, the image opened.
+        for far in [i64::MAX, i64::MIN] {
+            let kept = [Pinned { at: [far, 0], shown: "srgb".into() }, Pinned { at: [1, 2], shown: "hex".into() }];
+            save(&doc, &ids, &kept, &path, &Progress::default()).unwrap();
+            assert_eq!(load(&path, None).unwrap().samplers, kept[1..], "{far} read");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

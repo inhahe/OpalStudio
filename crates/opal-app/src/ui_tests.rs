@@ -5665,6 +5665,10 @@ fn the_measure_tool_measures_moves_what_it_measured_and_draws_a_protractor_s_arm
     assert_eq!(ends(&h), Some(([100.0, 200.0], [300.0, 150.0])));
     drag_image(&mut h, &[[200.0, 175.0], [205.0, 175.0], [210.0, 170.0]], none);
     assert_eq!(ends(&h), Some(([110.0, 195.0], [310.0, 145.0])));
+    // A Ctrl+drag is the layer picker's: nothing measured.
+    let ctrled = measured(&h);
+    drag_image(&mut h, &[[20.0, 20.0], [60.0, 40.0], [90.0, 60.0]], egui::Modifiers::COMMAND);
+    assert_eq!(measured(&h), ctrled, "measured with Ctrl held");
     // Measured anew with Shift: along a multiple of 45°.
     drag_image(&mut h, &[[50.0, 50.0], [100.0, 55.0], [150.0, 58.0]], shift);
     assert_eq!(ends(&h), Some(([50.0, 50.0], [150.0, 50.0])));
@@ -5726,6 +5730,32 @@ fn the_measure_tool_measures_moves_what_it_measured_and_draws_a_protractor_s_arm
     h.run();
     let m = measured(&h).unwrap();
     assert!((m.end[0] - 50.0).abs() < 1e-9 && (m.end[1] - 10.0).abs() < 1e-9, "{m:?}");
+    // Esc with a menu open closes it, and leaves what is measured.
+    h.get_by_label("Units").click();
+    h.run();
+    assert!(egui::Popup::is_any_open(&h.ctx), "the menu not open");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(measured(&h).is_some(), "Esc for the menu removed the measure");
+    assert!(!egui::Popup::is_any_open(&h.ctx), "the menu left open");
+    // The end typed onto the start: a line of no length, refused (nothing to divide by).
+    let before = measured(&h);
+    let start = measured(&h).unwrap().start;
+    for (k, v) in start.iter().enumerate() {
+        h.query_all(egui_kittest::kittest::by().label("End").predicate(|n| n.numeric_value().is_some()))
+            .nth(k)
+            .expect("the end's field")
+            .click();
+        h.run();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.get(focused()).type_text(&v.to_string());
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+    }
+    let m = measured(&h).unwrap();
+    assert!(m.measures(), "a line of no length kept: {m:?}");
+    assert_eq!(m.start, before.unwrap().start);
     // Another tool: not drawn, but kept. Esc with the tool: gone.
     h.state_mut().state_mut().set_tool(ToolId::Select);
     h.run();
@@ -5756,6 +5786,20 @@ fn the_color_sampler_tool_pins_points_whose_colour_the_info_panel_shows() {
     h.run();
     assert!(h.query_by_label("#1").is_some(), "not in the Info panel");
     assert!(h.query_all_by_label_contains("Red 255").next().is_some(), "its colour not shown");
+    // Taken off its middle and let go: where it was; dragged so, it keeps where it was taken.
+    let v = h.state().state().active().unwrap().view;
+    let ppp = h.ctx.pixels_per_point();
+    let at = |x: f32, y: f32| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
+    h.hover_at(at(55.5, 60.5));
+    h.run();
+    h.drag_at(at(55.5, 60.5));
+    h.run();
+    h.drop_at(at(55.5, 60.5));
+    h.run();
+    assert_eq!(pixels(&h), vec![[50, 60]], "jumped to the pointer");
+    drag_image(&mut h, &[[55.5, 60.5], [65.0, 60.5], [75.5, 60.5]], none);
+    assert_eq!(pixels(&h), vec![[70, 60]]);
+    drag_image(&mut h, &[[70.5, 60.5], [60.0, 60.0], [50.5, 60.5]], none);
     // Dragged, it moves; Esc part-way gives the drag up.
     drag_image(&mut h, &[[50.5, 60.5], [90.0, 70.0], [120.5, 80.5]], none);
     assert_eq!(pixels(&h), vec![[120, 80]]);
@@ -5774,6 +5818,9 @@ fn the_color_sampler_tool_pins_points_whose_colour_the_info_panel_shows() {
     h.drop_at(at(200.0, 100.0));
     h.run();
     assert_eq!(pixels(&h), vec![[120, 80]], "not given up");
+    // Ctrl+click picks a layer, as with every tool: no sampler.
+    click_image(&mut h, [200.5, 150.5], egui::Modifiers::COMMAND);
+    assert_eq!(pixels(&h), vec![[120, 80]], "pinned with Ctrl held");
     // Off the canvas: a click places none, and a drag keeps one on it.
     click_image(&mut h, [-20.5, 50.5], none);
     assert_eq!(pixels(&h), vec![[120, 80]], "placed off the canvas");
@@ -5787,6 +5834,8 @@ fn the_color_sampler_tool_pins_points_whose_colour_the_info_panel_shows() {
         let bg = d.doc().layers[0].id;
         d.edit_pending("Hide", |doc| doc.layer_mut(bg).unwrap().visible = false);
     }
+    // (The panel keeps what it read a moment while the image changes: see `color_sampler::FRESH`.)
+    std::thread::sleep(crate::color_sampler::FRESH);
     h.run();
     assert!(h.query_all_by_label_contains("Red 255 → 0").next().is_some(), "before and after not shown");
     render(&mut h, "color-samplers");
@@ -5818,4 +5867,39 @@ fn the_color_sampler_tool_pins_points_whose_colour_the_info_panel_shows() {
     assert!(!pixels(&h).contains(&first), "not the first removed");
     command(&mut h, Cmd::ClearColorSamplers);
     assert!(pixels(&h).is_empty());
+}
+
+#[test]
+fn the_pointer_s_place_and_colour_are_the_image_s_it_is_over() {
+    let _gpu = gpu_lock();
+    let mut h = harness();
+    image_of(&mut h, 200, 100);
+    image_of(&mut h, 200, 100);
+    let [first, second] = doc_ids(&h)[..] else { panic!("two images") };
+    // The active one's canvas moved, so that its pixels are counted otherwise.
+    h.state_mut()
+        .state_mut()
+        .doc_mut(second)
+        .unwrap()
+        .apply("Move canvas", |doc, _| {
+            doc.canvas.x = 100;
+            Ok::<(), String>(())
+        })
+        .unwrap();
+    command(&mut h, Cmd::TileImages);
+    h.run();
+    h.state_mut().state_mut().set_tool(crate::tools::ToolId::ColorSampler);
+    h.run();
+    assert_eq!(h.state().state().active_doc, Some(second));
+    let v = h.state().state().doc(first).unwrap().view;
+    let at = v.screen_rect.min + v.to_screen(egui::vec2(10.5, 20.5)) / h.ctx.pixels_per_point();
+    h.hover_at(at);
+    h.run();
+    h.run();
+    let title = h.state().state().doc(first).unwrap().title.clone();
+    assert!(
+        h.query_by_label(&format!("10, 20 in {title}")).is_some(),
+        "the Info panel's pointer not the image's it is over"
+    );
+    assert!(h.query_by_label("10, 20").is_some(), "the status bar's pointer not the image's it is over");
 }

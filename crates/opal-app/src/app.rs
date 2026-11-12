@@ -276,16 +276,21 @@ impl OpalApp {
             if keys_held_back(ctx) || paste_presses > 0 {
                 self.st.notify(KEYS_WAIT);
             }
-            self.cancel_paste_key(ctx);
-            self.editing_keys(ctx);
+            if !egui::Popup::is_any_open(ctx) {
+                self.cancel_paste_key(ctx);
+                self.editing_keys(ctx);
+            }
             // Alt held with the button is not alone (and is down, when let go of after it).
             (self.alt_down, self.alt_alone) = (ctx.input(|i| i.modifiers.alt), false);
             return self.view_keys(ctx);
         }
         if !typing {
             self.clipboard_events(ctx, paste_presses);
-            self.cancel_paste_key(ctx);
-            self.editing_keys(ctx);
+            // (A menu open takes Esc and the keys that move about it: closed, nothing else is.)
+            if !egui::Popup::is_any_open(ctx) {
+                self.cancel_paste_key(ctx);
+                self.editing_keys(ctx);
+            }
         }
         // Keytips: Alt pressed and released on its own toggles them. Held with a button down
         // (pressed in the middle of a drag, to draw from the middle, say), it is not alone.
@@ -1237,7 +1242,9 @@ impl OpalApp {
             // Positions count from the canvas's corner, wherever cropping has put it.
             StatusPart::Pointer => {
                 let unit = self.st.unit();
-                let (Some((x, y)), Some(d)) = (self.st.cursor_shown, self.st.active()) else { return };
+                // (Of the image it is over, which need not be the active one.)
+                let Some((id, x, y)) = self.st.cursor_shown else { return };
+                let Some(d) = self.st.doc(id) else { return };
                 let (c, ppi) = (d.doc().canvas, d.doc().resolution);
                 let (x, y) = ((x - c.x) as f64, (y - c.y) as f64);
                 let at = if unit == opal_core::units::Unit::Px {

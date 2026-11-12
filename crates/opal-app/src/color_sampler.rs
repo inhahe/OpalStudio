@@ -143,42 +143,80 @@ impl Read {
     }
 }
 
-/// What `layers` show averaged over the `size × size` pixels about pixel `p`, composited as
-/// the canvas composites them: their premultiplied colours averaged, then made straight.
-pub fn read(layers: &[Arc<Layer>], p: [i64; 2], size: i64) -> Read {
-    let h = size / 2;
-    let rect = IRect::new(p[0] - h, p[1] - h, p[0] + h + 1, p[1] + h + 1);
-    let pixels = opal_core::composite::flatten(layers, &rect);
-    let mut sum = [0.0f64; 4];
-    for px in &pixels {
-        let px = opal_core::tile::pixel_to_f32(*px);
-        for (s, v) in sum.iter_mut().zip(px) {
-            *s += f64::from(v);
-        }
-    }
-    let n = pixels.len().max(1) as f64;
-    let [r, g, b, a] = sum.map(|s| s / n);
-    let rgb = if a > 0.0 { [r / a, g / a, b / a] } else { [0.0; 3] };
-    Read { rgb, alpha: a }
-}
+/// How long what was read is kept while the image changes from frame to frame (a box
+/// dragged), where it may lag (the Info panel's): composited at most this often then, not
+/// every frame.
+pub const FRESH: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// What has been read off one state of an image: kept until its layers change, so that a
-/// colour is composited once, not each frame.
+/// The most composited tiles kept (the pointer moving about takes more).
+const MOST_TILES: usize = 64;
+
+/// What has been read off one state of an image (its layers), and the tiles of it composited
+/// for that, as the canvas composites them: kept until its layers change, so that a tile is
+/// composited once, not each frame or each pixel. The layers are held weakly: none (a preview
+/// given up, say) is kept from going by what was read of it, nor its place taken by another.
 #[derive(Default)]
 pub struct Readings {
-    layers: Vec<Arc<Layer>>,
+    layers: Vec<std::sync::Weak<Layer>>,
+    /// When they were taken.
+    taken: Option<std::time::Instant>,
+    /// Each tile composited (none where nothing shows).
+    tiles: HashMap<opal_core::tile::TileCoord, Option<Arc<opal_core::tile::Tile>>>,
     read: HashMap<([i64; 2], i64), Read>,
 }
 
 impl Readings {
-    /// What `layers` show about pixel `p`, `size` pixels a side (see [`read`]).
-    pub fn get(&mut self, layers: &[Arc<Layer>], p: [i64; 2], size: i64) -> Read {
-        // (Many read, the pointer moving about: begun again, so as not to grow unbounded.)
-        if !opal_core::composite::same_layers(&self.layers, layers) || self.read.len() > 256 {
-            self.layers = layers.to_vec();
+    /// What `layers` show averaged over the `size × size` pixels about pixel `p`: their
+    /// premultiplied colours averaged, then made straight; and whether that is what they
+    /// showed a moment before instead, which, with `lagging`, is kept for [`FRESH`] while they
+    /// change.
+    pub fn get(&mut self, layers: &[Arc<Layer>], p: [i64; 2], size: i64, lagging: bool) -> (Read, bool) {
+        let same = self.layers.len() == layers.len()
+            && self.layers.iter().zip(layers).all(|(was, l)| std::ptr::eq(was.as_ptr(), Arc::as_ptr(l)));
+        if !same {
+            let recent = self.taken.is_some_and(|t| t.elapsed() < FRESH);
+            if lagging
+                && recent
+                && let Some(r) = self.read.get(&(p, size))
+            {
+                return (*r, true);
+            }
+            self.layers = layers.iter().map(Arc::downgrade).collect();
+            self.taken = Some(std::time::Instant::now());
+            self.tiles.clear();
             self.read.clear();
         }
-        *self.read.entry((p, size)).or_insert_with(|| read(layers, p, size))
+        // (Many read, the pointer moving about: begun again, so as not to grow unbounded.)
+        if self.read.len() > 256 {
+            self.read.clear();
+        }
+        if self.tiles.len() > MOST_TILES {
+            self.tiles.clear();
+        }
+        if let Some(r) = self.read.get(&(p, size)) {
+            return (*r, false);
+        }
+        let h = size / 2;
+        let rect = IRect::new(p[0] - h, p[1] - h, p[0] + h + 1, p[1] + h + 1);
+        let mut sum = [0.0f64; 4];
+        for (x, y) in (rect.y0..rect.y1).flat_map(|y| (rect.x0..rect.x1).map(move |x| (x, y))) {
+            let c = opal_core::tile::TileCoord::containing(x, y);
+            let tile =
+                self.tiles.entry(c).or_insert_with(|| opal_core::composite::composite_tile(layers, c).map(Arc::new));
+            if let Some(t) = tile {
+                let at = c.rect(0);
+                let px = opal_core::tile::pixel_to_f32(t.get((x - at.x0) as u32, (y - at.y0) as u32));
+                for (s, v) in sum.iter_mut().zip(px) {
+                    *s += f64::from(v);
+                }
+            }
+        }
+        let n = (size * size) as f64;
+        let [r, g, b, a] = sum.map(|s| s / n);
+        let rgb = if a > 0.0 { [r / a, g / a, b / a] } else { [0.0; 3] };
+        let read = Read { rgb, alpha: a };
+        self.read.insert((p, size), read);
+        (read, false)
     }
 }
 
@@ -192,6 +230,9 @@ pub const SIZES: &[(&str, &str)] = &[
     ("51", "51 × 51 average"),
     ("101", "101 × 101 average"),
 ];
+
+/// The ids of [`SIZES`], as scripts give them.
+pub const SIZE_IDS: &[&str] = &["1", "3", "5", "11", "31", "51", "101"];
 
 /// The ways a colour may be shown, as the tool's settings offer them: each [`Shown`]'s id and
 /// name, in its order.
@@ -308,36 +349,51 @@ pub fn info_panel(ui: &mut egui::Ui, st: &mut crate::state::AppState) {
     let settings = st.tool_settings(ToolId::ColorSampler);
     let size = sample_size(settings);
     let mut pointer_shown = shown_by(settings, "sampler.pointer");
-    let cursor = st.cursor_canvas;
-    let Some(d) = st.active_mut() else {
+    if st.active().is_none() {
         ui.label(egui::RichText::new("Open or create an image to see its colours here.").color(weak));
         return;
-    };
-    let c = d.doc().canvas;
-    // Under the pointer.
+    }
+    // Under the pointer, in whichever image it is over (last frame's: the panel may be laid
+    // out before the canvases), named if not the active one.
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Pointer").strong());
         shown_menu(ui, &mut pointer_shown, egui::IdSalt::new("info-pointer"));
     });
-    match cursor {
-        Some((x, y)) => {
+    let active = st.active_doc;
+    match st.cursor_shown.filter(|&(id, ..)| st.doc(id).is_some()) {
+        Some((id, x, y)) => {
+            let d = st.doc_mut(id).expect("filtered above");
+            let c = d.doc().canvas;
             let layers = d.doc().layers.clone();
-            let read = d.readings[0].get(&layers, [x, y], size);
+            let (read, late) = d.readings[0].get(&layers, [x, y], size, true);
+            if late {
+                ui.ctx().request_repaint_after(FRESH);
+            }
+            let whose = if Some(id) == active { String::new() } else { format!(" in {}", d.title) };
             ui.horizontal(|ui| {
                 swatch(ui, &read);
-                ui.label(format!("{}, {}", x - c.x, y - c.y));
+                ui.label(format!("{}, {}{whose}", x - c.x, y - c.y));
             });
             ui.label(line(&read, None, pointer_shown));
         }
+        // (As tall as a colour's two lines, so that nothing below moves as the pointer leaves
+        // the image: for the panel's own buttons, say.)
         None => {
-            ui.label(egui::RichText::new("Over the image, the colour under the pointer shows here.").color(weak));
+            ui.label(egui::RichText::new("Not over an image").color(weak));
+            ui.label(" ");
         }
     }
     ui.separator();
+    let d = st.active_mut().expect("checked above");
+    let c = d.doc().canvas;
     // The samplers.
-    let readings = d.sampler_readings(size);
+    let (readings, late) = d.sampler_readings(size, true);
+    if late {
+        ui.ctx().request_repaint_after(FRESH);
+    }
     if readings.is_empty() {
-        let how = "Click on the image with the Color Sampler tool (I) to pin a point whose colour shows here,                    as edits change it.";
+        let how = "Click on the image with the Color Sampler tool (I) to pin a point whose colour shows here, \
+                   as edits change it.";
         ui.add(egui::Label::new(egui::RichText::new(how).color(weak)).wrap());
     }
     let pixels = d.sampler_pixels();
@@ -402,23 +458,26 @@ impl DocState {
 
     /// What its samplers read, each `size` pixels a side: as the image shows now (an edit in
     /// progress, if one is), and as its history has it if that differs.
-    pub fn sampler_readings(&mut self, size: i64) -> Vec<(Read, Option<Read>)> {
+    ///
+    /// With `lagging` (for the Info panel; not for scripts, which want them as they are), what
+    /// was read a moment before is kept while the image changes from frame to frame, said by
+    /// the second value (see [`Readings::get`]).
+    pub fn sampler_readings(&mut self, size: i64, lagging: bool) -> (Vec<(Read, Option<Read>)>, bool) {
         let pixels = self.sampler_pixels();
         let shown = self.doc().layers.clone();
         let kept = self.history.doc().layers.clone();
         let differ = !opal_core::composite::same_layers(&shown, &kept);
-        if !differ {
-            // (Not keeping a state's layers alive once nothing differs from it.)
-            self.readings[1] = Readings::default();
-        }
-        pixels
+        let mut lagged = false;
+        let read = pixels
             .iter()
             .map(|&p| {
-                let now = self.readings[0].get(&shown, p, size);
-                let before = differ.then(|| self.readings[1].get(&kept, p, size));
+                let (now, late) = self.readings[0].get(&shown, p, size, lagging);
+                lagged |= late;
+                let before = differ.then(|| self.readings[1].get(&kept, p, size, false).0);
                 (now, before.filter(|b| *b != now))
             })
-            .collect()
+            .collect();
+        (read, lagged)
     }
 
     /// Samplers changed: told to whatever shows them (and [`is_dirty`](DocState::is_dirty)
@@ -449,11 +508,14 @@ impl DocState {
     }
 }
 
-/// A drag of a sampler: which one, and where it was before it (put back if it is given up).
+/// A drag of a sampler: which one, where it was before it (put back if it is given up), and
+/// where in it the pointer took it (document pixels from its pixel's middle), so that it does
+/// not jump to the pointer.
 #[derive(Clone, Copy, Debug)]
 pub struct SamplerDrag {
     index: usize,
     was: Sampler,
+    grip: [f64; 2],
 }
 
 impl DocState {
@@ -493,10 +555,19 @@ pub fn canvas(
     shown: Shown,
     notice: &mut Option<String>,
 ) {
-    let (pressed, down, at, alt) =
-        ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.latest_pos(), i.modifiers.alt));
-    // (Where it was pressed; or, pressed and let go within the frame, where it is.)
+    let (pressed, down, at, alt, ctrl) = ctx.input(|i| {
+        (
+            i.pointer.primary_pressed(),
+            i.pointer.primary_down(),
+            i.pointer.latest_pos(),
+            i.modifiers.alt,
+            i.modifiers.command,
+        )
+    });
+    // (Where it was pressed; or, pressed and let go within the frame, where it is. Not with
+    // Ctrl: Ctrl+click picks a layer, whatever the tool.)
     if pressed
+        && !ctrl
         && d.drag.is_none()
         && response.contains_pointer()
         && let Some(p) = ctx.input(|i| i.pointer.press_origin().or_else(|| i.pointer.interact_pos()))
@@ -506,7 +577,12 @@ pub fn canvas(
                 d.samplers.remove(i);
                 d.samplers_changed();
             }
-            Some(index) => d.drag = Some(Drag::Sampler(SamplerDrag { index, was: d.samplers[index] })),
+            Some(index) => {
+                let [px, py] = d.samplers[index].pixel(d.doc().carried);
+                let [x, y] = to_doc(p);
+                let grip = [x - (px as f64 + 0.5), y - (py as f64 + 0.5)];
+                d.drag = Some(Drag::Sampler(SamplerDrag { index, was: d.samplers[index], grip }));
+            }
             None => {
                 let [x, y] = to_doc(p);
                 let pixel = [x.floor() as i64, y.floor() as i64];
@@ -523,7 +599,9 @@ pub fn canvas(
     }
     let Some(Drag::Sampler(g)) = d.drag else { return };
     let index = g.index;
-    // (Removed meanwhile, by a script: nothing left to drag.)
+    // (Nothing removes one while a button is held: scripts' calls wait, and the panel's
+    // buttons want the pointer. Should one go all the same, the drag stops.)
+    debug_assert!(index < d.samplers.len(), "a sampler removed while dragged");
     if index >= d.samplers.len() {
         d.drag = None;
         return;
@@ -534,6 +612,7 @@ pub fn canvas(
     }
     if down && let Some(pos) = at {
         let [x, y] = to_doc(pos);
+        let [x, y] = [x - g.grip[0], y - g.grip[1]];
         let c = d.doc().canvas.rect();
         // Kept on the canvas.
         let pixel = [(x.floor() as i64).clamp(c.x0, c.x1 - 1), (y.floor() as i64).clamp(c.y0, c.y1 - 1)];
@@ -590,6 +669,20 @@ mod tests {
     }
 
     #[test]
+    fn what_is_read_keeps_no_layers_alive() {
+        use opal_core::document::{IdGen, Layer};
+        let mut ids = IdGen::default();
+        let mut img = opal_core::raster::RasterImage::new();
+        img.set_pixel(0, 0, opal_core::tile::pixel_from_f32([1.0, 0.0, 0.0, 1.0]));
+        let layers = vec![Arc::new(Layer::new_raster(ids.layer(), ids.object(), "red", img))];
+        let mut readings = Readings::default();
+        assert_eq!(readings.get(&layers, [0, 0], 1, false).0.srgb8(), [255, 0, 0]);
+        let gone = Arc::downgrade(&layers[0]);
+        drop(layers);
+        assert!(gone.upgrade().is_none(), "kept alive by what was read");
+    }
+
+    #[test]
     fn a_sampler_goes_with_the_image_turned_and_back() {
         let s = Sampler::of([10, 20], Affine::IDENTITY, Shown::default());
         assert_eq!(s.pixel(Affine::IDENTITY), [10, 20]);
@@ -611,20 +704,30 @@ mod tests {
         let white = Read { rgb: [1.0; 3], alpha: 1.0 };
         let close =
             |a: &Read, b: &Read| (0..3).all(|k| (a.rgb[k] - b.rgb[k]).abs() < 1e-3) && (a.alpha - b.alpha).abs() < 1e-3;
-        let r = d.sampler_readings(1);
+        let (r, _) = d.sampler_readings(1, false);
         assert!(r.len() == 1 && close(&r[0].0, &white) && r[0].1.is_none(), "{r:?}");
-        // The background hidden by an edit in progress: nothing there now, white before.
+        // The background hidden by an edit in progress: nothing there now, white before. Where
+        // it may lag (the panel's), what was read a moment before is kept a moment, and said.
         let bg = d.doc().layers[0].id;
         d.edit_pending("Hide", |doc| doc.layer_mut(bg).unwrap().visible = false);
+        let (r, late) = d.sampler_readings(1, true);
+        assert!(late && close(&r[0].0, &white), "{r:?}");
         // (Read as before, a pixel: not what was read of the image as it was.)
-        let r = d.sampler_readings(1);
+        let (r, late) = d.sampler_readings(1, false);
+        assert!(!late);
         assert_eq!(r[0].0.alpha, 0.0);
         assert!(r[0].1.is_some_and(|b| close(&b, &white)), "{r:?}");
+        // A moment later, as it is, where it may lag too.
+        d.readings[0].taken = d.readings[0].taken.map(|t| t - FRESH);
+        let bg2 = d.doc().layers[0].id;
+        d.edit_pending("Hide", |doc| doc.layer_mut(bg2).unwrap().opacity = 0.5);
+        let (r, late) = d.sampler_readings(1, true);
+        assert!(!late && (r[0].0.alpha - 0.0).abs() < 1e-6, "{r:?}");
         // Off the canvas, half a square of it read: half as opaque.
         d.discard_pending("Hide");
         let edge = Sampler::of([0, 10], carried, Shown::default());
         d.samplers = vec![edge];
-        let r = d.sampler_readings(3);
+        let (r, _) = d.sampler_readings(3, false);
         assert!((r[0].0.alpha - 2.0 / 3.0).abs() < 1e-3 && close(&Read { alpha: r[0].0.alpha, ..white }, &r[0].0));
         // Kept in the file: changed since, the image has changes to save.
         assert!(d.samplers_saved.is_empty());
@@ -646,5 +749,6 @@ mod tests {
             Shown::all().map(Shown::name).collect::<Vec<_>>()
         );
         assert!(SIZES.iter().all(|(id, _)| id.parse::<i64>().is_ok_and(|n| n % 2 == 1)));
+        assert_eq!(SIZES.iter().map(|(id, _)| *id).collect::<Vec<_>>(), SIZE_IDS);
     }
 }

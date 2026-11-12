@@ -479,6 +479,14 @@ impl Matting {
             Matting::RemoveMatte(_) => 0,
         }
     }
+
+    /// `px` (`w × h` pixels, row by row) matted as `self` says.
+    pub fn apply(self, px: &mut [opal_core::tile::Pixel], w: usize, h: usize) {
+        match self {
+            Matting::Defringe(reach) => opal_core::matting::defringe(px, w, h, reach),
+            Matting::RemoveMatte(matte) => opal_core::matting::remove_matte(px, matte),
+        }
+    }
 }
 
 /// How many tiles a matte works out at once before writing those it changed into the bitmap
@@ -509,19 +517,16 @@ pub fn matted(
                 let tile = c.rect(0);
                 let around = IRect::new(tile.x0 - margin, tile.y0 - margin, tile.x1 + margin, tile.y1 + margin);
                 let mut px = image.read_rect(&around);
-                match m {
-                    Matting::Defringe(w) => {
-                        opal_core::matting::defringe(&mut px, around.width() as usize, around.height() as usize, w)
-                    }
-                    Matting::RemoveMatte(matte) => opal_core::matting::remove_matte(&mut px, matte),
-                }
-                // The tile's own pixels, out of the margin.
-                let (w, m) = (around.width() as usize, margin as usize);
-                let own: Vec<opal_core::tile::Pixel> = (0..tile.height() as usize)
-                    .flat_map(|y| px[(y + m) * w + m..(y + m) * w + m + tile.width() as usize].to_vec())
-                    .collect();
+                // The tile's own pixels, out of the margin: as read, and matted.
+                let (w, pad, tw) = (around.width() as usize, margin as usize, tile.width() as usize);
+                let own = |px: &[opal_core::tile::Pixel]| -> Vec<opal_core::tile::Pixel> {
+                    (0..tile.height() as usize).flat_map(|y| px[(y + pad) * w + pad..][..tw].to_vec()).collect()
+                };
+                let was = own(&px);
+                m.apply(&mut px, w, around.height() as usize);
+                let now = own(&px);
                 progress.advance(1);
-                Ok((own != image.read_rect(&tile)).then_some((tile, own)))
+                Ok((now != was).then_some((tile, now)))
             })
             .collect::<Result<Vec<_>, String>>()?;
         for (tile, px) in done.into_iter().flatten() {
@@ -1343,12 +1348,7 @@ mod tests {
     /// `img` within `bounds` matted as `m` says, all of it at once.
     fn matted_whole(img: &RasterImage, bounds: &IRect, m: Matting) -> Vec<opal_core::tile::Pixel> {
         let mut whole = img.read_rect(bounds);
-        match m {
-            Matting::Defringe(w) => {
-                opal_core::matting::defringe(&mut whole, bounds.width() as usize, bounds.height() as usize, w)
-            }
-            Matting::RemoveMatte(matte) => opal_core::matting::remove_matte(&mut whole, matte),
-        }
+        m.apply(&mut whole, bounds.width() as usize, bounds.height() as usize);
         whole
     }
 

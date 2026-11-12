@@ -402,7 +402,7 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     }
     let cursor_canvas = pointer_px.map(|p| {
         let c = d.view.to_canvas(p);
-        (c.x.floor() as i64, c.y.floor() as i64)
+        (id, c.x.floor() as i64, c.y.floor() as i64)
     });
 
     // ---- Drawing --------------------------------------------------------------------

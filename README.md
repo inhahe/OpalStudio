@@ -113,6 +113,10 @@ cargo test --workspace                     # all tests, interface tests included
   margin), from the sides you choose; Reveal All, which grows the canvas to show everything
   the layers hold; Resize Image and Resize Canvas; quarter turns, flips and rotation by any
   angle.
+  Cropping and resizing the canvas never delete anything unless asked to. Canvases go up
+  to 300,000 pixels a side; anything that would need more memory than the computer has
+  free (counting room on disk for the parts that can go there) is refused, with how much
+  it needs, rather than run out of it.
 - **Measuring.** The Measure tool (N) measures between two points: the length, the angle
   (as a protractor reads it), the width and height, in any unit, shown on the image and in
   the tool settings, where numbers can be typed in too. Drag an end to move it, Shift for
@@ -126,10 +130,6 @@ cargo test --workspace                     # all tests, interface tests included
   model you choose for each (HSB, HSL, Lab, LCh, OKLab, linear, a hex code…), averaged over
   as large a square as you like, and while an edit is shown before being applied, each value
   as it was beside it. They are kept in the image's file.
-  Cropping and resizing the canvas never delete anything unless asked to. Canvases go up
-  to 300,000 pixels a side; anything that would need more memory than the computer has
-  free (counting room on disk for the parts that can go there) is refused, with how much
-  it needs, rather than run out of it.
 - **Selections** (in progress). A selection can be soft: each pixel is selected from not at
   all to fully, and everything acting on it acts on each pixel that much. So far: the Select
   tool (M), dragging rectangles and ellipses on whole pixels, or clicking for a single row or

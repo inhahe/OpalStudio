@@ -254,8 +254,8 @@ impl AppState {
                 // As a call refused at once has it put back, unless the user has moved on: the
                 // image, and the layers the call chose in the one it edited (which, busy, the
                 // user could not choose meanwhile), not those chosen in others since.
-                if let Some((back, layers)) = a.call.view.filter(|_| self.active_doc == Some(id)) {
-                    if let Some(back) = back {
+                if let Some((back, layers)) = a.call.view {
+                    if let Some(back) = back.filter(|_| self.active_doc == Some(id)) {
                         self.back_to(back);
                     }
                     if let Some((_, state)) = layers.into_iter().find(|(d, _)| *d == id)
@@ -638,6 +638,24 @@ mod tests {
         st.finish_edits();
         assert_eq!(st.active_doc, Some(first));
         assert_eq!(st.doc(other).unwrap().active_layer(), Some(lower), "the layer chosen meanwhile undone");
+        assert_eq!(st.doc(first).unwrap().active_layer(), Some(first_upper), "the call's choice left");
+        // Refused while the user is on the other image: they stay there, and the edited image's
+        // layers are put back all the same.
+        let view = (Some(first), vec![(first, st.doc(first).unwrap().layer_selection_state())]);
+        st.doc_mut(first).unwrap().select_only(first_lower);
+        st.edit_later(
+            first,
+            "Refuse",
+            crate::memory::Allowance::now(),
+            |_, _, _| Err::<u32, String>("No".into()),
+            |_, _, _| {},
+        );
+        let call = crate::api::Calling { name: "refuse".into(), heard: true, view: Some(view) };
+        st.doc_mut(first).unwrap().busy.as_mut().unwrap().answer =
+            Some(Answer { n: 5, call, with: Box::new(|_, _| serde_json::json!({})) });
+        st.show_doc(other);
+        st.finish_edits();
+        assert_eq!(st.active_doc, Some(other), "taken back from where they went");
         assert_eq!(st.doc(first).unwrap().active_layer(), Some(first_upper), "the call's choice left");
     }
 }

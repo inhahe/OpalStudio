@@ -83,13 +83,14 @@ impl Measure {
     /// How far (degrees clockwise) the image would turn for the line to be level or plumb,
     /// whichever is nearer: from -45 to 45 (0 for a line of no length).
     pub fn straightening(&self) -> f64 {
-        if self.length() == 0.0 {
+        let length = self.length();
+        if length == 0.0 || !length.is_finite() {
             return 0.0;
         }
         let a = self.angle();
         let t = a - (a / 90.0).round() * 90.0;
-        // (Level or plumb to within what a pixel across the line's length could tell.)
-        if t.abs() < 1e-9 { 0.0 } else { t }
+        // (A turn smaller than the crop box turns content by is none: see `crop::crop_doc`.)
+        if t.to_radians().abs() <= 1e-9 { 0.0 } else { t }
     }
 
     /// Where the line's middle is.
@@ -100,7 +101,12 @@ impl Measure {
     /// Whether it measures anything: a line of some length, and an arm of some length if it
     /// has one.
     pub(crate) fn measures(&self) -> bool {
-        self.start != self.end && self.arm != Some(self.start)
+        let finite = |p: [f64; 2]| p.iter().all(|v| v.is_finite());
+        self.start != self.end
+            && self.arm != Some(self.start)
+            && finite(self.start)
+            && finite(self.end)
+            && self.arm.is_none_or(finite)
     }
 }
 
@@ -266,7 +272,9 @@ pub fn canvas(
 ) {
     let (pressed, down, at, modifiers) =
         ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.latest_pos(), i.modifiers));
+    // (Not with Ctrl: Ctrl+click picks a layer, whatever the tool.)
     if pressed
+        && !modifiers.command
         && d.drag.is_none()
         && response.contains_pointer()
         && let Some(p) = ctx.input(|i| i.pointer.press_origin())
@@ -423,10 +431,11 @@ pub fn panel(ui: &mut egui::Ui, st: &mut AppState) {
             ("Start", &mut v.start, ["measure.start.x", "measure.start.y"]),
             ("End", &mut v.end, ["measure.end.x", "measure.end.y"]),
         ] {
-            ui.label(name);
+            let label = ui.label(name);
             for k in 0..2 {
                 let mut px = p[k] - corner[k];
-                if length_field(&mut px, scope, -far..=far, 1).remember(ids[k]).show(ui).changed() {
+                let r = length_field(&mut px, scope, -far..=far, 1).remember(ids[k]).show(ui);
+                if r.labelled_by(label.id).changed() {
                     p[k] = px + corner[k];
                 }
             }
@@ -465,7 +474,9 @@ pub fn panel(ui: &mut egui::Ui, st: &mut AppState) {
             st.set_unit(unit);
         }
     });
+    // (A line of no length measures nothing: as the canvas and scripts have it, refused.)
     if v != m
+        && v.measures()
         && let Some(d) = st.active_mut()
     {
         d.measure = Some(v);
@@ -566,6 +577,10 @@ mod tests {
             assert_eq!(m.straightening(), 0.0, "{m:?}");
         }
         assert_eq!(line([0.0, 0.0], [30.0, 40.0]).length(), 50.0);
+        // A turn too small for the crop to make: none.
+        assert_eq!(line([0.0, 0.0], [1000.0, 0.0000005]).straightening(), 0.0);
+        let wild = line([0.0, 0.0], [f64::NAN, 1.0]);
+        assert!(!wild.measures() && wild.straightening() == 0.0);
     }
 
     #[test]

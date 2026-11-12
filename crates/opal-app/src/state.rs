@@ -242,11 +242,12 @@ pub struct AppState {
     pub close_queue: VecDeque<DocId>,
     /// When settings last changed and have not been written to disk yet.
     pub settings_changed: Option<Instant>,
-    /// The canvas pixel under the pointer, set by the canvas during the frame.
-    pub cursor_canvas: Option<(i64, i64)>,
-    /// The position the status bar shows: last frame's `cursor_canvas` (the status bar is
-    /// laid out before the canvas reports this frame's).
-    pub cursor_shown: Option<(i64, i64)>,
+    /// The image under the pointer, and the pixel of it, set by its canvas during the frame
+    /// (another image's than the active one's, where several are shown).
+    pub cursor_canvas: Option<(DocId, i64, i64)>,
+    /// The position the status bar and the Info panel show: last frame's `cursor_canvas`
+    /// (they are laid out before the canvas reports this frame's).
+    pub cursor_shown: Option<(DocId, i64, i64)>,
     /// Whether a mouse button pressed on an image is held, set by the canvas during the frame.
     pub canvas_held_now: bool,
     /// Last frame's `canvas_held_now`, which the keys (handled before the canvas is drawn) go

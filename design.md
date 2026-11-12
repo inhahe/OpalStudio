@@ -946,7 +946,8 @@ own), as a drawing is turned on a desk; painting needs it most.
   on the line all of it (an end first, where they meet); Alt+drag from an end draws a
   protractor's second arm from it (from the end, the line is turned round, so that end is
   its start, the vertex). A drag that measures nothing (a click) leaves what was measured;
-  Esc gives a drag up, as the tool changing does (Space making it the hand). Drawn only while
+  Esc gives a drag up, as the tool changing does (Space making it the hand). With Ctrl, a
+  press is the layer picker's, whatever the tool, and measures nothing. Drawn only while
   the tool is chosen: the line and the arm, light over dark so as to show on any image, a
   handle at each point, the arc between the arms, and labels beyond each end (its length,
   and the line's angle) and outside the arc (the angle between), clear of the handles.
@@ -956,13 +957,17 @@ own), as a drawing is turned on a desk; painting needs it most.
   between the arms (0 to 180). The tool settings show them in the unit sizes are shown in
   (its menu there changes it everywhere), the ends' positions from the canvas's corner in
   fields that take what is typed (a length typed moves the end along the line; an angle,
-  round the start), and Straighten, Straighten Layers and Clear Measurement.
+  round the start; what would leave a line of no length, or of no number, is not taken, as
+  the canvas and scripts refuse it), and Straighten, Straighten Layers and Clear Measurement.
+  Esc with the tool removes what is measured, unless a menu is open, whose Esc it is: a menu
+  open takes Esc and the editing keys from the image, whatever the tool.
 - **Kept** on the image (`DocState::measure`) until the next measure, Esc with the tool, or
   Clear Measurement; not part of its history, nor kept in its file. Its points are kept with
   the `Document::carried` they were measured in, so it goes with the image turned, flipped or
   resized since, and back with that undone (`Measure::now`).
 - **Straighten** (Image › Rotate): the image turned about its canvas's middle by the least
-  that makes the line level or plumb (`Measure::straightening`: -45° to 45°), as the Crop
+  that makes the line level or plumb (`Measure::straightening`: -45° to 45°; one too small
+  for the crop to turn content by, under a billionth of a radian, is none), as the Crop
   tool's straightening does it (one history state, "Crop and straighten", off the interface
   thread, the layers keeping their pixels), the canvas then the largest rectangle of its shape
   within what was there (`inscribed`: its sides differing from the canvas's by even numbers
@@ -982,12 +987,16 @@ own), as a drawing is turned on a desk; painting needs it most.
 ### Color samplers
 
 - **The Color Sampler tool** (I; `color_sampler`): a click on the canvas pins a sampler on
-  the pixel clicked (ten at most: the eleventh is refused, saying so); a press on one drags it
-  (kept on the canvas; Esc gives the drag up, as the tool changing does), Alt+click removes it,
-  and Clear Color Samplers (the tool settings, scripts) removes them all. Each is drawn,
+  the pixel clicked (ten at most: the eleventh is refused, saying so); a press on one drags it,
+  by where it was taken (no jump to the pointer), kept on the canvas (Esc gives the drag up,
+  as the tool changing does); Alt+click removes it, and Clear Color Samplers (the tool
+  settings, scripts) removes them all. With Ctrl, a press is the layer picker's and pins
+  nothing. Each is drawn,
   whatever the tool, as a ring about its pixel with its number beside it, light over dark.
 - **The Info panel** (a tab beside Layers, brought to the front as the tool is chosen): the
-  colour under the pointer, then each sampler: its number, the pixel from the canvas's corner
+  colour under the pointer, in whichever image it is over (named, if not the active one, as
+  the status bar's pointer position is that image's too: `AppState::cursor_shown`), its two
+  lines kept as the pointer leaves the image so that nothing below moves; then each sampler: its number, the pixel from the canvas's corner
   (said if off the canvas, a crop having left it there), a swatch, its colour in a way chosen
   for it (a menu: any of `opal_color`'s models, sRGB by default, or sRGB's hex code; values in
   the model's units, rounded as its range wants), and its opacity where there is transparency.
@@ -996,16 +1005,21 @@ own), as a drawing is turned on a desk; painting needs it most.
   (`before → now`). The tool's *Sample size* averages a square about each pixel (3 × 3 to
   101 × 101), of premultiplied colour, made straight after; *New samplers show* is how one
   placed shows its colour.
-- **Read** as the canvas composites the image (`composite::flatten` of the square), off the
-  image as it shows and, while it differs, off its history's state: each kept (`Readings`)
-  until those layers change, so a colour is composited once, not each frame.
+- **Read** as the canvas composites the image, off the image as it shows and, while it
+  differs, off its history's state (`Readings`): each tile composited once
+  (`composite::composite_tile`), and what is read kept, until those layers change, so a colour
+  is composited once, not each frame or each pixel crossed. The layers are held weakly, so
+  nothing read keeps a state alive. While the image changes from frame to frame (a box
+  dragged), the panel keeps what it read for up to 100 ms (`FRESH`) before compositing again,
+  and asks for a frame then; scripts are always told the colours as they are.
 - **Kept** with the image (`DocState::samplers`), not in its history: their placing is not
   an edit, and undoing an edit does not move them. They go with the image turned, flipped or
   resized, as the measure does (each kept with the `Document::carried` it was placed in). The
   image's file keeps them (`samplers` in `document.json`, version 5; see `native`), so a change
   to them is a change to save (`DocState::samplers_saved`, which `is_dirty` compares).
 - Scripts: `add_color_sampler(x, y, shown_as)`, `move_color_sampler(number, x, y, shown_as)`,
-  `delete_color_sampler(number)`, `clear_color_samplers()`, and the `color_samplers` query
+  `delete_color_sampler(number)` (only where one is moved to need be on the canvas: one a crop
+  left off it may be shown otherwise there), `clear_color_samplers()`, and the `color_samplers` query
   (each sampler's pixel and colour, and before, while an edit in progress changes it); the
   `color_at` query reads any pixel's colour (a square averaged, in any model) without a
   sampler. A colour is told as its linear sRGB (the image's own, unclamped), alpha, 8-bit
@@ -2895,8 +2909,9 @@ API's `selection` query tells them, a mask step naming its mask's number, the nu
 mask its steps come to, and how the image has changed since, if it has, `[a, b, c, d, e, f]`;
 and, version 5, `samplers`, the color samplers pinned on the image, each the pixel it samples
 and how it shows its colour, the editor's identifier for it (a colour model's, or `hex`: one
-not known is read as sRGB), at most a thousand read, each within the coordinates a canvas
-may have, the editor keeping the first ten),
+not known is read as sRGB); one past the coordinates a canvas may have (a damaged file's, or
+one carried far off by many resizes) is left out, not the image, and so is any past the
+first thousand, the editor keeping the first ten),
 `tiles/<n>.bin` or `tiles/<n>.srgb8`, one tile each, and `masks/<n>.bin`, the saved
 selections' masks, each once (`Mask::write_to`, written as made: a magic, the level outside
 its rows, and its rows of runs, each tile one level, a level a column or a row, or a level a
