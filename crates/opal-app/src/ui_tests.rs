@@ -3569,7 +3569,7 @@ fn an_outline_drawn_point_by_point_survives_backspace_mid_pull_space_and_ctrl_cl
     click_image(&mut h, [100.0, 100.0], none);
     click_image(&mut h, [200.0, 100.0], none);
     // A curve pulled from the last point, Backspace pressed with the button still held, and
-    // the pull going on: the point taken back, the editor still standing.
+    // the pull going on: the key waits for the button (said so), the curve pulled.
     h.hover_at(at([200.0, 100.0]));
     h.run();
     h.drag_at(at([200.0, 100.0]));
@@ -3584,8 +3584,9 @@ fn an_outline_drawn_point_by_point_survives_backspace_mid_pull_space_and_ctrl_cl
     }
     h.drop_at(at([260.0, 170.0]));
     h.run();
-    assert_eq!(points(&h), Some(1), "the point was not taken back");
-    click_image(&mut h, [200.0, 100.0], none);
+    assert_eq!(points(&h), Some(2), "the point was taken back mid-pull");
+    let said = h.state().state().notice.as_ref().map(|n| n.0.clone());
+    assert_eq!(said.as_deref(), Some(crate::app::KEYS_WAIT));
     // Space held to scroll, a drag with it, and let go: the outline waits.
     h.event(egui::Event::Key {
         key: egui::Key::Space,
@@ -3853,13 +3854,15 @@ fn a_right_drag_redraws_a_stretch_of_the_outline_the_nearer_or_with_tab_the_othe
     let label = |h: &Harness<'static, OpalApp>| {
         h.state().state().active().unwrap().history.undo_label().map(str::to_owned).unwrap_or_default()
     };
-    // A drag with `button` along `path` (document pixels), `key` pressed once it has gone a number of
-    // points (through the input hook, as the app's window gives it), let go in the frame of its last
-    // move.
-    let drag = |h: &mut Harness<'static, OpalApp>,
-                button: egui::PointerButton,
-                path: &[[f32; 2]],
-                key: Option<(usize, egui::Modifiers, egui::Key)>| {
+    // What is done in the middle of a drag, once it has gone a number of points: a key pressed
+    // (through the input hook, as the app's window gives it), or anything else.
+    enum Mid {
+        Key(usize, egui::Modifiers, egui::Key),
+        Do(usize, fn(&mut Harness<'static, OpalApp>)),
+    }
+    // A drag with `button` along `path` (document pixels), `mid` done on the way, let go in the
+    // frame of its last move.
+    let drag = |h: &mut Harness<'static, OpalApp>, button: egui::PointerButton, path: &[[f32; 2]], mid: Option<Mid>| {
         let v = h.state().state().active().unwrap().view;
         let ppp = h.ctx.pixels_per_point();
         let at = |[x, y]: [f32; 2]| v.screen_rect.min + v.to_screen(egui::vec2(x, y)) / ppp;
@@ -3875,17 +3878,28 @@ fn a_right_drag_redraws_a_stretch_of_the_outline_the_nearer_or_with_tab_the_othe
         for (k, &p) in path[1..path.len() - 1].iter().enumerate() {
             h.hover_at(at(p));
             h.run();
-            if let Some((after, modifiers, key)) = key
-                && after == k
-            {
-                // Into the frame's input itself, as the window gives it to the hook.
-                let mut raw = std::mem::take(h.input_mut());
-                for pressed in [true, false] {
-                    raw.events.push(egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers });
+            match mid {
+                Some(Mid::Key(after, modifiers, key)) if after == k => {
+                    // Into the frame's input itself, as the window gives it to the hook.
+                    let mut raw = std::mem::take(h.input_mut());
+                    for pressed in [true, false] {
+                        raw.events.push(egui::Event::Key {
+                            key,
+                            physical_key: None,
+                            pressed,
+                            repeat: false,
+                            modifiers,
+                        });
+                    }
+                    crate::outline_tool::take_reshape_keys(&mut h.state_mut().state_mut().docs, &mut raw);
+                    *h.input_mut() = raw;
+                    h.run();
                 }
-                crate::outline_tool::take_reshape_keys(&mut h.state_mut().state_mut().docs, &mut raw);
-                *h.input_mut() = raw;
-                h.run();
+                Some(Mid::Do(after, f)) if after == k => {
+                    f(h);
+                    h.run();
+                }
+                _ => {}
             }
         }
         let last = at(*path.last().unwrap());
@@ -3901,17 +3915,26 @@ fn a_right_drag_redraws_a_stretch_of_the_outline_the_nearer_or_with_tab_the_othe
     assert_eq!(label(&h), crate::outline_tool::RESHAPE);
     // With Tab: the other stretch, the rest of the square, redrawn: the bump alone left.
     square(&mut h);
-    drag(&mut h, egui::PointerButton::Secondary, &bump, Some((1, none, egui::Key::Tab)));
+    drag(&mut h, egui::PointerButton::Secondary, &bump, Some(Mid::Key(1, none, egui::Key::Tab)));
     assert_eq!(selected(&h), Some(Extent::Within(IRect::new(125, 70, 175, 100))));
     // (Tab was the redrawing's alone: no widget has the keyboard.)
     assert_eq!(h.ctx.memory(|m| m.focused()), None);
-    // Delete mid-drag: neither the picked points' nor Clear's.
-    square(&mut h);
-    drag(&mut h, egui::PointerButton::Secondary, &bump, Some((1, none, egui::Key::Delete)));
-    assert_eq!(label(&h), crate::outline_tool::RESHAPE);
-    h.state_mut().state_mut().active_mut().unwrap().undo();
-    h.run();
-    assert_ne!(label(&h), "Clear");
+    // Keys that would change the image do nothing mid-drag, and the status bar says why: Delete
+    // neither the picked points' nor Clear's, Ctrl+Z no undo, M no other tool.
+    for (modifiers, key) in [(none, egui::Key::Delete), (egui::Modifiers::COMMAND, egui::Key::Z), (none, egui::Key::M)]
+    {
+        square(&mut h);
+        h.state_mut().state_mut().notice = None;
+        drag(&mut h, egui::PointerButton::Secondary, &bump, Some(Mid::Key(1, modifiers, key)));
+        assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 70, 200, 200))), "{key:?}");
+        assert_eq!(label(&h), crate::outline_tool::RESHAPE);
+        let said = h.state().state().notice.as_ref().map(|n| n.0.clone());
+        assert_eq!(said.as_deref(), Some(crate::app::KEYS_WAIT));
+        assert_eq!(h.state().state().tool(), crate::tools::ToolId::Outline);
+        h.state_mut().state_mut().active_mut().unwrap().undo();
+        h.run();
+        assert_ne!(label(&h), "Clear");
+    }
     // Let go away from it: nothing redrawn, and said why.
     square(&mut h);
     let was = selected(&h);
@@ -3924,14 +3947,18 @@ fn a_right_drag_redraws_a_stretch_of_the_outline_the_nearer_or_with_tab_the_othe
     click_image(&mut h, [200.0, 100.0], none);
     let was = selected(&h);
     h.state_mut().state_mut().notice = None;
-    drag(&mut h, egui::PointerButton::Secondary, &bump, Some((2, none, egui::Key::Escape)));
+    drag(&mut h, egui::PointerButton::Secondary, &bump, Some(Mid::Key(2, none, egui::Key::Escape)));
     assert_eq!(selected(&h), was);
     assert_ne!(label(&h), crate::outline_tool::RESHAPE);
     assert_eq!(crate::outline_tool::picked(h.state().state().active().unwrap()), vec![1]);
     assert_eq!(h.state().state().notice, None);
-    // The selection undone mid-drag: given up, the undo kept.
+    // The selection undone mid-drag (as nothing the user can do then may, but as anything changing
+    // it would): given up, the undo kept.
     square(&mut h);
-    drag(&mut h, egui::PointerButton::Secondary, &bump, Some((2, egui::Modifiers::COMMAND, egui::Key::Z)));
+    let undo: fn(&mut Harness<'static, OpalApp>) = |h| {
+        h.state_mut().state_mut().active_mut().unwrap().undo();
+    };
+    drag(&mut h, egui::PointerButton::Secondary, &bump, Some(Mid::Do(2, undo)));
     assert_eq!(selected(&h), None);
     // How near it must be let go is the tool's Reach: 12 screen points off the outline is too far
     // at 7, near enough at 20.
@@ -3956,14 +3983,26 @@ fn a_right_drag_redraws_a_stretch_of_the_outline_the_nearer_or_with_tab_the_othe
     h.event(egui::Event::Key { key: egui::Key::R, physical_key: None, pressed: false, repeat: false, modifiers: none });
     h.run();
     assert_eq!(selected(&h), Some(Extent::Within(IRect::new(100, 70, 200, 200))));
-    // Another tool chosen mid-drag: given up, nothing redrawn once the outline tool is back.
+    // Another tool chosen mid-drag (not by its key): given up, nothing redrawn once the outline
+    // tool is back.
     square(&mut h);
     let was = selected(&h);
-    drag(&mut h, egui::PointerButton::Secondary, &bump, Some((2, none, egui::Key::M)));
+    let select: fn(&mut Harness<'static, OpalApp>) =
+        |h| h.state_mut().state_mut().set_tool(crate::tools::ToolId::Select);
+    drag(&mut h, egui::PointerButton::Secondary, &bump, Some(Mid::Do(2, select)));
     assert_eq!(h.state().state().tool(), crate::tools::ToolId::Select);
     h.key_press(egui::Key::L);
     h.run();
     assert_eq!(selected(&h), was);
+    // The view's keys act mid-drag, not held back: Ctrl+= zooms in. (Last, as the drag goes on
+    // where it was on the screen, now off the outline.)
+    square(&mut h);
+    h.state_mut().state_mut().notice = None;
+    let zoom = h.state().state().active().unwrap().view.zoom;
+    drag(&mut h, egui::PointerButton::Secondary, &bump, Some(Mid::Key(1, egui::Modifiers::COMMAND, egui::Key::Equals)));
+    assert!(h.state().state().active().unwrap().view.zoom > zoom);
+    let said = h.state().state().notice.as_ref().map(|n| n.0.clone());
+    assert_ne!(said.as_deref(), Some(crate::app::KEYS_WAIT));
 }
 
 #[test]

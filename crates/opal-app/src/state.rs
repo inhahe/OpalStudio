@@ -229,6 +229,11 @@ pub struct AppState {
     /// The position the status bar shows: last frame's `cursor_canvas` (the status bar is
     /// laid out before the canvas reports this frame's).
     pub cursor_shown: Option<(i64, i64)>,
+    /// Whether a mouse button pressed on an image is held, set by the canvas during the frame.
+    pub canvas_held_now: bool,
+    /// Last frame's `canvas_held_now`, which the keys (handled before the canvas is drawn) go
+    /// by: while it holds, those that would change the image do nothing.
+    pub canvas_held: bool,
     pub gpu: GpuStatus,
     pub clipboard: Box<dyn Clipboard>,
     /// A short note for the status bar, and when it was given (it fades after a while).
@@ -381,6 +386,8 @@ impl AppState {
             settings_changed: None,
             cursor_canvas: None,
             cursor_shown: None,
+            canvas_held_now: false,
+            canvas_held: false,
             gpu: GpuStatus::default(),
             // Tests never touch the real clipboard.
             #[cfg(not(test))]

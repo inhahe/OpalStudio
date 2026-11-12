@@ -727,9 +727,8 @@ Edge snapping (live-wire) comes with milestone 8.
   near counts as "on the outline" is the tool's *Reach* setting (`outline.near`, 3 to 20
   screen points, 7 by default), which is also how near a press must be to a point, handle,
   side or the symmetry's handles. A right-click without a drag still opens the context menu.
-  **R + left-drag** does the same as right-drag, for touchpads. While a redrawing or a drag on
-  the outline is under way, Delete and Backspace do nothing: the picked points' keys wait,
-  and Clear, theirs otherwise, does not run.
+  **R + left-drag** does the same as right-drag, for touchpads. While it is under way, keys
+  that would change the image do nothing (*Keys during a drag*), Delete among them.
 - Points of the outline can also be dragged directly.
 
 ### AI object and paint-the-area selection
@@ -811,6 +810,21 @@ Every command is defined once: name, icon, one-line description, longer help tex
 shortcut, and the condition under which it is available, with the reason shown when it is
 not. The ribbon, command search, context menus, keyboard shortcuts, keytips and the help
 pages are all generated from it, so a command looks and behaves the same everywhere.
+
+**Keys during a drag.** While a mouse button pressed on an image is held, keys that would
+change it do nothing, as in Photoshop, and the status bar says so. This covers commands'
+shortcuts, tool keys, the editing keys (arrows, Enter, Delete, Backspace) and the clipboard's
+events. A drag works its edit out again from where it began, so it would carry on past an
+undo or a deselect and leave states nobody meant.
+
+- What still acts: Esc, which gives up what is under way; Space, the hand, to scroll; Tab
+  during a redrawing (*Reshaping an outline*); and the view's commands, which change
+  nothing a drag works out its edit from: zoom, screen modes, off-canvas content, the
+  selection overlay (`app::acts_during_drag`).
+- The canvas notes whether a button pressed on it is held (`AppState::canvas_held_now`).
+  The keys, handled before the canvas is drawn, go by the frame before's
+  (`canvas_held`), and take the rest out of the frame's input (`app::keys_held_back`).
+- Scripts likewise wait while a button is held (`AppState::scripts_wait`).
 
 ### Ribbon
 

@@ -95,6 +95,9 @@ pub fn canvas_ui(ui: &mut egui::Ui, st: &mut AppState, id: DocId) {
     if response.clicked() || response.drag_started() || response.secondary_clicked() {
         st.active_doc = Some(id);
     }
+    if response.is_pointer_button_down_on() {
+        st.canvas_held_now = true;
+    }
 
     let prefs = CanvasPrefs::read(&st.prefs);
     let cache_budget = crate::prefs::bytes(&st.prefs, "canvas.cache");

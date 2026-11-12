@@ -241,6 +241,19 @@ impl OpalApp {
         }
         // Esc typed into a field leaves the field, not the box the field is about.
         let typing = ctx.egui_wants_keyboard_input() || self.field_had_keys;
+        // While a mouse button is held on an image, keys that would change it do nothing (as in
+        // Photoshop): a drag works its edit out again from where it began, and would carry on
+        // past what they did. Esc still gives up what it gives up, and the view's keys act.
+        if !typing && self.st.canvas_held && ctx.input(|i| i.pointer.any_down()) {
+            let held = keys_held_back(ctx) + paste_presses;
+            if held > 0 {
+                self.st.notify(KEYS_WAIT);
+            }
+            self.editing_keys(ctx);
+            // Alt held with the button is not alone (and is down, when let go of after it).
+            (self.alt_down, self.alt_alone) = (ctx.input(|i| i.modifiers.alt), false);
+            return self.view_keys(ctx);
+        }
         if !typing {
             self.clipboard_events(ctx, paste_presses);
             self.cancel_paste_key(ctx);
@@ -283,6 +296,16 @@ impl OpalApp {
         for t in ToolId::ALL {
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, t.info().key)) {
                 self.st.set_tool(t);
+            }
+        }
+    }
+
+    /// The view's commands' shortcuts (zooming, screen modes, what the canvas shows), which
+    /// act even while a mouse button is held on an image.
+    fn view_keys(&mut self, ctx: &egui::Context) {
+        for (s, cmd) in shortcuts_most_specific_first().into_iter().filter(|(_, c)| acts_during_drag(*c)) {
+            if ctx.input_mut(|i| i.consume_shortcut(&s)) {
+                self.st.queue.push(cmd);
             }
         }
     }
@@ -376,14 +399,6 @@ impl OpalApp {
                 d.revision += 1;
             }
             return;
-        }
-        // While a drag on the outline edited or a redrawing of it is under way, Delete and
-        // Backspace do nothing: not the picked points' (they wait for it), nor Clear's.
-        if outline_tool && (d.outline_drag.is_some() || d.reshaping.is_some()) {
-            ctx.input_mut(|i| {
-                i.consume_key(Modifiers::NONE, Key::Delete);
-                i.consume_key(Modifiers::NONE, Key::Backspace);
-            });
         }
         // Points picked on the outline edited take Delete and Backspace (taking them away) and
         // Esc (letting go of them), before any command does; not while a box is open (whose
@@ -1128,6 +1143,7 @@ impl eframe::App for OpalApp {
         // The scheme can change under us when following the system's.
         self.st.palette = theme::palette(self.st.scheme(&ctx));
         self.st.cursor_shown = self.st.cursor_canvas.take();
+        self.st.canvas_held = std::mem::take(&mut self.st.canvas_held_now);
         self.st.leave_undrawn(ctx.cumulative_pass_nr());
         // A rename left open when another document became active is finished, in its own
         // document, as clicking elsewhere would finish it.
@@ -1235,6 +1251,50 @@ impl eframe::App for OpalApp {
 
 /// Every command shortcut with its command, those with more modifiers first. egui matches a
 /// shortcut ignoring extra Shift and Alt, so Ctrl+S, tried first, would take Ctrl+Shift+S.
+/// What the status bar says when keys are held back during a drag on the image.
+pub const KEYS_WAIT: &str =
+    "Keys that would change the image do nothing while a mouse button is held on it: let go first.";
+
+/// Whether `cmd` acts while a mouse button is held on an image: the view's commands, which
+/// change nothing a drag works out its edit from.
+fn acts_during_drag(cmd: Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::ZoomIn
+            | Cmd::ZoomOut
+            | Cmd::ZoomFit
+            | Cmd::Zoom100
+            | Cmd::ToggleOffCanvas
+            | Cmd::ToggleSelectionOverlay
+            | Cmd::ScreenMode
+    )
+}
+
+/// Takes out of this frame's input, while a mouse button is held on an image, every key press
+/// that would change it, and the clipboard's events: all but Esc (which gives a drag up), Space
+/// (the hand, to scroll) and the view's commands' shortcuts (see [`acts_during_drag`]). How
+/// many it took.
+fn keys_held_back(ctx: &egui::Context) -> u32 {
+    let view: Vec<egui::KeyboardShortcut> =
+        shortcuts_most_specific_first().into_iter().filter(|(_, c)| acts_during_drag(*c)).map(|(s, _)| s).collect();
+    ctx.input_mut(|i| {
+        let mut held = 0;
+        i.events.retain(|e| {
+            let keep = match e {
+                Event::Key { key: Key::Escape | Key::Space, .. } | Event::Key { pressed: false, .. } => true,
+                Event::Key { key, modifiers, .. } => {
+                    view.iter().any(|s| s.logical_key == *key && modifiers.matches_logically(s.modifiers))
+                }
+                Event::Copy | Event::Cut | Event::Paste(_) | Event::PasteImage(_) => false,
+                _ => true,
+            };
+            held += u32::from(!keep);
+            keep
+        });
+        held
+    })
+}
+
 fn shortcuts_most_specific_first() -> Vec<(egui::KeyboardShortcut, Cmd)> {
     let mut all: Vec<(egui::KeyboardShortcut, Cmd)> =
         Cmd::ALL.iter().flat_map(|&c| c.info().shortcuts.iter().map(move |s| (*s, c))).collect();
